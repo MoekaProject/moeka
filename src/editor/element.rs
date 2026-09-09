@@ -1200,6 +1200,7 @@ fn build_precise_table_layout(
         line_height,
         handle_size,
     );
+    let cell_padding_x = layout.cell_padding_x;
 
     let mut row_heights = vec![line_height + cell_padding_y * 2.0; layout.visual_row_count];
     for vi in 0..layout.visual_row_count {
@@ -2481,6 +2482,8 @@ impl Element for EditorElement {
         let mut table_click_areas_local: Vec<(Bounds<Pixels>, usize, usize, usize)> = Vec::new();
         let mut table_col_handle_areas_local: Vec<(Bounds<Pixels>, usize, usize)> = Vec::new();
         let mut table_row_handle_areas_local: Vec<(Bounds<Pixels>, usize, usize)> = Vec::new();
+        let mut table_boundary_caret_areas_local: Vec<(Bounds<Pixels>, TableBoundaryCaret)> =
+            Vec::new();
         let mut table_layout_cache: HashMap<usize, helpers::TableLayout> = HashMap::new();
         let mut image_edit_icons: Vec<(Bounds<Pixels>, usize, f32)> = Vec::new();
         let mut image_edit_hit_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
@@ -4922,6 +4925,87 @@ impl Element for EditorElement {
                         // Table block starts at text_line_top (header text is hidden)
                         let table_top = text_line_top;
                         let outer_radius = px(table_styles.table_outer_radius_px);
+                        let table_bottom = table_top + layout.total_height;
+                        let table_right = table_left + layout.total_width;
+
+                        if layout.visual_row_count > 0 {
+                            let first_row_height =
+                                layout.row_heights.first().copied().unwrap_or(line_height);
+                            let last_row_height =
+                                layout.row_heights.last().copied().unwrap_or(line_height);
+                            let cursor_height = line_height
+                                * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
+                            let cursor_width = editor.styles.cursor.cursor_width_px;
+                            let boundary_gap = editor.scaled(4.0);
+                            let left_blank_right = table_left;
+                            let viewport_left = origin_x;
+                            let viewport_right = origin_x + viewport_width;
+                            let right_blank_right = viewport_right;
+                            if left_blank_right > viewport_left {
+                                table_boundary_caret_areas_local.push((
+                                    Bounds::new(
+                                        point(px(viewport_left), px(table_top)),
+                                        size(
+                                            px(left_blank_right - viewport_left),
+                                            px(layout.total_height),
+                                        ),
+                                    ),
+                                    TableBoundaryCaret {
+                                        table_start_line: ti.table_start_line,
+                                        side: TableBoundarySide::Above,
+                                    },
+                                ));
+                            }
+                            if right_blank_right > table_right {
+                                table_boundary_caret_areas_local.push((
+                                    Bounds::new(
+                                        point(px(table_right), px(table_top)),
+                                        size(
+                                            px(right_blank_right - table_right),
+                                            px(layout.total_height),
+                                        ),
+                                    ),
+                                    TableBoundaryCaret {
+                                        table_start_line: ti.table_start_line,
+                                        side: TableBoundarySide::Below,
+                                    },
+                                ));
+                            }
+
+                            if editor.table_boundary_caret.is_some_and(|boundary| {
+                                boundary.table_start_line == ti.table_start_line
+                            }) && window.is_window_active()
+                                && editor.focus_handle.is_focused(window)
+                                && editor.focused_sidebar_path.is_none()
+                            {
+                                let boundary = editor.table_boundary_caret.unwrap();
+                                let (cursor_x, row_top, row_height) = match boundary.side {
+                                    TableBoundarySide::Above => (
+                                        (table_left - boundary_gap - cursor_width)
+                                            .max(viewport_left + 1.0),
+                                        table_top,
+                                        first_row_height,
+                                    ),
+                                    TableBoundarySide::Below => (
+                                        (table_right + boundary_gap)
+                                            .min(viewport_right - cursor_width - 1.0),
+                                        table_bottom - last_row_height,
+                                        last_row_height,
+                                    ),
+                                };
+                                cursor_paints.push(super::caret::CaretPaint {
+                                    bounds: Bounds::new(
+                                        point(
+                                            px(cursor_x),
+                                            px(row_top + (row_height - cursor_height) / 2.0),
+                                        ),
+                                        size(px(cursor_width), px(cursor_height)),
+                                    ),
+                                    color: theme.cursor,
+                                    force_visible: false,
+                                });
+                            }
+                        }
 
                         // Selection highlight: blue border when selection covers table
                         let table_block_start_offset = buffer.line_start(ti.table_start_line);
@@ -5325,6 +5409,12 @@ impl Element for EditorElement {
 
                                                 // Paint cursors within this cell
                                                 if editor.selected_handle.is_none()
+                                                    && !editor.table_boundary_caret.is_some_and(
+                                                        |boundary| {
+                                                            boundary.table_start_line
+                                                                == ti.table_start_line
+                                                        },
+                                                    )
                                                     && window.is_window_active()
                                                     && editor.focus_handle.is_focused(window)
                                                     && editor.focused_sidebar_path.is_none()
@@ -8826,6 +8916,7 @@ impl Element for EditorElement {
             editor.table_click_areas = table_click_areas_local.clone();
             editor.table_col_handle_areas = table_col_handle_areas_local.clone();
             editor.table_row_handle_areas = table_row_handle_areas_local.clone();
+            editor.table_boundary_caret_areas = table_boundary_caret_areas_local.clone();
             editor.gutter_fold_areas = gutter_fold_hit_areas_local.clone();
             editor.inline_diff_gutter_areas = inline_diff_gutter_areas_local.clone();
             editor.inline_diff_hunk_areas = inline_diff_hunk_areas_local.clone();
@@ -9119,6 +9210,7 @@ impl Element for EditorElement {
                 cursor_offset: caret_cursor_offset,
                 scroll_offset,
                 horizontal_offset: caret_horizontal_offset,
+                table_boundary_caret: self.editor.read(cx).table_boundary_caret,
                 paints: cursor_paints,
             });
         if pane_swapped {

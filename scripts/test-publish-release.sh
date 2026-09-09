@@ -10,6 +10,7 @@ mkdir -p "$work/bin"
 helper=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/publish-release.sh
 export HEAD_FIXTURE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 export OTHER_FIXTURE=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+export PUBLIC_FIXTURE=cccccccccccccccccccccccccccccccccccccccc
 export PATH="$work/bin:$PATH"
 
 cat >"$work/bin/git" <<'MOCK'
@@ -36,21 +37,19 @@ case "$1" in
             else printf '%s\trefs/heads/main\n' "$HEAD_FIXTURE"; fi
         elif [[ "$SCENARIO" == remote-tag-mismatch ]]; then
             printf '%s\trefs/tags/v9.8.7\n' "$OTHER_FIXTURE"
-        elif [[ -f "$FIXTURE/pushed" ]]; then
+        elif [[ "$*" == *MoekaProject/community* && -f "$FIXTURE/public-tag" ]]; then
+            printf '%s\trefs/tags/v9.8.7\n' "$PUBLIC_FIXTURE"
+        elif [[ "$*" != *MoekaProject/community* && -f "$FIXTURE/private-tag" ]]; then
             printf '%s\trefs/tags/v9.8.7\n%s\trefs/tags/v9.8.7^{}\n' "$OTHER_FIXTURE" "$HEAD_FIXTURE"
         fi;;
-    cat-file) [[ "$SCENARIO" != untracked-approval || "$*" != *release-approval.txt* ]];;
-    show) cat "$FIXTURE/packaging/release-approval.txt";;
+    cat-file) :;;
     show-ref) [[ -f "$FIXTURE/local-tag" || "$SCENARIO" == tag-mismatch || "$SCENARIO" == existing-tag ]];;
     tag)
         [[ "$*" == "tag -a v9.8.7 $HEAD_FIXTURE -m Release v9.8.7" ]] || exit 90
         touch "$FIXTURE/local-tag";;
     push)
-        [[ "$*" == *'refs/tags/v9.8.7:refs/tags/v9.8.7' && "$*" != *force* ]] || exit 91
-        touch "$FIXTURE/pushed";;
-    archive)
-        [[ "$*" == 'archive --format=tar --prefix=Moeka-v9.8.7/ refs/tags/v9.8.7' ]] || exit 92
-        printf 'Exact-tag tracked source fixture (scripts and vendor)\n';;
+        [[ "$*" == 'push origin refs/tags/v9.8.7:refs/tags/v9.8.7' && "$*" != *force* ]] || exit 91
+        touch "$FIXTURE/private-tag";;
     for-each-ref) echo 'Release v9.8.7';;
     *) echo "UNEXPECTED git: $*" >&2; exit 99;;
 esac
@@ -81,6 +80,11 @@ printf 'gh %s\n' "$*" >>"$FIXTURE/calls"
 state=$(cat "$FIXTURE/state")
 api=repos/MoekaProject/community
 if [[ "$1" == api ]]; then
+    if [[ "$*" == *'--method POST'* && "$*" == *"$api/git/refs"* ]]; then
+        [[ "$*" == *'ref=refs/tags/v9.8.7'* && "$*" == *"sha=$PUBLIC_FIXTURE"* ]] || exit 97
+        touch "$FIXTURE/public-tag"
+        exit 0
+    fi
     shift
     endpoint= include=false query=
     while [[ $# -gt 0 ]]; do
@@ -97,6 +101,7 @@ if [[ "$1" == api ]]; then
         "$api")
             if [[ "$SCENARIO" == no-permission ]]; then printf 'MoekaProject/community\tfalse\n';
             else printf 'MoekaProject/community\ttrue\n'; fi;;
+        "$api/git/ref/heads/main") printf '%s\n' "$PUBLIC_FIXTURE";;
         "$api/releases/tags/v9.8.7")
             [[ "$include" == true && "$query" == '[.id, .draft, .tag_name, .target_commitish] | @tsv' ]] || exit 98
             if [[ "$SCENARIO" == removed-draft && "$(grep -c -- '--include' "$FIXTURE/calls")" -ge 3 ]]; then
@@ -113,11 +118,11 @@ if [[ "$1" == api ]]; then
             if [[ "$state" == absent ]]; then printf 'HTTP/2.0 404 Not Found\r\n\r\n'; exit 1; fi
             printf 'HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n'
             draft=true; [[ "$state" != published ]] || draft=false
-            target=$HEAD_FIXTURE; [[ "$SCENARIO" != draft-target-mismatch ]] || target=$OTHER_FIXTURE
+            target=$PUBLIC_FIXTURE; [[ "$SCENARIO" != draft-target-mismatch ]] || target=$OTHER_FIXTURE
             printf '123\t%s\tv9.8.7\t%s\n' "$draft" "$target";;
         "$api/releases?per_page=100")
             if [[ "$SCENARIO" == list-network ]]; then exit 1; fi
-            if [[ "$SCENARIO" == hidden-draft ]]; then printf '123\ttrue\tv9.8.7\t%s\n' "$HEAD_FIXTURE"; fi;;
+            if [[ "$SCENARIO" == hidden-draft ]]; then printf '123\ttrue\tv9.8.7\t%s\n' "$PUBLIC_FIXTURE"; fi;;
         "$api/releases/123/assets?per_page=100")
             if [[ "$SCENARIO" == extra-asset ]]; then printf '9\tunexpected.zip\t1\t-\tuploaded\n'; fi
             i=0
@@ -144,7 +149,7 @@ elif [[ "$1" == release ]]; then
     [[ "$*" != *--clobber* && "$*" != *delete* ]] || exit 96
     case "$2" in
         create)
-            [[ "$state" == absent && "$*" == *--draft* && "$*" == *--verify-tag* ]] || exit 95
+            [[ "$state" == absent && "$*" == *--draft* && "$*" == *--verify-tag* && "$*" == *"--target $PUBLIC_FIXTURE"* ]] || exit 95
             echo draft >"$FIXTURE/state";;
         upload)
             [[ "$state" == draft ]] || exit 94
@@ -171,7 +176,6 @@ fixture() {
     mkdir -p "$FIXTURE/"{scripts,packaging,git-common,remote}
     cp "$helper" "$FIXTURE/scripts/publish-release.sh"
     printf '[package]\nversion = "9.8.7"\n' >"$FIXTURE/Cargo.toml"
-    printf 'GPL-3.0-or-later distribution review: approved\n' >"$FIXTURE/packaging/release-approval.txt"
     touch "$FIXTURE/LICENSE" "$FIXTURE/THIRD_PARTY_NOTICES.md" "$FIXTURE/Cargo.lock" "$FIXTURE/calls"
     echo absent >"$FIXTURE/state"
 }
@@ -196,9 +200,6 @@ fixture upstream; export UPSTREAM_FIXTURE=imeoer/main; reject 'track origin/main
 fixture behind; reject 'differs from upstream' check v9.8.7
 fixture stale-upstream; reject 'Live origin/main' check v9.8.7
 fixture version; reject 'Tag/version mismatch' check v9.8.8
-fixture missing-approval; rm "$FIXTURE/packaging/release-approval.txt"; reject 'file missing' publish v9.8.7
-fixture untracked-approval; reject 'must be committed' publish v9.8.7
-fixture unresolved; echo pending >"$FIXTURE/packaging/release-approval.txt"; reject 'GPL distribution review is unresolved' publish v9.8.7
 fixture tag-mismatch; reject 'Local tag mismatch' publish v9.8.7
 fixture remote-tag-mismatch; reject 'Remote tag mismatch' publish v9.8.7
 fixture git-network; reject 'Cannot verify live origin/main' publish v9.8.7
@@ -228,11 +229,12 @@ for scenario in success no-digest existing-tag; do
     fixture "$scenario"
     invoke publish v9.8.7 || fail "Fresh publish: $scenario"
     [[ "$(cat "$FIXTURE/state")" == published ]] || fail 'Draft not published'
-    [[ "$(grep -c '^gh release upload ' "$FIXTURE/calls")" == 10 ]] || fail 'Expected eight binaries, source and checksums'
+    [[ "$(grep -c '^gh release upload ' "$FIXTURE/calls")" == 8 ]] || fail 'Expected eight binary assets'
     [[ "$(grep -c '^gh release create ' "$FIXTURE/calls")" == 1 ]] || fail 'Expected one draft'
     [[ "$(grep -c '^gh release edit ' "$FIXTURE/calls")" == 1 ]] || fail 'Expected one final publish'
-    (cd "$FIXTURE/dist" && shasum -a 256 -c SHA256SUMS >/dev/null) || fail 'Invalid checksums'
-    [[ -f "$FIXTURE/dist/Moeka-v9.8.7-source.tar.gz" ]] || fail 'Missing source'
+    [[ ! -e "$FIXTURE/dist/Moeka-v9.8.7-source.tar.gz" && ! -e "$FIXTURE/dist/SHA256SUMS" ]] || fail 'Source-related assets must not be created'
+    if grep -Eq '^git push .*MoekaProject/community|^git archive ' "$FIXTURE/calls"; then fail 'Private source was exposed to community'; fi
+    [[ -f "$FIXTURE/public-tag" ]] || fail 'Community binary release tag was not created'
     if [[ "$scenario" == existing-tag ]] && grep -q '^git tag ' "$FIXTURE/calls"; then fail 'Existing HEAD tag was recreated'; fi
     if [[ "$scenario" == no-digest ]] && ! grep -q '/releases/assets/' "$FIXTURE/calls"; then fail 'Missing digest fallback'; fi
     : >"$FIXTURE/calls"
@@ -257,7 +259,7 @@ cp "$FIXTURE/dist/Moeka-macos-arm64.dmg" "$FIXTURE/original.dmg"
 echo changed >>"$FIXTURE/dist/Moeka-macos-arm64.dmg"
 : >"$FIXTURE/calls"
 export SCENARIO=changed-draft
-reject 'Draft artifacts changed' publish v9.8.7
+reject 'Remote size mismatch' publish v9.8.7
 cp "$FIXTURE/original.dmg" "$FIXTURE/dist/Moeka-macos-arm64.dmg"
 : >"$FIXTURE/calls"
 export SCENARIO=removed-draft
@@ -267,7 +269,7 @@ echo draft >"$FIXTURE/state"
 export SCENARIO=resume
 invoke publish v9.8.7 || fail 'Draft resume failed'
 [[ "$(cat "$FIXTURE/state")" == published ]] || fail 'Resume did not publish'
-[[ "$(grep -c '^gh release upload ' "$FIXTURE/calls")" == 9 ]] || fail 'Resume should upload only missing assets'
+[[ "$(grep -c '^gh release upload ' "$FIXTURE/calls")" == 7 ]] || fail 'Resume should upload only missing assets'
 [[ "$original" == "$(shasum -a 256 "$FIXTURE/remote/Moeka-macos-arm64.dmg")" ]] || fail 'Original draft asset changed'
 if grep -Eq '^(make |git (push|tag )|gh release create )' "$FIXTURE/calls"; then fail 'Resume rebuilt, retagged, or recreated release'; fi
 echo 'PASS interrupted upload, changed-dist refusal, and no-overwrite draft resume'

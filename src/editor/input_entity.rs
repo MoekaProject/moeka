@@ -167,6 +167,9 @@ impl EntityInputHandler for EditorView {
             if !self.begin_content_edit(cx) {
                 return;
             }
+            if self.table_boundary_caret.is_some() && !self.insert_line_at_table_boundary(cx) {
+                return;
+            }
         } else if self.active_tab_is_read_only() {
             return;
         }
@@ -404,6 +407,9 @@ impl EntityInputHandler for EditorView {
                 .is_some_and(|range| !range.is_empty());
         if !new_text.is_empty() || replaces_text {
             if !self.begin_content_edit(cx) {
+                return;
+            }
+            if self.table_boundary_caret.is_some() && !self.insert_line_at_table_boundary(cx) {
                 return;
             }
         } else if self.active_tab_is_read_only() {

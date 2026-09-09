@@ -2473,7 +2473,7 @@ impl Styles {
                 text_input_menu_shadow: menu_theme.bg_primary.l < 0.5,
             },
             search: SearchStyles {
-                search_bar_width_px: 312.0,
+                search_bar_width_px: 380.0,
                 search_bar_padding_px: 5.0,
                 search_bar_bg: ui_theme.bg_primary,
                 search_bar_border_width_px: 1.0,
@@ -2484,7 +2484,7 @@ impl Styles {
                 search_bar_offset_top_px: 8.0,
                 search_bar_offset_right_px: 8.0,
                 search_input_gap_px: 4.0,
-                search_input_height_px: 20.0,
+                search_input_height_px: 24.0,
                 search_input_font_size_px: ui_font_size_sm_px,
                 search_input_icon_size_px: 12.0,
                 search_input_icon_color: ui_theme.text_secondary,

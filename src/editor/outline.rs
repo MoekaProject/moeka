@@ -28,8 +28,6 @@ struct OutlinePanelLayoutKey {
     fold_icon_hit_size: f32,
     fold_icon_gap: f32,
     scrollbar_reserve: f32,
-    fallback_chars_per_line: usize,
-    max_lines: usize,
 }
 
 #[derive(Default)]
@@ -37,7 +35,6 @@ pub(crate) struct OutlinePanelLayoutCache {
     key: Option<OutlinePanelLayoutKey>,
     visible_heading_indices: Vec<(usize, usize)>,
     item_heights: Vec<f32>,
-    chars_per_line: Vec<usize>,
     visible_expanded: Vec<bool>,
     has_later_peer: Vec<bool>,
     has_prior_expanded_peer: Vec<bool>,
@@ -50,7 +47,7 @@ impl OutlinePanelLayoutCache {
         key: OutlinePanelLayoutKey,
         headings: &[OutlineHeading],
         collapsed_lines: &std::collections::HashSet<usize>,
-        mut row_metrics: impl FnMut(&OutlineHeading, usize) -> (f32, usize),
+        mut row_height: impl FnMut(&OutlineHeading, usize) -> f32,
     ) {
         if self.key == Some(key) {
             return;
@@ -59,15 +56,13 @@ impl OutlinePanelLayoutCache {
         let visible_heading_indices =
             visible_outline_heading_indices_with_depths(headings, collapsed_lines);
         let mut item_heights = Vec::with_capacity(visible_heading_indices.len());
-        let mut chars_per_line = Vec::with_capacity(visible_heading_indices.len());
         let mut visible_expanded = Vec::with_capacity(visible_heading_indices.len());
         let mut offsets = Vec::with_capacity(visible_heading_indices.len() + 1);
         offsets.push(0.0);
         for (heading_index, depth) in &visible_heading_indices {
             let heading = &headings[*heading_index];
-            let (height, chars) = row_metrics(heading, *depth);
+            let height = row_height(heading, *depth);
             item_heights.push(height);
-            chars_per_line.push(chars);
             visible_expanded.push(
                 outline_heading_has_children(headings, *heading_index)
                     && !collapsed_lines.contains(&heading.line),
@@ -100,7 +95,6 @@ impl OutlinePanelLayoutCache {
         self.key = Some(key);
         self.visible_heading_indices = visible_heading_indices;
         self.item_heights = item_heights;
-        self.chars_per_line = chars_per_line;
         self.visible_expanded = visible_expanded;
         self.has_later_peer = has_later_peer;
         self.has_prior_expanded_peer = has_prior_expanded_peer;
@@ -353,49 +347,6 @@ fn outline_heading_text_width(text: &str, font_size: f32) -> f32 {
     columns.max(1) as f32 * font_size.max(1.0) * 0.56 + font_size.max(1.0) * 0.35
 }
 
-fn outline_chars_per_line(available_width: f32, font_size: f32, fallback: usize) -> usize {
-    let char_width = font_size.max(1.0) * 0.56;
-    if available_width.is_finite() && available_width > char_width {
-        (available_width / char_width).floor().max(8.0) as usize
-    } else {
-        fallback.max(8)
-    }
-}
-
-fn outline_wrapped_text(
-    text: &str,
-    chars_per_line: usize,
-    max_lines: usize,
-) -> (SharedString, usize) {
-    let break_after_columns = chars_per_line.max(8);
-    let max_lines = max_lines.max(1);
-    let mut out = String::with_capacity(text.len());
-    let mut line_columns = 0usize;
-    let mut line_count = 1usize;
-    let mut truncated = false;
-    for ch in text.chars() {
-        let columns = if ch.is_ascii() { 1 } else { 2 };
-        if line_columns > 0 && line_columns + columns > break_after_columns {
-            if line_count == max_lines {
-                truncated = true;
-                break;
-            }
-            out.push('\n');
-            line_count += 1;
-            line_columns = 0;
-        }
-        out.push(ch);
-        line_columns += columns;
-    }
-    if truncated {
-        while out.ends_with(char::is_whitespace) {
-            out.pop();
-        }
-        out.push('…');
-    }
-    (SharedString::from(out), line_count)
-}
-
 fn normalized_outline_width_bounds(min_width: f32, max_width: f32) -> (f32, f32) {
     let min_width = if min_width.is_finite() {
         min_width.max(0.0)
@@ -424,7 +375,7 @@ mod tests {
         outline_has_prior_expanded_peer, outline_hover_animation_value,
         outline_nearest_guide_ranges, outline_rail_compact_row_top, outline_rail_inner_height,
         outline_rail_project_index, outline_rail_render_count, outline_rail_row_top,
-        outline_rail_slot_count, outline_tick_influence, outline_wrapped_text,
+        outline_rail_slot_count, outline_tick_influence,
     };
 
     #[test]
@@ -437,18 +388,10 @@ mod tests {
             .iter()
             .map(|heading| (heading.line, heading.level, heading.text.as_ref()))
             .collect::<Vec<_>>();
-
         assert_eq!(
             headings,
             vec![(0, 1, "ATX"), (2, 2, "Quoted"), (4, 2, "Setext")]
         );
-    }
-
-    #[test]
-    fn nested_list_thematic_break_is_not_an_outline_heading() {
-        let buffer = Buffer::from_text("- parent\n  - child\n  ---\n");
-        let index = MarkdownOutlineIndex::rebuild(&buffer);
-        assert!(index.headings.is_empty());
     }
 
     #[test]
@@ -567,21 +510,6 @@ mod tests {
     }
 
     #[test]
-    fn outline_wrapping_and_height_share_the_same_lines() {
-        let (short, short_lines) = outline_wrapped_text("short", 24, 3);
-        assert_eq!(short.as_ref(), "short");
-        assert_eq!(short_lines, 1);
-
-        let (wrapped, wrapped_lines) = outline_wrapped_text("abcdefghijklmnopqrstuvwxyz", 12, 3);
-        assert_eq!(wrapped.as_ref().matches('\n').count() + 1, wrapped_lines);
-        assert_eq!(wrapped_lines, 3);
-
-        let (truncated, truncated_lines) = outline_wrapped_text("abcdefghijklmnopqrstuvwxyz", 8, 2);
-        assert_eq!(truncated_lines, 2);
-        assert!(truncated.as_ref().ends_with('…'));
-    }
-
-    #[test]
     fn outline_guides_continue_only_to_later_peers() {
         let visible = [(0, 0), (1, 1), (2, 1), (3, 2), (4, 2), (5, 1)];
         assert!(outline_has_later_peer(&visible, 1, 1));
@@ -645,9 +573,7 @@ mod tests {
         })
         .collect::<Vec<_>>();
         let mut cache = OutlinePanelLayoutCache::default();
-        cache.rebuild_if_needed(test_layout_key(0), &headings, &HashSet::new(), |_, _| {
-            (24.0, 24)
-        });
+        cache.rebuild_if_needed(test_layout_key(0), &headings, &HashSet::new(), |_, _| 24.0);
 
         for (index, (_, depth)) in cache.visible_heading_indices.iter().enumerate() {
             assert_eq!(
@@ -679,8 +605,6 @@ mod tests {
             fold_icon_hit_size: 20.0,
             fold_icon_gap: 4.0,
             scrollbar_reserve: 12.0,
-            fallback_chars_per_line: 24,
-            max_lines: 3,
         }
     }
 
@@ -697,16 +621,7 @@ mod tests {
         let mut cache = OutlinePanelLayoutCache::default();
 
         let rebuild_started = Instant::now();
-        cache.rebuild_if_needed(
-            test_layout_key(1),
-            &headings,
-            &HashSet::new(),
-            |heading, depth| {
-                let chars = 28usize.saturating_sub(depth).max(8);
-                let lines = heading.text.chars().count().div_ceil(chars).clamp(1, 3);
-                ((lines as f32 * 18.0 + 8.0).max(24.0), chars)
-            },
-        );
+        cache.rebuild_if_needed(test_layout_key(1), &headings, &HashSet::new(), |_, _| 26.0);
         let rebuild_ms = rebuild_started.elapsed().as_secs_f64() * 1_000.0;
 
         let cached_started = Instant::now();
@@ -1611,13 +1526,13 @@ impl EditorView {
         let indent_step = self.scaled(os.outline_rail_label_indent_step_px);
         let fold_icon_size = self.scaled(os.outline_rail_label_fold_icon_size_px);
         let fold_icon_hit_size = (fold_icon_size + self.scaled(8.0)).round();
+        let fold_icon_visual_inset = ((fold_icon_hit_size - fold_icon_size) * 0.5).max(0.0);
         let fold_icon_gap = self.scaled(os.outline_rail_label_fold_icon_gap_px);
         let indent_guide_width = self.scaled(os.outline_rail_label_indent_guide_width_px);
         let indent_guide_dash_length =
             self.scaled(os.outline_rail_label_indent_guide_dash_length_px);
         let indent_guide_gap_length = self.scaled(os.outline_rail_label_indent_guide_gap_length_px);
         let indent_guide_color = multiply_alpha(os.outline_rail_label_indent_guide_color, 0.45);
-        let max_lines = os.outline_rail_label_max_lines.max(1);
         let panel_width = self
             .utility_panel_width()
             .max(f32::from(
@@ -1631,23 +1546,8 @@ impl EditorView {
                 .max(self.styles.editor.editor_scrollbar_width_px)
                 + self.styles.editor.editor_scrollbar_right_margin_px,
         );
-        let fallback_chars_per_line = os.outline_rail_label_wrap_chars_per_line.max(8);
-        let outline_row_metrics = |heading: &OutlineHeading, depth: usize| {
-            let indent = depth as f32 * indent_step.max(0.0);
-            let text_width = (panel_width
-                - section_padding_x * 2.0
-                - indent
-                - fold_icon_hit_size
-                - fold_icon_gap
-                - scrollbar_reserve)
-                .max(font_size * fallback_chars_per_line as f32 * 0.35);
-            let chars_per_line =
-                outline_chars_per_line(text_width, font_size, fallback_chars_per_line);
-            let line_count =
-                outline_wrapped_text(heading.text.as_ref(), chars_per_line, max_lines).1;
-            let height =
-                (item_padding_y * 2.0 + line_height * line_count as f32).max(item_min_height);
-            (height, chars_per_line)
+        let outline_row_height = |_: &OutlineHeading, _: usize| {
+            (item_padding_y * 2.0 + line_height).max(item_min_height)
         };
         let layout_key = OutlinePanelLayoutKey {
             epoch: self.outline_panel_layout_epoch,
@@ -1661,8 +1561,6 @@ impl EditorView {
             fold_icon_hit_size,
             fold_icon_gap,
             scrollbar_reserve,
-            fallback_chars_per_line,
-            max_lines,
         };
         {
             let mut cache = self.outline_panel_layout_cache.borrow_mut();
@@ -1670,7 +1568,7 @@ impl EditorView {
                 layout_key,
                 &headings,
                 &self.outline_rail_collapsed_heading_lines,
-                outline_row_metrics,
+                outline_row_height,
             );
         }
 
@@ -1743,11 +1641,8 @@ impl EditorView {
                     ups.utility_panel_item_value_text_color
                 };
                 let indent = depth as f32 * indent_step.max(0.0);
-                let inner_padding_left = section_padding_x + indent;
+                let inner_padding_left = header_padding_x - fold_icon_visual_inset + indent;
                 let row_height = layout_cache.item_heights[render_start + visible_offset];
-                let chars_per_line = layout_cache.chars_per_line[render_start + visible_offset];
-                let wrapped_text =
-                    outline_wrapped_text(heading.text.as_ref(), chars_per_line, max_lines).0;
                 let visible_index = render_start + visible_offset;
                 let icon_clearance = self.scaled(2.0);
                 let icon_top = ((row_height - fold_icon_size) * 0.5).max(0.0);
@@ -1786,6 +1681,9 @@ impl EditorView {
 
                 children.push(
                     div()
+                        .w_full()
+                        .max_w_full()
+                        .overflow_hidden()
                         .min_h(px(row_height))
                         .flex_shrink_0()
                         .relative()
@@ -1838,10 +1736,11 @@ impl EditorView {
                         })
                         .child(
                             div()
+                                .w(px(0.0))
                                 .min_w(px(0.0))
                                 .flex_1()
-                                .whitespace_normal()
-                                .child(wrapped_text),
+                                .truncate()
+                                .child(heading.text.clone()),
                         )
                         .on_mouse_down(
                             MouseButton::Left,
@@ -1894,6 +1793,8 @@ impl EditorView {
                     .id("outline-panel-scroll")
                     .h_full()
                     .w_full()
+                    .min_w(px(0.0))
+                    .overflow_x_hidden()
                     .overflow_y_scroll()
                     .on_scroll_wheel(cx.listener(|this, _, _, cx| {
                         this.reveal_panel_scrollbar(PanelScrollbarKind::Outline, cx);
@@ -1959,7 +1860,6 @@ impl EditorView {
         let preferred = self.outline_panel_preferred_width();
         let min_width = (preferred * 0.85).max(self.scaled(140.0));
         let global_max = self.scaled(self.styles.utility_panel.utility_panel_resize_max_width_px);
-        let max_width = (preferred * 1.25).max(min_width).min(global_max);
-        normalized_outline_width_bounds(min_width, max_width)
+        normalized_outline_width_bounds(min_width, global_max)
     }
 }

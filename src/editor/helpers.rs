@@ -1144,9 +1144,13 @@ pub(crate) fn compute_table_layout(
         }
     }
 
-    // Convert to pixel widths, respecting available_width
+    // Keep every table inside the editor viewport. On very narrow panes or
+    // tables with many columns, shrink padding before compressing content;
+    // wrapped cell text then increases row height instead of overflowing.
+    let available_width = available_width.max(col_count as f32);
+    let cell_padding_x = cell_padding_x.min(available_width / (col_count as f32 * 4.0));
     let total_padding = cell_padding_x * 2.0 * col_count as f32;
-    let content_width = (available_width - total_padding).max(col_count as f32 * 28.0);
+    let content_width = (available_width - total_padding).max(col_count as f32);
     let desired_total: f32 = desired_col_widths_chars
         .iter()
         .map(|&w| w as f32 * base_char_width)
@@ -1168,7 +1172,7 @@ pub(crate) fn compute_table_layout(
         }
         widths
     } else {
-        let min_col = 28.0_f32;
+        let min_col = (content_width / col_count as f32).min(28.0).max(1.0);
         let mut widths: Vec<f32> = desired_col_widths_chars
             .iter()
             .map(|&w| (w as f32 * base_char_width).max(min_col))
@@ -2262,10 +2266,10 @@ mod tests {
         AnchoredPopupVertical, GeneratedPreviewFontFamilies, anchored_popup_placement,
         apply_search_match_text_styles, build_display_text, build_generated_block_preview_svg,
         build_table_display_text, build_text_runs_for_display, compute_display_prefix_bytes,
-        compute_generated_preview_size, effective_monospace_wrap_width_for_letter_spacing,
-        effective_wrap_width_for_letter_spacing, load_generated_preview_image_from_svg,
-        prefix_is_folded, table_cell_content_offset, table_cell_decoration, task_prefix_is_folded,
-        wrap_segment_byte_ranges,
+        compute_generated_preview_size, compute_table_layout,
+        effective_monospace_wrap_width_for_letter_spacing, effective_wrap_width_for_letter_spacing,
+        load_generated_preview_image_from_svg, prefix_is_folded, table_cell_content_offset,
+        table_cell_decoration, task_prefix_is_folded, wrap_segment_byte_ranges,
     };
 
     #[test]
@@ -2297,6 +2301,27 @@ mod tests {
                 super::line_baseline_font(&decorations[0], false, &body, &heading, &mono),
                 body,
             );
+        }
+    }
+
+    #[test]
+    fn table_layout_never_exceeds_available_width() {
+        let text = "| A | B | C | D | E | F | G | H |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| long content | long content | long content | long content | long content | long content | long content | long content |";
+        let decorations = markdown::parse_decorations(text);
+        for available_width in [80.0, 160.0, 320.0] {
+            let layout = compute_table_layout(
+                &decorations,
+                0,
+                3,
+                available_width,
+                8.0,
+                4.0,
+                8.0,
+                20.0,
+                16.0,
+            );
+            assert!(layout.total_width <= available_width + 0.01);
+            assert!(layout.cells.iter().flatten().all(|cell| cell.width > 0.0));
         }
     }
 

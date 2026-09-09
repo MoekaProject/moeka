@@ -1557,11 +1557,37 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         if action == FormatMenuAction::Copy {
-            self.copy_selection_to_clipboard(cx);
+            if let Some(range) = self.table_boundary_block_range() {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                    self.buffer.text_for_range(range).to_string(),
+                ));
+            } else {
+                self.copy_selection_to_clipboard(cx);
+            }
             self.close_context_menu(cx);
             return;
         }
         if !self.begin_content_edit(cx) {
+            self.close_context_menu(cx);
+            return;
+        }
+        if !matches!(action, FormatMenuAction::Cut | FormatMenuAction::Paste)
+            && self.table_boundary_caret.is_some()
+            && !self.insert_line_at_table_boundary(cx)
+        {
+            self.close_context_menu(cx);
+            return;
+        }
+        if action == FormatMenuAction::Cut
+            && let Some(boundary) = self.table_boundary_caret
+            && let Some(range) = self.table_boundary_block_range()
+        {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                self.buffer.text_for_range(range).to_string(),
+            ));
+            self.table_boundary_caret = None;
+            self.table_boundary_drag_origin = None;
+            self.table_delete_table(boundary.table_start_line, cx);
             self.close_context_menu(cx);
             return;
         }

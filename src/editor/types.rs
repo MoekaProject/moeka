@@ -180,6 +180,18 @@ pub(crate) enum GeneratedPreviewAction {
     Code,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TableBoundarySide {
+    Above,
+    Below,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TableBoundaryCaret {
+    pub(crate) table_start_line: usize,
+    pub(crate) side: TableBoundarySide,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct GeneratedPreviewDragState {
     pub cache_key: String,

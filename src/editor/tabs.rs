@@ -727,6 +727,7 @@ impl EditorView {
         if switching_tabs {
             self.stash_active_tab_generated_preview_cache();
             self.reading_mode = reading_mode_after_tab_activation(self.reading_mode, true);
+            self.table_boundary_caret = None;
         }
         self.invalidate_active_file_panel_caches();
         self.active_tab_id = Some(tab_id.clone());
@@ -792,6 +793,9 @@ impl EditorView {
         }
         self.record_active_tab_navigation_target();
         self.mark_inline_diff_dirty(true);
+        if self.search_visible {
+            self.run_search(cx);
+        }
         cx.notify();
     }
 
@@ -2692,7 +2696,63 @@ impl EditorView {
         let new_hover_color = ts.tab_new_hover_text_color;
         let new_hover_bg = ts.tab_item_hover_bg;
         let end_drop_target_width = self.scaled(ts.tab_end_drop_target_width_px);
-        tab_items.push(tooltip::with_tooltip(
+        let first_tab_id = self.tabs.first().map(|tab| tab.id.clone());
+        let start_tab_ids = current_tab_ids.clone();
+        let start_settings_tab_id = settings_tab_id.clone();
+        let start_target = div()
+            .h(px(inner_height))
+            .w(px(0.0))
+            .flex_none()
+            .relative()
+            .child(
+                div()
+                    .id("tab-bar-start-drop-target")
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .h(px(inner_height))
+                    .w(px(end_drop_target_width))
+                    .drag_over::<DraggedTab>(move |style, dragged, _, _| {
+                        let Some(first_tab_id) = first_tab_id.as_deref() else {
+                            return style;
+                        };
+                        if dragged.source_pane_id != pane_id
+                            || Self::tab_drop_changes_order_for(
+                                &start_tab_ids,
+                                start_settings_tab_id.as_deref(),
+                                &dragged.tab_id,
+                                TabDropTarget::Before(first_tab_id),
+                            )
+                        {
+                            style
+                                .border_l(px(end_drop_indicator_width))
+                                .border_color(end_drop_indicator_color)
+                        } else {
+                            style
+                        }
+                    })
+                    .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                        this.tab_drag_split_target = None;
+                        if dragged.source_pane_id != pane_id
+                            || this.pane_id_for_tab(&dragged.tab_id) != Some(pane_id)
+                        {
+                            this.move_tab_to_pane(&dragged.tab_id, pane_id, Some(0), cx);
+                        } else {
+                            let dragged_tab_id = dragged.tab_id.clone();
+                            this.with_pane(pane_id, move |this| {
+                                if let Some(first_id) = this.tabs.first().map(|tab| tab.id.clone())
+                                {
+                                    this.reorder_tab_before(&dragged_tab_id, &first_id, cx);
+                                }
+                            });
+                        }
+                        this.tab_drag_candidate_id = None;
+                        this.tab_dragging_id = None;
+                    })),
+            )
+            .into_any_element();
+
+        let new_tab_button = tooltip::with_tooltip(
             div()
                 .h(px(inner_height))
                 .w(px(self.scaled(ts.tab_new_width_px)))
@@ -2729,66 +2789,68 @@ impl EditorView {
             cx.entity().clone(),
             self.t(crate::i18n::TextKey::NewFile),
             Some(crate::editor::shortcut::hint("secondary-t")),
-        ));
-        tab_items.push(
-            div()
-                .id("tab-bar-end-drop-target")
-                .h(px(inner_height))
-                .w(px(end_drop_target_width))
-                .flex_none()
-                .drag_over::<DraggedTab>(move |style, dragged, _, _| {
-                    if dragged.source_pane_id != pane_id
-                        || Self::tab_drop_changes_order_for(
-                            &current_tab_ids,
-                            settings_tab_id.as_deref(),
-                            &dragged.tab_id,
-                            TabDropTarget::End,
-                        )
-                    {
-                        style
-                            .border_l(px(end_drop_indicator_width))
-                            .border_color(end_drop_indicator_color)
-                    } else {
-                        style
-                    }
-                })
-                .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
-                    this.tab_drag_split_target = None;
-                    if dragged.source_pane_id != pane_id
-                        || this.pane_id_for_tab(&dragged.tab_id) != Some(pane_id)
-                    {
-                        this.move_tab_to_pane(&dragged.tab_id, pane_id, None, cx);
-                        this.tab_drag_candidate_id = None;
-                        this.tab_dragging_id = None;
-                        return;
-                    }
-                    let dragged_tab_id = dragged.tab_id.clone();
-                    this.with_pane(pane_id, move |this| {
-                        let current_tab_ids: Vec<String> =
-                            this.tabs.iter().map(|tab| tab.id.clone()).collect();
-                        let settings_tab_id = this
-                            .tabs
-                            .iter()
-                            .find(|tab| tab.kind == TabKind::Settings)
-                            .map(|tab| tab.id.clone());
-                        if Self::tab_drop_changes_order_for(
-                            &current_tab_ids,
-                            settings_tab_id.as_deref(),
-                            &dragged_tab_id,
-                            TabDropTarget::End,
-                        ) {
-                            this.reorder_tab_to_end(&dragged_tab_id, cx);
-                        }
-                        this.tab_drag_candidate_id = None;
-                        this.tab_dragging_id = None;
-                    });
-                }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(Self::on_tab_bar_drag_space_mouse_down),
-                )
-                .into_any_element(),
         );
+        let end_target = div()
+            .id("tab-bar-end-drop-target")
+            .h(px(inner_height))
+            .min_w(px(end_drop_target_width))
+            .flex_1()
+            .child(new_tab_button)
+            .drag_over::<DraggedTab>(move |style, dragged, _, _| {
+                if dragged.source_pane_id != pane_id
+                    || Self::tab_drop_changes_order_for(
+                        &current_tab_ids,
+                        settings_tab_id.as_deref(),
+                        &dragged.tab_id,
+                        TabDropTarget::End,
+                    )
+                {
+                    style
+                        .border_l(px(end_drop_indicator_width))
+                        .border_color(end_drop_indicator_color)
+                } else {
+                    style
+                }
+            })
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.tab_drag_split_target = None;
+                if dragged.source_pane_id != pane_id
+                    || this.pane_id_for_tab(&dragged.tab_id) != Some(pane_id)
+                {
+                    this.move_tab_to_pane(&dragged.tab_id, pane_id, None, cx);
+                    this.tab_drag_candidate_id = None;
+                    this.tab_dragging_id = None;
+                    return;
+                }
+                let dragged_tab_id = dragged.tab_id.clone();
+                this.with_pane(pane_id, move |this| {
+                    let current_tab_ids: Vec<String> =
+                        this.tabs.iter().map(|tab| tab.id.clone()).collect();
+                    let settings_tab_id = this
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.kind == TabKind::Settings)
+                        .map(|tab| tab.id.clone());
+                    if Self::tab_drop_changes_order_for(
+                        &current_tab_ids,
+                        settings_tab_id.as_deref(),
+                        &dragged_tab_id,
+                        TabDropTarget::End,
+                    ) {
+                        this.reorder_tab_to_end(&dragged_tab_id, cx);
+                    }
+                    this.tab_drag_candidate_id = None;
+                    this.tab_dragging_id = None;
+                });
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+            )
+            .into_any_element();
+
+        tab_items.insert(0, start_target);
+        tab_items.push(end_target);
 
         let can_nav_back = self.can_navigate_tab_history_back();
         let can_nav_forward = self.can_navigate_tab_history_forward();

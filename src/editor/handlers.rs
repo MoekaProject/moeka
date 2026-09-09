@@ -33,6 +33,9 @@ impl EditorView {
         };
 
         self.restore_snapshot(snapshot);
+        if self.search_visible {
+            self.run_search(cx);
+        }
         self.reset_typing_checkpoint_grouping();
         self.tabs[index].snapshot = self.current_snapshot();
         self.sync_active_tab_dirty_state();
@@ -82,6 +85,9 @@ impl EditorView {
         self.ime_composition_snapshot = None;
         self.dedup_cursors();
         self.reparse();
+        if self.search_visible {
+            self.run_search(cx);
+        }
         self.reset_typing_checkpoint_grouping();
         self.sync_active_tab_dirty_state();
         self.pause_blinking(cx);
@@ -156,6 +162,15 @@ impl EditorView {
             return;
         }
         if self.dismiss_selection_toolbar(window, cx) {
+            cx.notify();
+            return;
+        }
+        if self.table_boundary_caret.take().is_some() {
+            self.table_boundary_drag_origin = None;
+            cx.notify();
+            return;
+        }
+        if self.selected_handle.take().is_some() || self.table_drag.take().is_some() {
             cx.notify();
             return;
         }
@@ -355,6 +370,28 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if let Some(boundary) = self.table_boundary_caret {
+            if boundary.side == TableBoundarySide::Below {
+                self.table_boundary_caret = None;
+                self.table_boundary_drag_origin = None;
+                self.table_delete_table(boundary.table_start_line, cx);
+                self.pause_blinking(cx);
+                return;
+            }
+            self.pause_blinking(cx);
+            cx.notify();
+            return;
+        }
+        if !self.cursor.has_selection()
+            && !self.has_extra_cursors()
+            && self
+                .table_cursor_cell_range()
+                .is_some_and(|range| self.cursor.offset <= range.start)
+        {
+            let _ = self.move_table_cursor_horizontal(false);
+            self.pause_blinking(cx);
+            return;
+        }
         self.checkpoint();
         let should_normalize_ordered_lists = self.active_tab_is_markdown();
         let cursor_line_before = self.cursor_line();
@@ -550,6 +587,28 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if let Some(boundary) = self.table_boundary_caret {
+            if boundary.side == TableBoundarySide::Below {
+                self.table_boundary_caret = None;
+                self.table_boundary_drag_origin = None;
+                self.table_delete_table(boundary.table_start_line, cx);
+                self.pause_blinking(cx);
+                return;
+            }
+            self.pause_blinking(cx);
+            cx.notify();
+            return;
+        }
+        if !self.cursor.has_selection()
+            && !self.has_extra_cursors()
+            && self
+                .table_cursor_cell_range()
+                .is_some_and(|range| self.cursor.offset >= range.end)
+        {
+            let _ = self.move_table_cursor_horizontal(true);
+            self.pause_blinking(cx);
+            return;
+        }
         if let Some((table_start_line, is_column, index)) = self.selected_handle.take() {
             if is_column && self.block_is_front_matter(table_start_line) {
                 self.pause_blinking(cx);
@@ -668,6 +727,11 @@ impl EditorView {
             self.finish_horizontal_cursor_move(cx);
             return;
         }
+        if !had_selection && self.move_table_cursor_horizontal(false) {
+            self.finish_horizontal_cursor_move(cx);
+            return;
+        }
+        self.table_boundary_caret = None;
         let prev_offset = self.cursor.offset;
         let (line, _col) = self.buffer.offset_to_line_col(self.cursor.offset);
         let cell_ranges = self
@@ -723,12 +787,18 @@ impl EditorView {
             self.sidebar_nav_right(cx);
             return;
         }
+        let had_selection = self.cursor.has_selection();
         self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_move_right();
             self.finish_horizontal_cursor_move(cx);
             return;
         }
+        if !had_selection && self.move_table_cursor_horizontal(true) {
+            self.finish_horizontal_cursor_move(cx);
+            return;
+        }
+        self.table_boundary_caret = None;
         let prev_offset = self.cursor.offset;
         let (line, _col) = self.buffer.offset_to_line_col(self.cursor.offset);
         let cell_ranges = self
@@ -789,6 +859,12 @@ impl EditorView {
             self.pause_blinking(cx);
             return;
         }
+        if self.move_table_boundary_caret(false) {
+            self.navigate_scroll_to_cursor();
+            self.pause_blinking(cx);
+            cx.notify();
+            return;
+        }
         let prev_offset = self.cursor.offset;
         if self.vertical_move_goal_x.is_none() {
             self.vertical_move_goal_x = self.cursor_visual_x(self.cursor.offset);
@@ -840,6 +916,12 @@ impl EditorView {
             self.pause_blinking(cx);
             return;
         }
+        if self.move_table_boundary_caret(true) {
+            self.navigate_scroll_to_cursor();
+            self.pause_blinking(cx);
+            cx.notify();
+            return;
+        }
         let prev_offset = self.cursor.offset;
         if self.vertical_move_goal_x.is_none() {
             self.vertical_move_goal_x = self.cursor_visual_x(self.cursor.offset);
@@ -864,6 +946,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_select_left();
@@ -879,6 +962,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_select_right();
@@ -889,6 +973,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.table_boundary_caret = None;
         if self.has_extra_cursors() {
             self.reset_cursor_visual_targeting();
             self.multi_cursor_select_up();
@@ -914,6 +999,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.table_boundary_caret = None;
         if self.has_extra_cursors() {
             self.reset_cursor_visual_targeting();
             self.multi_cursor_select_down();
@@ -938,12 +1024,22 @@ impl EditorView {
             self.whiteboard_select_all(cx);
             return;
         }
+        self.table_boundary_caret = None;
         self.cursor.select_all(&self.buffer);
         self.pause_blinking(cx);
     }
 
     pub(crate) fn on_home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
         self.clear_phantom_selection();
+        if self.table_boundary_caret.is_some() {
+            self.pause_blinking(cx);
+            return;
+        }
+        if self.move_table_cursor_to_cell_edge(true) {
+            self.finish_horizontal_cursor_move(cx);
+            return;
+        }
+        self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_move_to_line_start();
@@ -955,6 +1051,15 @@ impl EditorView {
 
     pub(crate) fn on_end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
         self.clear_phantom_selection();
+        if self.table_boundary_caret.is_some() {
+            self.pause_blinking(cx);
+            return;
+        }
+        if self.move_table_cursor_to_cell_edge(false) {
+            self.finish_horizontal_cursor_move(cx);
+            return;
+        }
+        self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
         if self.has_extra_cursors() {
             self.multi_cursor_move_to_line_end();
@@ -970,6 +1075,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.table_boundary_caret = None;
         if self.has_extra_cursors() {
             self.multi_cursor_select_to_line_start();
         } else {
@@ -979,6 +1085,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.table_boundary_caret = None;
         if self.has_extra_cursors() {
             self.multi_cursor_select_to_line_end();
         } else {
@@ -1023,6 +1130,14 @@ impl EditorView {
                 self.sidebar_confirm_focused(cx);
             }
             return;
+        }
+        if self.table_boundary_caret.is_some() {
+            if !self.begin_content_edit(cx) {
+                return;
+            }
+            if self.insert_line_at_table_boundary(cx) {
+                return;
+            }
         }
         if !self.begin_content_edit(cx) {
             return;
@@ -1266,6 +1381,10 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if self.table_boundary_caret.is_some() {
+            let _ = self.insert_line_at_table_boundary(cx);
+            return;
+        }
         self.checkpoint();
         self.multi_cursor_enter();
         self.reparse();
@@ -1275,6 +1394,12 @@ impl EditorView {
 
     pub(crate) fn on_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
         if !self.begin_content_edit(cx) {
+            return;
+        }
+        if self.table_boundary_caret.is_some() {
+            let _ = self.move_table_cursor_horizontal(true);
+            self.pause_blinking(cx);
+            cx.notify();
             return;
         }
         if self.table_move_to_adjacent_cell(true, cx) {
@@ -1288,11 +1413,7 @@ impl EditorView {
         if has_list_line {
             self.indent_selected_list_lines();
         } else if has_selection {
-            if self.has_extra_cursors() {
-                self.indent_line_indices(&line_indices, &indent_text);
-            } else {
-                self.indent_current_lines(&indent_text);
-            }
+            self.indent_line_indices(&line_indices, &indent_text);
         } else {
             if self.has_extra_cursors() {
                 self.multi_cursor_insert(&indent_text);
@@ -1313,6 +1434,12 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if self.table_boundary_caret.is_some() {
+            let _ = self.move_table_cursor_horizontal(false);
+            self.pause_blinking(cx);
+            cx.notify();
+            return;
+        }
         if self.table_move_to_adjacent_cell(false, cx) {
             return;
         }
@@ -1324,11 +1451,7 @@ impl EditorView {
         if has_list_line {
             self.unindent_selected_list_lines();
         } else if has_selection {
-            if self.has_extra_cursors() {
-                self.unindent_line_indices(&line_indices, unindent_width);
-            } else {
-                self.unindent_current_lines(unindent_width);
-            }
+            self.unindent_line_indices(&line_indices, unindent_width);
         }
         self.pause_blinking(cx);
     }
@@ -1338,12 +1461,31 @@ impl EditorView {
             self.whiteboard_copy(cx);
             return;
         }
+        if let Some(range) = self.table_boundary_block_range() {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                self.buffer.text_for_range(range).to_string(),
+            ));
+            return;
+        }
         self.copy_selection_to_clipboard(cx);
     }
 
     pub(crate) fn on_cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
         if self.active_tab_is_whiteboard() {
             self.whiteboard_cut(cx);
+            return;
+        }
+        if let Some(boundary) = self.table_boundary_caret
+            && let Some(range) = self.table_boundary_block_range()
+            && self.begin_content_edit(cx)
+        {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                self.buffer.text_for_range(range).to_string(),
+            ));
+            self.table_boundary_caret = None;
+            self.table_boundary_drag_origin = None;
+            self.table_delete_table(boundary.table_start_line, cx);
+            self.pause_blinking(cx);
             return;
         }
         self.cut_selection_to_clipboard(cx);
@@ -1367,6 +1509,9 @@ impl EditorView {
             return;
         }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            if self.table_boundary_caret.is_some() && !self.insert_line_at_table_boundary(cx) {
+                return;
+            }
             self.insert_pasted_text(&text, cx);
         }
     }
@@ -1387,6 +1532,11 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.clear_phantom_selection();
+        if self.table_boundary_caret.is_some() {
+            let _ = self.move_table_cursor_horizontal(false);
+            self.finish_horizontal_cursor_move(cx);
+            return;
+        }
         if self.has_extra_cursors() {
             self.multi_cursor_move_word_left();
         } else {
@@ -1402,6 +1552,11 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.clear_phantom_selection();
+        if self.table_boundary_caret.is_some() {
+            let _ = self.move_table_cursor_horizontal(true);
+            self.finish_horizontal_cursor_move(cx);
+            return;
+        }
         if self.has_extra_cursors() {
             self.multi_cursor_move_word_right();
         } else {
@@ -1417,6 +1572,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.clear_phantom_selection();
+        self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
         self.cursor.select_word_left(&self.buffer);
         for cursor in &mut self.extra_cursors {
@@ -1433,6 +1589,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.clear_phantom_selection();
+        self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
         self.cursor.select_word_right(&self.buffer);
         for cursor in &mut self.extra_cursors {
@@ -1449,6 +1606,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.clear_phantom_selection();
+        self.table_boundary_caret = None;
         self.cursor.move_to(0, &self.buffer);
         for cursor in &mut self.extra_cursors {
             cursor.move_to(0, &self.buffer);
@@ -1465,6 +1623,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.clear_phantom_selection();
+        self.table_boundary_caret = None;
         let end = self.buffer.len();
         self.cursor.move_to(end, &self.buffer);
         for cursor in &mut self.extra_cursors {
@@ -1482,6 +1641,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.clear_phantom_selection();
+        self.table_boundary_caret = None;
         self.cursor.select_to(0, &self.buffer);
         for cursor in &mut self.extra_cursors {
             cursor.select_to(0, &self.buffer);
@@ -1498,6 +1658,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.clear_phantom_selection();
+        self.table_boundary_caret = None;
         let end = self.buffer.len();
         self.cursor.select_to(end, &self.buffer);
         for cursor in &mut self.extra_cursors {
@@ -1514,6 +1675,10 @@ impl EditorView {
 
     fn delete_to_line_boundary_impl(&mut self, to_start: bool, kill: bool, cx: &mut Context<Self>) {
         if !self.begin_content_edit(cx) {
+            return;
+        }
+        if self.table_boundary_caret.is_some() || self.table_cursor_cell().is_some() {
+            self.pause_blinking(cx);
             return;
         }
         self.checkpoint();
@@ -1603,12 +1768,19 @@ impl EditorView {
         if text.is_empty() {
             return;
         }
+        if self.table_boundary_caret.is_some() && !self.insert_line_at_table_boundary(cx) {
+            return;
+        }
         self.insert_pasted_text(&text, cx);
     }
 
     /// Inserts a line break after the cursor without moving it (emacs ctrl-o).
     pub(crate) fn on_open_line(&mut self, _: &OpenLine, _: &mut Window, cx: &mut Context<Self>) {
         if self.active_tab_is_whiteboard() || !self.begin_content_edit(cx) {
+            return;
+        }
+        if self.table_boundary_caret.is_some() {
+            let _ = self.insert_line_at_table_boundary(cx);
             return;
         }
         self.checkpoint();
@@ -1634,6 +1806,10 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         if self.active_tab_is_whiteboard() || !self.begin_content_edit(cx) {
+            return;
+        }
+        if self.table_boundary_caret.is_some() || self.table_cursor_cell().is_some() {
+            self.pause_blinking(cx);
             return;
         }
         self.clear_extra_cursors();
@@ -1698,6 +1874,10 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if self.table_boundary_caret.is_some() || self.table_cursor_cell().is_some() {
+            self.pause_blinking(cx);
+            return;
+        }
         self.checkpoint();
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
@@ -1722,6 +1902,10 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if self.table_boundary_caret.is_some() || self.table_cursor_cell().is_some() {
+            self.pause_blinking(cx);
+            return;
+        }
         self.checkpoint();
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
@@ -1739,13 +1923,19 @@ impl EditorView {
 
     // ── Format actions ──────────────────────────────────────────────
 
+    fn begin_markdown_format_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        self.active_tab_is_markdown()
+            && self.begin_content_edit(cx)
+            && (self.table_boundary_caret.is_none() || self.insert_line_at_table_boundary(cx))
+    }
+
     pub(crate) fn on_toggle_bold(
         &mut self,
         _: &ToggleBold,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1759,7 +1949,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1773,7 +1963,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1787,7 +1977,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1801,7 +1991,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1815,7 +2005,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1829,7 +2019,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1843,7 +2033,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1857,7 +2047,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1871,7 +2061,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1885,7 +2075,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1912,7 +2102,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1926,7 +2116,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1940,7 +2130,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1953,7 +2143,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1966,7 +2156,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1979,7 +2169,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -1992,7 +2182,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2005,7 +2195,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2019,7 +2209,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_is_markdown() || !self.begin_content_edit(cx) {
+        if !self.begin_markdown_format_edit(cx) {
             return;
         }
         if let Some(level) = self

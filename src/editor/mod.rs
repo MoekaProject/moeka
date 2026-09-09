@@ -122,6 +122,10 @@ const GENERATED_PREVIEW_CACHE_RETAIN: usize = 96;
 /// Entry count alone says nothing about cost: one full-width retina diagram can
 /// outweigh dozens of small ones, so cap the decoded bytes as well.
 const GENERATED_PREVIEW_CACHE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
+/// SVGs are much cheaper than decoded rasters and avoid rerunning Mermaid's
+/// layout engine when an evicted offscreen preview scrolls back into view.
+const GENERATED_PREVIEW_SVG_CACHE_RETAIN: usize = 512;
+const GENERATED_PREVIEW_SVG_CACHE_BYTE_BUDGET: usize = 32 * 1024 * 1024;
 
 #[derive(Default)]
 pub(crate) struct GeneratedPreviewTabCache {
@@ -874,6 +878,7 @@ impl LazyMarkdownDecorations {
         if range.is_empty() || self.parsed_chunks.is_empty() {
             return;
         }
+        self.fenced_code_spans = None;
         let first = range.start / LARGE_MARKDOWN_CHUNK_LINES;
         let last = range.end.saturating_sub(1) / LARGE_MARKDOWN_CHUNK_LINES;
         for chunk in first..=last.min(self.parsed_chunks.len().saturating_sub(1)) {
@@ -907,9 +912,9 @@ pub(crate) fn parse_lazy_markdown_range(
     decorations: &mut [LineDecoration],
     lazy: &mut LazyMarkdownDecorations,
     range: Range<usize>,
-) -> bool {
+) -> Option<Range<usize>> {
     if buffer.line_count() == 0 || lazy.parsed_chunks.is_empty() {
-        return false;
+        return None;
     }
 
     let line_count = buffer.line_count();
@@ -917,7 +922,7 @@ pub(crate) fn parse_lazy_markdown_range(
     let end = range.end.max(start + 1).min(line_count);
     let first_chunk = start / LARGE_MARKDOWN_CHUNK_LINES;
     let last_chunk = (end - 1) / LARGE_MARKDOWN_CHUNK_LINES;
-    let mut changed = false;
+    let mut changed_range: Option<Range<usize>> = None;
     if lazy.fenced_code_spans.is_none() {
         lazy.fenced_code_spans = Some(markdown::fenced_code_block_line_ranges(buffer.text()));
     }
@@ -976,10 +981,13 @@ pub(crate) fn parse_lazy_markdown_range(
         }
         decorations[parse_start..parse_end].clone_from_slice(&parsed);
         lazy.mark_parsed(chunk);
-        changed = true;
+        changed_range = Some(match changed_range {
+            Some(changed) => changed.start.min(parse_start)..changed.end.max(parse_end),
+            None => parse_start..parse_end,
+        });
     }
 
-    changed
+    changed_range
 }
 
 fn should_use_lazy_markdown_reparse(line_count: usize, force_full_reparse: bool) -> bool {
@@ -1851,6 +1859,10 @@ pub struct EditorView {
     pub(crate) table_col_handle_areas: Vec<(gpui::Bounds<Pixels>, usize, usize)>,
     /// Table row handle areas: (bounds, table_start_line, visual_row)
     pub(crate) table_row_handle_areas: Vec<(gpui::Bounds<Pixels>, usize, usize)>,
+    /// Blank-space hit areas beside a table: (bounds, boundary caret).
+    pub(crate) table_boundary_caret_areas: Vec<(gpui::Bounds<Pixels>, TableBoundaryCaret)>,
+    pub(crate) table_boundary_caret: Option<TableBoundaryCaret>,
+    pub(crate) table_boundary_drag_origin: Option<TableBoundaryCaret>,
     /// Active table drag operation
     pub(crate) table_drag: Option<TableDragState>,
     /// Which table (by table_start_line) the mouse is hovering near (for handle visibility)
@@ -2612,6 +2624,9 @@ impl EditorView {
             table_click_areas: Vec::new(),
             table_col_handle_areas: Vec::new(),
             table_row_handle_areas: Vec::new(),
+            table_boundary_caret_areas: Vec::new(),
+            table_boundary_caret: None,
+            table_boundary_drag_origin: None,
             table_drag: None,
             hovering_table_start: None,
             hovering_handle: None,
@@ -6411,6 +6426,7 @@ impl EditorView {
             self.set_line_display_info(preserved_line_display_info);
         }
         self.refresh_generated_block_previews();
+        self.sync_table_boundary_caret_after_reparse();
         self.retain_valid_active_code_block_display_overrides();
         self.layout_dirty = true;
         self.invalidate_info_panel_cache();
@@ -6830,16 +6846,25 @@ impl EditorView {
                 continue;
             }
 
-            let svg = helpers::build_generated_block_preview_svg(
-                preview.kind,
-                &preview.source_text,
-                &self.theme,
-                helpers::GeneratedPreviewFontFamilies {
-                    monospace: self.styles.editor.editor_monospace_font_family,
-                    body_cjk: self.styles.editor.editor_body_cjk_font_family,
-                    mermaid_theme: self.app_settings.mermaid_theme(),
-                },
-            );
+            let svg: Arc<str> = (!force)
+                .then(|| {
+                    self.generated_preview_svg_cache
+                        .get(&preview.cache_key)
+                        .cloned()
+                })
+                .flatten()
+                .unwrap_or_else(|| {
+                    Arc::from(helpers::build_generated_block_preview_svg(
+                        preview.kind,
+                        &preview.source_text,
+                        &self.theme,
+                        helpers::GeneratedPreviewFontFamilies {
+                            monospace: self.styles.editor.editor_monospace_font_family,
+                            body_cjk: self.styles.editor.editor_body_cjk_font_family,
+                            mermaid_theme: self.app_settings.mermaid_theme(),
+                        },
+                    ))
+                });
             // The SVG fully determines the rasterized image. On a forced refresh
             // (theme/font/settings change) only re-rasterize when the SVG actually
             // changed; settings that do not affect previews (line height, letter
@@ -6848,13 +6873,13 @@ impl EditorView {
             let svg_unchanged = self
                 .generated_preview_svg_cache
                 .get(&preview.cache_key)
-                .is_some_and(|cached| cached.as_ref() == svg.as_str());
+                .is_some_and(|cached| cached.as_ref() == svg.as_ref());
             if force && has_cached_image && svg_unchanged {
                 continue;
             }
             self.generated_preview_svg_cache
-                .insert(preview.cache_key.clone(), Arc::<str>::from(svg.clone()));
-            let image = helpers::load_generated_preview_image_from_svg(&svg, preview.kind)
+                .insert(preview.cache_key.clone(), svg.clone());
+            let image = helpers::load_generated_preview_image_from_svg(svg.as_ref(), preview.kind)
                 .ok()
                 .map(Arc::new);
             self.image_cache.insert(preview.cache_key.clone(), image);
@@ -6878,27 +6903,32 @@ impl EditorView {
             if rendered_count >= GENERATED_PREVIEW_RENDER_BUDGET {
                 break;
             }
-            let svg = helpers::build_generated_block_preview_svg(
-                markdown::BlockPreviewKind::Math,
-                &source_text,
-                &self.theme,
-                helpers::GeneratedPreviewFontFamilies {
-                    monospace: self.styles.editor.editor_monospace_font_family,
-                    body_cjk: self.styles.editor.editor_body_cjk_font_family,
-                    mermaid_theme: self.app_settings.mermaid_theme(),
-                },
-            );
+            let svg: Arc<str> = (!force)
+                .then(|| self.generated_preview_svg_cache.get(&cache_key).cloned())
+                .flatten()
+                .unwrap_or_else(|| {
+                    Arc::from(helpers::build_generated_block_preview_svg(
+                        markdown::BlockPreviewKind::Math,
+                        &source_text,
+                        &self.theme,
+                        helpers::GeneratedPreviewFontFamilies {
+                            monospace: self.styles.editor.editor_monospace_font_family,
+                            body_cjk: self.styles.editor.editor_body_cjk_font_family,
+                            mermaid_theme: self.app_settings.mermaid_theme(),
+                        },
+                    ))
+                });
             let svg_unchanged = self
                 .generated_preview_svg_cache
                 .get(&cache_key)
-                .is_some_and(|cached| cached.as_ref() == svg.as_str());
+                .is_some_and(|cached| cached.as_ref() == svg.as_ref());
             if force && has_cached_image && svg_unchanged {
                 continue;
             }
             self.generated_preview_svg_cache
-                .insert(cache_key.clone(), Arc::<str>::from(svg.clone()));
+                .insert(cache_key.clone(), svg.clone());
             let image = helpers::load_generated_preview_image_from_svg(
-                &svg,
+                svg.as_ref(),
                 markdown::BlockPreviewKind::Math,
             )
             .ok()
@@ -6961,7 +6991,7 @@ impl EditorView {
         self.trim_generated_preview_render_caches();
     }
 
-    fn generated_preview_cache_bytes(&self, cache_key: &str) -> usize {
+    fn generated_preview_raster_cache_bytes(&self, cache_key: &str) -> usize {
         fn decoded_bytes(image: &RenderImage) -> usize {
             let size = image.size(0);
             let width = i32::from(size.width).max(0) as usize;
@@ -6973,9 +7003,6 @@ impl EditorView {
         if let Some(Some(image)) = self.image_cache.get(cache_key) {
             bytes += decoded_bytes(image);
         }
-        if let Some(svg) = self.generated_preview_svg_cache.get(cache_key) {
-            bytes += svg.len();
-        }
         if let Some((_, image)) = self.generated_preview_overlay_cache.get(cache_key) {
             bytes += decoded_bytes(image);
         }
@@ -6983,16 +7010,22 @@ impl EditorView {
     }
 
     fn trim_generated_preview_render_caches(&mut self) {
-        let total_bytes = self
+        let raster_entry_count = self
             .generated_preview_keys
             .iter()
-            .map(|cache_key| self.generated_preview_cache_bytes(cache_key))
+            .filter(|cache_key| {
+                self.image_cache.contains_key(*cache_key)
+                    || self
+                        .generated_preview_overlay_cache
+                        .contains_key(*cache_key)
+                    || self.generated_preview_views.contains_key(*cache_key)
+            })
+            .count();
+        let total_raster_bytes = self
+            .generated_preview_keys
+            .iter()
+            .map(|cache_key| self.generated_preview_raster_cache_bytes(cache_key))
             .sum::<usize>();
-        if self.generated_preview_keys.len() <= GENERATED_PREVIEW_CACHE_RETAIN
-            && total_bytes <= GENERATED_PREVIEW_CACHE_BYTE_BUDGET
-        {
-            return;
-        }
 
         let (priority_start, priority_end) = self.generated_preview_priority_line_range();
         let cursor_line = self
@@ -7048,34 +7081,89 @@ impl EditorView {
         ranked_keys.sort();
         let mut seen_keys = HashSet::new();
         ranked_keys.retain(|(_, _, cache_key)| seen_keys.insert(cache_key.clone()));
-        let mut keep_keys = HashSet::new();
-        let mut kept_bytes = 0usize;
-        for (_, _, cache_key) in ranked_keys.into_iter().take(GENERATED_PREVIEW_CACHE_RETAIN) {
-            let bytes = self.generated_preview_cache_bytes(&cache_key);
+        let mut keep_raster_keys = HashSet::new();
+        let mut kept_raster_bytes = 0usize;
+        for (_, _, cache_key) in ranked_keys
+            .iter()
+            .filter(|(_, _, cache_key)| {
+                self.image_cache.contains_key(cache_key)
+                    || self.generated_preview_overlay_cache.contains_key(cache_key)
+                    || self.generated_preview_views.contains_key(cache_key)
+            })
+            .take(GENERATED_PREVIEW_CACHE_RETAIN)
+        {
+            let bytes = self.generated_preview_raster_cache_bytes(cache_key);
             // Keep the closest preview even when it alone exceeds the budget,
             // otherwise the one on screen would be dropped every frame.
-            if !keep_keys.is_empty() && kept_bytes + bytes > GENERATED_PREVIEW_CACHE_BYTE_BUDGET {
+            if !keep_raster_keys.is_empty()
+                && kept_raster_bytes + bytes > GENERATED_PREVIEW_CACHE_BYTE_BUDGET
+            {
                 break;
             }
-            kept_bytes += bytes;
-            keep_keys.insert(cache_key);
+            kept_raster_bytes += bytes;
+            keep_raster_keys.insert(cache_key.clone());
         }
         if let Some(cache_key) = self.code_mode_preview_key.as_ref() {
-            keep_keys.insert(cache_key.clone());
+            keep_raster_keys.insert(cache_key.clone());
         }
         if let Some(overlay) = self.preview_overlay.as_ref() {
-            keep_keys.insert(overlay.cache_key.clone());
+            keep_raster_keys.insert(overlay.cache_key.clone());
         }
 
-        for cache_key in self.generated_preview_keys.iter() {
-            if keep_keys.contains(cache_key) {
+        if raster_entry_count > GENERATED_PREVIEW_CACHE_RETAIN
+            || total_raster_bytes > GENERATED_PREVIEW_CACHE_BYTE_BUDGET
+        {
+            for cache_key in self.generated_preview_keys.iter() {
+                if keep_raster_keys.contains(cache_key) {
+                    continue;
+                }
+                self.image_cache.remove(cache_key);
+                self.generated_preview_overlay_cache.remove(cache_key);
+                self.generated_preview_views.remove(cache_key);
+            }
+        }
+
+        let svg_entry_count = self
+            .generated_preview_svg_cache
+            .keys()
+            .filter(|cache_key| self.generated_preview_keys.contains(*cache_key))
+            .count();
+        let total_svg_bytes = self
+            .generated_preview_svg_cache
+            .iter()
+            .filter(|(cache_key, _)| self.generated_preview_keys.contains(*cache_key))
+            .map(|(_, svg)| svg.len())
+            .sum::<usize>();
+        if svg_entry_count <= GENERATED_PREVIEW_SVG_CACHE_RETAIN
+            && total_svg_bytes <= GENERATED_PREVIEW_SVG_CACHE_BYTE_BUDGET
+        {
+            return;
+        }
+
+        let mut keep_svg_keys = HashSet::new();
+        let mut kept_svg_bytes = 0usize;
+        for (_, _, cache_key) in ranked_keys
+            .into_iter()
+            .take(GENERATED_PREVIEW_SVG_CACHE_RETAIN)
+        {
+            let bytes = self
+                .generated_preview_svg_cache
+                .get(&cache_key)
+                .map_or(0, |svg| svg.len());
+            if bytes == 0 {
                 continue;
             }
-            self.image_cache.remove(cache_key);
-            self.generated_preview_svg_cache.remove(cache_key);
-            self.generated_preview_overlay_cache.remove(cache_key);
-            self.generated_preview_views.remove(cache_key);
+            if !keep_svg_keys.is_empty()
+                && kept_svg_bytes + bytes > GENERATED_PREVIEW_SVG_CACHE_BYTE_BUDGET
+            {
+                break;
+            }
+            kept_svg_bytes += bytes;
+            keep_svg_keys.insert(cache_key);
         }
+        self.generated_preview_svg_cache.retain(|cache_key, _| {
+            !self.generated_preview_keys.contains(cache_key) || keep_svg_keys.contains(cache_key)
+        });
     }
 
     pub(crate) fn active_file_kind(&self) -> Option<&FileKind> {
@@ -8087,10 +8175,10 @@ impl EditorView {
                 .get(cursor_line)
                 .map(|d| d.block_type.clone())
                 .unwrap_or(BlockType::Normal);
-            let leading_ws =
-                line_content.len() - line_content.trim_start_matches([' ', '\t']).len();
-            let trimmed = &line_content[leading_ws..];
-            let ws_str = " ".repeat(leading_ws);
+            let (ws_str, trimmed) = markdown::split_continuation_prefix(&line_content);
+            let quote_prefix_len = markdown::blockquote_prefix_len(&line_content);
+            let body_indent = ws_str.len().saturating_sub(quote_prefix_len);
+            let leading_ws = quote_prefix_len + body_indent;
 
             match block_type {
                 BlockType::UnorderedList => {
@@ -8106,8 +8194,9 @@ impl EditorView {
                         let text_after_marker = &line_content[leading_ws + marker_len..];
                         if text_after_marker.trim().is_empty() {
                             edit_start = line_start;
-                            self.buffer.replace(line_start..line_end, "");
-                            cursor.move_to(line_start, &self.buffer);
+                            self.buffer
+                                .replace(line_start..line_end, &line_content[..quote_prefix_len]);
+                            cursor.move_to(line_start + quote_prefix_len, &self.buffer);
                             cursor.insert(&mut self.buffer, "\n");
                         } else {
                             let marker = &trimmed[..marker_len];
@@ -8131,8 +8220,9 @@ impl EditorView {
                         let text_after_marker = &line_content[leading_ws + prefix_len..];
                         if text_after_marker.trim().is_empty() {
                             edit_start = line_start;
-                            self.buffer.replace(line_start..line_end, "");
-                            cursor.move_to(line_start, &self.buffer);
+                            self.buffer
+                                .replace(line_start..line_end, &line_content[..quote_prefix_len]);
+                            cursor.move_to(line_start + quote_prefix_len, &self.buffer);
                             cursor.insert(&mut self.buffer, "\n");
                         } else {
                             let bullet = if trimmed.starts_with("- ") {
@@ -8164,8 +8254,9 @@ impl EditorView {
                         let text_after_marker = &line_content[leading_ws + prefix_len..];
                         if text_after_marker.trim().is_empty() {
                             edit_start = line_start;
-                            self.buffer.replace(line_start..line_end, "");
-                            cursor.move_to(line_start, &self.buffer);
+                            self.buffer
+                                .replace(line_start..line_end, &line_content[..quote_prefix_len]);
+                            cursor.move_to(line_start + quote_prefix_len, &self.buffer);
                             cursor.insert(&mut self.buffer, "\n");
                             ordered_list_update = Some(false);
                         } else {
@@ -8833,6 +8924,9 @@ impl EditorView {
 
         match self.import_clipboard_resources(&item, cx) {
             Ok(ClipboardPasteOutcome::Insert(text)) => {
+                if self.table_boundary_caret.is_some() && !self.insert_line_at_table_boundary(cx) {
+                    return;
+                }
                 self.insert_pasted_text(&text, cx);
                 return;
             }
@@ -8848,6 +8942,9 @@ impl EditorView {
         }
 
         if let Some(text) = item.text() {
+            if self.table_boundary_caret.is_some() && !self.insert_line_at_table_boundary(cx) {
+                return;
+            }
             if let Some(multi_cursor_clipboard) = self.multi_cursor_clipboard.as_ref()
                 && multi_cursor_clipboard.serialized_text == text
                 && multi_cursor_clipboard.segments.len() == 1 + self.extra_cursors.len()
@@ -8944,8 +9041,10 @@ impl EditorView {
             let line_start = self.buffer.line_start(line);
             let line_end = self.buffer.line_end(line);
             let line_text = self.buffer.line_content(line).to_string();
-            let trimmed = line_text.trim_start();
-            let leading_ws = line_text.len() - trimmed.len();
+            let quote_prefix_len = markdown::blockquote_prefix_len(&line_text);
+            let body = &line_text[quote_prefix_len..];
+            let trimmed = body.trim_start();
+            let leading_ws = quote_prefix_len + body.len() - trimmed.len();
             let existing_prefix_len = Self::detect_block_prefix_len(trimmed);
             let existing_prefix = &trimmed[..existing_prefix_len];
             let old_content_start = line_start + leading_ws + existing_prefix_len;
@@ -9179,29 +9278,6 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn indent_current_lines(&mut self, spaces: &str) {
-        let selection = self.cursor.selection_range();
-        let (start_line, _) = self.buffer.offset_to_line_col(selection.start);
-        let end_anchor = selection
-            .end
-            .saturating_sub(usize::from(selection.end > selection.start));
-        let (end_line, _) = self.buffer.offset_to_line_col(end_anchor);
-
-        let mut inserted = 0usize;
-        for line in start_line..=end_line {
-            let line_start = self.buffer.line_start(line) + inserted;
-            self.buffer.insert(line_start, spaces);
-            inserted += spaces.len();
-        }
-
-        let new_start = selection.start + spaces.len();
-        let new_end = selection.end + inserted;
-        self.cursor.anchor = new_start.min(self.buffer.len());
-        self.cursor.offset = new_end.min(self.buffer.len());
-        self.reparse();
-        self.scroll_to_cursor();
-    }
-
     pub(crate) fn selected_line_span(&self) -> (usize, usize) {
         self.line_span_for_range(self.cursor.selection_range())
     }
@@ -9280,51 +9356,6 @@ impl EditorView {
         {
             self.normalize_ordered_lists_in_line_span(first_line, last_line);
             self.reparse();
-        }
-    }
-
-    pub(crate) fn unindent_current_lines(&mut self, max_spaces: usize) {
-        let selection = self.cursor.selection_range();
-        let (start_line, _) = self.buffer.offset_to_line_col(selection.start);
-        let end_anchor = selection
-            .end
-            .saturating_sub(usize::from(selection.end > selection.start));
-        let (end_line, _) = self.buffer.offset_to_line_col(end_anchor);
-
-        // Collect how many leading spaces to strip from each line (before mutation)
-        let mut strips: Vec<usize> = Vec::new();
-        for line in start_line..=end_line {
-            let content = self.buffer.line_content(line);
-            let leading: usize = content
-                .bytes()
-                .take(max_spaces)
-                .take_while(|&b| b == b' ')
-                .count();
-            strips.push(leading);
-        }
-
-        let mut total_removed = 0usize;
-        let mut first_removed = 0usize;
-        for (i, &strip) in strips.iter().enumerate() {
-            if strip > 0 {
-                let line = start_line + i;
-                // After previous removals, line_start already reflects the new state
-                let line_start = self.buffer.line_start(line);
-                self.buffer.replace(line_start..line_start + strip, "");
-                if i == 0 {
-                    first_removed = strip;
-                }
-                total_removed += strip;
-            }
-        }
-
-        if total_removed > 0 {
-            let new_start = selection.start.saturating_sub(first_removed);
-            let new_end = selection.end.saturating_sub(total_removed);
-            self.cursor.anchor = new_start.min(self.buffer.len());
-            self.cursor.offset = new_end.min(self.buffer.len());
-            self.reparse();
-            self.scroll_to_cursor();
         }
     }
 
@@ -9715,20 +9746,29 @@ impl EditorView {
         let line_start = self.buffer.line_start(line);
         let line_end = self.buffer.line_end(line);
         let line_text = self.buffer.line_content(line).to_string();
+        let quote_prefix_len = markdown::blockquote_prefix_len(&line_text);
+        let body = &line_text[quote_prefix_len..];
+        let body_indent = body.len() - body.trim_start_matches([' ', '\t']).len();
+        let prefix_len = quote_prefix_len + body_indent;
+        let preserved_prefix = &line_text[..prefix_len];
+        let body = &line_text[prefix_len..];
         let target_prefix = format!("{} ", "#".repeat(level as usize));
-        let (replacement, new_cursor) = if line_text.starts_with(&target_prefix) {
-            (line_text[target_prefix.len()..].to_string(), line_start)
+        let (replacement, new_cursor) = if body.starts_with(&target_prefix) {
+            (
+                format!("{preserved_prefix}{}", &body[target_prefix.len()..]),
+                line_start + prefix_len,
+            )
         } else {
-            let stripped = line_text.trim_start_matches('#');
-            let existing_hashes = line_text.len() - stripped.len();
+            let stripped = body.trim_start_matches('#');
+            let existing_hashes = body.len() - stripped.len();
             let content = if existing_hashes > 0 {
                 stripped.strip_prefix(' ').unwrap_or(stripped)
             } else {
-                &line_text
+                body
             };
             (
-                format!("{target_prefix}{content}"),
-                line_start + target_prefix.len(),
+                format!("{preserved_prefix}{target_prefix}{content}"),
+                line_start + prefix_len + target_prefix.len(),
             )
         };
         self.buffer.replace(line_start..line_end, &replacement);
@@ -10766,12 +10806,23 @@ impl EditorView {
     }
 
     pub(crate) fn ensure_lazy_markdown_decorations(&mut self, range: Range<usize>) -> bool {
-        let Some(lazy) = self.lazy_markdown_decorations.as_mut() else {
+        let parsed_range = {
+            let Some(lazy) = self.lazy_markdown_decorations.as_mut() else {
+                return false;
+            };
+            parse_lazy_markdown_range(&self.buffer, &mut self.decorations, lazy, range)
+        };
+        let Some(parsed_range) = parsed_range else {
             return false;
         };
-        let changed = parse_lazy_markdown_range(&self.buffer, &mut self.decorations, lazy, range);
-
-        changed
+        for line in parsed_range.clone() {
+            if line < self.line_display_info.len() {
+                self.line_display_info[line] = None;
+            }
+        }
+        self.clear_sparse_line_geometry_range(parsed_range);
+        self.invalidate_line_geometry_cache();
+        true
     }
 
     pub(crate) fn begin_large_document_frame_bench_prepaint(&mut self) {
@@ -11673,7 +11724,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        EditorView, SparseLineGeometry, classify_file_kind_for_bytes,
+        EditorView, LazyMarkdownDecorations, SparseLineGeometry, classify_file_kind_for_bytes,
         compute_incremental_markdown_decorations, edit_may_change_leading_indent,
         editor_can_start_content_edit, editor_is_read_only, generated_preview_intersects_range,
         heading_matches_anchor, line_display_transfer_line_bounds,
@@ -12034,13 +12085,20 @@ mod tests {
         let buffer = Buffer::from_text(&lines.join("\n"));
         let (mut decorations, mut lazy) = new_lazy_markdown_decorations(buffer.line_count());
 
-        assert!(parse_lazy_markdown_range(
-            &buffer,
-            &mut decorations,
-            &mut lazy,
-            800..801,
-        ));
+        let parsed_range =
+            parse_lazy_markdown_range(&buffer, &mut decorations, &mut lazy, 800..801)
+                .expect("lazy range parsed");
+        assert!(parsed_range.contains(&800));
         assert_eq!(decorations[800].block_type, BlockType::CodeBlock);
+    }
+
+    #[test]
+    fn lazy_markdown_edits_invalidate_cached_fence_ranges() {
+        let mut lazy = LazyMarkdownDecorations::new(512);
+        lazy.fenced_code_spans = Some(vec![10..40]);
+        lazy.invalidate_range(20..21);
+
+        assert!(lazy.fenced_code_spans.is_none());
     }
 
     #[test]

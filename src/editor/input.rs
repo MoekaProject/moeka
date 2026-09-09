@@ -177,9 +177,11 @@ impl EditorView {
                         if (editor.scroll_offset - previous_scroll).abs() < f32::EPSILON {
                             return None;
                         }
-                        let offset = editor.offset_for_position(position);
-                        editor.update_wrap_boundary_affinity_for_position(offset, position);
-                        editor.cursor.select_to(offset, &editor.buffer);
+                        if !editor.update_table_boundary_drag_selection(position) {
+                            let offset = editor.offset_for_position(position);
+                            editor.update_wrap_boundary_affinity_for_position(offset, position);
+                            editor.cursor.select_to(offset, &editor.buffer);
+                        }
                         cx.notify();
                         Some(())
                     })
@@ -196,6 +198,49 @@ impl EditorView {
                     .await;
             }
         }));
+    }
+
+    fn update_table_boundary_drag_selection(&mut self, position: Point<Pixels>) -> bool {
+        if !self.selection_drag_has_moved {
+            return false;
+        }
+        let Some(origin) = self.table_boundary_drag_origin else {
+            return false;
+        };
+        if !self
+            .table_click_areas
+            .iter()
+            .any(|(bounds, table_start, _, _)| {
+                *table_start == origin.table_start_line && bounds.contains(&position)
+            })
+        {
+            return false;
+        }
+        let Some(table_info) = self
+            .decorations
+            .get(origin.table_start_line)
+            .and_then(|decoration| decoration.table_info.as_ref())
+        else {
+            return false;
+        };
+        let table_start = self.buffer.line_start(table_info.table_start_line);
+        let table_end = self
+            .buffer
+            .line_end(table_info.table_end_line.saturating_sub(1));
+        match origin.side {
+            TableBoundarySide::Above => {
+                self.cursor.anchor = table_start;
+                self.cursor.offset = table_end;
+            }
+            TableBoundarySide::Below => {
+                self.cursor.anchor = table_end;
+                self.cursor.offset = table_start;
+            }
+        }
+        self.table_boundary_caret = None;
+        self.clear_wrap_boundary_affinity();
+        self.suppress_fold_for_empty_selection_drag = false;
+        true
     }
 
     pub(crate) fn primary_cursor_has_inline_edit_headroom(&self) -> bool {
@@ -584,6 +629,30 @@ impl EditorView {
         self.clear_vertical_move_goal_x();
 
         if event.button == MouseButton::Left {
+            if let Some(&(_, boundary)) = self
+                .table_boundary_caret_areas
+                .iter()
+                .find(|(bounds, _)| bounds.contains(&event.position))
+            {
+                self.clear_phantom_selection();
+                self.clear_extra_cursors();
+                self.clear_wrap_boundary_affinity();
+                self.marked_range = None;
+                self.extra_marked_ranges.clear();
+                self.selected_handle = None;
+                if self.focus_table_boundary(boundary) {
+                    self.table_boundary_drag_origin = Some(boundary);
+                    self.is_selecting = true;
+                    self.selection_drag_has_moved = false;
+                    self.selection_drag_position = Some(event.position);
+                    self.last_mouse_down_target = Some((event.position, self.cursor.offset));
+                    self.sync_selection_drag_scroll_task(cx);
+                    self.pause_blinking(cx);
+                    cx.notify();
+                    return;
+                }
+            }
+            self.table_boundary_caret = None;
             if let Some(&(bounds, table_start, visual_row, col)) = self
                 .table_click_areas
                 .iter()
@@ -1539,6 +1608,7 @@ impl EditorView {
         self.suppress_fold_for_empty_selection_drag =
             was_selecting && self.selection_drag_has_moved && !had_selection;
         self.selection_drag_has_moved = false;
+        self.table_boundary_drag_origin = None;
         if was_selecting {
             cx.notify();
         }
@@ -1945,11 +2015,21 @@ impl EditorView {
                 self.clamp_scroll();
             }
 
-            let offset = if let Some(&(bounds, table_start, visual_row, col)) = self
+            let hovered_table_cell = self
                 .table_click_areas
                 .iter()
                 .find(|(bounds, _, _, _)| bounds.contains(&event.position))
-            {
+                .copied();
+            if self.update_table_boundary_drag_selection(event.position) {
+                cx.notify();
+                return;
+            }
+
+            if self.selection_drag_has_moved && self.table_boundary_drag_origin.is_some() {
+                self.table_boundary_caret = None;
+            }
+
+            let offset = if let Some((bounds, table_start, visual_row, col)) = hovered_table_cell {
                 self.table_cell_offset_for_position(
                     window,
                     table_start,

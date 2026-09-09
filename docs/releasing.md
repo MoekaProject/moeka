@@ -1,6 +1,6 @@
 # Release safety and local publishing
 
-## Channels and current block
+## Channels
 
 Official GitHub Releases remain in **MoekaProject/community**. The only
 supported official release entry point is local `make publish vX.Y.Z` on the
@@ -17,22 +17,13 @@ has no release token, signing/notary secrets, tag trigger, or Homebrew update.
 GitHub's internal artifact service authentication is still used by
 `upload-artifact`; no extra publishing secret is needed.
 
-**GPL readiness is unresolved until a human completes provenance and
-distribution review.** The release helper requires a regular, tracked and
-committed file named packaging/release-approval.txt containing this exact line:
+Official releases currently publish binaries only. The application source
+repository and its release tag remain private. The public `community` tag is
+created against that repository's own `main` commit, so GitHub's automatic
+source archives do not contain Moeka application source. Do not push the private
+source tag or its reachable history to `MoekaProject/community`.
 
-> GPL-3.0-or-later distribution review: approved
-
-There is deliberately no environment-variable bypass. This change does not
-create the approval file. Do not add it merely to make a build pass. Keep it
-absent while the open-source readiness checklist is incomplete; revoke the
-approval if dependencies, assets, licensing, or distribution conditions change.
-Record reviewer, date, reviewed dependency/asset inventory, and evidence in the
-approval file when the review is genuinely complete. The automatic gate checks
-the declaration, not the legal merits or continuing validity of that review.
-
-The gate applies only to official publishing, not ordinary `cargo build`,
-`make build-release`, or candidate builds. Packaging does require LICENSE and
+Packaging requires LICENSE and
 THIRD_PARTY_NOTICES.md; an optional licenses/ directory is copied when present.
 Missing notices fail packaging rather than silently producing incomplete
 distributions. The macOS app (including the separate MAS bundle) carries these
@@ -40,7 +31,7 @@ in Resources; Windows and Linux packages carry them alongside the executable.
 MAS packaging remains a separate existing channel, not an approval of App Store
 terms compatibility or permission to distribute an unresolved GPL build.
 
-## Required review: source and licensing
+## Required review: licensing and distribution
 
 Before creating approval, a human must review at least:
 
@@ -49,28 +40,17 @@ Before creating approval, a human must review at least:
   fonts, icons, embedded resources, and bundled Linux shared libraries.
 - Compatibility and the complete notices/license texts for actual shipped
   binaries, not just the top-level Rust package.
-- Corresponding Source obligations, dependency source availability and exact
-  versions, build/install scripts, toolchain inputs, and any applicable
-  Installation Information obligations.
-- The source/history that will be made public, including credentials and
-  material for which redistribution rights are missing. Rotate exposed secrets;
-  removing their current files does not remove them from Git history.
-
-The helper emits dist/Moeka-vX.Y.Z-source.tar.gz using `git archive` of the
-**exact release tag**, with a versioned prefix and deterministic gzip headers.
-It contains tracked project source, tracked scripts and vendor contents (subject
-to Git archive attributes), not untracked/ignored files, Cargo's downloaded
-crate sources, Git dependency checkouts in the Cargo cache, sysroot packages,
-or submodule working trees. **A Git archive plus notices is not evidence of
-complete GPL Corresponding Source compliance.** Review whether additional
-dependency source, offers or other delivery mechanisms are required before
-approving distribution. This helper does not assemble a complete dependency
-source bundle or claim that it satisfies all GPL obligations.
+- The legal basis for binary distribution, dependency source availability and
+  exact versions, build/install scripts, toolchain inputs, and any applicable
+  source or Installation Information obligations.
+- The private source/history and release artifacts for credentials or material
+  without redistribution rights. Rotate exposed secrets; removing their current
+  files does not remove them from Git history.
 
 ## Preflight and official release procedure
 
-1. Complete the review above, commit the approval and distribution documents,
-   bump the package version, and update/commit the lockfile separately. Run CI
+1. Complete the review above, bump the package version, and update/commit the
+  lockfile separately. Run CI
    and review its results. Authenticate local Git and GitHub CLI without
    putting credentials in source or command history.
 2. Synchronize `main` separately through the normal review/push process. It
@@ -80,7 +60,7 @@ source bundle or claim that it satisfies all GPL obligations.
 3. Run `make publish-check TAG=vX.Y.Z`. This is read-only: no fetch, build,
    signing, ref creation, upload or release edit. It checks the clean tree
    (including untracked files), stable tag syntax/version, main/upstream,
-   committed approval/license/notices/lockfile, and local and remote tag
+  committed license/notices/lockfile, and local and remote tag
    commits. An existing lightweight or annotated tag at HEAD is accepted.
    Any other commit is refused, never retagged.
 4. Preflight authenticates access to MoekaProject/community. Only an actual
@@ -94,16 +74,14 @@ source bundle or claim that it satisfies all GPL obligations.
    Moeka names and dist layout; the official asset allowlist is fixed, not a
    wildcard over potentially stale files. Do not override build commands or
    paths to reuse candidate binaries.
-6. The helper repeats preflight after builds, checks unchanged HEAD, creates
-   an annotated tag **only if absent**, then prepares the exact-tag archive and
-   dist/SHA256SUMS. Only missing tag refs are pushed, without force, to origin
-   and MoekaProject/community. **Pushing the tag exposes its reachable source
-   history in the destination repository**, not just the source tarball.
-   Existing remote tags are checked by peeled commit, not overwritten.
-7. The helper creates a **draft before any upload** with the exact HEAD target,
+6. The helper repeats preflight after builds, checks unchanged HEAD, and creates
+  an annotated source tag **only if absent**. That tag is pushed only to the
+  private origin. A lightweight tag with the same name is created in the public
+  community repository against community `main`; no Moeka source objects are
+  pushed there. Existing remote tags are checked, not overwritten.
+7. The helper creates a **draft before any upload** against community `main`,
    or resumes that same draft. It uploads eight binary archives (two macOS DMGs
-   and six platform ZIPs), the source tarball and SHA256SUMS. SHA256SUMS covers
-   all nine payloads, not itself. Unknown/duplicate/incomplete remote assets
+   and six platform ZIPs). Unknown/duplicate/incomplete remote assets
    are refused. Existing asset names are never overwritten or deleted.
 8. Every asset must match local byte size and GitHub's SHA-256 digest when
    supplied. If no digest is available, the helper downloads and byte-compares
@@ -122,9 +100,8 @@ No Homebrew upload/update is performed.
 - On failure, tags and draft assets already created are left intact. There is
   no automatic rollback, delete, force-push, release recreation or clobber.
 - Preserve the entire original dist directory securely until publishing
-  finishes. On retry an existing draft skips builds and requires the exact
-  original source archive and matching SHA256SUMS. It verifies existing remote
-  assets and uploads only missing ones. Rebuilt signed/notarized bytes often
+  finishes. On retry an existing draft skips builds, verifies existing remote
+  binary assets and uploads only missing ones. Rebuilt signed/notarized bytes often
   differ; do not overwrite original outputs to resume a draft.
 - Mismatches, unexpected assets or a draft targeting a different commit require
   human investigation. Do not delete published releases or tags to work around
@@ -139,10 +116,9 @@ No Homebrew upload/update is performed.
   protection where available. Never publish a draft manually during upload.
   The helper never overwrites any asset, but a concurrent external publisher
   could expose a partially uploaded draft between checks.
-- Source archives/checksums establish traceability and transport integrity,
-  not a cryptographic signature or proof of reproducible binaries. Signing and
-  notarization remain in the existing local macOS scripts; the helper's tests
-  do not validate Apple services, hosted runners or binary functionality.
+- Signing and notarization remain in the existing local macOS scripts; the
+  helper's tests do not validate Apple services, hosted runners or binary
+  functionality.
 
 ## CI, updates and safe tests
 

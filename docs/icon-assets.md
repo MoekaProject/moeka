@@ -1,5 +1,9 @@
 # Icon assets
 
+The search `replace.svg` and `replace-all.svg` icons come from
+[Lucide](https://github.com/lucide-icons/lucide), under the
+[ISC license](../licenses/lucide-icons.txt).
+
 ## Organization
 
 The 44 SVG files formerly at the root of the icon tree now live in five

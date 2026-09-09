@@ -2854,6 +2854,18 @@ pub(crate) fn sidebar_action_label(language: UiLanguage, key: &str) -> &'static 
 
 pub(crate) fn search_option_label(language: UiLanguage, key: &str) -> &'static str {
     match (language, key) {
+        (UiLanguage::ChineseSimplified, "invalid_regex") => "正则表达式无效",
+        (UiLanguage::ChineseTraditional, "invalid_regex") => "規則運算式無效",
+        (UiLanguage::Japanese, "invalid_regex") => "無効な正規表現",
+        (UiLanguage::Korean, "invalid_regex") => "잘못된 정규식",
+        (UiLanguage::French, "invalid_regex") => "Expression régulière invalide",
+        (UiLanguage::German, "invalid_regex") => "Ungültiger regulärer Ausdruck",
+        (UiLanguage::Spanish, "invalid_regex") => "Expresión regular no válida",
+        (UiLanguage::Portuguese, "invalid_regex") => "Expressão regular inválida",
+        (UiLanguage::Russian, "invalid_regex") => "Недопустимое регулярное выражение",
+        (UiLanguage::Arabic, "invalid_regex") => "تعبير نمطي غير صالح",
+        (UiLanguage::Hindi, "invalid_regex") => "अमान्य रेगुलर एक्सप्रेशन",
+        (_, "invalid_regex") => "Invalid regular expression",
         (UiLanguage::ChineseSimplified, "case") => "区分大小写",
         (UiLanguage::ChineseSimplified, "word") => "全词匹配",
         (UiLanguage::ChineseSimplified, "regex") => "正则表达式",

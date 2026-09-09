@@ -128,6 +128,7 @@ actions!(
         FindPrevious,
         DismissSearch,
         ToggleReplace,
+        SwitchSearchInput,
         ToggleSearchCaseSensitive,
         ToggleSearchWholeWord,
         ToggleSearchRegex,

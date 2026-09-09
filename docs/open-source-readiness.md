@@ -70,11 +70,10 @@ copyright issues, cached GitHub references or sensitive data in release binaries
   screenshots, binaries and Actions artifacts for personal information.
 - [ ] Confirm the final destructive ref replacement and public-visibility scope.
 
-Only after these checks may a maintainer commit `packaging/release-approval.txt`
-containing `GPL-3.0-or-later distribution review: approved`. Include the reviewed
-revision, evidence, reviewer, date and any scope limitations. Adding the marker
-does not itself establish legal compliance. It must be revisited for dependency,
-asset, distribution-channel and licensing changes.
+Only after these checks may a maintainer decide to publish application source.
+Record the reviewed revision, evidence, reviewer, date and any scope limitations.
+The review must be revisited for dependency, asset, distribution-channel and
+licensing changes.
 
 ## Single-commit cutover
 

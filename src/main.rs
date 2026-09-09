@@ -740,6 +740,18 @@ fn main() {
             ),
             KeyBinding::new("secondary-alt-w", ToggleSearchWholeWord, Some("SearchBar")),
             KeyBinding::new("secondary-alt-r", ToggleSearchRegex, Some("SearchBar")),
+            KeyBinding::new("secondary-alt-f", ToggleReplace, Some("EditorSearchBar")),
+            KeyBinding::new("alt-enter", ReplaceNext, Some("EditorSearchBar")),
+            KeyBinding::new("secondary-alt-enter", ReplaceAll, Some("EditorSearchBar")),
+            KeyBinding::new("escape", DismissSearch, Some("EditorSearchBar")),
+            KeyBinding::new("tab", SwitchSearchInput, Some("EditorSearchBar")),
+            KeyBinding::new("shift-tab", SwitchSearchInput, Some("EditorSearchBar")),
+        ]);
+
+        #[cfg(not(target_os = "macos"))]
+        cx.bind_keys([
+            KeyBinding::new("ctrl-h", ToggleReplace, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-h", ToggleReplace, Some("EditorSearchBar")),
         ]);
 
         cx.bind_keys([

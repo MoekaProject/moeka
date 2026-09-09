@@ -6,7 +6,7 @@ use gpui::{
     Context, Entity, Hsla, PaintQuad, Render, Subscription, Window, canvas, fill, prelude::*,
 };
 
-use super::{EditorView, PaneId, element};
+use super::{EditorView, PaneId, TableBoundaryCaret, element};
 
 #[derive(Clone)]
 pub(crate) struct CaretPaint {
@@ -20,12 +20,20 @@ pub(crate) struct CaretGeometrySnapshot {
     pub(crate) cursor_offset: usize,
     pub(crate) scroll_offset: f32,
     pub(crate) horizontal_offset: f32,
+    pub(crate) table_boundary_caret: Option<TableBoundaryCaret>,
     pub(crate) paints: Vec<CaretPaint>,
 }
 
 impl CaretGeometrySnapshot {
-    fn matches(&self, cursor_offset: usize, scroll_offset: f32, horizontal_offset: f32) -> bool {
+    fn matches(
+        &self,
+        cursor_offset: usize,
+        scroll_offset: f32,
+        horizontal_offset: f32,
+        table_boundary_caret: Option<TableBoundaryCaret>,
+    ) -> bool {
         self.cursor_offset == cursor_offset
+            && self.table_boundary_caret == table_boundary_caret
             && (self.scroll_offset - scroll_offset).abs() <= 0.5
             && (self.horizontal_offset - horizontal_offset).abs() <= 0.5
     }
@@ -204,6 +212,7 @@ impl CaretOverlayView {
 #[cfg(test)]
 mod tests {
     use super::{CARET_FADE_FRAMES, CaretGeometrySnapshot, caret_fade_opacity};
+    use crate::editor::{TableBoundaryCaret, TableBoundarySide};
 
     #[test]
     fn overlay_caret_fade_is_smooth_monotonic_and_reaches_the_endpoint() {
@@ -226,12 +235,22 @@ mod tests {
             cursor_offset: 42,
             scroll_offset: 120.0,
             horizontal_offset: 24.0,
+            table_boundary_caret: None,
             paints: Vec::new(),
         };
-        assert!(snapshot.matches(42, 120.4, 24.4));
-        assert!(!snapshot.matches(43, 120.0, 24.0));
-        assert!(!snapshot.matches(42, 120.6, 24.0));
-        assert!(!snapshot.matches(42, 120.0, 24.6));
+        assert!(snapshot.matches(42, 120.4, 24.4, None));
+        assert!(!snapshot.matches(43, 120.0, 24.0, None));
+        assert!(!snapshot.matches(42, 120.6, 24.0, None));
+        assert!(!snapshot.matches(42, 120.0, 24.6, None));
+        assert!(!snapshot.matches(
+            42,
+            120.0,
+            24.0,
+            Some(TableBoundaryCaret {
+                table_start_line: 3,
+                side: TableBoundarySide::Above,
+            }),
+        ));
     }
 }
 
@@ -250,6 +269,7 @@ impl Render for CaretOverlayView {
                     editor.cursor.offset,
                     editor.scroll_offset,
                     horizontal_offset,
+                    editor.table_boundary_caret,
                 ) {
                     snapshot.paints
                 } else {

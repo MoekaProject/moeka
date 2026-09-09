@@ -414,6 +414,9 @@ pane_state! {
     (table_click_areas, Vec<(gpui::Bounds<Pixels>, usize, usize, usize)>, Vec::new()),
     (table_col_handle_areas, Vec<(gpui::Bounds<Pixels>, usize, usize)>, Vec::new()),
     (table_row_handle_areas, Vec<(gpui::Bounds<Pixels>, usize, usize)>, Vec::new()),
+    (table_boundary_caret_areas, Vec<(gpui::Bounds<Pixels>, TableBoundaryCaret)>, Vec::new()),
+    (table_boundary_caret, Option<TableBoundaryCaret>, None),
+    (table_boundary_drag_origin, Option<TableBoundaryCaret>, None),
     (table_drag, Option<TableDragState>, None),
     (hovering_table_start, Option<usize>, None),
     (hovering_handle, Option<(usize, bool, usize)>, None),
@@ -441,6 +444,7 @@ pane_state! {
     (preview_overlay_image_bounds, Option<Bounds<Pixels>>, None),
     (last_mouse_down_target, Option<(Point<Pixels>, usize)>, None),
     (selection_drag_has_moved, bool, false),
+    (selection_drag_scroll_task, Option<Task<()>>, None),
     // ── Folding / gutter ──
     (folded_sections, HashSet<usize>, HashSet::new()),
     (folded_image_previews, HashSet<usize>, HashSet::new()),
@@ -691,6 +695,9 @@ impl EditorView {
 
         // Cancel animations that were driving the previous pane's root fields.
         self.scroll_anim_epoch = self.scroll_anim_epoch.wrapping_add(1);
+        if self.search_visible {
+            self.run_search(cx);
+        }
 
         // Panels/status/outline follow the focused pane.
         self.invalidate_active_file_panel_caches();

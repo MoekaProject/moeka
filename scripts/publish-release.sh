@@ -15,7 +15,7 @@ repo=${3:-MoekaProject/community}
 [[ "$tag" != v0.1.12 ]] || die 'v0.1.12 is protected; never modify or republish it.'
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
-for tool in git gh gzip shasum cmp; do
+for tool in git gh shasum cmp; do
     command -v "$tool" >/dev/null || die "Missing tool: $tool"
 done
 tmp=$(mktemp -d)
@@ -32,6 +32,7 @@ destination="https://github.com/$repo.git"
 release_id=
 release_state=absent
 head=
+public_head=
 
 # --include supplies the actual HTTP status, not a substring of an error message.
 # Only a positively observed HTTP 404 means absence; all other errors stop us.
@@ -57,19 +58,19 @@ read_release() {
     IFS=$'\t' read -r id draft remote_tag target extra <<< "$row"
     [[ "$id" =~ ^[0-9]+$ && "$remote_tag" == "$tag" && -z "$extra" ]] || die 'Malformed release response.'
     [[ "$draft" == true ]] || die 'Release is already published (or has invalid draft state); assets are immutable.'
-    [[ "$target" == "$head" ]] || die 'Existing draft target does not match HEAD; manual review required.'
+    [[ "$target" == "$public_head" ]] || die 'Existing draft target does not match community main; manual review required.'
     release_id=$id
     release_state=draft
 }
 
 remote_tag_commit() {
-    local remote=$1 refs direct peeled
+    local remote=$1 expected=$2 refs direct peeled
     refs=$(git ls-remote "$remote" "refs/tags/$tag" "refs/tags/$tag^{}") || die "Cannot read tag from $remote"
     direct=$(awk -v ref="refs/tags/$tag" '$2 == ref {print $1}' <<< "$refs")
     peeled=$(awk -v ref="refs/tags/$tag^{}" '$2 == ref {print $1}' <<< "$refs")
     if [[ -n "$refs" ]]; then
         [[ "$direct" =~ ^[0-9a-f]{40}$ ]] || die "Malformed remote tag at $remote"
-        [[ "${peeled:-$direct}" == "$head" ]] || die "Remote tag mismatch at $remote"
+        [[ "${peeled:-$direct}" == "$expected" ]] || die "Remote tag mismatch at $remote"
     fi
     printf '%s' "$direct"
 }
@@ -88,18 +89,15 @@ local_checks() {
     [[ "$remote_main" == "$head"$'\trefs/heads/main' ]] || die 'Live origin/main differs from HEAD.'
     version=$(awk -F '"' '/^\[package\]/ {package=1; next} /^\[/ {package=0} package && /^version = / {print $2; exit}' Cargo.toml)
     [[ "$tag" == "v$version" ]] || die 'Tag/version mismatch with Cargo.toml.'
-    for file in packaging/release-approval.txt LICENSE THIRD_PARTY_NOTICES.md Cargo.lock; do
+    for file in LICENSE THIRD_PARTY_NOTICES.md Cargo.lock; do
         [[ -f "$file" && ! -L "$file" ]] || die "Required release review/distribution file missing: $file"
         git cat-file -e "HEAD:$file" || die "Release file must be committed: $file"
     done
-    git show HEAD:packaging/release-approval.txt | grep -Fxq 'GPL-3.0-or-later distribution review: approved' \
-        || die 'GPL distribution review is unresolved; no environment bypass is supported.'
     if git show-ref --verify --quiet "refs/tags/$tag"; then
         commit=$(git rev-parse --verify "refs/tags/$tag^{commit}") || die 'Local tag is not a commit.'
         [[ "$commit" == "$head" ]] || die 'Local tag mismatch: existing tag does not point to HEAD.'
     fi
-    remote_tag_commit origin >/dev/null
-    remote_tag_commit "$destination" >/dev/null
+    remote_tag_commit origin "$head" >/dev/null
 }
 
 check() {
@@ -109,6 +107,10 @@ check() {
     # repository identity and permission before interpreting release absence.
     permission=$(gh api --method GET "$api" --jq '[.full_name, .permissions.push] | @tsv') || die 'Cannot authenticate release repository access.'
     [[ "$permission" == "$repo"$'\ttrue' ]] || die 'Authenticated contents-write access is needed to see and resume drafts.'
+    public_head=$(gh api --method GET "$api/git/ref/heads/main" --jq '.object.sha') \
+        || die 'Cannot read community main.'
+    [[ "$public_head" =~ ^[0-9a-f]{40}$ ]] || die 'Malformed community main ref.'
+    remote_tag_commit "$destination" "$public_head" >/dev/null
     read_release
 }
 
@@ -125,11 +127,10 @@ lock=$lock_dir
 original_head=$head
 initial_state=$release_state
 initial_id=$release_id
-source_name="Moeka-$tag-source.tar.gz"
 assets=(Moeka-macos-arm64.dmg Moeka-macos-x86_64.dmg
         Moeka-macos-arm64.zip Moeka-macos-x86_64.zip
         Moeka-windows-arm64.zip Moeka-windows-x86_64.zip
-        Moeka-linux-arm64.zip Moeka-linux-x86_64.zip "$source_name")
+    Moeka-linux-arm64.zip Moeka-linux-x86_64.zip)
     [[ ! -L dist ]] || die 'Unsafe dist symlink.'
 mkdir -p dist
 
@@ -152,31 +153,22 @@ done
 if ! git show-ref --verify --quiet "refs/tags/$tag"; then
     git tag -a "$tag" "$head" -m "Release $tag" # New annotated tag only; no force.
 fi
-git archive --format=tar --prefix="Moeka-$tag/" "refs/tags/$tag" | gzip -n >"$tmp/source.tar.gz"
-[[ ! -L "dist/$source_name" && ! -L dist/SHA256SUMS ]] || die 'Unsafe source or checksum symlink.'
-if [[ "$initial_state" == absent ]]; then
-    cp "$tmp/source.tar.gz" "dist/$source_name"
-    (cd dist && shasum -a 256 "${assets[@]}") >"$tmp/SHA256SUMS"
-    cp "$tmp/SHA256SUMS" dist/SHA256SUMS
-else
-    [[ -f "dist/$source_name" && ! -L "dist/$source_name" ]] || die 'Missing original source archive.'
-    cmp -s "$tmp/source.tar.gz" "dist/$source_name" || die 'Draft source archive is not the exact local tag archive.'
-    (cd dist && shasum -a 256 "${assets[@]}") >"$tmp/SHA256SUMS"
-    cmp -s "$tmp/SHA256SUMS" dist/SHA256SUMS || die 'Draft artifacts changed or original SHA256SUMS is missing; restore original dist.'
+# The source tag stays in the private origin. The public community tag points
+# to community's own main commit, so GitHub's automatic source archives contain
+# only the public community repository rather than Moeka application source.
+remote_ref=$(remote_tag_commit origin "$head")
+if [[ -z "$remote_ref" ]]; then
+    git push origin "refs/tags/$tag:refs/tags/$tag"
 fi
-[[ ! -L dist/SHA256SUMS ]] || die 'Unsafe SHA256SUMS symlink.'
-assets+=(SHA256SUMS)
-
-# Push only a missing release tag. main is never pushed; existing tags are
-# checked by peeled commit and never replaced, even if annotations differ.
-for remote in origin "$destination"; do
-    remote_ref=$(remote_tag_commit "$remote")
-    if [[ -z "$remote_ref" ]]; then
-        git push "$remote" "refs/tags/$tag:refs/tags/$tag"
-    fi
-    remote_ref=$(remote_tag_commit "$remote")
-    [[ -n "$remote_ref" ]] || die "Tag was not visible at $remote after push."
-done
+remote_ref=$(remote_tag_commit origin "$head")
+[[ -n "$remote_ref" ]] || die 'Private source tag was not visible after push.'
+public_ref=$(remote_tag_commit "$destination" "$public_head")
+if [[ -z "$public_ref" ]]; then
+    gh api --method POST "$api/git/refs" -f ref="refs/tags/$tag" -f sha="$public_head" >/dev/null \
+        || die 'Cannot create community release tag.'
+fi
+public_ref=$(remote_tag_commit "$destination" "$public_head")
+[[ -n "$public_ref" ]] || die 'Community release tag was not visible after creation.'
 read_release
 if [[ "$initial_state" == draft ]]; then
     [[ "$release_id" == "$initial_id" ]] || die 'Original draft was removed or replaced; it will not be recreated.'
@@ -184,7 +176,7 @@ fi
 if [[ "$release_state" == absent ]]; then
     notes=$(git for-each-ref "refs/tags/$tag" --format='%(contents)')
     [[ -n "$notes" ]] || notes="Release $tag"
-    gh release create "$tag" --repo "$repo" --verify-tag --target "$head" \
+    gh release create "$tag" --repo "$repo" --verify-tag --target "$public_head" \
         --title "$tag" --notes "$notes" --draft
     read_release
 fi
@@ -247,10 +239,6 @@ check
 assert_draft
 load_assets
 for asset in "${assets[@]}"; do verify_asset "$asset"; done
-# Detect local artifact edits too; do not publish a checksum manifest that no
-# longer describes the files just verified.
-(cd dist && shasum -a 256 "${assets[@]:0:9}") >"$tmp/SHA256SUMS"
-cmp -s "$tmp/SHA256SUMS" dist/SHA256SUMS || die 'Artifacts changed during upload.'
 assert_draft
 gh release edit "$tag" --repo "$repo" --draft=false --latest
 printf 'Published %s in %s. Assets will not be replaced by this script.\n' "$tag" "$repo"

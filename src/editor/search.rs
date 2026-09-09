@@ -24,6 +24,46 @@ enum SearchScanStep {
     Cancelled,
 }
 
+fn search_replacements(
+    text: &str,
+    query: &str,
+    replacement: &str,
+    case_sensitive: bool,
+    whole_word: bool,
+    use_regex: bool,
+) -> Result<Vec<(Range<usize>, String)>, regex::Error> {
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !use_regex {
+        return Ok(
+            find_search_matches(text, query, case_sensitive, whole_word, false)
+                .into_iter()
+                .map(|range| (range, replacement.to_string()))
+                .collect(),
+        );
+    }
+    let regex = regex::RegexBuilder::new(query)
+        .case_insensitive(!case_sensitive)
+        .build()?;
+    Ok(regex
+        .captures_iter(text)
+        .filter_map(|captures| {
+            let found = captures.get(0)?;
+            if found.is_empty()
+                || (whole_word
+                    && (!is_word_boundary(text, found.start())
+                        || !is_word_boundary(text, found.end())))
+            {
+                return None;
+            }
+            let mut expanded = String::new();
+            captures.expand(replacement, &mut expanded);
+            Some((found.range(), expanded))
+        })
+        .collect())
+}
+
 /// Rounds `offset` up to the next line start so slices never split a line.
 /// Keeping slices line-aligned is also what makes whole-word matching correct at
 /// a slice's leading edge: the byte before it is always a newline.
@@ -74,6 +114,40 @@ fn search_slice_matches(
 }
 
 impl EditorView {
+    fn search_can_replace(&self) -> bool {
+        self.active_tab_supports_text_search()
+            && self.active_tab_can_start_content_edit()
+            && !self.active_tab_is_terminal()
+    }
+
+    fn focus_search_input(&self, replacement: bool, window: &mut Window, cx: &gpui::App) {
+        let editor = if replacement {
+            &self.search_replace_editor
+        } else {
+            &self.search_query_editor
+        };
+        if let Some(editor) = editor {
+            editor.focus_handle(cx).focus(window);
+        }
+    }
+
+    fn switch_search_input(
+        &mut self,
+        _: &SwitchSearchInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let query_focused = self
+            .search_query_editor
+            .as_ref()
+            .is_some_and(|editor| editor.focus_handle(cx).is_focused(window));
+        self.focus_search_input(
+            query_focused && self.search_replace_visible && self.search_can_replace(),
+            window,
+            cx,
+        );
+    }
+
     pub(crate) fn with_search_tooltip(
         &self,
         child: impl IntoElement,
@@ -124,13 +198,14 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active_tab_supports_text_search() {
+        if !self.search_can_replace() {
             return;
         }
         if !self.search_visible {
             self.open_search(true, window, cx);
         } else {
             self.search_replace_visible = !self.search_replace_visible;
+            self.focus_search_input(self.search_replace_visible, window, cx);
             cx.notify();
         }
     }
@@ -141,7 +216,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.replace_current_match(cx);
+        if self.search_visible && self.search_replace_visible {
+            self.replace_current_match(cx);
+        }
     }
 
     pub(crate) fn on_replace_all(
@@ -150,7 +227,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.replace_all_matches(cx);
+        if self.search_visible && self.search_replace_visible {
+            self.replace_all_matches(cx);
+        }
     }
 
     pub(crate) fn open_search(
@@ -163,7 +242,7 @@ impl EditorView {
         if !self.active_tab_supports_text_search() && !is_terminal {
             return;
         }
-        let with_replace = with_replace && !is_terminal;
+        let with_replace = with_replace && self.search_can_replace();
         let was_visible = self.search_visible;
         self.search_visible = true;
         self.search_replace_visible = with_replace;
@@ -283,6 +362,9 @@ impl EditorView {
             });
         }
 
+        self.focus_search_input(with_replace, window, cx);
+        self.run_search(cx);
+
         cx.notify();
     }
 
@@ -330,6 +412,10 @@ impl EditorView {
                 self.search_use_regex,
             );
             self.adopt_new_search_matches(0, cx);
+            if self.search_current_index.is_none() && !self.search_matches.is_empty() {
+                self.search_current_index = Some(0);
+                self.reveal_current_search_match(cx);
+            }
             cx.notify();
             return;
         }
@@ -338,12 +424,17 @@ impl EditorView {
         // counter fills in as slices land.
         self.search_scan_complete = false;
         let epoch = self.search_scan_epoch;
+        let pane_id = self.current_pane_id();
+        let tab_id = self.active_tab_id.clone();
         self.search_scan_task = Some(cx.spawn(async move |this, cx| {
             let mut scan_start = 0usize;
             loop {
                 let step = this
                     .update(cx, |this, cx| {
-                        if this.search_scan_epoch != epoch {
+                        if this.search_scan_epoch != epoch
+                            || this.current_pane_id() != pane_id
+                            || this.active_tab_id != tab_id
+                        {
                             return SearchScanStep::Cancelled;
                         }
                         this.scan_search_slice(scan_start, cx)
@@ -430,18 +521,19 @@ impl EditorView {
     }
 
     fn reveal_current_search_match(&mut self, cx: &mut Context<Self>) {
-        if !(self.embedded_editor && self.embedded_read_only) {
-            return;
-        }
         let Some(index) = self.search_current_index else {
             return;
         };
         let Some(range) = self.search_matches.get(index) else {
             return;
         };
-        self.cursor.offset = range.start;
-        self.cursor.anchor = range.start;
-        self.center_cursor_in_view_immediately(cx);
+        self.cursor.move_to(range.start, &self.buffer);
+        self.table_boundary_caret = None;
+        if self.embedded_editor && self.embedded_read_only {
+            self.center_cursor_in_view_immediately(cx);
+        } else {
+            self.center_cursor_in_view(cx);
+        }
     }
 
     /// Longest distance a match can reach past the slice it starts in.
@@ -452,31 +544,6 @@ impl EditorView {
         } else {
             self.search_query.len().saturating_sub(1)
         }
-    }
-
-    /// Blocks on the remainder of a streaming scan; replace needs every match.
-    pub(crate) fn ensure_search_scan_complete(&mut self, cx: &mut Context<Self>) {
-        if self.search_scan_complete {
-            return;
-        }
-        self.search_scan_epoch = self.search_scan_epoch.wrapping_add(1);
-        self.search_scan_task = None;
-        let current_index = self.search_current_index;
-        self.search_matches = find_search_matches(
-            self.buffer.text(),
-            &self.search_query,
-            self.search_case_sensitive,
-            self.search_whole_word,
-            self.search_use_regex,
-        );
-        self.search_scan_complete = true;
-        self.search_scan_buffer_len = self.buffer.len();
-        self.search_current_index =
-            current_index.filter(|index| *index < self.search_matches.len());
-        if self.search_current_index.is_none() && !self.search_matches.is_empty() {
-            self.search_current_index = Some(0);
-        }
-        cx.notify();
     }
 
     pub(crate) fn search_navigate(&mut self, forward: bool, cx: &mut Context<Self>) {
@@ -536,61 +603,94 @@ impl EditorView {
     }
 
     pub(crate) fn replace_current_match(&mut self, cx: &mut Context<Self>) {
+        if !self.active_tab_can_start_content_edit() || !self.active_tab_supports_text_search() {
+            return;
+        }
+        let Ok(replacements) = search_replacements(
+            self.buffer.text(),
+            &self.search_query,
+            &self.search_replace,
+            self.search_case_sensitive,
+            self.search_whole_word,
+            self.search_use_regex,
+        ) else {
+            return;
+        };
+        let start = self
+            .search_current_index
+            .and_then(|index| self.search_matches.get(index))
+            .map_or(self.cursor.offset, |range| range.start);
+        let Some((range, replacement)) = replacements
+            .iter()
+            .find(|(range, _)| range.start >= start)
+            .or_else(|| replacements.first())
+        else {
+            return;
+        };
         if !self.begin_content_edit(cx) {
             return;
         }
-        self.ensure_search_scan_complete(cx);
-        let Some(index) = self.search_current_index else {
-            return;
-        };
-        if index >= self.search_matches.len() {
-            return;
-        }
-        let range = self.search_matches[index].clone();
-        let replacement = self.search_replace.clone();
-        let len_diff = replacement.len() as isize - (range.end - range.start) as isize;
-
         self.checkpoint();
-        self.buffer.replace(range.clone(), &replacement);
-
-        self.search_matches.remove(index);
-        for search_match in &mut self.search_matches[index..] {
-            search_match.start = (search_match.start as isize + len_diff) as usize;
-            search_match.end = (search_match.end as isize + len_diff) as usize;
-        }
-
-        if self.search_matches.is_empty() {
-            self.search_current_index = None;
-        } else {
-            self.search_current_index = Some(index.min(self.search_matches.len() - 1));
-        }
-
-        self.cursor.offset = range.start + replacement.len();
-        self.cursor.anchor = self.cursor.offset;
-        self.mark_active_tab_dirty();
+        self.queue_non_markdown_line_display_transfer(range, replacement);
+        self.buffer.replace(range.clone(), replacement);
+        self.cursor
+            .move_to(range.start + replacement.len(), &self.buffer);
+        self.clear_extra_cursors();
+        self.clear_marked_ranges();
+        self.clear_phantom_selection();
+        self.selected_handle = None;
+        self.reset_cursor_visual_targeting();
         self.reparse();
+        self.run_search(cx);
+        if let Some(next) = self
+            .search_current_index
+            .and_then(|index| self.search_matches.get(index))
+        {
+            self.cursor.move_to(next.start, &self.buffer);
+        }
+        self.sync_table_boundary_caret_after_reparse();
+        self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
     pub(crate) fn replace_all_matches(&mut self, cx: &mut Context<Self>) {
+        if !self.active_tab_can_start_content_edit() || !self.active_tab_supports_text_search() {
+            return;
+        }
+        let Ok(replacements) = search_replacements(
+            self.buffer.text(),
+            &self.search_query,
+            &self.search_replace,
+            self.search_case_sensitive,
+            self.search_whole_word,
+            self.search_use_regex,
+        ) else {
+            return;
+        };
+        let Some((first, replacement)) = replacements.first() else {
+            return;
+        };
         if !self.begin_content_edit(cx) {
             return;
         }
-        self.ensure_search_scan_complete(cx);
-        if self.search_matches.is_empty() {
-            return;
-        }
-
+        let cursor_offset = first.start + replacement.len();
         self.checkpoint();
-        let replacement = self.search_replace.clone();
-        let matches: Vec<_> = self.search_matches.drain(..).rev().collect();
-        for range in &matches {
-            self.buffer.replace(range.clone(), &replacement);
+        let old_len = self.buffer.len();
+        let mut replaced_text = self.buffer.text().to_string();
+        for (range, replacement) in replacements.iter().rev() {
+            replaced_text.replace_range(range.clone(), replacement);
         }
-        self.search_current_index = None;
-        self.mark_active_tab_dirty();
+        self.queue_non_markdown_line_display_transfer(&(0..old_len), &replaced_text);
+        self.buffer.replace(0..old_len, &replaced_text);
+        self.cursor.move_to(cursor_offset, &self.buffer);
+        self.clear_extra_cursors();
+        self.clear_marked_ranges();
+        self.clear_phantom_selection();
+        self.selected_handle = None;
+        self.reset_cursor_visual_targeting();
         self.reparse();
         self.run_search(cx);
+        self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
 
@@ -615,27 +715,26 @@ impl EditorView {
     }
 
     pub(crate) fn search_replace_text_input_styles(&self) -> crate::style::TextInputStyles {
-        let mut styles = self.styles.text_input.clone();
-        styles.text_input_height_px = self.scaled(self.styles.search.search_input_height_px);
-        styles.text_input_padding_left_px =
-            self.scaled(self.styles.text_input.text_input_padding_left_px);
-        styles.text_input_padding_right_px =
-            self.scaled(self.styles.text_input.text_input_padding_right_px);
-        styles.text_input_font_size_px = self.scaled(self.styles.search.search_input_font_size_px);
-        styles.text_input_radius_px = self.scaled(self.styles.text_input.text_input_radius_px);
-        styles.text_input_cursor_width_px =
-            self.scaled(self.styles.text_input.text_input_cursor_width_px);
-        styles.text_input_bg = gpui::transparent_black();
-        styles.text_input_focus_bg = gpui::transparent_black();
-        styles.text_input_text_color = self.styles.search.search_match_text_color;
-        styles.text_input_placeholder_color = self.styles.search.search_counter_text_color;
-        styles.text_input_cursor_color = self.styles.search.search_option_btn_active_icon_color;
-        styles.text_input_cursor_height_ratio = self.styles.search.search_input_cursor_height_ratio;
-        styles
+        self.search_query_text_input_styles()
     }
 
     pub(crate) fn render_search_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let search_styles = &self.styles.search;
+        let can_replace = self.search_can_replace();
+        let replace_visible = can_replace && self.search_replace_visible;
+        let regex_error = if self.search_use_regex && !self.search_query.is_empty() {
+            regex::RegexBuilder::new(&self.search_query)
+                .case_insensitive(!self.search_case_sensitive)
+                .build()
+                .err()
+                .map(|error| error.to_string())
+        } else {
+            None
+        };
+        let can_apply_replace = can_replace
+            && regex_error.is_none()
+            && !self.search_query.is_empty()
+            && !self.search_matches.is_empty();
 
         let match_count = if let Some(tab_id) = self.active_terminal_tab_id() {
             self.terminal_search_match_count(&tab_id)
@@ -669,6 +768,10 @@ impl EditorView {
         let input_left_inset = self.scaled(search_styles.search_input_left_inset_px);
         let input_left = (input_left_inset - icon_size).max(0.0) / 2.0;
         let icon_top = (input_height - icon_size).max(0.0) / 2.0;
+        let fold_button_size = self.scaled(18.0);
+        let fold_icon_size = self.scaled(10.0);
+        let fold_button_left = (input_left_inset - fold_button_size).max(0.0) / 2.0;
+        let fold_button_top = (input_height - fold_button_size).max(0.0) / 2.0;
 
         let button_active_bg = search_styles.search_option_btn_active_bg;
         let button_hover_bg = search_styles.search_option_btn_hover_bg;
@@ -679,42 +782,100 @@ impl EditorView {
         let nav_icon_color = search_styles.search_nav_btn_icon_color;
         let nav_hover_bg = search_styles.search_nav_btn_hover_bg;
         let close_hover_bg = search_styles.search_close_btn_hover_bg;
+        let bar_width = self.scaled(search_styles.search_bar_width_px).min(
+            (self.last_viewport_width
+                - self.scaled(search_styles.search_bar_offset_right_px) * 2.0)
+                .max(0.0),
+        );
 
         let query_row = div()
             .w_full()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(px(self.scaled(search_styles.search_input_gap_px)))
             .child(
                 div()
                     .relative()
                     .flex_1()
+                    .min_w(px(self
+                        .scaled(96.0)
+                        .min((bar_width - self.scaled(16.0)).max(0.0))))
                     .h(px(input_height))
+                    .when(regex_error.is_some(), |this| {
+                        this.border_b(px(1.0)).border_color(self.theme.text_danger)
+                    })
                     .when_some(self.search_query_editor.clone(), |this, editor| {
                         this.child(editor)
                     })
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(input_left))
-                            .top(px(icon_top))
-                            .w(px(icon_size))
-                            .h(px(icon_size))
-                            .child(
-                                svg()
-                                    .path(SEARCH_ICON_SVG_PATH)
-                                    .size(px(icon_size))
-                                    .text_color(search_styles.search_input_icon_color),
-                            ),
-                    ),
+                    .when(!can_replace, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .left(px(input_left))
+                                .top(px(icon_top))
+                                .w(px(icon_size))
+                                .h(px(icon_size))
+                                .child(
+                                    svg()
+                                        .path(SEARCH_ICON_SVG_PATH)
+                                        .size(px(icon_size))
+                                        .text_color(search_styles.search_input_icon_color),
+                                ),
+                        )
+                    })
+                    .when(can_replace, |this| {
+                        this.child(tooltip::with_tooltip(
+                            div()
+                                .id("search-toggle-replace")
+                                .absolute()
+                                .left(px(fold_button_left))
+                                .top(px(fold_button_top))
+                                .size(px(fold_button_size))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(self.scaled(3.0)))
+                                .hover(move |style| style.bg(button_hover_bg))
+                                .cursor(gpui::CursorStyle::Arrow)
+                                .child(
+                                    svg()
+                                        .path(if replace_visible {
+                                            FOLD_EXPANDED_SVG_PATH
+                                        } else {
+                                            FOLD_SVG_PATH
+                                        })
+                                        .size(px(fold_icon_size))
+                                        .text_color(if replace_visible {
+                                            button_active_icon_color
+                                        } else {
+                                            button_icon_color
+                                        }),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, window, cx| {
+                                        window.prevent_default();
+                                        cx.stop_propagation();
+                                        this.on_toggle_replace(&ToggleReplace, window, cx);
+                                    }),
+                                ),
+                            cx.entity().clone(),
+                            self.t(crate::i18n::TextKey::Replace),
+                            Some(crate::editor::shortcut::hint("secondary-alt-f")),
+                        ))
+                    }),
             )
             .child(
                 div()
+                    .flex_none()
                     .text_size(px(self.scaled(search_styles.search_counter_font_size_px)))
                     .text_color(search_styles.search_counter_text_color)
                     .min_w(px(
                         self.scaled(search_styles.search_input_counter_min_width_px)
                     ))
+                    .max_w(px(self.scaled(72.0)))
+                    .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .child(counter_text),
@@ -722,6 +883,7 @@ impl EditorView {
             .child(
                 div()
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap(px(button_gap))
                     .child(
@@ -844,6 +1006,7 @@ impl EditorView {
                 self.with_search_tooltip(
                     div()
                         .id("search-prev-btn")
+                        .flex_none()
                         .w(px(nav_btn_size))
                         .h(px(nav_btn_size))
                         .flex()
@@ -851,7 +1014,10 @@ impl EditorView {
                         .justify_center()
                         .rounded(px(button_radius))
                         .cursor(gpui::CursorStyle::Arrow)
-                        .hover(move |style| style.bg(nav_hover_bg))
+                        .opacity(if match_count > 0 { 1.0 } else { 0.35 })
+                        .when(match_count > 0, |this| {
+                            this.hover(move |style| style.bg(nav_hover_bg))
+                        })
                         .child(
                             svg()
                                 .path("assets/icons/navigation/arrow-up.svg")
@@ -860,7 +1026,8 @@ impl EditorView {
                         )
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
+                            cx.listener(|this, _, window, cx| {
+                                window.prevent_default();
                                 cx.stop_propagation();
                                 this.search_navigate(false, cx);
                             }),
@@ -874,6 +1041,7 @@ impl EditorView {
                 self.with_search_tooltip(
                     div()
                         .id("search-next-btn")
+                        .flex_none()
                         .w(px(nav_btn_size))
                         .h(px(nav_btn_size))
                         .flex()
@@ -881,7 +1049,10 @@ impl EditorView {
                         .justify_center()
                         .rounded(px(button_radius))
                         .cursor(gpui::CursorStyle::Arrow)
-                        .hover(move |style| style.bg(nav_hover_bg))
+                        .opacity(if match_count > 0 { 1.0 } else { 0.35 })
+                        .when(match_count > 0, |this| {
+                            this.hover(move |style| style.bg(nav_hover_bg))
+                        })
                         .child(
                             svg()
                                 .path("assets/icons/navigation/arrow-down.svg")
@@ -890,7 +1061,8 @@ impl EditorView {
                         )
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
+                            cx.listener(|this, _, window, cx| {
+                                window.prevent_default();
                                 cx.stop_propagation();
                                 this.search_navigate(true, cx);
                             }),
@@ -904,6 +1076,7 @@ impl EditorView {
                 self.with_search_tooltip(
                     div()
                         .id("search-close-btn")
+                        .flex_none()
                         .w(px(self.scaled(search_styles.search_close_btn_size_px)))
                         .h(px(self.scaled(search_styles.search_close_btn_size_px)))
                         .flex()
@@ -933,17 +1106,14 @@ impl EditorView {
 
         let mut container = div()
             .id("search-bar")
-            .key_context("SearchBar")
+            .key_context("SearchBar EditorSearchBar")
+            .on_action(cx.listener(Self::switch_search_input))
             .occlude()
             .absolute()
             .top(px(self.scaled(search_styles.search_bar_offset_top_px)))
             .right(px(self.scaled(search_styles.search_bar_offset_right_px)))
-            // Narrow hosts (agent chat transcript) shrink the bar to fit.
-            .w(px(self.scaled(search_styles.search_bar_width_px).min(
-                (self.last_viewport_width
-                    - self.scaled(search_styles.search_bar_offset_right_px) * 2.0)
-                    .max(180.0),
-            )))
+            .w(px(bar_width))
+            .max_w_full()
             .bg(search_styles.search_bar_bg)
             .border(px(search_styles.search_bar_border_width_px))
             .border_color(search_styles.search_bar_border_color)
@@ -955,12 +1125,68 @@ impl EditorView {
             .gap(px(self.scaled(search_styles.search_bar_gap_px)))
             .child(query_row);
 
-        if self.search_replace_visible {
+        if replace_visible {
             let replace_btn_hover = search_styles.search_replace_btn_hover_bg;
-            let replace_btn_font = self.scaled(search_styles.search_replace_btn_font_size_px);
             let replace_btn_color = search_styles.search_replace_btn_text_color;
-            let replace_btn_height = self.scaled(search_styles.search_replace_btn_height_px);
-            let replace_btn_padding = self.scaled(search_styles.search_replace_btn_padding_x_px);
+            let replace_btn_size = self.scaled(18.0);
+            let replace_icon_size = self.scaled(12.0);
+
+            let replace_button = |all: bool, cx: &mut Context<Self>| {
+                tooltip::with_tooltip(
+                    div()
+                        .id(if all {
+                            "search-replace-all-btn"
+                        } else {
+                            "search-replace-btn"
+                        })
+                        .size(px(replace_btn_size))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(button_radius))
+                        .cursor(gpui::CursorStyle::Arrow)
+                        .opacity(if can_apply_replace { 1.0 } else { 0.35 })
+                        .when(can_apply_replace, |this| {
+                            this.hover(move |style| style.bg(replace_btn_hover))
+                        })
+                        .child(
+                            svg()
+                                .path(if all {
+                                    "assets/icons/search/replace-all.svg"
+                                } else {
+                                    "assets/icons/search/replace.svg"
+                                })
+                                .size(px(replace_icon_size))
+                                .text_color(replace_btn_color),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                if can_apply_replace {
+                                    if all {
+                                        this.replace_all_matches(cx);
+                                    } else {
+                                        this.replace_current_match(cx);
+                                    }
+                                }
+                            }),
+                        ),
+                    cx.entity().clone(),
+                    self.t(if all {
+                        crate::i18n::TextKey::ReplaceAll
+                    } else {
+                        crate::i18n::TextKey::Replace
+                    }),
+                    Some(crate::editor::shortcut::hint(if all {
+                        "secondary-alt-enter"
+                    } else {
+                        "alt-enter"
+                    })),
+                )
+            };
 
             container = container.child(
                 div()
@@ -971,56 +1197,47 @@ impl EditorView {
                     .when_some(self.search_replace_editor.clone(), |this, editor| {
                         this.child(
                             div()
+                                .relative()
                                 .flex_1()
-                                .h(px(self.scaled(search_styles.search_input_height_px)))
-                                .child(editor),
+                                .min_w(px(0.0))
+                                .h(px(input_height))
+                                .child(editor)
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(input_left))
+                                        .top(px(icon_top))
+                                        .size(px(icon_size))
+                                        .child(
+                                            svg()
+                                                .path("assets/icons/search/replace.svg")
+                                                .size(px(self.scaled(10.0)))
+                                                .text_color(button_icon_color),
+                                        ),
+                                ),
                         )
                     })
-                    .child(
-                        div()
-                            .id("search-replace-btn")
-                            .px(px(replace_btn_padding))
-                            .h(px(replace_btn_height))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(button_radius))
-                            .text_size(px(replace_btn_font))
-                            .text_color(replace_btn_color)
-                            .cursor(gpui::CursorStyle::Arrow)
-                            .hover(move |style| style.bg(replace_btn_hover))
-                            .child(self.t(crate::i18n::TextKey::Replace))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.replace_current_match(cx);
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("search-replace-all-btn")
-                            .px(px(replace_btn_padding))
-                            .h(px(replace_btn_height))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(button_radius))
-                            .text_size(px(replace_btn_font))
-                            .text_color(replace_btn_color)
-                            .cursor(gpui::CursorStyle::Arrow)
-                            .hover(move |style| style.bg(replace_btn_hover))
-                            .child(self.t(crate::i18n::TextKey::ReplaceAll))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.replace_all_matches(cx);
-                                }),
-                            ),
-                    ),
+                    .child(replace_button(false, cx))
+                    .child(replace_button(true, cx)),
             );
+        }
+
+        if let Some(error) = regex_error {
+            container = container.child(tooltip::with_tooltip(
+                div()
+                    .w_full()
+                    .px(px(self.scaled(4.0)))
+                    .text_size(px(self.scaled(search_styles.search_counter_font_size_px)))
+                    .text_color(self.theme.text_danger)
+                    .whitespace_normal()
+                    .child(crate::i18n::search_option_label(
+                        self.ui_language,
+                        "invalid_regex",
+                    )),
+                cx.entity().clone(),
+                error,
+                None::<SharedString>,
+            ));
         }
 
         container.into_any_element()
@@ -1050,7 +1267,11 @@ pub(crate) fn find_search_matches(
         };
         if let Ok(regex) = regex {
             for found in regex.find_iter(text) {
-                if found.start() != found.end() {
+                if found.start() != found.end()
+                    && (!whole_word
+                        || (is_word_boundary(text, found.start())
+                            && is_word_boundary(text, found.end())))
+                {
                     matches.push(found.start()..found.end());
                 }
             }
@@ -1146,6 +1367,107 @@ fn is_word_char(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{find_search_matches, next_search_slice_boundary, search_slice_matches};
+
+    #[test]
+    fn replacement_uses_full_regex_context_and_captures() {
+        let text = "foo=12\nFOO=345";
+        let edits = super::search_replacements(
+            text,
+            r"(?m)^(?P<key>foo)=(\d+)$",
+            "${key}:$2:$$",
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            edits,
+            vec![(0..6, "foo:12:$".into()), (7..14, "FOO:345:$".into())]
+        );
+    }
+
+    #[test]
+    fn replacement_preserves_literal_dollars_and_utf8_ranges() {
+        let text = "中文 foo FOO";
+        let edits = super::search_replacements(text, "foo", "$1中文", false, false, false).unwrap();
+        let mut buffer = crate::buffer::Buffer::from_text(text);
+        for (range, replacement) in edits.iter().rev() {
+            buffer.replace(range.clone(), replacement);
+        }
+        assert_eq!(buffer.text(), "中文 $1中文 $1中文");
+    }
+
+    #[test]
+    fn replacement_can_delete_and_ignores_invalid_or_empty_queries() {
+        assert_eq!(
+            super::search_replacements("foo", "foo", "", true, false, false).unwrap(),
+            vec![(0..3, String::new())]
+        );
+        assert!(super::search_replacements("foo", "[", "x", true, false, true).is_err());
+        assert!(
+            super::search_replacements("foo", "", "x", true, false, false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            super::search_replacements("foo", "^", "x", true, false, true)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn replacement_and_search_share_whole_word_regex_ranges() {
+        let text = "food foo FOO";
+        let edits = super::search_replacements(text, "foo", "bar", false, true, true).unwrap();
+        assert_eq!(
+            edits
+                .iter()
+                .map(|(range, _)| range.clone())
+                .collect::<Vec<_>>(),
+            find_search_matches(text, "foo", false, true, true)
+        );
+        assert_eq!(edits.len(), 2);
+    }
+
+    #[test]
+    fn replacement_all_is_one_undoable_transaction() {
+        use crate::editor::history_store::{SnapshotViewState, TabHistory};
+        let text = "中文 foo\nFOO foo";
+        let edits = super::search_replacements(text, "foo", "替换", false, false, false).unwrap();
+        let mut buffer = crate::buffer::Buffer::from_text(text);
+        buffer.begin_edit_recording();
+        for (range, replacement) in edits.iter().rev() {
+            buffer.replace(range.clone(), replacement);
+        }
+        let replaced = buffer.text().to_string();
+        assert_eq!(replaced, "中文 替换\n替换 替换");
+        let mut history = TabHistory::default();
+        history.push_undo_transaction(
+            buffer.finish_edit_recording(),
+            SnapshotViewState::new(0, 0, 0.0, Vec::new()),
+            SnapshotViewState::new(0, 0, 0.0, Vec::new()),
+            false,
+        );
+        assert_eq!(history.undo_stack.len(), 1);
+        let (undo, _) = history.take_undo_transaction().unwrap();
+        assert!(buffer.apply_edits_inverse(&undo));
+        assert_eq!(buffer.text(), text);
+        let (redo, _) = history.take_redo_transaction().unwrap();
+        assert!(buffer.apply_edits_forward(&redo));
+        assert_eq!(buffer.text(), replaced);
+    }
+
+    #[test]
+    fn replacement_all_does_not_reprocess_inserted_matches() {
+        let text = "foo foo";
+        let edits = super::search_replacements(text, "foo", "foofoo", true, false, false).unwrap();
+        let mut buffer = crate::buffer::Buffer::from_text(text);
+        for (range, replacement) in edits.iter().rev() {
+            buffer.replace(range.clone(), replacement);
+        }
+        assert_eq!(buffer.text(), "foofoo foofoo");
+    }
 
     /// Walks `text` the way the streaming scan does, so the result has to match
     /// a single full-document scan.
