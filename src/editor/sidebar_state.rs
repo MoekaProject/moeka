@@ -214,6 +214,7 @@ impl EditorView {
 
     pub(super) fn visible_starred_sidebar_files(&mut self) -> Vec<PathBuf> {
         let mut changed = self.app_settings.prune_missing_starred_files();
+        let root = Self::normalize_sidebar_path(&self.sidebar_root);
         let mut visible = Vec::new();
         let mut deduped = Vec::with_capacity(self.app_settings.starred_files.len());
 
@@ -227,7 +228,9 @@ impl EditorView {
                 changed = true;
                 continue;
             }
-            visible.push(normalized.clone());
+            if !root.as_os_str().is_empty() && normalized.starts_with(&root) {
+                visible.push(normalized.clone());
+            }
             deduped.push(normalized);
         }
 
@@ -244,7 +247,7 @@ impl EditorView {
     }
 
     pub(super) fn sidebar_starred_section_height(&self, has_root: bool) -> f32 {
-        if !has_root && self.sidebar_visible_starred_count() == 0 {
+        if !has_root {
             return 0.0;
         }
 
@@ -257,13 +260,18 @@ impl EditorView {
     }
 
     pub(super) fn sidebar_visible_starred_count(&self) -> usize {
+        let root = Self::normalize_sidebar_path(&self.sidebar_root);
         let mut visible = std::collections::HashSet::new();
         self.app_settings
             .starred_files
             .iter()
             .filter_map(|path| {
                 let normalized = Self::normalize_sidebar_path(path);
-                (normalized.exists() && normalized.is_file()).then_some(normalized)
+                (normalized.exists()
+                    && normalized.is_file()
+                    && !root.as_os_str().is_empty()
+                    && normalized.starts_with(&root))
+                .then_some(normalized)
             })
             .for_each(|path| {
                 visible.insert(path);

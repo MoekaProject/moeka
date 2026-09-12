@@ -129,25 +129,16 @@ mod backend {
     }
 
     pub(super) fn reveal(path: &Path) -> Result<(), ShellError> {
-        let path = path.to_owned();
-        if file_url(&path).is_null() {
-            return Err(invalid_path(&path));
-        }
-
         unsafe {
-            let operation = block::ConcreteBlock::new(move || {
-                let target = file_url(&path);
-                if target.is_null() {
-                    return;
-                }
-                let urls: *mut Object = msg_send![class!(NSArray), arrayWithObject: target];
-                let _: () = msg_send![workspace(), activateFileViewerSelectingURLs: urls];
-            })
-            .copy();
-            let queue: *mut Object = msg_send![class!(NSOperationQueue), mainQueue];
-            let _: () = msg_send![queue, addOperationWithBlock: &*operation];
+            let target = file_url(path);
+            if target.is_null() {
+                return Err(invalid_path(path));
+            }
+
+            let urls: *mut Object = msg_send![class!(NSArray), arrayWithObject: target];
+            let _: () = msg_send![workspace(), activateFileViewerSelectingURLs: urls];
+            Ok(())
         }
-        Ok(())
     }
 }
 

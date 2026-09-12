@@ -19,5 +19,3 @@ pub(crate) mod terminal;
 pub(crate) mod trash;
 pub(crate) mod window_chrome;
 pub(crate) mod window_state;
-#[cfg(windows)]
-pub(crate) mod windows_single_instance;

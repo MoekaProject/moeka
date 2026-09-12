@@ -25,13 +25,22 @@ fn cursor_scroll_viewport(scroll_offset: f32, viewport_height: f32) -> (f32, f32
     (scroll_offset, scroll_offset + viewport_height.max(0.0))
 }
 
-fn typing_stayed_on_visual_line(
-    before_line: usize,
-    before_visual_row: usize,
-    after_line: usize,
-    after_visual_row: usize,
+fn typing_scroll_should_restore(
+    same_logical_line: bool,
+    visual_geometry_ready: bool,
+    scroll_before: f32,
+    viewport_height: f32,
+    cursor_top: f32,
+    cursor_bottom: f32,
 ) -> bool {
-    before_line == after_line && before_visual_row == after_visual_row
+    same_logical_line
+        && (!visual_geometry_ready
+            || caret_vertical_overflow(
+                cursor_top,
+                cursor_bottom,
+                scroll_before,
+                scroll_before + viewport_height.max(0.0),
+            ) == std::cmp::Ordering::Equal)
 }
 
 impl EditorView {
@@ -784,13 +793,13 @@ impl EditorView {
 
     pub(crate) fn capture_typing_scroll_guard(&mut self) {
         let line = self.cursor_line();
-        let visual_row = self
-            .cursor_visual_position(self.cursor.offset)
-            .map(|(row, _)| row)
-            .unwrap_or(0);
+        let visual_position = self.cursor_visual_position(self.cursor.offset);
         self.pending_typing_scroll_guard = Some(PendingTypingScrollGuard {
             line,
-            visual_row,
+            visual_geometry_ready: visual_position.is_some()
+                && !self.layout_dirty
+                && self.last_viewport_height > 0.0,
+            viewport_height: self.last_viewport_height,
             scroll_offset: self.scroll_offset,
         });
     }
@@ -804,14 +813,27 @@ impl EditorView {
             .cursor_visual_position(self.cursor.offset)
             .map(|(row, _)| row)
             .unwrap_or(0);
-        if !typing_stayed_on_visual_line(guard.line, guard.visual_row, line, visual_row) {
+        let line_height = self
+            .line_display_info
+            .get(line)
+            .and_then(|info| info.as_ref())
+            .map(|info| info.line_height)
+            .unwrap_or_else(|| self.line_height_for_block(&BlockType::Normal));
+        let cursor_top = self.line_y_offset(line) + visual_row as f32 * line_height;
+        if !typing_scroll_should_restore(
+            guard.line == line,
+            guard.visual_geometry_ready,
+            guard.scroll_offset,
+            guard.viewport_height,
+            cursor_top,
+            cursor_top + line_height,
+        ) {
             return false;
         }
 
         self.pending_scroll_to_cursor = false;
         self.pending_center_cursor_in_view = false;
         self.scroll_offset = guard.scroll_offset;
-        self.clamp_scroll();
         true
     }
 
@@ -1292,7 +1314,7 @@ pub(crate) fn apply_macos_content_corner_radius(window: &mut Window, radius: f64
 mod tests {
     #[cfg(target_os = "macos")]
     use super::{EditorView, traffic_light_offsets_for_layout};
-    use super::{caret_vertical_overflow, cursor_scroll_viewport, typing_stayed_on_visual_line};
+    use super::{caret_vertical_overflow, cursor_scroll_viewport, typing_scroll_should_restore};
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -1333,9 +1355,18 @@ mod tests {
     }
 
     #[test]
-    fn typing_scroll_guard_releases_only_for_hard_or_soft_wraps() {
-        assert!(typing_stayed_on_visual_line(8, 2, 8, 2));
-        assert!(!typing_stayed_on_visual_line(8, 2, 9, 0));
-        assert!(!typing_stayed_on_visual_line(8, 2, 8, 3));
+    fn typing_scroll_guard_preserves_first_layout_and_visible_short_edits() {
+        assert!(typing_scroll_should_restore(
+            true, false, 120.0, 0.0, 900.0, 920.0
+        ));
+        assert!(typing_scroll_should_restore(
+            true, true, 120.0, 300.0, 180.0, 200.0
+        ));
+        assert!(!typing_scroll_should_restore(
+            true, true, 120.0, 300.0, 430.0, 450.0
+        ));
+        assert!(!typing_scroll_should_restore(
+            false, false, 120.0, 300.0, 180.0, 200.0
+        ));
     }
 }

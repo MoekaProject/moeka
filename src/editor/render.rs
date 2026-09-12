@@ -1185,43 +1185,87 @@ impl Render for EditorView {
                     .when(self.should_render_right_panels(), |this| {
                         this.child(self.render_right_panels(cx))
                     })
-                    .when(
-                        !show_empty_workspace && self.should_render_utility_panel_on_right(),
-                        |this| {
-                            this.child(
-                                div()
-                                    .id("workspace-tab-bar-actions")
-                                    .absolute()
-                                    .top_0()
-                                    // Sits beside the caption buttons the window
-                                    // draws in the same corner.
-                                    .right(px(self.window_caption_trailing_inset()))
-                                    .h(px(self.tab_bar_height()))
-                                    .flex()
-                                    .items_center()
-                                    .justify_end()
-                                    .occlude()
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(Self::on_tab_bar_drag_space_mouse_down),
-                                    )
-                                    .child(self.render_tab_bar_toggle_actions(cx)),
-                            )
-                        },
-                    )
+                    .when(self.should_render_utility_panel_on_right(), |this| {
+                        this.child(
+                            div()
+                                .id("workspace-tab-bar-actions")
+                                .absolute()
+                                .top_0()
+                                // Sits beside the caption buttons the window
+                                // draws in the same corner.
+                                .right(px(self.window_caption_trailing_inset()))
+                                .h(px(self.tab_bar_height()))
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .occlude()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+                                )
+                                .child(self.render_tab_bar_toggle_actions(cx)),
+                        )
+                    })
                     .when(show_empty_workspace, |this| {
+                        let toolbar_top = self
+                            .scaled(self.styles.toolbar.toolbar_offset_top_px)
+                            .round();
+                        let toolbar_left = self
+                            .scaled(self.styles.toolbar.toolbar_offset_left_px)
+                            .round();
+                        let button_size =
+                            self.scaled(self.styles.toolbar.toolbar_primary_btn_size_px);
+                        let icon_size =
+                            self.scaled(self.styles.toolbar.toolbar_primary_icon_size_px);
+                        let hover_opacity = self.styles.toolbar.toolbar_primary_hover_opacity;
+                        let anchor =
+                            tooltip::toolbar_anchor_bounds(toolbar_left, toolbar_top, button_size);
+                        let sidebar_tooltip = if self.workspaces.is_empty() {
+                            self.t(crate::i18n::TextKey::OpenFolder)
+                        } else {
+                            crate::i18n::sidebar_visibility_action_label(
+                                self.ui_language,
+                                self.sidebar_visible,
+                            )
+                        };
                         this.child(
                             div()
                                 .id("empty-workspace-titlebar-drag-region")
                                 .absolute()
                                 .top_0()
-                                .left_0()
-                                .right_0()
+                                .left(px(button_size + toolbar_left * 2.0))
+                                .right(px(self.window_caption_trailing_inset()))
                                 .h(px(self.tab_bar_height()))
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(Self::on_tab_bar_drag_space_mouse_down),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(toolbar_left))
+                                .top(px(toolbar_top))
+                                .child(self.render_toolbar_button(
+                                    "empty-toolbar-sidebar-toggle",
+                                    button_size,
+                                    button_size,
+                                    icon_size,
+                                    1.0,
+                                    hover_opacity,
+                                    SIDEBAR_TOGGLE_SVG_PATH,
+                                    anchor,
+                                    sidebar_tooltip,
+                                    Some(crate::editor::shortcut::hint("secondary-shift-s")),
+                                    cx,
+                                    |this, cx| {
+                                        if this.workspaces.is_empty() {
+                                            this.pick_workspace_folder(cx);
+                                        } else {
+                                            this.toggle_sidebar_visibility(cx);
+                                        }
+                                    },
+                                )),
                         )
                     }),
             )

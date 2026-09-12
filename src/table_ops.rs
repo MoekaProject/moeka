@@ -1,5 +1,8 @@
 use crate::markdown::{TableAlign, parse_table_cells_with_ranges};
 
+pub const TABLE_SIZE_PICKER_MAX_ROWS: usize = 8;
+pub const TABLE_SIZE_PICKER_MAX_COLUMNS: usize = 8;
+
 #[derive(Debug, Clone)]
 pub struct TableModel {
     pub col_count: usize,
@@ -282,6 +285,44 @@ pub fn delete_column(lines: &[String], col_idx: usize) -> Vec<String> {
     serialize_table(&model)
 }
 
+pub fn resize_table(lines: &[String], data_row_count: usize, column_count: usize) -> Vec<String> {
+    let mut model = parse_table_block(lines);
+    let column_count = column_count.max(1);
+    let data_row_count = data_row_count.max(1);
+
+    model.col_count = column_count;
+    model.header_cells.resize(column_count, String::new());
+    model.aligns.resize(column_count, TableAlign::Left);
+    model
+        .data_rows
+        .resize_with(data_row_count, || vec![String::new(); column_count]);
+    model.data_rows.truncate(data_row_count);
+    for row in &mut model.data_rows {
+        row.resize(column_count, String::new());
+    }
+
+    serialize_table(&model)
+}
+
+pub fn resize_table_from_picker(
+    lines: &[String],
+    selected_data_rows: usize,
+    selected_columns: usize,
+) -> Vec<String> {
+    let model = parse_table_block(lines);
+    let data_rows = if model.data_rows.len() > TABLE_SIZE_PICKER_MAX_ROWS {
+        model.data_rows.len()
+    } else {
+        selected_data_rows
+    };
+    let columns = if model.col_count > TABLE_SIZE_PICKER_MAX_COLUMNS {
+        model.col_count
+    } else {
+        selected_columns
+    };
+    resize_table(lines, data_rows, columns)
+}
+
 pub fn set_column_alignment(
     lines: &[String],
     col_idx: usize,
@@ -438,6 +479,62 @@ mod tests {
         assert_eq!(output[0], "| Key   | Longer value |");
         assert_eq!(output[1], "| ----- | -----------: |");
         assert_eq!(output[2], "| Value | x            |");
+    }
+
+    #[test]
+    fn resize_table_preserves_cells_inside_the_new_shape() {
+        let lines = vec![
+            "| A | B | C |".to_string(),
+            "| --- | :---: | ---: |".to_string(),
+            "| 1 | 2 | 3 |".to_string(),
+            "| 4 | 5 | 6 |".to_string(),
+        ];
+
+        let smaller = resize_table(&lines, 1, 2);
+        let smaller_model = parse_table_block(&smaller);
+        assert_eq!(smaller_model.header_cells, ["A", "B"]);
+        assert_eq!(smaller_model.data_rows, [["1", "2"]]);
+        assert_eq!(smaller_model.aligns, [TableAlign::Left, TableAlign::Center]);
+
+        let larger = resize_table(&smaller, 3, 4);
+        let larger_model = parse_table_block(&larger);
+        assert_eq!(larger_model.col_count, 4);
+        assert_eq!(larger_model.data_rows.len(), 3);
+        assert_eq!(larger_model.header_cells[..2], ["A", "B"]);
+        assert_eq!(larger_model.data_rows[0][..2], ["1", "2"]);
+        assert!(larger_model.data_rows[2].iter().all(String::is_empty));
+    }
+
+    #[test]
+    fn picker_resize_preserves_dimensions_that_exceed_its_grid() {
+        let rows = (0..10)
+            .map(|row| format!("| r{row}a | r{row}b |"))
+            .collect::<Vec<_>>();
+        let mut tall = vec!["| A | B |".to_string(), "| --- | --- |".to_string()];
+        tall.extend(rows);
+        let resized = parse_table_block(&resize_table_from_picker(&tall, 3, 4));
+        assert_eq!(resized.data_rows.len(), 10);
+        assert_eq!(resized.col_count, 4);
+
+        let wide_header = format!(
+            "| {} |",
+            (0..10)
+                .map(|i| format!("C{i}"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        let wide_separator = format!("| {} |", vec!["---"; 10].join(" | "));
+        let wide_row = format!(
+            "| {} |",
+            (0..10)
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        let wide = vec![wide_header, wide_separator, wide_row];
+        let resized = parse_table_block(&resize_table_from_picker(&wide, 4, 3));
+        assert_eq!(resized.data_rows.len(), 4);
+        assert_eq!(resized.col_count, 10);
     }
 
     #[test]

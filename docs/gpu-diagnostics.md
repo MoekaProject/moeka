@@ -1,4 +1,20 @@
-# macOS GPU diagnostics
+# GPU diagnostics
+
+## Windows adapter compatibility
+
+Moeka prefers the high-performance hardware adapter on Windows. If a machine's
+only GPU or driver hangs during Direct3D initialization, launch once with the
+WARP software renderer to confirm the driver is the cause:
+
+```powershell
+$env:MOEKA_GPU_ADAPTER = "software"
+& "C:\path\to\Moeka.exe"
+```
+
+WARP is a compatibility fallback and may use more CPU. Remove the environment
+variable after testing. Include the GPU model and driver version with reports.
+
+## macOS
 
 Use a release build on the affected Mac. The runtime profile records CPU and memory samples together with cumulative `mouse_move_events` and actual `render_frames` counters.
 

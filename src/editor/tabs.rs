@@ -845,6 +845,9 @@ impl EditorView {
             }
         }
         if self.tabs.is_empty() {
+            if self.is_utility_panel_active(RightUtilityPanel::Outline) {
+                self.set_visible_utility_panel(None, cx);
+            }
             if was_active {
                 self.stash_active_tab_generated_preview_cache();
             }

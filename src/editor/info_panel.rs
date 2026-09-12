@@ -829,11 +829,42 @@ fn render_markdown_for_export(markdown: &str) -> String {
     options.remove(Options::ENABLE_SUBSCRIPT);
     options.remove(Options::ENABLE_SUPERSCRIPT);
     options.remove(Options::ENABLE_STRIKETHROUGH);
-    let masked = mask_escaped_custom_syntax(markdown, options);
+    let markdown = markdown_with_explicit_table_boundaries(markdown);
+    let masked = mask_escaped_custom_syntax(&markdown, options);
     let parser = Parser::new_ext(&masked, options);
     let mut html = String::new();
     push_html(&mut html, transform_export_events(parser).into_iter());
     html
+}
+
+fn markdown_with_explicit_table_boundaries(markdown: &str) -> std::borrow::Cow<'_, str> {
+    let decorations = crate::markdown::parse_decorations(markdown);
+    let mut output = String::with_capacity(markdown.len());
+    let mut changed = false;
+    let mut previous_was_table = false;
+    let mut previous_was_blank = true;
+
+    for (line, source) in markdown.split_inclusive('\n').enumerate() {
+        let content = source.trim_end_matches(['\r', '\n']);
+        let is_blank = content.trim().is_empty();
+        let is_table = decorations
+            .get(line)
+            .and_then(|decoration| decoration.table_info.as_ref())
+            .is_some_and(|table| !table.is_front_matter);
+        if line > 0 && is_table != previous_was_table && !previous_was_blank && !is_blank {
+            output.push('\n');
+            changed = true;
+        }
+        output.push_str(source);
+        previous_was_table = is_table;
+        previous_was_blank = is_blank;
+    }
+
+    if changed {
+        std::borrow::Cow::Owned(output)
+    } else {
+        std::borrow::Cow::Borrowed(markdown)
+    }
 }
 
 fn build_html_document(title: &str, markdown: &str, source_file_path: Option<&Path>) -> String {
@@ -1777,7 +1808,13 @@ fn rendered_plain_text_for_export(markdown: &str) -> String {
                 push_export_newlines(&mut out, 2)
             }
             Event::Start(Tag::CodeBlock(_)) => push_export_newlines(&mut out, 1),
-            Event::Html(_) | Event::InlineHtml(_) | Event::Start(_) | Event::End(_) => {}
+            Event::Html(html) | Event::InlineHtml(html) => {
+                let tag = html.trim().to_ascii_lowercase();
+                if matches!(tag.as_str(), "<br>" | "<br/>" | "<br />") {
+                    push_export_newlines(&mut out, 1);
+                }
+            }
+            Event::Start(_) | Event::End(_) => {}
         }
     }
     out.trim().to_string()
@@ -4183,6 +4220,31 @@ mod tests {
         assert!(
             doc.contains(".markdown-body .callout-title svg{flex:0 0 auto;width:.9em;height:.9em;"),
             "callout icon sizing: missing rule"
+        );
+    }
+
+    #[test]
+    fn export_keeps_unspaced_text_and_headings_outside_tables() {
+        let markdown = "| A | B |\n| --- | --- |\n| 1 | 2 |\nmiddle\n| C | D |\n| --- | --- |\n| 3 | 4 |\n# ad|bc\n";
+        let html = super::render_markdown_for_export(markdown);
+
+        assert_eq!(html.matches("<table>").count(), 2);
+        assert!(html.contains("<p>middle</p>"));
+        assert!(html.contains("<h1>ad|bc</h1>"));
+    }
+
+    #[test]
+    fn export_preserves_html_breaks_inside_table_cells() {
+        let html = super::render_markdown_for_export(
+            "| A | B |\n| --- | --- |\n| first<br>second | value |\n",
+        );
+
+        assert!(html.contains("first<br>second"));
+        assert!(
+            super::rendered_plain_text_for_export(
+                "| A | B |\n| --- | --- |\n| first<br>second | value |\n"
+            )
+            .contains("first\nsecond")
         );
     }
 

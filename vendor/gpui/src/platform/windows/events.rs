@@ -29,6 +29,7 @@ pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 const AUTO_HIDE_TASKBAR_THICKNESS_PX: i32 = 1;
+const WHEEL_PIXELS_PER_SYSTEM_UNIT: f32 = 14.0;
 
 impl WindowsWindowInner {
     pub(crate) fn handle_msg(
@@ -554,14 +555,14 @@ impl WindowsWindowInner {
         unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
         let input = PlatformInput::ScrollWheel(ScrollWheelEvent {
             position: logical_point(cursor_point.x as f32, cursor_point.y as f32, scale_factor),
-            delta: ScrollDelta::Lines(match modifiers.shift {
+            delta: ScrollDelta::Pixels(match modifiers.shift {
                 true => Point {
-                    x: wheel_distance,
-                    y: 0.0,
+                    x: px(wheel_distance * WHEEL_PIXELS_PER_SYSTEM_UNIT),
+                    y: px(0.0),
                 },
                 false => Point {
-                    y: wheel_distance,
-                    x: 0.0,
+                    y: px(wheel_distance * WHEEL_PIXELS_PER_SYSTEM_UNIT),
+                    x: px(0.0),
                 },
             }),
             modifiers,
@@ -600,9 +601,9 @@ impl WindowsWindowInner {
         unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
         let event = PlatformInput::ScrollWheel(ScrollWheelEvent {
             position: logical_point(cursor_point.x as f32, cursor_point.y as f32, scale_factor),
-            delta: ScrollDelta::Lines(Point {
-                x: wheel_distance,
-                y: 0.0,
+            delta: ScrollDelta::Pixels(Point {
+                x: px(wheel_distance * WHEEL_PIXELS_PER_SYSTEM_UNIT),
+                y: px(0.0),
             }),
             modifiers: current_modifiers(),
             touch_phase: TouchPhase::Moved,

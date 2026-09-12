@@ -357,6 +357,36 @@ impl EditorView {
         );
     }
 
+    fn delete_adjacent_table_cell_break(
+        &mut self,
+        backwards: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.cursor.has_selection() || self.has_extra_cursors() {
+            return false;
+        }
+        let Some(cell_range) = self.table_cursor_cell_range() else {
+            return false;
+        };
+        let Some(delete_range) =
+            adjacent_html_break_range(self.buffer.text(), self.cursor.offset, backwards)
+        else {
+            return false;
+        };
+        if delete_range.start < cell_range.start || delete_range.end > cell_range.end {
+            return false;
+        }
+
+        self.checkpoint();
+        self.queue_non_markdown_line_display_transfer(&delete_range, "");
+        self.buffer.delete(delete_range.clone());
+        self.cursor.move_to(delete_range.start, &self.buffer);
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+        true
+    }
+
     pub(crate) fn on_backspace(
         &mut self,
         _: &Backspace,
@@ -390,6 +420,9 @@ impl EditorView {
         {
             let _ = self.move_table_cursor_horizontal(false);
             self.pause_blinking(cx);
+            return;
+        }
+        if self.delete_adjacent_table_cell_break(true, cx) {
             return;
         }
         self.checkpoint();
@@ -607,6 +640,9 @@ impl EditorView {
         {
             let _ = self.move_table_cursor_horizontal(true);
             self.pause_blinking(cx);
+            return;
+        }
+        if self.delete_adjacent_table_cell_break(false, cx) {
             return;
         }
         if let Some((table_start_line, is_column, index)) = self.selected_handle.take() {
@@ -828,7 +864,7 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn on_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_tab_is_whiteboard() {
             self.whiteboard_nudge(0.0, -whiteboard_geometry::GRID, cx);
             return;
@@ -859,6 +895,21 @@ impl EditorView {
             self.pause_blinking(cx);
             return;
         }
+        if self.table_cursor_cell().is_some() {
+            if self.vertical_move_goal_x.is_none() {
+                self.vertical_move_goal_x =
+                    self.table_visual_x_for_offset(window, self.cursor.offset);
+            }
+            let goal_x = self.vertical_move_goal_x.unwrap_or_default();
+            if let Some(offset) =
+                self.table_vertical_target(window, self.cursor.offset, false, goal_x)
+            {
+                self.cursor.move_to(offset, &self.buffer);
+                self.navigate_scroll_to_cursor();
+                self.pause_blinking(cx);
+                return;
+            }
+        }
         if self.move_table_boundary_caret(false) {
             self.navigate_scroll_to_cursor();
             self.pause_blinking(cx);
@@ -883,7 +934,7 @@ impl EditorView {
         self.pause_blinking(cx);
     }
 
-    pub(crate) fn on_down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_tab_is_whiteboard() {
             self.whiteboard_nudge(0.0, whiteboard_geometry::GRID, cx);
             return;
@@ -915,6 +966,21 @@ impl EditorView {
             self.scroll_to_cursor();
             self.pause_blinking(cx);
             return;
+        }
+        if self.table_cursor_cell().is_some() {
+            if self.vertical_move_goal_x.is_none() {
+                self.vertical_move_goal_x =
+                    self.table_visual_x_for_offset(window, self.cursor.offset);
+            }
+            let goal_x = self.vertical_move_goal_x.unwrap_or_default();
+            if let Some(offset) =
+                self.table_vertical_target(window, self.cursor.offset, true, goal_x)
+            {
+                self.cursor.move_to(offset, &self.buffer);
+                self.navigate_scroll_to_cursor();
+                self.pause_blinking(cx);
+                return;
+            }
         }
         if self.move_table_boundary_caret(true) {
             self.navigate_scroll_to_cursor();
@@ -948,9 +1014,13 @@ impl EditorView {
     ) {
         self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
+        let in_table = self.table_cell_for_offset(self.cursor.offset).is_some();
         if self.has_extra_cursors() {
             self.multi_cursor_select_left();
-        } else {
+        } else if let Some(target) = self.table_visible_horizontal_target(self.cursor.offset, false)
+        {
+            self.cursor.select_to(target, &self.buffer);
+        } else if !in_table {
             self.cursor.select_left(&self.buffer);
         }
         self.finish_horizontal_cursor_move(cx);
@@ -964,27 +1034,44 @@ impl EditorView {
     ) {
         self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
+        let in_table = self.table_cell_for_offset(self.cursor.offset).is_some();
         if self.has_extra_cursors() {
             self.multi_cursor_select_right();
-        } else {
+        } else if let Some(target) = self.table_visible_horizontal_target(self.cursor.offset, true)
+        {
+            self.cursor.select_to(target, &self.buffer);
+        } else if !in_table {
             self.cursor.select_right(&self.buffer);
         }
         self.finish_horizontal_cursor_move(cx);
     }
 
-    pub(crate) fn on_select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_select_up(
+        &mut self,
+        _: &SelectUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.table_boundary_caret = None;
         if self.has_extra_cursors() {
             self.reset_cursor_visual_targeting();
             self.multi_cursor_select_up();
         } else {
+            let in_table = self.table_cell_for_offset(self.cursor.offset).is_some();
             if self.vertical_move_goal_x.is_none() {
-                self.vertical_move_goal_x = self.cursor_visual_x(self.cursor.offset);
+                self.vertical_move_goal_x = self
+                    .table_visual_x_for_offset(window, self.cursor.offset)
+                    .or_else(|| self.cursor_visual_x(self.cursor.offset));
             }
             let goal_x = self.vertical_move_goal_x.unwrap_or_default();
-            if let Some(offset) = self.offset_for_visual_up(self.cursor.offset) {
+            if let Some(offset) =
+                self.table_vertical_target(window, self.cursor.offset, false, goal_x)
+            {
                 self.cursor.select_to(offset, &self.buffer);
-            } else {
+            } else if !in_table && let Some(offset) = self.offset_for_visual_up(self.cursor.offset)
+            {
+                self.cursor.select_to(offset, &self.buffer);
+            } else if !in_table {
                 self.cursor.select_up(&self.buffer);
             }
             self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
@@ -996,7 +1083,7 @@ impl EditorView {
     pub(crate) fn on_select_down(
         &mut self,
         _: &SelectDown,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.table_boundary_caret = None;
@@ -1004,13 +1091,22 @@ impl EditorView {
             self.reset_cursor_visual_targeting();
             self.multi_cursor_select_down();
         } else {
+            let in_table = self.table_cell_for_offset(self.cursor.offset).is_some();
             if self.vertical_move_goal_x.is_none() {
-                self.vertical_move_goal_x = self.cursor_visual_x(self.cursor.offset);
+                self.vertical_move_goal_x = self
+                    .table_visual_x_for_offset(window, self.cursor.offset)
+                    .or_else(|| self.cursor_visual_x(self.cursor.offset));
             }
             let goal_x = self.vertical_move_goal_x.unwrap_or_default();
-            if let Some(offset) = self.offset_for_visual_down(self.cursor.offset) {
+            if let Some(offset) =
+                self.table_vertical_target(window, self.cursor.offset, true, goal_x)
+            {
                 self.cursor.select_to(offset, &self.buffer);
-            } else {
+            } else if !in_table
+                && let Some(offset) = self.offset_for_visual_down(self.cursor.offset)
+            {
+                self.cursor.select_to(offset, &self.buffer);
+            } else if !in_table {
                 self.cursor.select_down(&self.buffer);
             }
             self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
@@ -1122,6 +1218,27 @@ impl EditorView {
         true
     }
 
+    fn insert_table_cell_break(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.has_extra_cursors() {
+            return false;
+        }
+        let Some(cell_range) = self.table_cursor_cell_range() else {
+            return false;
+        };
+        let selection = self.cursor.selection_range();
+        if selection.start < cell_range.start || selection.end > cell_range.end {
+            return false;
+        }
+
+        self.checkpoint();
+        self.queue_non_markdown_line_display_transfer(&selection, "<br>");
+        self.cursor.insert(&mut self.buffer, "<br>");
+        self.reparse();
+        self.scroll_to_cursor();
+        self.pause_blinking(cx);
+        true
+    }
+
     pub(crate) fn on_enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
         if self.focused_sidebar_path.is_some() {
             if self.sidebar_edit.is_some() {
@@ -1154,7 +1271,7 @@ impl EditorView {
             self.commit_sidebar_edit(cx);
             return;
         }
-        if !self.has_extra_cursors() && self.table_move_to_cell_below(cx) {
+        if self.insert_table_cell_break(cx) {
             return;
         }
         self.checkpoint();
@@ -1385,6 +1502,9 @@ impl EditorView {
             let _ = self.insert_line_at_table_boundary(cx);
             return;
         }
+        if self.insert_table_cell_break(cx) {
+            return;
+        }
         self.checkpoint();
         self.multi_cursor_enter();
         self.reparse();
@@ -1540,7 +1660,14 @@ impl EditorView {
         if self.has_extra_cursors() {
             self.multi_cursor_move_word_left();
         } else {
-            self.cursor.move_word_left(&self.buffer);
+            let current = self.cursor.offset;
+            let mut probe = self.cursor;
+            probe.move_word_left(&self.buffer);
+            if let Some(target) = self.table_visible_word_target(current, probe.offset, false) {
+                self.cursor.move_to(target, &self.buffer);
+            } else if self.table_cell_for_offset(current).is_none() {
+                self.cursor = probe;
+            }
         }
         self.finish_horizontal_cursor_move(cx);
     }
@@ -1560,7 +1687,14 @@ impl EditorView {
         if self.has_extra_cursors() {
             self.multi_cursor_move_word_right();
         } else {
-            self.cursor.move_word_right(&self.buffer);
+            let current = self.cursor.offset;
+            let mut probe = self.cursor;
+            probe.move_word_right(&self.buffer);
+            if let Some(target) = self.table_visible_word_target(current, probe.offset, true) {
+                self.cursor.move_to(target, &self.buffer);
+            } else if self.table_cell_for_offset(current).is_none() {
+                self.cursor = probe;
+            }
         }
         self.finish_horizontal_cursor_move(cx);
     }
@@ -1574,7 +1708,14 @@ impl EditorView {
         self.clear_phantom_selection();
         self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
-        self.cursor.select_word_left(&self.buffer);
+        let current = self.cursor.offset;
+        let mut probe = self.cursor;
+        probe.select_word_left(&self.buffer);
+        if let Some(target) = self.table_visible_word_target(current, probe.offset, false) {
+            self.cursor.select_to(target, &self.buffer);
+        } else if self.table_cell_for_offset(current).is_none() {
+            self.cursor = probe;
+        }
         for cursor in &mut self.extra_cursors {
             cursor.select_word_left(&self.buffer);
         }
@@ -1591,7 +1732,14 @@ impl EditorView {
         self.clear_phantom_selection();
         self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
-        self.cursor.select_word_right(&self.buffer);
+        let current = self.cursor.offset;
+        let mut probe = self.cursor;
+        probe.select_word_right(&self.buffer);
+        if let Some(target) = self.table_visible_word_target(current, probe.offset, true) {
+            self.cursor.select_to(target, &self.buffer);
+        } else if self.table_cell_for_offset(current).is_none() {
+            self.cursor = probe;
+        }
         for cursor in &mut self.extra_cursors {
             cursor.select_word_right(&self.buffer);
         }

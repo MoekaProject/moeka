@@ -304,6 +304,7 @@ pub(crate) struct EditorPrepaintState {
     /// Table cell borders and backgrounds
     table_borders: Vec<PaintQuad>,
     table_bgs: Vec<PaintQuad>,
+    table_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
     /// Image URL-edit icons: (bounds, line_idx, alpha)
     image_edit_icons: Vec<(Bounds<Pixels>, usize, f32)>,
     /// Blue wavy underlines for links when cmd is held
@@ -1323,11 +1324,22 @@ fn build_precise_table_layout(
                             helpers::apply_letter_spacing(shaped, letter_spacing);
                         }
                     }
-                    if let Some(shaped) = shaped_lines.into_iter().next() {
-                        let visual_lines =
-                            helpers::wrap_boundary_byte_indices(&shaped, &cell_layout.display_text)
+                    if !shaped_lines.is_empty() {
+                        let hard_line_ranges =
+                            helpers::hard_line_byte_ranges(&cell_layout.display_text);
+                        let visual_lines = shaped_lines
+                            .iter()
+                            .zip(hard_line_ranges)
+                            .map(|(shaped, range)| {
+                                helpers::wrap_boundary_byte_indices(
+                                    shaped,
+                                    &cell_layout.display_text[range],
+                                )
                                 .len()
-                                + 1;
+                                    + 1
+                            })
+                            .sum::<usize>()
+                            .max(1);
                         row_height = row_height
                             .max(visual_lines as f32 * line_height + cell_padding_y * 2.0);
                     }
@@ -2459,6 +2471,7 @@ impl Element for EditorElement {
         let mut image_borders: Vec<PaintQuad> = Vec::new();
         let mut table_borders: Vec<PaintQuad> = Vec::new();
         let mut table_bgs: Vec<PaintQuad> = Vec::new();
+        let mut table_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
         let mut diff_line_bgs: Vec<PaintQuad> = Vec::new();
         let mut diff_inline_quads: Vec<PaintQuad> = Vec::new();
         // In-place (working-tree) diff: left-edge indicator bars plus the
@@ -2482,6 +2495,7 @@ impl Element for EditorElement {
         let mut table_click_areas_local: Vec<(Bounds<Pixels>, usize, usize, usize)> = Vec::new();
         let mut table_col_handle_areas_local: Vec<(Bounds<Pixels>, usize, usize)> = Vec::new();
         let mut table_row_handle_areas_local: Vec<(Bounds<Pixels>, usize, usize)> = Vec::new();
+        let mut table_corner_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut table_boundary_caret_areas_local: Vec<(Bounds<Pixels>, TableBoundaryCaret)> =
             Vec::new();
         let mut table_layout_cache: HashMap<usize, helpers::TableLayout> = HashMap::new();
@@ -5255,7 +5269,31 @@ impl Element for EditorElement {
                                                 );
                                             }
                                         }
-                                        if let Some(shaped) = shaped_lines.into_iter().next() {
+                                        let hard_line_ranges = helpers::hard_line_byte_ranges(
+                                            &cell_layout.display_text,
+                                        );
+                                        let mut hard_line_y = cell_text_y;
+                                        for (shaped, hard_line_range) in
+                                            shaped_lines.into_iter().zip(hard_line_ranges)
+                                        {
+                                            let hard_display_text = cell_layout
+                                                .display_text
+                                                .get(hard_line_range.clone())
+                                                .unwrap_or("");
+                                            let hard_cell_runs = helpers::extract_runs_for_range(
+                                                &cell_runs,
+                                                hard_line_range.start,
+                                                hard_line_range.end,
+                                            );
+                                            let hard_buffer_to_display = cell_layout
+                                                .buffer_to_display
+                                                .iter()
+                                                .map(|display_index| {
+                                                    display_index
+                                                        .saturating_sub(hard_line_range.start)
+                                                        .min(hard_line_range.len())
+                                                })
+                                                .collect::<Vec<_>>();
                                             let cell_x = cell_content_x
                                                 + helpers::table_cell_content_offset(
                                                     cell_layout.alignment,
@@ -5287,13 +5325,13 @@ impl Element for EditorElement {
                                                             &mut search_match_quads,
                                                             &[match_start - cell_source_start
                                                                 ..match_end - cell_source_start],
-                                                            &cell_layout.display_text,
+                                                            hard_display_text,
                                                             cell_content.len(),
-                                                            &cell_layout.buffer_to_display,
-                                                            &cell_runs,
+                                                            &hard_buffer_to_display,
+                                                            &hard_cell_runs,
                                                             &shaped,
                                                             cell_x,
-                                                            cell_text_y,
+                                                            hard_line_y,
                                                             line_height,
                                                             font_size,
                                                             0.0,
@@ -5362,7 +5400,7 @@ impl Element for EditorElement {
                                                     if sel_start < sel_end {
                                                         let buf_start = sel_start - cell_buf_start;
                                                         let buf_end = sel_end - cell_buf_start;
-                                                        let disp_start = if buf_start
+                                                        let global_disp_start = if buf_start
                                                             >= cell_layout.buffer_to_display.len()
                                                         {
                                                             cell_layout.display_text.len()
@@ -5372,7 +5410,7 @@ impl Element for EditorElement {
                                                                 buf_start,
                                                             )
                                                         };
-                                                        let disp_end = if buf_end
+                                                        let global_disp_end = if buf_end
                                                             >= cell_layout.buffer_to_display.len()
                                                         {
                                                             cell_layout.display_text.len()
@@ -5382,19 +5420,42 @@ impl Element for EditorElement {
                                                                 buf_end,
                                                             )
                                                         };
+                                                        let disp_start = global_disp_start
+                                                            .saturating_sub(hard_line_range.start)
+                                                            .min(hard_line_range.len());
+                                                        let disp_end = global_disp_end
+                                                            .saturating_sub(hard_line_range.start)
+                                                            .min(hard_line_range.len());
+                                                        if hard_display_text.is_empty()
+                                                            && global_disp_start
+                                                                <= hard_line_range.start
+                                                            && global_disp_end
+                                                                >= hard_line_range.start
+                                                        {
+                                                            selection_quads.push(fill(
+                                                                Bounds::new(
+                                                                    point(
+                                                                        px(cell_x),
+                                                                        px(hard_line_y),
+                                                                    ),
+                                                                    size(
+                                                                        px((font_size * 0.35)
+                                                                            .max(3.0)),
+                                                                        px(line_height),
+                                                                    ),
+                                                                ),
+                                                                theme.selection,
+                                                            ));
+                                                        }
                                                         selection_quads.extend(
                                                             helpers::build_selection_quads(
-                                                                &cell_layout.display_text,
-                                                                &cell_runs,
+                                                                hard_display_text,
+                                                                &hard_cell_runs,
                                                                 &shaped,
-                                                                disp_start.min(
-                                                                    cell_layout.display_text.len(),
-                                                                ),
-                                                                disp_end.min(
-                                                                    cell_layout.display_text.len(),
-                                                                ),
+                                                                disp_start,
+                                                                disp_end,
                                                                 cell_x,
-                                                                cell_text_y,
+                                                                hard_line_y,
                                                                 line_height,
                                                                 font_size,
                                                                 0.0,
@@ -5426,7 +5487,7 @@ impl Element for EditorElement {
                                                             {
                                                                 let in_cell =
                                                                     cur_off - cell_buf_start;
-                                                                let disp_col = if in_cell
+                                                                let global_disp_col = if in_cell
                                                                     >= cell_layout
                                                                         .buffer_to_display
                                                                         .len()
@@ -5438,9 +5499,24 @@ impl Element for EditorElement {
                                                                     in_cell,
                                                                 )
                                                                 };
-                                                                let disp_col = disp_col.min(
-                                                                    cell_layout.display_text.len(),
-                                                                );
+                                                                let global_disp_col =
+                                                                    global_disp_col.min(
+                                                                        cell_layout
+                                                                            .display_text
+                                                                            .len(),
+                                                                    );
+                                                                if global_disp_col
+                                                                    < hard_line_range.start
+                                                                    || global_disp_col
+                                                                        > hard_line_range.end
+                                                                {
+                                                                    continue;
+                                                                }
+                                                                let disp_col = global_disp_col
+                                                                    .saturating_sub(
+                                                                        hard_line_range.start,
+                                                                    )
+                                                                    .min(hard_line_range.len());
                                                                 if let Some(pos) = shaped
                                                                     .position_for_index(
                                                                         disp_col,
@@ -5453,7 +5529,7 @@ impl Element for EditorElement {
                                                                             .cursor
                                                                             .cursor_height_factor
                                                                             .clamp(0.1, 1.0);
-                                                                    let cursor_top = cell_text_y
+                                                                    let cursor_top = hard_line_y
                                                                         + f32::from(pos.y)
                                                                         + (line_height
                                                                             - cursor_height)
@@ -5488,9 +5564,9 @@ impl Element for EditorElement {
                                             if editor.app_settings.show_whitespace {
                                                 push_whitespace_dot_quads(
                                                     &mut whitespace_dots,
-                                                    &cell_layout.display_text,
+                                                    hard_display_text,
                                                     &shaped,
-                                                    point(px(cell_x), px(cell_text_y)),
+                                                    point(px(cell_x), px(hard_line_y)),
                                                     line_height,
                                                     editor.scaled(
                                                         editor
@@ -5509,13 +5585,13 @@ impl Element for EditorElement {
                                             push_inline_math_images(
                                                 &cell_decoration,
                                                 &cell_content,
-                                                &cell_layout.display_text,
-                                                &cell_layout.buffer_to_display,
+                                                hard_display_text,
+                                                &hard_buffer_to_display,
                                                 &cell_active_ranges,
                                                 &shaped,
                                                 image_cache,
                                                 cell_x,
-                                                cell_text_y,
+                                                hard_line_y,
                                                 0.0,
                                                 line_height,
                                                 editor
@@ -5541,7 +5617,7 @@ impl Element for EditorElement {
                                             let paint_origin =
                                                 helpers::baseline_aligned_text_origin(
                                                     &shaped,
-                                                    point(px(cell_x), px(cell_text_y)),
+                                                    point(px(cell_x), px(hard_line_y)),
                                                     px(line_height),
                                                     cell_baseline,
                                                 );
@@ -5550,6 +5626,16 @@ impl Element for EditorElement {
                                                 paint_origin,
                                                 px(line_height),
                                             ));
+                                            let visual_lines = helpers::wrap_boundary_byte_indices(
+                                                &table_cell_texts
+                                                    .last()
+                                                    .expect("cell line was just appended")
+                                                    .0,
+                                                hard_display_text,
+                                            )
+                                            .len()
+                                                + 1;
+                                            hard_line_y += visual_lines as f32 * line_height;
                                         }
                                     }
 
@@ -5585,6 +5671,31 @@ impl Element for EditorElement {
                         // Column handle areas (above header, hover-only)
                         {
                             let handle_h = layout.handle_size;
+                            if !editor.active_tab_is_read_only() {
+                                let icon_size = (handle_h * 2.0).max(1.0);
+                                let corner_bounds = Bounds::new(
+                                    point(px(table_left - icon_size), px(table_top - icon_size)),
+                                    size(px(icon_size), px(icon_size)),
+                                );
+                                table_corner_areas_local.push((corner_bounds, ti.table_start_line));
+                                let picker_open =
+                                    editor.context_menu.as_ref().is_some_and(|menu| {
+                                        matches!(
+                                            menu.kind,
+                                            ContextMenuKind::TableResize { table_start_line }
+                                                if table_start_line == ti.table_start_line
+                                        )
+                                    });
+                                if editor.hovering_table_start == Some(ti.table_start_line)
+                                    || picker_open
+                                {
+                                    table_icons.push((
+                                        corner_bounds,
+                                        "assets/icons/format/table.svg",
+                                        table_styles.table_handle_color,
+                                    ));
+                                }
+                            }
                             let mut hx = 0.0_f32;
                             for ci in 0..layout.col_count {
                                 let cell_w = layout
@@ -8916,6 +9027,7 @@ impl Element for EditorElement {
             editor.table_click_areas = table_click_areas_local.clone();
             editor.table_col_handle_areas = table_col_handle_areas_local.clone();
             editor.table_row_handle_areas = table_row_handle_areas_local.clone();
+            editor.table_corner_areas = table_corner_areas_local.clone();
             editor.table_boundary_caret_areas = table_boundary_caret_areas_local.clone();
             editor.gutter_fold_areas = gutter_fold_hit_areas_local.clone();
             editor.inline_diff_gutter_areas = inline_diff_gutter_areas_local.clone();
@@ -9151,6 +9263,7 @@ impl Element for EditorElement {
             image_borders,
             table_borders,
             table_bgs,
+            table_icons,
             table_cell_texts,
             code_block_copy_buttons,
             inline_diff_revert_buttons,
@@ -9452,6 +9565,17 @@ impl Element for EditorElement {
 
         for quad in prepaint.table_borders.drain(..) {
             window.paint_quad(quad);
+        }
+        for (bounds, path, color) in &prepaint.table_icons {
+            window
+                .paint_svg(
+                    *bounds,
+                    (*path).into(),
+                    TransformationMatrix::default(),
+                    *color,
+                    cx,
+                )
+                .ok();
         }
 
         // Table cell texts (per-cell rendering)

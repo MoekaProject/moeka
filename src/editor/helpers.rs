@@ -558,8 +558,10 @@ pub(crate) fn build_display_text(
         });
     }
 
-    display_replacements
-        .retain(|replacement| !active_ranges_intersect(active_ranges, &replacement.trigger_range));
+    display_replacements.retain(|replacement| {
+        replacement.display_text == "\n"
+            || !active_ranges_intersect(active_ranges, &replacement.trigger_range)
+    });
     display_replacements.sort_by_key(|replacement| replacement.source_range.start);
 
     if decoration.syntax_ranges.is_empty() && display_replacements.is_empty() {
@@ -814,12 +816,10 @@ pub(crate) fn build_table_display_text(
             1.0,
             1.0,
         );
-        let trimmed_start = folded_cell_raw.len() - folded_cell_raw.trim_start().len();
-        let trimmed_end = folded_cell_raw.len() - folded_cell_raw.trim_end().len();
-        let folded_cell =
-            folded_cell_raw[trimmed_start..folded_cell_raw.len() - trimmed_end].to_string();
-        let cell_d2b: Vec<usize> =
-            cell_d2b_raw[trimmed_start..cell_d2b_raw.len() - trimmed_end].to_vec();
+        let trimmed_range = table_cell_trimmed_display_range(&folded_cell_raw);
+        let trimmed_start = trimmed_range.start;
+        let folded_cell = folded_cell_raw[trimmed_range.clone()].to_string();
+        let cell_d2b: Vec<usize> = cell_d2b_raw[trimmed_range].to_vec();
         let cell_b2d: Vec<usize> = cell_b2d_raw
             .iter()
             .map(|&d| d.saturating_sub(trimmed_start))
@@ -962,7 +962,45 @@ pub(crate) fn table_cell_decoration(
         }
     }
 
+    for source_range in table_cell_break_ranges(cell_content) {
+        if cell_decoration.protected_ranges.iter().any(|protected| {
+            protected.start < source_range.end && protected.end > source_range.start
+        }) || cell_decoration.inline_spans.iter().any(|span| {
+            span.kind == markdown::InlineKind::InlineCode
+                && span.range.start < source_range.end
+                && span.range.end > source_range.start
+        }) {
+            continue;
+        }
+        cell_decoration
+            .display_replacements
+            .push(markdown::DisplayReplacement {
+                source_range: source_range.clone(),
+                display_text: "\n".to_string(),
+                trigger_range: source_range,
+            });
+    }
+
     cell_decoration
+}
+
+fn table_cell_break_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut offset = 0usize;
+    while let Some(relative_start) = text[offset..].find('<') {
+        let start = offset + relative_start;
+        let Some(relative_end) = text[start..].find('>') else {
+            break;
+        };
+        let end = start + relative_end + 1;
+        let inner = text[start + 1..end - 1].trim();
+        let tag = inner.strip_suffix('/').unwrap_or(inner).trim();
+        if tag.eq_ignore_ascii_case("br") && !markdown::is_escaped_at(text, start) {
+            ranges.push(start..end);
+        }
+        offset = end;
+    }
+    ranges
 }
 
 pub(crate) fn compute_table_render_widths(
@@ -1274,11 +1312,10 @@ pub(crate) fn compute_table_layout(
                 1.0,
                 1.0,
             );
-            let trimmed = folded_raw.trim();
-            let trim_start = folded_raw.len() - folded_raw.trim_start().len();
-            let trim_end = folded_raw.len() - folded_raw.trim_end().len();
-            let display_text = trimmed.to_string();
-            let d2b = d2b_raw[trim_start..d2b_raw.len() - trim_end].to_vec();
+            let trimmed_range = table_cell_trimmed_display_range(&folded_raw);
+            let trim_start = trimmed_range.start;
+            let display_text = folded_raw[trimmed_range.clone()].to_string();
+            let d2b = d2b_raw[trimmed_range].to_vec();
             let b2d = b2d_raw
                 .iter()
                 .map(|&d| d.saturating_sub(trim_start))
@@ -1629,6 +1666,26 @@ pub(crate) fn extract_runs_for_range(
         pos = run_end;
     }
     result
+}
+
+pub(crate) fn hard_line_byte_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    for (index, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            ranges.push(start..index);
+            start = index + 1;
+        }
+    }
+    ranges.push(start..text.len());
+    ranges
+}
+
+pub(crate) fn table_cell_trimmed_display_range(display_text: &str) -> Range<usize> {
+    let trimmed_start = display_text.trim_start_matches([' ', '\t']);
+    let start = display_text.len() - trimmed_start.len();
+    let trimmed = trimmed_start.trim_end_matches([' ', '\t']);
+    start..start + trimmed.len()
 }
 
 /// Get wrap boundary byte indices from the WrappedLine's shaped runs.
@@ -4397,6 +4454,67 @@ mod tests {
         assert!(references.inline_spans.iter().any(|span| {
             span.kind == markdown::InlineKind::Image && span.target.as_deref() == Some("photo.png")
         }));
+    }
+
+    #[test]
+    fn table_cell_break_tags_become_editable_display_newlines() {
+        let content = "one<br>two<BR/>three<br />four";
+        let decoration = table_cell_decoration(
+            &markdown::LineDecoration::default(),
+            content,
+            &(0..content.len()),
+        );
+        assert_eq!(decoration.display_replacements.len(), 3);
+        assert!(
+            decoration
+                .display_replacements
+                .iter()
+                .all(|replacement| replacement.display_text == "\n")
+        );
+        let (display_text, _, _, _) = build_display_text(
+            content,
+            &decoration,
+            &[],
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        assert_eq!(display_text, "one\ntwo\nthree\nfour");
+        let (selected_display_text, _, _, _) = build_display_text(
+            content,
+            &decoration,
+            &[2..8],
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        assert_eq!(selected_display_text, "one\ntwo\nthree\nfour");
+        assert_eq!(
+            super::hard_line_byte_ranges("one\n\nthree"),
+            vec![0..3, 4..4, 5..10]
+        );
+
+        let literal = r"\<br> `<br>`";
+        let decoration = table_cell_decoration(
+            &markdown::LineDecoration::default(),
+            literal,
+            &(0..literal.len()),
+        );
+        assert!(decoration.display_replacements.is_empty());
     }
 
     #[test]

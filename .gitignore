@@ -20,17 +20,3 @@ dist
 
 # Mac App Store provisioning profile: account-specific, fetched per machine
 packaging/macos/mas.provisionprofile
-
-# Machine-local state and credentials. Keep sanitized examples under docs/.
-/config.yaml
-/.venv/
-/.kilo/
-/.env
-/.env.*
-!/.env.example
-*.p12
-*.p8
-*.pfx
-*.mobileprovision
-*.provisionprofile
-/audit-reports/

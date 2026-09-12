@@ -416,18 +416,6 @@ fn install_panic_logger() {
 fn main() {
     install_panic_logger();
 
-    let launch_paths = launch_paths_from_args();
-    #[cfg(windows)]
-    let forwarded_open_paths = match platform::windows_single_instance::acquire(&launch_paths) {
-        platform::windows_single_instance::InstanceRole::Primary(receiver) => Some(receiver),
-        platform::windows_single_instance::InstanceRole::SecondaryForwarded => return,
-        platform::windows_single_instance::InstanceRole::SecondaryFailed => {
-            log_error!("failed to forward files to the running Moeka instance");
-            return;
-        }
-        platform::windows_single_instance::InstanceRole::PrimaryFallback => None,
-    };
-
     #[cfg(target_os = "macos")]
     let pending_open_paths = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
     #[cfg(target_os = "macos")]
@@ -455,17 +443,7 @@ fn main() {
             if let (Some(editor), Some(async_app)) = (editor, async_app) {
                 async_app
                     .spawn(async move |cx| {
-                        let _ = cx.update(|cx| {
-                            open_launch_paths(&editor, paths, cx);
-                            let existing_window = cx
-                                .window_stack()
-                                .and_then(|windows| windows.first().copied())
-                                .or_else(|| cx.windows().first().copied());
-                            if let Some(window) = existing_window {
-                                restore_window(window, cx);
-                            }
-                            cx.activate(true);
-                        });
+                        let _ = cx.update(|cx| open_launch_paths(&editor, paths, cx));
                     })
                     .detach();
             } else {
@@ -740,18 +718,6 @@ fn main() {
             ),
             KeyBinding::new("secondary-alt-w", ToggleSearchWholeWord, Some("SearchBar")),
             KeyBinding::new("secondary-alt-r", ToggleSearchRegex, Some("SearchBar")),
-            KeyBinding::new("secondary-alt-f", ToggleReplace, Some("EditorSearchBar")),
-            KeyBinding::new("alt-enter", ReplaceNext, Some("EditorSearchBar")),
-            KeyBinding::new("secondary-alt-enter", ReplaceAll, Some("EditorSearchBar")),
-            KeyBinding::new("escape", DismissSearch, Some("EditorSearchBar")),
-            KeyBinding::new("tab", SwitchSearchInput, Some("EditorSearchBar")),
-            KeyBinding::new("shift-tab", SwitchSearchInput, Some("EditorSearchBar")),
-        ]);
-
-        #[cfg(not(target_os = "macos"))]
-        cx.bind_keys([
-            KeyBinding::new("ctrl-h", ToggleReplace, Some("MarkdownEditor")),
-            KeyBinding::new("ctrl-h", ToggleReplace, Some("EditorSearchBar")),
         ]);
 
         cx.bind_keys([
@@ -914,43 +880,9 @@ fn main() {
         #[cfg(target_os = "macos")]
         let pending_paths_for_window = pending_open_paths.clone();
         let view = open_editor_window(cx).expect("failed to open main window");
+        let launch_paths = launch_paths_from_args();
         if !launch_paths.is_empty() {
             open_launch_paths(&view, launch_paths, cx);
-        }
-        #[cfg(windows)]
-        if let Some(receiver) = forwarded_open_paths {
-            let editor = view.clone();
-            let editor_window = cx.windows().into_iter().find(|handle| {
-                handle
-                    .downcast::<EditorView>()
-                    .and_then(|handle| handle.entity(cx).ok())
-                    .is_some_and(|entity| entity == editor)
-            });
-            cx.spawn(async move |cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(50))
-                        .await;
-                    loop {
-                        match receiver.try_recv() {
-                            Ok(paths) => {
-                                let _ = cx.update(|cx| {
-                                    open_launch_paths(&editor, paths, cx);
-                                    if let Some(handle) = editor_window {
-                                        let _ = handle.update(cx, |_, window, _| {
-                                            // GPUI restores minimized Windows windows here.
-                                            window.activate_window();
-                                        });
-                                    }
-                                });
-                            }
-                            Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                            Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
-                        }
-                    }
-                }
-            })
-            .detach();
         }
         #[cfg(target_os = "macos")]
         {

@@ -14,12 +14,10 @@ use windows::Win32::{
         },
         Dxgi::{
             CreateDXGIFactory2, DXGI_CREATE_FACTORY_DEBUG, DXGI_CREATE_FACTORY_FLAGS,
-            IDXGIAdapter1, IDXGIFactory6,
+            DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IDXGIAdapter1, IDXGIFactory6,
         },
     },
 };
-use windows::core::Interface;
-
 pub(crate) fn try_to_recover_from_device_lost<T>(
     mut f: impl FnMut() -> Result<T>,
     on_success: impl FnOnce(T),
@@ -121,8 +119,23 @@ fn get_dxgi_factory(debug_layer_available: bool) -> Result<IDXGIFactory6> {
 
 #[inline]
 fn get_adapter(dxgi_factory: &IDXGIFactory6, debug_layer_available: bool) -> Result<IDXGIAdapter1> {
+    if std::env::var("MOEKA_GPU_ADAPTER").is_ok_and(|value| value.eq_ignore_ascii_case("software"))
+    {
+        let adapter = unsafe { dxgi_factory.EnumWarpAdapter::<IDXGIAdapter1>() }
+            .context("Getting the WARP software adapter")?;
+        log::warn!("Using the WARP software renderer because MOEKA_GPU_ADAPTER=software");
+        return Ok(adapter);
+    }
+
     for adapter_index in 0.. {
-        let adapter: IDXGIAdapter1 = unsafe { dxgi_factory.EnumAdapters(adapter_index)?.cast()? };
+        let Ok(adapter) = (unsafe {
+            dxgi_factory.EnumAdapterByGpuPreference::<IDXGIAdapter1>(
+                adapter_index,
+                DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+            )
+        }) else {
+            break;
+        };
         if let Ok(desc) = unsafe { adapter.GetDesc1() } {
             let gpu_name = String::from_utf16_lossy(&desc.Description)
                 .trim_matches(char::from(0))
@@ -139,7 +152,9 @@ fn get_adapter(dxgi_factory: &IDXGIFactory6, debug_layer_available: bool) -> Res
         }
     }
 
-    unreachable!()
+    log::warn!("No compatible hardware GPU was found; falling back to the WARP software renderer");
+    unsafe { dxgi_factory.EnumWarpAdapter::<IDXGIAdapter1>() }
+        .context("Getting the WARP software adapter")
 }
 
 #[inline]

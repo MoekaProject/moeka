@@ -27,7 +27,7 @@ pub(crate) enum UpdateState {
     Checking,
     Ready(PreparedUpdate),
     Installing,
-    Failed(String),
+    Failed,
     UpToDate,
 }
 
@@ -65,10 +65,9 @@ impl UpdateState {
 pub(crate) struct PreparedUpdate {
     pub version: String,
     pub release_notes: String,
-    /// Downloaded installer, populated only after the user confirms installation.
+    /// Downloaded installer, or `None` where the release ships no build for
+    /// this platform and the download page is opened instead.
     pub path: Option<PathBuf>,
-    /// Matching release asset, or `None` when the release page should be opened.
-    pub download_url: Option<String>,
     pub release_url: String,
 }
 
@@ -130,7 +129,7 @@ impl EditorView {
                     Ok(None) => UpdateState::UpToDate,
                     Err(error) => {
                         log_error!("Moeka update check failed: {error}");
-                        UpdateState::Failed(error)
+                        UpdateState::Failed
                     }
                 };
                 if std::mem::take(&mut this.update_check_is_manual) {
@@ -167,15 +166,11 @@ impl EditorView {
                 crate::i18n::update_up_to_date_message(self.ui_language, current_version()),
                 cx,
             ),
-            UpdateState::Failed(error) => self.show_dismissable_update_dialog(
+            _ => self.show_dismissable_update_dialog(
                 crate::i18n::update_check_failed_title(self.ui_language).to_string(),
-                format!(
-                    "{}\n\n{error}",
-                    crate::i18n::update_check_failed_message(self.ui_language)
-                ),
+                crate::i18n::update_check_failed_message(self.ui_language).to_string(),
                 cx,
             ),
-            _ => {}
         }
     }
 
@@ -186,13 +181,14 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let confirm_label = self.t(crate::i18n::TextKey::Acknowledge).to_string();
+        let cancel_label = self.t(crate::i18n::TextKey::Cancel).to_string();
         self.show_dialog(
             Dialog {
                 title,
                 message,
                 save_label: None,
                 confirm_label,
-                cancel_label: String::new(),
+                cancel_label,
                 is_danger: false,
                 action: DialogAction::DismissOnly,
             },
@@ -225,27 +221,12 @@ impl EditorView {
         );
     }
 
-    pub(crate) fn install_update(&mut self, update: PreparedUpdate, cx: &mut Context<Self>) {
+    pub(crate) fn install_update(&mut self, update: PreparedUpdate) {
         self.update_state = UpdateState::Installing;
-        self.update_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { prepare_update_installer(update) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.update_task = None;
-                let result = result.and_then(install_update);
-                if let Err(error) = result {
-                    log_error!("Moeka update install failed: {error}");
-                    this.update_state = UpdateState::Failed(error.clone());
-                    this.show_dismissable_update_dialog(
-                        crate::i18n::update_check_failed_title(this.ui_language).to_string(),
-                        error,
-                        cx,
-                    );
-                }
-            });
-        }));
+        if let Err(error) = install_update(update) {
+            log_error!("Moeka update install failed: {error}");
+            self.update_state = UpdateState::Failed;
+        }
     }
 }
 
@@ -267,85 +248,40 @@ fn check_and_download_update() -> Result<Option<PreparedUpdate>, String> {
             version: release.tag_name,
             release_notes: release.body.unwrap_or_default(),
             path: None,
-            download_url: None,
             release_url,
         }));
     };
 
+    let update_dir = config_paths::cache_dir()
+        .join("updates")
+        .join(safe_file_name(&release.tag_name));
+    fs::create_dir_all(&update_dir).map_err(|error| error.to_string())?;
+    let out_path = update_dir.join(safe_file_name(&asset.name));
+    download_asset(&asset.browser_download_url, &out_path)?;
+
     Ok(Some(PreparedUpdate {
         version: release.tag_name,
         release_notes: release.body.unwrap_or_default(),
-        path: None,
-        download_url: Some(asset.browser_download_url.clone()),
+        path: Some(out_path),
         release_url,
     }))
 }
 
-fn prepare_update_installer(mut update: PreparedUpdate) -> Result<PreparedUpdate, String> {
-    if update.path.is_some() || update.download_url.is_none() {
-        return Ok(update);
-    }
-    let update_dir = config_paths::cache_dir()
-        .join("updates")
-        .join(safe_file_name(&update.version));
-    fs::create_dir_all(&update_dir).map_err(|error| error.to_string())?;
-    let url = update.download_url.as_deref().unwrap_or_default();
-    let asset_name = url.rsplit('/').next().unwrap_or("Moeka-update");
-    let out_path = update_dir.join(safe_file_name(asset_name));
-    download_asset(url, &out_path)?;
-    update.path = Some(out_path);
-    Ok(update)
-}
-
 fn fetch_latest_release() -> Result<GitHubRelease, String> {
-    let text = github_request(LATEST_RELEASE_URL, Some("application/vnd.github+json"))
+    let mut request = ureq::get(LATEST_RELEASE_URL)
+        .set("Accept", "application/vnd.github+json")
+        .set("User-Agent", &user_agent());
+    if let Ok(token) = std::env::var("MOEKA_GITHUB_TOKEN")
+        && !token.trim().is_empty()
+    {
+        request = request.set("Authorization", &format!("Bearer {}", token.trim()));
+    }
+    let text = request
         .call()
         .map_err(|error| error.to_string())?
         .into_string()
         .map_err(|error| error.to_string())?;
     serde_json::from_str(&text).map_err(|error| error.to_string())
-}
-
-fn github_request(url: &str, accept: Option<&str>) -> GitHubRequest {
-    GitHubRequest {
-        url: url.to_string(),
-        accept: accept.map(str::to_string),
-    }
-}
-
-struct GitHubRequest {
-    url: String,
-    accept: Option<String>,
-}
-
-impl GitHubRequest {
-    fn request(&self) -> ureq::Request {
-        let request = ureq::get(&self.url).set("User-Agent", &user_agent());
-        if let Some(accept) = &self.accept {
-            request.set("Accept", accept)
-        } else {
-            request
-        }
-    }
-
-    fn call(&self) -> Result<ureq::Response, ureq::Error> {
-        let token = std::env::var("MOEKA_GITHUB_TOKEN")
-            .ok()
-            .filter(|token| !token.trim().is_empty());
-        if let Some(token) = token {
-            match self
-                .request()
-                .set("Authorization", &format!("Bearer {}", token.trim()))
-                .call()
-            {
-                Ok(response) => Ok(response),
-                Err(ureq::Error::Status(401 | 403, _)) => self.request().call(),
-                Err(error) => Err(error),
-            }
-        } else {
-            self.request().call()
-        }
-    }
 }
 
 fn current_version() -> &'static str {
@@ -393,9 +329,13 @@ fn select_update_asset_for_platform<'a>(
 }
 
 fn download_asset(url: &str, out_path: &Path) -> Result<(), String> {
-    let response = github_request(url, None)
-        .call()
-        .map_err(|error| error.to_string())?;
+    let mut request = ureq::get(url).set("User-Agent", &user_agent());
+    if let Ok(token) = std::env::var("MOEKA_GITHUB_TOKEN")
+        && !token.trim().is_empty()
+    {
+        request = request.set("Authorization", &format!("Bearer {}", token.trim()));
+    }
+    let response = request.call().map_err(|error| error.to_string())?;
     let mut reader = response.into_reader();
     let mut file = fs::File::create(out_path).map_err(|error| error.to_string())?;
     let mut buffer = [0u8; 64 * 1024];

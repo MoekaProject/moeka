@@ -157,10 +157,10 @@ impl EditorView {
     }
 
     pub(crate) fn delete_paths_to_trash(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let mut deleted_paths = Vec::new();
+        let mut deleted_any = false;
         for path in paths {
             match crate::platform::trash::move_to_trash(path) {
-                Ok(()) => deleted_paths.push(path.clone()),
+                Ok(()) => deleted_any = true,
                 Err(error) => {
                     let message = format!(
                         "{}: {error}",
@@ -171,14 +171,14 @@ impl EditorView {
             }
         }
 
-        if deleted_paths.is_empty() {
+        if !deleted_any {
             self.context_menu = None;
             cx.notify();
             return;
         }
 
         let mut starred_changed = false;
-        for path in &deleted_paths {
+        for path in paths {
             starred_changed |= self.app_settings.remove_starred_prefix(path);
         }
         if starred_changed {
@@ -190,7 +190,7 @@ impl EditorView {
             self.with_pane(pane_id, |this| {
                 this.tabs.retain(|tab| {
                     tab.path.as_ref().is_none_or(|candidate| {
-                        !deleted_paths.iter().any(|path| candidate.starts_with(path))
+                        !paths.iter().any(|path| candidate.starts_with(path))
                     })
                 });
                 this.active_tab_index_cache.set(None);
@@ -209,19 +209,19 @@ impl EditorView {
             self.remove_pane_if_empty(pane_id, cx);
         }
         self.selected_sidebar_paths
-            .retain(|selected| !deleted_paths.iter().any(|path| selected.starts_with(path)));
+            .retain(|selected| !paths.iter().any(|path| selected.starts_with(path)));
 
         if self
             .focused_sidebar_path
             .as_ref()
-            .is_some_and(|focused| deleted_paths.iter().any(|path| focused.starts_with(path)))
+            .is_some_and(|focused| paths.iter().any(|path| focused.starts_with(path)))
         {
             self.focused_sidebar_path = None;
         }
         if self
             .sidebar_selection_anchor
             .as_ref()
-            .is_some_and(|anchor| deleted_paths.iter().any(|path| anchor.starts_with(path)))
+            .is_some_and(|anchor| paths.iter().any(|path| anchor.starts_with(path)))
         {
             self.sidebar_selection_anchor = None;
         }

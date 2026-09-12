@@ -641,23 +641,48 @@ impl EntityInputHandler for EditorView {
             } else {
                 helpers::buffer_to_display_offset(&info.buffer_to_display, cell_offset)
             };
-            let pos = info
-                .wrapped
+            let hard_line_index = info
+                .hard_line_ranges
+                .iter()
+                .position(|range| disp_col <= range.end)
+                .unwrap_or_else(|| info.hard_line_ranges.len().saturating_sub(1));
+            let hard_line_range = info.hard_line_ranges.get(hard_line_index)?;
+            let wrapped = info.wrapped_lines.get(hard_line_index)?;
+            let local_display_col = disp_col
+                .saturating_sub(hard_line_range.start)
+                .min(hard_line_range.len());
+            let pos = wrapped
                 .position_for_index(
-                    disp_col.min(info.display_text.len()),
+                    local_display_col,
                     px(self.base_font_size()
                         * self.styles.editor.editor_paragraph_line_height_factor),
                 )
                 .unwrap_or_default();
             let line_height =
                 self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
+            let preceding_height = info
+                .wrapped_lines
+                .iter()
+                .zip(&info.hard_line_ranges)
+                .take(hard_line_index)
+                .map(|(line, range)| {
+                    (helpers::wrap_boundary_byte_indices(
+                        line,
+                        info.display_text.get(range.clone()).unwrap_or(""),
+                    )
+                    .len()
+                        + 1) as f32
+                        * line_height
+                })
+                .sum::<f32>();
             let content_offset = helpers::table_cell_content_offset(
                 info.alignment,
                 inner_width,
-                f32::from(info.wrapped.unwrapped_layout.width),
+                f32::from(wrapped.unwrapped_layout.width),
             );
             let x = f32::from(cell_bounds.origin.x) + padding_x + content_offset + f32::from(pos.x);
-            let y = f32::from(cell_bounds.origin.y) + padding_y + f32::from(pos.y);
+            let y =
+                f32::from(cell_bounds.origin.y) + padding_y + preceding_height + f32::from(pos.y);
             if ime_debug_enabled() {
                 ime_debug_log(format!(
                     "bounds_for_range table line={} col={} cell_col={} visual_row={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",

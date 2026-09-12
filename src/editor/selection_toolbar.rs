@@ -255,10 +255,11 @@ impl EditorView {
 
     pub(crate) fn retain_selection_toolbar_after_format(&mut self) {
         let key = self.selection_toolbar_selection_key();
-        if let (Some(popup), Some(key)) = (&mut self.selection_toolbar_popup, key) {
-            if popup.pane_id == self.focused_pane_id && popup.selection.tab_id == key.tab_id {
-                popup.selection = key;
-            }
+        if let (Some(popup), Some(key)) = (&mut self.selection_toolbar_popup, key)
+            && popup.pane_id == self.focused_pane_id
+            && popup.selection.tab_id == key.tab_id
+        {
+            popup.selection = key;
         }
     }
 

@@ -366,6 +366,9 @@ pub(crate) enum ContextMenuKind {
     Format,
     FormatHeading,
     FormatMore,
+    TableResize {
+        table_start_line: usize,
+    },
     Export {
         path: PathBuf,
     },
@@ -1380,9 +1383,30 @@ fn markdown_plain_edit_can_change_inline_delimiter_flanking(
     _inserted_text: &str,
     line_before_edit: &str,
 ) -> bool {
-    line_before_edit
-        .chars()
-        .any(|ch| matches!(ch, '*' | '_' | '~' | '+' | '=' | '[' | ']' | '`' | '^'))
+    line_before_edit.chars().any(|ch| {
+        matches!(
+            ch,
+            '#' | '*'
+                | '_'
+                | '`'
+                | '~'
+                | '['
+                | ']'
+                | '('
+                | ')'
+                | '!'
+                | '<'
+                | '>'
+                | '|'
+                | ':'
+                | '-'
+                | '+'
+                | '='
+                | '\\'
+                | '$'
+                | '^'
+        )
+    })
 }
 
 fn finalize_multi_cursor_edits(
@@ -1419,7 +1443,8 @@ pub(crate) struct PendingHistoryTransaction {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PendingTypingScrollGuard {
     pub(crate) line: usize,
-    pub(crate) visual_row: usize,
+    pub(crate) visual_geometry_ready: bool,
+    pub(crate) viewport_height: f32,
     pub(crate) scroll_offset: f32,
 }
 
@@ -1859,6 +1884,8 @@ pub struct EditorView {
     pub(crate) table_col_handle_areas: Vec<(gpui::Bounds<Pixels>, usize, usize)>,
     /// Table row handle areas: (bounds, table_start_line, visual_row)
     pub(crate) table_row_handle_areas: Vec<(gpui::Bounds<Pixels>, usize, usize)>,
+    /// Top-left table controls: (bounds, table_start_line).
+    pub(crate) table_corner_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     /// Blank-space hit areas beside a table: (bounds, boundary caret).
     pub(crate) table_boundary_caret_areas: Vec<(gpui::Bounds<Pixels>, TableBoundaryCaret)>,
     pub(crate) table_boundary_caret: Option<TableBoundaryCaret>,
@@ -1869,6 +1896,7 @@ pub struct EditorView {
     pub(crate) hovering_table_start: Option<usize>,
     /// Which specific handle the mouse is over: (table_start_line, is_column, index)
     pub(crate) hovering_handle: Option<(usize, bool, usize)>,
+    pub(crate) table_size_hover: Option<(usize, usize)>,
     /// Which specific handle is selected: (table_start_line, is_column, index)
     pub(crate) selected_handle: Option<(usize, bool, usize)>,
     pub(crate) image_cache: HashMap<String, Option<Arc<RenderImage>>>,
@@ -2565,7 +2593,7 @@ impl EditorView {
             code_mode_preview_key: None,
             generated_preview_rerender_task: None,
             generated_preview_rerender_pending: false,
-            last_viewport_height: 600.0,
+            last_viewport_height: 0.0,
             last_viewport_width: init_max_width,
             whiteboard_canvas_bounds: None,
             whiteboard_drag: None,
@@ -2624,12 +2652,14 @@ impl EditorView {
             table_click_areas: Vec::new(),
             table_col_handle_areas: Vec::new(),
             table_row_handle_areas: Vec::new(),
+            table_corner_areas: Vec::new(),
             table_boundary_caret_areas: Vec::new(),
             table_boundary_caret: None,
             table_boundary_drag_origin: None,
             table_drag: None,
             hovering_table_start: None,
             hovering_handle: None,
+            table_size_hover: None,
             selected_handle: None,
             image_cache: HashMap::new(),
             generated_preview_svg_cache: HashMap::new(),
@@ -5253,7 +5283,7 @@ impl EditorView {
                 self.delete_paths_to_trash(&paths, cx);
             }
             DialogAction::InstallUpdate { update } => {
-                self.install_update(update, cx);
+                self.install_update(update);
             }
             DialogAction::GitDiscardEntries { tracked, untracked } => {
                 self.run_git_operation(GitOperation::DiscardPaths { tracked, untracked }, cx);
@@ -5387,6 +5417,23 @@ impl EditorView {
     }
 
     fn insert_pasted_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let normalized = normalize_pasted_newlines(text);
+        let selection = self.cursor.selection_range();
+        let pasted_cell_text = (!self.has_extra_cursors())
+            .then(|| self.table_cursor_cell_range())
+            .flatten()
+            .filter(|cell| selection.start >= cell.start && selection.end <= cell.end)
+            .map(|_| markdown_table_cell_from_paste(&normalized));
+        let markdown_table = if pasted_cell_text.is_none() && self.active_tab_is_markdown() {
+            markdown_table_from_tsv(&normalized)
+        } else {
+            None
+        };
+        let text = pasted_cell_text
+            .as_deref()
+            .or(markdown_table.as_deref())
+            .unwrap_or(&normalized);
+        self.capture_typing_scroll_guard();
         self.checkpoint();
         if self.has_extra_cursors() {
             self.multi_cursor_insert(text);
@@ -9965,6 +10012,28 @@ impl EditorView {
         cx.notify();
     }
 
+    pub(crate) fn table_resize(
+        &mut self,
+        table_start_line: usize,
+        data_rows: usize,
+        columns: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = None;
+        self.table_size_hover = None;
+        if self.block_is_front_matter(table_start_line) {
+            cx.notify();
+            return;
+        }
+        let Some((start, end, lines)) = self.table_lines_for_block(table_start_line) else {
+            cx.notify();
+            return;
+        };
+        let new_lines = crate::table_ops::resize_table_from_picker(&lines, data_rows, columns);
+        self.replace_table_block(start, end, &new_lines, cx);
+        cx.notify();
+    }
+
     pub(crate) fn table_set_column_alignment(
         &mut self,
         table_start_line: usize,
@@ -11719,22 +11788,163 @@ pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
     0
 }
 
+fn normalize_pasted_newlines(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\r') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            normalized.push('\n');
+        } else {
+            normalized.push(character);
+        }
+    }
+    std::borrow::Cow::Owned(normalized)
+}
+
+fn markdown_table_from_tsv(text: &str) -> Option<String> {
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    let rows = text
+        .split('\n')
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let column_count = rows.first()?.len();
+    if rows.len() < 2 || column_count < 2 || rows.iter().any(|row| row.len() != column_count) {
+        return None;
+    }
+
+    let row = |cells: &[&str]| {
+        format!(
+            "| {} |",
+            cells
+                .iter()
+                .map(|cell| escape_markdown_table_cell(cell))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        )
+    };
+
+    let mut output = Vec::with_capacity(rows.len() + 1);
+    output.push(row(&rows[0]));
+    output.push(format!("| {} |", vec!["---"; column_count].join(" | ")));
+    output.extend(rows[1..].iter().map(|cells| row(cells)));
+    Some(output.join("\n"))
+}
+
+fn markdown_table_cell_from_paste(text: &str) -> String {
+    text.split('\n')
+        .map(escape_markdown_table_cell)
+        .collect::<Vec<_>>()
+        .join("<br>")
+}
+
+fn adjacent_html_break_range(
+    text: &str,
+    offset: usize,
+    backwards: bool,
+) -> Option<std::ops::Range<usize>> {
+    for length in [4usize, 5, 6] {
+        let range = if backwards {
+            offset.checked_sub(length)?..offset
+        } else {
+            offset..offset.checked_add(length)?
+        };
+        let candidate = text.get(range.clone())?;
+        if matches!(
+            candidate.to_ascii_lowercase().as_str(),
+            "<br>" | "<br/>" | "<br />"
+        ) {
+            return Some(range);
+        }
+    }
+    None
+}
+
+fn escape_markdown_table_cell(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for (index, character) in text.char_indices() {
+        if character == '|' && !crate::markdown::is_escaped_at(text, index) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        EditorView, LazyMarkdownDecorations, SparseLineGeometry, classify_file_kind_for_bytes,
-        compute_incremental_markdown_decorations, edit_may_change_leading_indent,
-        editor_can_start_content_edit, editor_is_read_only, generated_preview_intersects_range,
-        heading_matches_anchor, line_display_transfer_line_bounds,
-        markdown_syntax_expansion_allowed, new_lazy_markdown_decorations,
-        normalize_ordered_list_numbers_in_buffer, parse_lazy_markdown_range,
-        resolve_markdown_target_path, should_use_lazy_markdown_reparse, split_external_paths,
-        split_markdown_target, text_tab_is_dirty, unique_import_path,
+        EditorView, LazyMarkdownDecorations, SparseLineGeometry, adjacent_html_break_range,
+        classify_file_kind_for_bytes, compute_incremental_markdown_decorations,
+        edit_may_change_leading_indent, editor_can_start_content_edit, editor_is_read_only,
+        generated_preview_intersects_range, heading_matches_anchor,
+        line_display_transfer_line_bounds, markdown_syntax_expansion_allowed,
+        markdown_table_cell_from_paste, markdown_table_from_tsv, new_lazy_markdown_decorations,
+        normalize_ordered_list_numbers_in_buffer, normalize_pasted_newlines,
+        parse_lazy_markdown_range, resolve_markdown_target_path, should_use_lazy_markdown_reparse,
+        split_external_paths, split_markdown_target, text_tab_is_dirty, unique_import_path,
     };
     use crate::buffer::Buffer;
     use crate::markdown::{BlockType, parse_decorations};
+
+    #[test]
+    fn pasted_text_normalizes_all_newline_conventions() {
+        assert_eq!(normalize_pasted_newlines("1\r2"), "1\n2");
+        assert_eq!(normalize_pasted_newlines("1\r\n2"), "1\n2");
+        assert_eq!(normalize_pasted_newlines("1\r2\n3\r\n4"), "1\n2\n3\n4");
+        assert!(matches!(
+            normalize_pasted_newlines("1\n2"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn rectangular_tsv_becomes_a_markdown_table() {
+        assert_eq!(
+            markdown_table_from_tsv("Name\tValue\nAlpha\t1\nBeta\t2\n").as_deref(),
+            Some("| Name | Value |\n| --- | --- |\n| Alpha | 1 |\n| Beta | 2 |")
+        );
+        assert_eq!(
+            markdown_table_from_tsv("A|B\tC\\D\n1\t2").as_deref(),
+            Some("| A\\|B | C\\D |\n| --- | --- |\n| 1 | 2 |")
+        );
+    }
+
+    #[test]
+    fn ambiguous_tabbed_text_stays_plain() {
+        assert_eq!(markdown_table_from_tsv("label\tvalue"), None);
+        assert_eq!(markdown_table_from_tsv("A\tB\n1"), None);
+        assert_eq!(markdown_table_from_tsv("one column\nsecond row"), None);
+    }
+
+    #[test]
+    fn table_cell_paste_preserves_the_cell_boundary() {
+        assert_eq!(
+            markdown_table_cell_from_paste("first\nsecond|third\\four"),
+            "first<br>second\\|third\\four"
+        );
+        assert_eq!(
+            markdown_table_cell_from_paste(r"already\|escaped"),
+            r"already\|escaped"
+        );
+        assert_eq!(markdown_table_cell_from_paste("A\tB\n1\t2"), "A\tB<br>1\t2");
+    }
+
+    #[test]
+    fn html_breaks_are_deleted_as_one_table_cell_unit() {
+        let text = "one<br>two<BR />three";
+        assert_eq!(adjacent_html_break_range(text, 7, true), Some(3..7));
+        assert_eq!(adjacent_html_break_range(text, 10, false), Some(10..16));
+        assert_eq!(adjacent_html_break_range(text, 3, true), None);
+    }
 
     #[test]
     fn cursor_blink_switches_only_between_opacity_endpoints() {
@@ -12002,6 +12212,22 @@ mod tests {
     }
 
     #[test]
+    fn incremental_markdown_refreshes_strikethrough_when_delimiter_closes() {
+        assert!(assert_incremental_matches_full(
+            "before\n\n~~1~\n\nafter\n",
+            "before\n\n~~1~~\n\nafter\n",
+        ));
+    }
+
+    #[test]
+    fn incremental_markdown_keeps_adjacent_invalid_strikethrough_lines_isolated() {
+        assert!(assert_incremental_matches_full(
+            "before\n\n~~1 ~~\n~~ 1~\n\nafter\n",
+            "before\n\n~~1 ~~\n~~ 1~~\n\nafter\n",
+        ));
+    }
+
+    #[test]
     fn markdown_plain_transfer_rejects_edits_on_lines_with_inline_delimiters() {
         assert!(
             super::markdown_plain_edit_can_change_inline_delimiter_flanking(" ", "**生态改进：**")
@@ -12010,6 +12236,9 @@ mod tests {
         assert!(super::markdown_plain_edit_can_change_inline_delimiter_flanking("text", "**"));
         assert!(super::markdown_plain_edit_can_change_inline_delimiter_flanking(" ", "*重点：*"));
         assert!(super::markdown_plain_edit_can_change_inline_delimiter_flanking(" ", "~~删除：~~"));
+        assert!(super::markdown_plain_edit_can_change_inline_delimiter_flanking(" ", "#title"));
+        assert!(super::markdown_plain_edit_can_change_inline_delimiter_flanking("x", ">quote"));
+        assert!(super::markdown_plain_edit_can_change_inline_delimiter_flanking("x", "a|b"));
         assert!(
             super::markdown_plain_edit_can_change_inline_delimiter_flanking(
                 "高",

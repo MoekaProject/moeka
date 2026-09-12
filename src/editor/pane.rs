@@ -356,7 +356,7 @@ pane_state! {
     (code_mode_preview_key, Option<String>, None),
     (generated_preview_rerender_task, Option<Task<()>>, None),
     (generated_preview_rerender_pending, bool, false),
-    (last_viewport_height, f32, 600.0),
+    (last_viewport_height, f32, 0.0),
     (last_viewport_width, f32, 800.0),
     // ── Whiteboard canvas interaction ──
     (whiteboard_canvas_bounds, Option<Bounds<Pixels>>, None),

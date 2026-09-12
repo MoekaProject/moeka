@@ -15,7 +15,7 @@ fn nearest_boundary_index(boundaries: &[f32], coordinate: f32) -> Option<usize> 
         .map(|(index, _)| index)
 }
 
-fn visible_table_line_indices(
+pub(super) fn visible_table_line_indices(
     decorations: &[LineDecoration],
     table_start: usize,
 ) -> Option<Vec<usize>> {
@@ -109,6 +109,29 @@ impl EditorView {
         )
     }
 
+    pub(crate) fn table_visible_word_target(
+        &self,
+        offset: usize,
+        raw_target: usize,
+        forward: bool,
+    ) -> Option<usize> {
+        let (_, source_line, column) = self.table_cell_for_offset(offset)?;
+        let table_info = self.decorations.get(source_line)?.table_info.as_ref()?;
+        let local_range = table_info.cell_ranges.get(column)?;
+        let line_start = self.buffer.line_start(source_line);
+        let cell_range = line_start + local_range.start..line_start + local_range.end;
+        if raw_target >= cell_range.start && raw_target <= cell_range.end {
+            return Some(raw_target);
+        }
+        self.table_visible_horizontal_target(
+            if forward {
+                cell_range.end
+            } else {
+                cell_range.start
+            },
+            forward,
+        )
+    }
     pub(crate) fn sync_table_boundary_caret_after_reparse(&mut self) {
         if self.cursor.has_selection() || self.has_extra_cursors() {
             self.table_boundary_caret = None;
@@ -258,6 +281,12 @@ impl EditorView {
                     side: TableBoundarySide::Below,
                 });
             }
+        }
+        if let Some(target) = self.table_visible_horizontal_target(self.cursor.offset, forward) {
+            self.cursor.move_to(target, &self.buffer);
+            self.table_boundary_caret = None;
+            self.reset_cursor_visual_targeting();
+            return true;
         }
         let Some(table_info) = self
             .decorations
@@ -563,12 +592,16 @@ impl EditorView {
     /// `(table_start_line, source_line, column)` of the cell holding the caret,
     /// or `None` when the caret is outside a (non front matter) table body.
     pub(crate) fn table_cursor_cell(&self) -> Option<(usize, usize, usize)> {
-        let line = self.cursor_line();
+        self.table_cell_for_offset(self.cursor.offset)
+    }
+
+    pub(crate) fn table_cell_for_offset(&self, offset: usize) -> Option<(usize, usize, usize)> {
+        let (line, col) = self.buffer.offset_to_line_col(offset);
         let table_info = self.decorations.get(line)?.table_info.as_ref()?;
         if table_info.is_separator || table_info.is_front_matter {
             return None;
         }
-        let col = self.cursor.offset - self.buffer.line_start(line);
+        let col = col.min(self.buffer.line_content(line).len());
         let index = table_info
             .cell_ranges
             .iter()
@@ -585,6 +618,154 @@ impl EditorView {
             .get(column)?;
         let line_start = self.buffer.line_start(line);
         Some(line_start + range.start..line_start + range.end)
+    }
+
+    pub(crate) fn table_visible_horizontal_target(
+        &self,
+        offset: usize,
+        forward: bool,
+    ) -> Option<usize> {
+        let (line, column) = self.buffer.offset_to_line_col(offset);
+        let table_info = self.decorations.get(line)?.table_info.as_ref()?;
+        if table_info.is_front_matter {
+            return None;
+        }
+        let table_start = table_info.table_start_line;
+        let rows = visible_table_line_indices(&self.decorations, table_start)?;
+        let row = rows.iter().position(|candidate| *candidate == line)?;
+        let line_start = self.buffer.line_start(line);
+
+        if let Some(cell) = table_info
+            .cell_ranges
+            .iter()
+            .position(|range| (range.start..=range.end).contains(&column))
+        {
+            let range = &table_info.cell_ranges[cell];
+            let absolute_range = line_start + range.start..line_start + range.end;
+            if forward && offset < absolute_range.end {
+                if let Some(tag) =
+                    super::adjacent_html_break_range(self.buffer.text(), offset, false)
+                    && tag.end <= absolute_range.end
+                {
+                    return Some(tag.end);
+                }
+                return Some(
+                    self.buffer
+                        .next_grapheme_boundary(offset)
+                        .min(absolute_range.end),
+                );
+            }
+            if !forward && offset > absolute_range.start {
+                if let Some(tag) =
+                    super::adjacent_html_break_range(self.buffer.text(), offset, true)
+                    && tag.start >= absolute_range.start
+                {
+                    return Some(tag.start);
+                }
+                return Some(
+                    self.buffer
+                        .prev_grapheme_boundary(offset)
+                        .max(absolute_range.start),
+                );
+            }
+            if forward && cell + 1 < table_info.cell_ranges.len() {
+                return Some(line_start + table_info.cell_ranges[cell + 1].start);
+            }
+            if !forward && cell > 0 {
+                return Some(line_start + table_info.cell_ranges[cell - 1].end);
+            }
+        }
+
+        let target_line = if forward {
+            rows.get(row + 1).copied()
+        } else {
+            row.checked_sub(1)
+                .and_then(|index| rows.get(index).copied())
+        }?;
+        let target_info = self.decorations.get(target_line)?.table_info.as_ref()?;
+        let range = if forward {
+            target_info.cell_ranges.first()?
+        } else {
+            target_info.cell_ranges.last()?
+        };
+        Some(self.buffer.line_start(target_line) + if forward { range.start } else { range.end })
+    }
+
+    pub(crate) fn table_visible_selection_target(&self, anchor: usize, target: usize) -> usize {
+        let (anchor_line, _) = self.buffer.offset_to_line_col(anchor);
+        let Some(anchor_table) = self
+            .decorations
+            .get(anchor_line)
+            .and_then(|decoration| decoration.table_info.as_ref())
+            .filter(|table_info| !table_info.is_front_matter)
+        else {
+            return target;
+        };
+        let (target_line, target_column) = self.buffer.offset_to_line_col(target);
+        if target_line < anchor_table.table_start_line || target_line >= anchor_table.table_end_line
+        {
+            return target;
+        }
+        let Some(target_info) = self
+            .decorations
+            .get(target_line)
+            .and_then(|decoration| decoration.table_info.as_ref())
+        else {
+            return target;
+        };
+        let forward = target >= anchor;
+        if target_info.is_separator {
+            let Some(rows) =
+                visible_table_line_indices(&self.decorations, anchor_table.table_start_line)
+            else {
+                return target;
+            };
+            let target_visible_line = if forward {
+                rows.iter().copied().find(|line| *line > target_line)
+            } else {
+                rows.iter().copied().rev().find(|line| *line < target_line)
+            };
+            let Some(target_visible_line) = target_visible_line else {
+                return target;
+            };
+            let Some(info) = self.decorations[target_visible_line].table_info.as_ref() else {
+                return target;
+            };
+            let Some(range) = (if forward {
+                info.cell_ranges.first()
+            } else {
+                info.cell_ranges.last()
+            }) else {
+                return target;
+            };
+            return self.buffer.line_start(target_visible_line)
+                + if forward { range.start } else { range.end };
+        }
+
+        let line_start = self.buffer.line_start(target_line);
+        if target_info
+            .cell_ranges
+            .iter()
+            .any(|range| (range.start..=range.end).contains(&target_column))
+        {
+            return target;
+        }
+        if forward {
+            target_info
+                .cell_ranges
+                .iter()
+                .find(|range| range.start > target_column)
+                .or_else(|| target_info.cell_ranges.last())
+                .map_or(target, |range| line_start + range.start)
+        } else {
+            target_info
+                .cell_ranges
+                .iter()
+                .rev()
+                .find(|range| range.end < target_column)
+                .or_else(|| target_info.cell_ranges.first())
+                .map_or(target, |range| line_start + range.end)
+        }
     }
 
     pub(crate) fn move_table_cursor_to_cell_edge(&mut self, start: bool) -> bool {
@@ -662,33 +843,6 @@ impl EditorView {
             return false;
         };
         if !self.select_table_cell(target_line, target_column) {
-            return false;
-        }
-        self.navigate_scroll_to_cursor();
-        self.pause_blinking(cx);
-        cx.notify();
-        true
-    }
-
-    /// Enter inside a table selects the cell directly below, appending a row
-    /// when the caret is already on the last one.
-    pub(crate) fn table_move_to_cell_below(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some((table_start, line, column)) = self.table_cursor_cell() else {
-            return false;
-        };
-        let Some(rows) = visible_table_line_indices(&self.decorations, table_start) else {
-            return false;
-        };
-        let Some(row) = rows.iter().position(|candidate| *candidate == line) else {
-            return false;
-        };
-        if row + 1 >= rows.len() {
-            self.table_insert_row(table_start, row, false, cx);
-        }
-        let Some(target_line) = self.table_source_line_for_visual_row(table_start, row + 1) else {
-            return false;
-        };
-        if !self.select_table_cell(target_line, column) {
             return false;
         }
         self.navigate_scroll_to_cursor();

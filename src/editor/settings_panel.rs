@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, Context, CursorStyle, Focusable, MouseButton, ScrollHandle, SharedString, Window,
-    div, prelude::*, px, relative, svg,
+    div, prelude::*, px, svg,
 };
 
 use crate::checkbox::{Checkbox, CheckboxColors};
@@ -118,6 +118,22 @@ enum SettingsOptionAction {
 // ── Settings panel rendering ────────────────────────────────────────
 
 impl EditorView {
+    fn settings_content_width(&self, window_width: f32) -> f32 {
+        let pane_width = self
+            .pane_bounds
+            .get(&self.current_pane_id())
+            .map(|bounds| f32::from(bounds.size.width))
+            .filter(|width| *width > 0.0)
+            .unwrap_or_else(|| {
+                (window_width
+                    - self.sidebar_width()
+                    - self.right_panel_width()
+                    - 2.0 * self.styles.window.window_border_width_px)
+                    .max(1.0)
+            });
+        pane_width.min(self.scaled(640.0)).max(1.0)
+    }
+
     pub(crate) fn render_settings_panel(
         &mut self,
         window: &mut Window,
@@ -126,6 +142,7 @@ impl EditorView {
         let bg = self.styles.editor.editor_bg;
         let sps = &self.styles.settings_panel;
         let version_label = format!("v{APP_VERSION}");
+        let content_width = self.settings_content_width(f32::from(window.bounds().size.width));
 
         div()
             .id("settings-panel")
@@ -139,6 +156,8 @@ impl EditorView {
             .text_color(sps.settings_primary_text_color)
             .child(
                 div()
+                    .w(px(content_width))
+                    .flex_none()
                     .max_w(px(self.scaled(640.0)))
                     .mx_auto()
                     .py(px(self.scaled(60.0)))
@@ -428,6 +447,8 @@ impl EditorView {
         let current = self.date_time_format_preview_label(self.app_settings.date_time_format());
 
         div()
+            .w_full()
+            .flex_none()
             .flex()
             .flex_col()
             .gap(px(self.scaled(12.0)))
@@ -456,6 +477,8 @@ impl EditorView {
         };
 
         div()
+            .w_full()
+            .flex_none()
             .flex()
             .flex_col()
             .gap(px(self.scaled(12.0)))
@@ -1197,6 +1220,8 @@ impl EditorView {
         let option_hover_bg = settings_styles.settings_theme_option_hover_bg;
 
         div()
+            .w_full()
+            .flex_none()
             .flex()
             .flex_col()
             .gap(px(self.scaled(16.0)))
@@ -1341,10 +1366,11 @@ impl EditorView {
             )
             .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .justify_between()
+                    .w_full()
+                    .flex_none()
+                    .grid()
+                    .grid_cols(4)
+                    .gap_x(px(self.scaled(8.0)))
                     .gap_y(px(self.scaled(8.0)))
                     .children(
                         themes
@@ -1384,8 +1410,8 @@ impl EditorView {
 
         div()
             .id(SharedString::from(format!("theme-{}", kind.label())))
-            // Four cards per row; space-between distributes the remaining 6%.
-            .w(relative(0.235))
+            .w_full()
+            .min_w(px(0.0))
             .py(px(self.scaled(8.0)))
             .px(px(self.scaled(8.0)))
             .flex()
@@ -1485,6 +1511,8 @@ impl EditorView {
         let monospace = self.styles.editor.editor_monospace_font_family;
 
         div()
+            .w_full()
+            .flex_none()
             .flex()
             .flex_col()
             .gap(px(self.scaled(12.0)))
@@ -1666,6 +1694,7 @@ impl EditorView {
         let control = self.render_picker_control(current_value, role, option_index, cx);
 
         div()
+            .w_full()
             .flex()
             .flex_row()
             .items_center()
@@ -1673,6 +1702,8 @@ impl EditorView {
             .child(
                 div()
                     .w(px(self.scaled(120.0)))
+                    .flex_none()
+                    .overflow_hidden()
                     .text_size(px(self.scaled(13.0)))
                     .text_color(text_secondary)
                     .child(label.to_string()),
@@ -1702,6 +1733,7 @@ impl EditorView {
 
         div()
             .flex_1()
+            .min_w(px(0.0))
             .on_children_prepainted({
                 let bounds_cell = bounds_cell.clone();
                 move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
@@ -1727,6 +1759,8 @@ impl EditorView {
                     .bg(bg)
                     .text_size(px(self.scaled(13.0)))
                     .text_color(text_primary)
+                    .overflow_hidden()
+                    .truncate()
                     .cursor(CursorStyle::Arrow)
                     .hover(move |style| style.bg(hover_bg))
                     .child(current_value)
@@ -2703,9 +2737,8 @@ impl EditorView {
         let sidebar_w = self.sidebar_width();
         let right_panel_w = self.right_panel_width();
         let pane_w = self.last_window_width - sidebar_w - right_panel_w - 2.0 * border_w;
-        let settings_content_max_w = self.scaled(640.0);
         let settings_px = self.scaled(40.0);
-        let settings_content_w = settings_content_max_w.min(pane_w);
+        let settings_content_w = self.settings_content_width(self.last_window_width);
         // mx_auto centers the content within the pane
         let settings_left = sidebar_w + border_w + (pane_w - settings_content_w) / 2.0;
         let button_left = settings_left + settings_px + self.scaled(120.0) + self.scaled(12.0);
@@ -2729,8 +2762,8 @@ impl EditorView {
             anchor: button_bounds,
             viewport_width: self.last_window_width,
             viewport_height: self.last_window_height,
-            desired_width: f32::from(button_bounds.size.width),
-            match_anchor_width: true,
+            desired_width: f32::from(button_bounds.size.width).max(self.scaled(260.0)),
+            match_anchor_width: false,
             row_count: picker.filtered.len(),
         };
 

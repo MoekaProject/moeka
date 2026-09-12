@@ -225,7 +225,7 @@ pub(crate) struct AppSettings {
     pub show_whitespace: bool,
     #[serde(default = "default_highlight_line_background")]
     pub highlight_line_background: bool,
-    #[serde(default)]
+    #[serde(default = "default_simple_mode")]
     pub simple_mode: bool,
     #[serde(default = "default_format_toolbar_visible")]
     pub format_toolbar_visible: bool,
@@ -370,8 +370,12 @@ fn default_highlight_line_background() -> bool {
     true
 }
 
+fn default_simple_mode() -> bool {
+    true
+}
+
 fn default_attachment_location() -> String {
-    "current_file".to_string()
+    "workspace_folder".to_string()
 }
 
 fn default_attachment_folder() -> String {
@@ -433,7 +437,7 @@ impl Default for AppSettings {
             outline_rail_visible: default_outline_rail_visible(),
             show_whitespace: default_show_whitespace(),
             highlight_line_background: default_highlight_line_background(),
-            simple_mode: false,
+            simple_mode: default_simple_mode(),
             format_toolbar_visible: default_format_toolbar_visible(),
             auto_save: false,
             attachment_location: default_attachment_location(),
@@ -828,6 +832,20 @@ mod tests {
         assert_eq!(settings.body_latin_font, expected);
         assert_eq!(settings.body_cjk_font, expected);
         assert_eq!(settings.code_font, expected);
+    }
+
+    #[test]
+    fn defaults_enable_simple_mode_and_use_workspace_attachments_folder() {
+        let settings = AppSettings::default();
+
+        assert!(settings.simple_mode);
+        assert_eq!(settings.attachment_location, "workspace_folder");
+        assert_eq!(settings.attachment_folder, "attachments");
+
+        let missing_fields: AppSettings = serde_yaml::from_str("{}\n").expect("default settings");
+        assert!(missing_fields.simple_mode);
+        assert_eq!(missing_fields.attachment_location, "workspace_folder");
+        assert_eq!(missing_fields.attachment_folder, "attachments");
     }
 
     #[test]

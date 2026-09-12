@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -135,10 +136,8 @@ impl gpui::Element for SelectionToolbarHoverRegion {
             }
             let hovered = hitbox.is_hovered(window) && !cx.has_active_drag();
             editor.update(cx, |this, cx| {
-                if hovered {
-                    if let Some(kind) = &menu_kind {
-                        this.open_selection_toolbar_menu(kind.clone(), Some(bounds), cx);
-                    }
+                if hovered && let Some(kind) = &menu_kind {
+                    this.open_selection_toolbar_menu(kind.clone(), Some(bounds), cx);
                 }
                 this.update_selection_toolbar_menu_hover(region, hovered, &hitbox, window, cx);
             });
@@ -186,7 +185,6 @@ impl FormatToolbarMetrics {
                 _ => self.button,
             })
             .sum();
-        // Include separator margins, inter-entry gaps and both full borders.
         content
             + entries.len().saturating_sub(1) as f32 * self.gap
             + 2.0 * (self.padding + self.border)
@@ -252,8 +250,6 @@ fn format_toolbar_layout(
     if metrics.width(&entries) > available_width {
         entries = vec![MoreMenu];
     }
-    // Do not clamp the natural width: the geometry owner must reject even a
-    // single More button if it cannot fit, rather than painting clipped controls.
     let width = metrics.width(&entries);
     (entries, width)
 }
@@ -430,6 +426,7 @@ impl EditorView {
         let had_submenu_aim = self.context_submenu_aim.take().is_some();
         let had_submenu_hovered = std::mem::replace(&mut self.context_submenu_hovered, false);
         let had_pane_target = self.context_menu_pane_target.take().is_some();
+        self.table_size_hover = None;
         if had_menu || had_submenu || had_submenu_aim || had_submenu_hovered || had_pane_target {
             if let Some(start) = self.slash_menu_start.take() {
                 let end = self.cursor.offset;
@@ -1466,7 +1463,6 @@ impl EditorView {
     }
 
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.selection_toolbar_menu_hover = SelectionToolbarMenuHover::default();
         if self.context_menu_pane_target.take().is_some() {
             cx.notify();
         }
@@ -1556,38 +1552,10 @@ impl EditorView {
         action: FormatMenuAction,
         cx: &mut Context<Self>,
     ) {
-        if action == FormatMenuAction::Copy {
-            if let Some(range) = self.table_boundary_block_range() {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                    self.buffer.text_for_range(range).to_string(),
-                ));
-            } else {
+        if self.active_tab_is_read_only() {
+            if action == FormatMenuAction::Copy {
                 self.copy_selection_to_clipboard(cx);
             }
-            self.close_context_menu(cx);
-            return;
-        }
-        if !self.begin_content_edit(cx) {
-            self.close_context_menu(cx);
-            return;
-        }
-        if !matches!(action, FormatMenuAction::Cut | FormatMenuAction::Paste)
-            && self.table_boundary_caret.is_some()
-            && !self.insert_line_at_table_boundary(cx)
-        {
-            self.close_context_menu(cx);
-            return;
-        }
-        if action == FormatMenuAction::Cut
-            && let Some(boundary) = self.table_boundary_caret
-            && let Some(range) = self.table_boundary_block_range()
-        {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                self.buffer.text_for_range(range).to_string(),
-            ));
-            self.table_boundary_caret = None;
-            self.table_boundary_drag_origin = None;
-            self.table_delete_table(boundary.table_start_line, cx);
             self.close_context_menu(cx);
             return;
         }
@@ -2282,7 +2250,6 @@ impl EditorView {
         shortcut: Option<SharedString>,
         is_selected: bool,
         is_active: bool,
-        is_enabled: bool,
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
@@ -2292,7 +2259,6 @@ impl EditorView {
             shortcut,
             is_selected,
             is_active,
-            is_enabled,
             FormatMenuHoverBehavior::None,
             cx,
             handler,
@@ -2306,7 +2272,6 @@ impl EditorView {
         shortcut: Option<SharedString>,
         is_selected: bool,
         is_active: bool,
-        is_enabled: bool,
         hover_behavior: FormatMenuHoverBehavior,
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
@@ -2349,7 +2314,7 @@ impl EditorView {
             .justify_between()
             .text_size(px(self.scaled(ms.menu_item_font_size_px)))
             .text_color(text_color)
-            .opacity(if is_enabled { 1.0 } else { 0.45 })
+            .hover(move |s| s.bg(hover_bg))
             .cursor(CursorStyle::Arrow)
             .child(
                 div()
@@ -2388,9 +2353,8 @@ impl EditorView {
                     )
                 }
             })
-            .when(is_enabled, |this| this.hover(move |s| s.bg(hover_bg)))
             .when(
-                is_enabled && !matches!(hover_behavior, FormatMenuHoverBehavior::None),
+                !matches!(hover_behavior, FormatMenuHoverBehavior::None),
                 |this| {
                     this.on_mouse_move(cx.listener(
                         move |this, event: &MouseMoveEvent, _window, cx| match hover_behavior {
@@ -2409,17 +2373,15 @@ impl EditorView {
                     ))
                 },
             )
-            .when(is_enabled, |this| {
-                this.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _event, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                        this.suppress_editor_mouse_up_for_current_menu_event(cx);
-                        handler(this, window, cx);
-                    }),
-                )
-            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
+                    handler(this, window, cx);
+                }),
+            )
             .into_any_element()
     }
 
@@ -2432,8 +2394,6 @@ impl EditorView {
     ) -> AnyElement {
         let ms = &self.styles.context_menu;
         let wss = &self.styles.workspace_switcher;
-        let is_enabled = matches!(submenu_kind, ContextMenuKind::Export { .. })
-            || !self.active_tab_is_read_only();
         let is_open = self.context_submenu.as_ref() == Some(&submenu_kind);
         let icon_size = self.scaled(ms.menu_format_icon_size_px);
         // Export lives in the sidebar-style menus, the rest in the format menu;
@@ -2474,7 +2434,7 @@ impl EditorView {
             .justify_between()
             .text_size(px(self.scaled(ms.menu_item_font_size_px)))
             .text_color(text_color)
-            .opacity(if is_enabled { 1.0 } else { 0.45 })
+            .hover(move |style| style.bg(hover_bg))
             .cursor(CursorStyle::Arrow)
             .child(
                 div()
@@ -2506,34 +2466,29 @@ impl EditorView {
                     .size(px(arrow_size))
                     .text_color(ms.menu_shortcut_text_color),
             )
-            .when(is_enabled, |this| {
-                this.hover(move |style| style.bg(hover_bg))
-            })
-            .when(is_enabled, |this| {
-                this.on_mouse_move({
-                    let submenu_kind = submenu_kind.clone();
-                    cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
-                        this.context_submenu_aim = Some(ContextSubmenuAim {
-                            origin: event.position,
-                        });
-                        this.context_submenu_hovered = false;
-                        if this.context_submenu.as_ref() != Some(&submenu_kind) {
-                            this.context_submenu = Some(submenu_kind.clone());
-                            cx.notify();
-                        }
-                    })
-                })
-                .on_mouse_down(MouseButton::Left, {
-                    let submenu_kind = submenu_kind.clone();
-                    cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                        cx.stop_propagation();
-                        this.context_submenu_aim = Some(ContextSubmenuAim {
-                            origin: event.position,
-                        });
-                        this.context_submenu_hovered = false;
+            .on_mouse_move({
+                let submenu_kind = submenu_kind.clone();
+                cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                    this.context_submenu_aim = Some(ContextSubmenuAim {
+                        origin: event.position,
+                    });
+                    this.context_submenu_hovered = false;
+                    if this.context_submenu.as_ref() != Some(&submenu_kind) {
                         this.context_submenu = Some(submenu_kind.clone());
                         cx.notify();
-                    })
+                    }
+                })
+            })
+            .on_mouse_down(MouseButton::Left, {
+                let submenu_kind = submenu_kind.clone();
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.context_submenu_aim = Some(ContextSubmenuAim {
+                        origin: event.position,
+                    });
+                    this.context_submenu_hovered = false;
+                    this.context_submenu = Some(submenu_kind.clone());
+                    cx.notify();
                 })
             })
             .into_any_element();
@@ -3252,7 +3207,6 @@ impl EditorView {
                     None,
                     false,
                     is_active,
-                    !self.active_tab_is_read_only(),
                     cx,
                     move |this, _, cx| {
                         this.execute_format_menu_action(action, cx);
@@ -3278,7 +3232,6 @@ impl EditorView {
                 None,
                 false,
                 false,
-                !self.active_tab_is_read_only(),
                 cx,
                 move |this, _, cx| {
                     this.execute_format_menu_action(action, cx);
@@ -3296,7 +3249,6 @@ impl EditorView {
                 None,
                 false,
                 false,
-                true,
                 cx,
                 move |this, _, cx| {
                     this.copy_markdown_image_to_clipboard(image_source.clone(), cx);
@@ -3314,7 +3266,6 @@ impl EditorView {
                     None,
                     false,
                     false,
-                    true,
                     cx,
                     move |this, _, cx| {
                         this.close_context_menu(cx);
@@ -3332,7 +3283,6 @@ impl EditorView {
                     None,
                     false,
                     false,
-                    true,
                     cx,
                     move |this, _, cx| {
                         this.context_menu = None;
@@ -3352,12 +3302,12 @@ impl EditorView {
         opacity: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let fts = &self.styles.format_toolbar;
+        let active_actions = self.active_format_actions();
         let interactive = self
             .selection_toolbar_animation
             .as_ref()
             .is_some_and(|state| state.visible);
-        let fts = &self.styles.format_toolbar;
-        let active_actions = self.active_format_actions();
         let metrics = FormatToolbarMetrics {
             button: self.scaled(fts.format_toolbar_btn_size_px),
             separator: self.scaled(
@@ -3378,8 +3328,6 @@ impl EditorView {
         let mut bar = div()
             .id("format-toolbar")
             .w(px(natural_width))
-            // min_w wins when even More cannot fit: the owner measures and
-            // rejects the whole bar instead of showing clipped controls.
             .min_w(px(natural_width))
             .max_w(px(available_width))
             .flex_none()
@@ -3397,14 +3345,6 @@ impl EditorView {
             .border_color(fts.format_toolbar_border_color)
             .rounded(px(self.scaled(self.styles.context_menu.menu_radius_px)))
             .when(self.theme_kind.is_dark(), |this| this.shadow_sm())
-            .when(!self.theme_kind.is_dark(), |this| {
-                this.shadow(vec![gpui::BoxShadow {
-                    color: gpui::hsla(0.0, 0.0, 0.0, 0.06),
-                    offset: gpui::point(px(0.0), px(self.scaled(1.0))),
-                    blur_radius: px(self.scaled(3.0)),
-                    spread_radius: px(0.0),
-                }])
-            })
             .cursor(CursorStyle::Arrow)
             .when(interactive, |this| {
                 this.on_mouse_down(
@@ -3414,19 +3354,6 @@ impl EditorView {
                         cx.stop_propagation();
                     }),
                 )
-                .on_mouse_down(MouseButton::Right, |_, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                })
-                .on_mouse_down(MouseButton::Middle, |_, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                })
-                .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_mouse_up(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-                .on_mouse_up(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
-                .on_mouse_move(|_, _, cx| cx.stop_propagation())
-                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             });
 
         for entry in entries {
@@ -3484,7 +3411,6 @@ impl EditorView {
             .selection_toolbar_animation
             .as_ref()
             .is_some_and(|state| state.visible);
-        let is_enabled = !self.active_tab_is_read_only();
         let group_name = SharedString::from(format!("format-toolbar-{label}"));
         let hover_color = fts.format_toolbar_icon_hover_color;
         let icon_color = if is_active {
@@ -3505,23 +3431,18 @@ impl EditorView {
             .items_center()
             .justify_center()
             .cursor(CursorStyle::Arrow)
-            .opacity(if is_enabled { 1.0 } else { 0.4 })
             .when_some(icon, |this, icon| {
                 this.child(
                     svg()
                         .path(icon)
                         .size(px(icon_size))
                         .text_color(icon_color)
-                        .when(is_enabled, |this| {
-                            this.group_hover(group_name.clone(), move |style| {
-                                style.text_color(hover_color)
-                            })
+                        .group_hover(group_name.clone(), move |style| {
+                            style.text_color(hover_color)
                         }),
                 )
             })
             .when(icon.is_none(), |this| {
-                // Geometric dots avoid a font-dependent ellipsis width and
-                // require no new asset for the More button.
                 this.child(
                     div()
                         .flex()
@@ -3529,14 +3450,8 @@ impl EditorView {
                         .children((0..3).map(|_| {
                             div()
                                 .size(px(self.scaled(2.0)))
-                                .flex_none()
                                 .rounded_full()
                                 .bg(icon_color)
-                                .when(is_enabled, |this| {
-                                    this.group_hover(group_name.clone(), move |style| {
-                                        style.bg(hover_color)
-                                    })
-                                })
                         })),
                 )
             })
@@ -3546,22 +3461,10 @@ impl EditorView {
                     cx.listener(move |this, _, window, cx| {
                         window.prevent_default();
                         cx.stop_propagation();
-                        if is_enabled
-                            && !this.active_tab_is_read_only()
-                            && this
-                                .selection_toolbar_animation
-                                .as_ref()
-                                .is_some_and(|state| state.visible)
-                        {
-                            on_click(this, cx);
-                        }
+                        on_click(this, cx);
                     }),
                 )
             });
-
-        if !interactive {
-            return button.into_any_element();
-        }
 
         tooltip::with_tooltip_above(button, cx.entity().clone(), label, shortcut)
     }
@@ -3582,7 +3485,7 @@ impl EditorView {
         bounds: Option<Bounds<Pixels>>,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_read_only() || !self.selection_toolbar_format_session() {
+        if !self.selection_toolbar_format_session() {
             return;
         }
         self.selection_toolbar_menu_hover.close_task = None;
@@ -3612,8 +3515,6 @@ impl EditorView {
             return;
         }
         let state = &mut self.selection_toolbar_menu_hover;
-        // Hitbox IDs are frame-local: removed or resized-away triggers cannot
-        // leave a stale hovered region keeping the menu open indefinitely.
         state.regions.retain(|_, hitbox| hitbox.is_hovered(window));
         if hovered {
             state.regions.insert(region, hitbox.clone());
@@ -3624,23 +3525,20 @@ impl EditorView {
             state.close_task = None;
             return;
         }
-        if state.close_task.is_some() {
-            return;
+        if state.close_task.is_none() {
+            state.close_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.selection_toolbar_owns_hover_menu()
+                        && this.selection_toolbar_menu_hover.regions.is_empty()
+                    {
+                        this.close_context_menu_immediately(cx);
+                    }
+                });
+            }));
         }
-        // Keep the menu alive while crossing the gap between trigger and panel.
-        // Reopening any menu drops this task, so it cannot dismiss a newer menu.
-        state.close_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(200))
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.selection_toolbar_owns_hover_menu()
-                    && this.selection_toolbar_menu_hover.regions.is_empty()
-                {
-                    this.close_context_menu_immediately(cx);
-                }
-            });
-        }));
     }
 
     fn render_format_toolbar_heading_button(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -3660,13 +3558,6 @@ impl EditorView {
             },
         );
 
-        if !self
-            .selection_toolbar_animation
-            .as_ref()
-            .is_some_and(|state| state.visible)
-        {
-            return button;
-        }
         SelectionToolbarHoverRegion {
             child: div()
                 .flex_none()
@@ -3699,14 +3590,6 @@ impl EditorView {
                 );
             },
         );
-
-        if !self
-            .selection_toolbar_animation
-            .as_ref()
-            .is_some_and(|state| state.visible)
-        {
-            return button;
-        }
         SelectionToolbarHoverRegion {
             child: div()
                 .flex_none()
@@ -3758,18 +3641,12 @@ impl EditorView {
                     FormatMenuAction::Paste,
                 ),
             ] {
-                let can_start_edit = self.active_tab_can_start_content_edit();
-                let is_enabled = action == FormatMenuAction::Copy
-                    || matches!(action, FormatMenuAction::Cut | FormatMenuAction::Paste)
-                        && can_start_edit
-                    || !self.active_tab_is_read_only();
                 items.push(self.render_format_context_menu_item_with_hover_behavior(
                     &label,
                     None,
                     shortcut,
                     false,
                     false,
-                    is_enabled,
                     FormatMenuHoverBehavior::ClearSubmenu,
                     cx,
                     move |this, _, cx| {
@@ -3787,7 +3664,6 @@ impl EditorView {
                     None,
                     false,
                     false,
-                    true,
                     FormatMenuHoverBehavior::ClearSubmenu,
                     cx,
                     move |this, _, cx| {
@@ -3804,7 +3680,6 @@ impl EditorView {
                     None,
                     false,
                     false,
-                    true,
                     FormatMenuHoverBehavior::ClearSubmenu,
                     cx,
                     move |this, _, cx| {
@@ -3829,7 +3704,6 @@ impl EditorView {
                 None,
                 false,
                 false,
-                true,
                 FormatMenuHoverBehavior::ClearSubmenu,
                 cx,
                 move |this, _, cx| {
@@ -3843,7 +3717,6 @@ impl EditorView {
                 None,
                 false,
                 false,
-                !self.active_tab_is_read_only(),
                 FormatMenuHoverBehavior::ClearSubmenu,
                 cx,
                 move |this, _, cx| {
@@ -3907,7 +3780,6 @@ impl EditorView {
                     shortcut,
                     false,
                     is_active,
-                    !self.active_tab_is_read_only(),
                     FormatMenuHoverBehavior::ClearSubmenu,
                     cx,
                     move |this, _, cx| {
@@ -3939,7 +3811,6 @@ impl EditorView {
                     shortcut,
                     false,
                     is_active,
-                    !self.active_tab_is_read_only(),
                     FormatMenuHoverBehavior::ClearSubmenu,
                     cx,
                     move |this, _, cx| {
@@ -3968,7 +3839,6 @@ impl EditorView {
                 slash_item.shortcut,
                 is_selected,
                 is_active,
-                !self.active_tab_is_read_only(),
                 cx,
                 move |this, _, cx| {
                     this.execute_format_menu_action(action, cx);
@@ -4025,7 +3895,6 @@ impl EditorView {
                 shortcut,
                 false,
                 is_active,
-                !self.active_tab_is_read_only(),
                 cx,
                 move |this, _, cx| {
                     this.execute_format_menu_action(action, cx);
@@ -4062,7 +3931,6 @@ impl EditorView {
                 shortcut,
                 false,
                 is_active,
-                !self.active_tab_is_read_only(),
                 cx,
                 move |this, _, cx| {
                     this.execute_format_menu_action(action, cx);
@@ -4117,7 +3985,6 @@ impl EditorView {
                 shortcut,
                 false,
                 is_active,
-                !self.active_tab_is_read_only(),
                 cx,
                 move |this, _, cx| {
                     this.execute_format_menu_action(action, cx);
@@ -4632,6 +4499,10 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ms = &self.styles.context_menu;
+        let table_resize_panel = self
+            .context_menu
+            .as_ref()
+            .is_some_and(|menu| matches!(menu.kind, ContextMenuKind::TableResize { .. }));
 
         let mut menu_div = div()
             .id(panel_id)
@@ -4643,8 +4514,11 @@ impl EditorView {
             // Occlude so hovering a menu item does not also hover the sidebar /
             // file-tree item painted underneath the menu.
             .occlude()
-            .overflow_y_scroll()
-            .py(px(self.scaled(ms.menu_padding_y_px)))
+            .when(table_resize_panel, |this| this.overflow_hidden())
+            .when(!table_resize_panel, |this| {
+                this.overflow_y_scroll()
+                    .py(px(self.scaled(ms.menu_padding_y_px)))
+            })
             .bg(ms.menu_bg)
             .border(px(ms.menu_border_width_px))
             .border_color(ms.menu_border_color)
@@ -4683,6 +4557,20 @@ impl EditorView {
             .on_scroll_wheel(cx.listener(|_this, _event, _window, cx| {
                 cx.stop_propagation();
             }));
+
+        let menu_div = if self
+            .context_menu
+            .as_ref()
+            .is_some_and(|menu| matches!(menu.kind, ContextMenuKind::TableResize { .. }))
+        {
+            menu_div.on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                if !*hovered {
+                    this.close_context_menu(cx);
+                }
+            }))
+        } else {
+            menu_div
+        };
 
         if self.selection_toolbar_owns_hover_menu() {
             return SelectionToolbarHoverRegion {
@@ -5008,6 +4896,100 @@ impl EditorView {
             move |this, _, cx| this.table_delete_table(table_start_line, cx),
         ));
         items
+    }
+
+    fn render_table_size_picker(
+        &self,
+        table_start_line: usize,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        const MAX_ROWS: usize = crate::table_ops::TABLE_SIZE_PICKER_MAX_ROWS;
+        const MAX_COLUMNS: usize = crate::table_ops::TABLE_SIZE_PICKER_MAX_COLUMNS;
+
+        let (current_rows, current_columns) = self
+            .table_lines_for_block(table_start_line)
+            .map(|(_, _, lines)| {
+                let model = crate::table_ops::parse_table_block(&lines);
+                (model.data_rows.len().max(1), model.col_count.max(1))
+            })
+            .unwrap_or((1, 1));
+        let (hover_rows, hover_columns) = self
+            .table_size_hover
+            .unwrap_or((current_rows.min(MAX_ROWS), current_columns.min(MAX_COLUMNS)));
+        let ms = &self.styles.context_menu;
+        let cell_size = self.scaled(9.0);
+        let gap = self.scaled(3.0);
+        let padding = self.scaled(ms.menu_padding_y_px);
+        let current_bg = crate::theme::with_alpha(ms.menu_format_active_text_color, 0.46);
+        let hover_bg = crate::theme::with_alpha(ms.menu_format_active_text_color, 0.22);
+        let overlap_bg = crate::theme::with_alpha(ms.menu_format_active_text_color, 0.62);
+        let mut rows = Vec::with_capacity(MAX_ROWS);
+
+        for row in 1..=MAX_ROWS {
+            let mut cells = Vec::with_capacity(MAX_COLUMNS);
+            for column in 1..=MAX_COLUMNS {
+                let hovered = row <= hover_rows && column <= hover_columns;
+                let currently_covered = row <= current_rows && column <= current_columns;
+                cells.push(
+                    div()
+                        .id(SharedString::from(format!(
+                            "table-size-{table_start_line}-{row}-{column}"
+                        )))
+                        .w(px(cell_size))
+                        .h(px(cell_size))
+                        .border(px(self.scaled(1.0)))
+                        .border_color(if hovered || currently_covered {
+                            ms.menu_format_active_text_color
+                        } else {
+                            ms.menu_border_color
+                        })
+                        .bg(if hovered && currently_covered {
+                            overlap_bg
+                        } else if currently_covered {
+                            current_bg
+                        } else if hovered {
+                            hover_bg
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .cursor(CursorStyle::Arrow)
+                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                            if *hovered && this.table_size_hover != Some((row, column)) {
+                                this.table_size_hover = Some((row, column));
+                                cx.notify();
+                            }
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                this.table_resize(table_start_line, row, column, cx);
+                            }),
+                        ),
+                );
+            }
+            rows.push(div().flex().gap(px(gap)).children(cells));
+        }
+
+        vec![
+            div()
+                .p(px(padding))
+                .flex()
+                .flex_col()
+                .gap(px(gap))
+                .child(
+                    div()
+                        .h(px(self.scaled(ms.menu_item_height_px) - padding))
+                        .flex()
+                        .items_center()
+                        .text_size(px(self.scaled(ms.menu_item_font_size_px)))
+                        .text_color(ms.menu_item_primary_text_color)
+                        .child(format!("{} × {}", hover_columns, hover_rows)),
+                )
+                .children(rows)
+                .into_any_element(),
+        ]
     }
 
     pub(crate) fn render_context_menu(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -5398,29 +5380,6 @@ impl EditorView {
                 self.append_tab_pane_context_menu_items(&mut items, tab_id, cx);
                 if let Some(tab) = self.tabs.iter().find(|t| t.id == *tab_id) {
                     if let Some(path) = &tab.path {
-                        let starred_path = Self::normalize_sidebar_path(path);
-                        let is_starred = self.app_settings.is_starred_file(&starred_path);
-                        items.push(self.render_context_menu_separator());
-                        items.push(self.render_context_menu_item(
-                            if is_starred {
-                                self.t(crate::i18n::TextKey::Unstar)
-                            } else {
-                                self.t(crate::i18n::TextKey::Star)
-                            },
-                            false,
-                            cx,
-                            move |this, _, cx| {
-                                if is_starred {
-                                    this.app_settings.remove_starred_file(&starred_path);
-                                } else {
-                                    this.app_settings.add_starred_file(starred_path.clone());
-                                    this.sidebar_starred_collapsed = false;
-                                }
-                                this.app_settings.save();
-                                this.close_context_menu(cx);
-                                cx.notify();
-                            },
-                        ));
                         if is_markdown_file(path) {
                             items.push(self.render_context_menu_separator());
                             items.push(self.render_format_submenu_trigger_item(
@@ -5739,6 +5698,10 @@ impl EditorView {
                 self.render_format_context_menu(cx),
                 self.scaled(self.styles.context_menu.menu_format_width_px),
             ),
+            ContextMenuKind::TableResize { table_start_line } => (
+                self.render_table_size_picker(*table_start_line, cx),
+                self.scaled(105.0),
+            ),
         };
 
         let estimated_menu_height = self.estimated_context_menu_height(items.len());
@@ -5757,9 +5720,7 @@ impl EditorView {
             .slash_menu_position()
             .filter(|_| matches!(menu.kind, ContextMenuKind::Format))
             .unwrap_or(menu.position);
-        let layout = if let Some(bounds) = toolbar_bounds {
-            // Inset both vertical anchor edges so upward and downward menus
-            // overlap the toolbar by the same small amount.
+        let mut layout = if let Some(bounds) = toolbar_bounds {
             let overlap = self.scaled(2.0).min(f32::from(bounds.size.height) / 2.0);
             let mut layout = self.context_menu_panel_layout_with_anchor(
                 Point::new(bounds.left(), bounds.bottom() - px(overlap)),
@@ -5800,6 +5761,13 @@ impl EditorView {
                 anchor_height,
             )
         };
+        if matches!(menu.kind, ContextMenuKind::TableResize { .. }) {
+            let (anchor_x, anchor_y) = self.context_menu_overlay_coordinates(anchor_position);
+            layout.left = anchor_x;
+            layout.estimated_top = anchor_y;
+            layout.bottom_anchor = None;
+            layout.max_height = (layout.overlay_height - anchor_y).max(1.0);
+        }
         let main_menu = self.render_context_menu_panel("context-menu", layout, width, items, cx);
 
         let export_submenu_open =
@@ -5866,7 +5834,7 @@ impl EditorView {
             let (left, top) = self.context_menu_overlay_coordinates(bounds.origin);
             let right = left + f32::from(bounds.size.width);
             let bottom = top + f32::from(bounds.size.height);
-            for (x, y, w, h) in [
+            for (x, y, width, height) in [
                 (0.0, 0.0, layout.overlay_width, top),
                 (
                     0.0,
@@ -5882,8 +5850,8 @@ impl EditorView {
                         .absolute()
                         .left(px(x))
                         .top(px(y))
-                        .w(px(w.max(0.0)))
-                        .h(px(h.max(0.0)))
+                        .w(px(width.max(0.0)))
+                        .h(px(height.max(0.0)))
                         .occlude()
                         .on_scroll_wheel(cx.listener(
                             |this, event: &gpui::ScrollWheelEvent, window, cx| {
@@ -5957,118 +5925,31 @@ impl EditorView {
 mod format_toolbar_layout_tests {
     use super::*;
 
-    fn metrics(scale: f32) -> FormatToolbarMetrics {
+    fn metrics() -> FormatToolbarMetrics {
         FormatToolbarMetrics {
-            button: 22.0 * scale,
-            separator: 11.0 * scale,
-            gap: scale,
-            padding: 8.0 * scale,
-            border: scale,
-        }
-    }
-
-    fn actions(entries: &[FormatToolbarEntry]) -> Vec<FormatMenuAction> {
-        entries
-            .iter()
-            .filter_map(|entry| match entry {
-                FormatToolbarEntry::Action { action, .. } => Some(*action),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn format_toolbar_wide_and_compact_groups_keep_primary_actions_in_order() {
-        let (wide, width) = format_toolbar_layout(248.0, metrics(1.0));
-        assert_eq!(width, 248.0); // 9 buttons, 2 separators, 10 gaps, padding + borders
-        assert!(matches!(
-            wide.first(),
-            Some(FormatToolbarEntry::HeadingMenu)
-        ));
-        assert!(matches!(wide.get(1), Some(FormatToolbarEntry::Separator)));
-        assert!(matches!(wide.get(9), Some(FormatToolbarEntry::Separator)));
-        assert!(matches!(wide.last(), Some(FormatToolbarEntry::MoreMenu)));
-        assert!(
-            actions(&wide)
-                == vec![
-                    FormatMenuAction::Bold,
-                    FormatMenuAction::Italic,
-                    FormatMenuAction::Strikethrough,
-                    FormatMenuAction::Underline,
-                    FormatMenuAction::InlineCode,
-                    FormatMenuAction::Todo,
-                    FormatMenuAction::Link,
-                ]
-        );
-
-        let (compact, width) = format_toolbar_layout(247.0, metrics(1.0));
-        assert_eq!(width, 202.0);
-        assert!(matches!(
-            compact.first(),
-            Some(FormatToolbarEntry::HeadingMenu)
-        ));
-        assert!(matches!(
-            compact.get(7),
-            Some(FormatToolbarEntry::Separator)
-        ));
-        assert!(
-            actions(&compact)
-                == vec![
-                    FormatMenuAction::Bold,
-                    FormatMenuAction::Italic,
-                    FormatMenuAction::InlineCode,
-                    FormatMenuAction::Todo,
-                    FormatMenuAction::Link,
-                ]
-        );
-    }
-
-    #[test]
-    fn format_toolbar_width_fits_at_scaled_breakpoints_without_clamping_controls() {
-        for scale in [0.75, 1.0, 1.25, 1.5, 2.0] {
-            let metrics = metrics(scale);
-            for limit in [40.0, 201.0, 202.0, 247.0, 248.0, 1200.0] {
-                let available = limit * scale;
-                let (entries, width) = format_toolbar_layout(available, metrics);
-                assert_eq!(width, metrics.width(&entries));
-                assert!(width <= available);
-            }
-            let (entries, width) = format_toolbar_layout(39.0 * scale, metrics);
-            assert!(entries == vec![FormatToolbarEntry::MoreMenu]);
-            assert_eq!(width, 40.0 * scale);
-            assert!(width > 39.0 * scale); // owner must hide, never truncate
+            button: 22.0,
+            separator: 11.0,
+            gap: 1.0,
+            padding: 8.0,
+            border: 1.0,
         }
     }
 
     #[test]
-    fn format_toolbar_more_opens_the_corresponding_submenu() {
-        // Match the More Formats entry in the format context menu directly.
-        for limit in [0.0, 40.0, 201.0, 202.0, 248.0, 1200.0] {
-            let (entries, _) = format_toolbar_layout(limit, metrics(1.0));
-            assert!(matches!(
-                entries.last().and_then(FormatToolbarEntry::menu_kind),
-                Some(ContextMenuKind::FormatMore)
-            ));
-            if entries.len() > 1 {
-                assert!(matches!(
-                    entries.first().and_then(FormatToolbarEntry::menu_kind),
-                    Some(ContextMenuKind::FormatHeading)
-                ));
-            }
+    fn toolbar_keeps_more_as_the_last_entry() {
+        for width in [40.0, 202.0, 248.0, 1200.0] {
+            let (entries, natural_width) = format_toolbar_layout(width, metrics());
+            assert!(matches!(entries.last(), Some(FormatToolbarEntry::MoreMenu)));
+            assert_eq!(natural_width, metrics().width(&entries));
         }
     }
 
     #[test]
-    fn format_toolbar_compaction_preserves_action_icons_and_tooltip_shortcuts() {
-        let (wide, _) = format_toolbar_layout(248.0, metrics(1.0));
-        let (compact, _) = format_toolbar_layout(202.0, metrics(1.0));
-        for entry in &compact {
-            assert!(wide.contains(entry));
-            if let FormatToolbarEntry::Action { icon, shortcut, .. } = entry {
-                assert!(!icon.is_empty());
-                assert!(shortcut.is_some());
-            }
-        }
+    fn narrow_toolbar_collapses_to_more_instead_of_expanding_all_actions() {
+        let (entries, width) = format_toolbar_layout(100.0, metrics());
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0], FormatToolbarEntry::MoreMenu));
+        assert_eq!(width, 40.0);
     }
 }
 

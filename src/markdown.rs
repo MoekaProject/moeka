@@ -1145,6 +1145,11 @@ fn parse_decorations_with_options(
                 }) = inline_stack.pop()
                 {
                     if kind == InlineKind::Strikethrough {
+                        let (start_line, _) = offset_to_line_col(start);
+                        let (end_line, _) = offset_to_line_col(source_range.end);
+                        if start_line != end_line {
+                            continue;
+                        }
                         add_inline_span(
                             &mut decorations,
                             &line_starts,
@@ -2769,16 +2774,18 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
             });
         if starts_table {
             let table_start = line_idx;
+            let table_column_count = header_cells.len();
             line_idx += 2;
             while line_idx < line_count {
-                if matches!(
+                if !matches!(
                     decorations[line_idx].block_type,
-                    BlockType::CodeBlock | BlockType::CodeBlockFence
+                    BlockType::Normal | BlockType::Blockquote
                 ) {
                     break;
                 }
                 let c = get_line_content(text, line_starts, line_idx, line_count);
-                if !is_table_line(c) {
+                if !is_table_line(c) || parse_table_cells_with_ranges(c).len() != table_column_count
+                {
                     break;
                 }
                 line_idx += 1;
@@ -4826,6 +4833,27 @@ mod tests {
     }
 
     #[test]
+    fn strikethrough_delimiters_do_not_pair_across_physical_lines() {
+        for text in ["~~1~~\n~~1 ~~\n\n~~ 1~~\n", "~~1~~\n~~1 ~~\n~~ 1~~\n"] {
+            let decorations = parse_decorations(text);
+            assert!(
+                decorations[0]
+                    .inline_spans
+                    .iter()
+                    .any(|span| span.kind == InlineKind::Strikethrough)
+            );
+            for decoration in decorations.iter().take(4).skip(1) {
+                assert!(
+                    !decoration
+                        .inline_spans
+                        .iter()
+                        .any(|span| span.kind == InlineKind::Strikethrough)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn setext_heading_inside_blockquote_keeps_heading_and_quote_context() {
         let decorations = parse_decorations("> Title\n> ===\n");
 
@@ -4899,6 +4927,19 @@ mod tests {
         assert!(table[..3].iter().all(|decoration| {
             decoration.block_type == BlockType::Table && decoration.table_info.is_some()
         }));
+    }
+
+    #[test]
+    fn table_body_stops_before_heading_or_mismatched_columns() {
+        let text = "| A | B |\n| --- | --- |\n| 1 | 2 |\n# ad|bc\n| x | y | z |\n";
+        let decorations = parse_decorations(text);
+
+        assert!(decorations[..3].iter().all(|decoration| {
+            decoration.block_type == BlockType::Table && decoration.table_info.is_some()
+        }));
+        assert_eq!(decorations[3].block_type, BlockType::Heading(1));
+        assert!(decorations[3].table_info.is_none());
+        assert!(decorations[4].table_info.is_none());
     }
 
     #[test]
