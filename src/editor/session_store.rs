@@ -427,6 +427,7 @@ fn tab_to_record(tab: &OpenTab) -> TabSessionRecord {
             cursor_anchor: tab.snapshot.cursor_anchor,
             scroll_offset: tab.snapshot.scroll_offset,
             editor_left_aligned: tab.editor_left_aligned,
+            reading_mode: tab.reading_mode,
             extra_cursors: tab.snapshot.extra_cursors.clone(),
         },
         recovery: tab.recovery.clone(),
@@ -491,6 +492,7 @@ fn restore_tab_from_record(record: &TabSessionRecord, ui_language: UiLanguage) -
         path,
         file_kind,
         editor_left_aligned: record.view.editor_left_aligned,
+        reading_mode: record.view.reading_mode,
         snapshot,
         image_view: ImageViewState::default(),
         whiteboard,
@@ -751,6 +753,7 @@ fn terminal_tab(record: &TabSessionRecord, agent_cli: ChatAgentCli) -> OpenTab {
         path: None,
         file_kind: None,
         editor_left_aligned: false,
+        reading_mode: false,
         snapshot: EditorSnapshot {
             text: String::new(),
             cursor_offset: 0,
@@ -807,6 +810,7 @@ fn settings_tab(id: String) -> OpenTab {
         path: None,
         file_kind: None,
         editor_left_aligned: false,
+        reading_mode: false,
         snapshot: EditorSnapshot {
             text: String::new(),
             cursor_offset: 0,
@@ -870,6 +874,7 @@ mod tests {
                 cursor_anchor: 50,
                 scroll_offset: 42.0,
                 editor_left_aligned: true,
+                reading_mode: true,
                 extra_cursors: vec![(80, 70)],
             },
             recovery: TabRecoveryState {
@@ -953,6 +958,7 @@ mod tests {
                 path: None,
                 file_kind: Some(FileKind::Markdown),
                 editor_left_aligned: false,
+                reading_mode: false,
                 snapshot: EditorSnapshot {
                     text: String::new(),
                     cursor_offset: 0,
@@ -1006,6 +1012,7 @@ mod tests {
                 cursor_anchor: 7,
                 scroll_offset: 7.0,
                 editor_left_aligned: false,
+                reading_mode: false,
                 extra_cursors: Vec::new(),
             },
             recovery: TabRecoveryState::default(),

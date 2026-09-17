@@ -431,6 +431,7 @@ pane_state! {
     (active_file_kind_cache, Option<FileKind>, None),
     (tab_bar_scroll_handle, ScrollHandle, ScrollHandle::new()),
     (editor_left_aligned, bool, false),
+    (reading_mode, bool, false),
     // ── Layout geometry from the last prepaint ──
     (last_editor_left, f32, 0.0),
     (last_editor_width, f32, 800.0),
@@ -691,7 +692,6 @@ impl EditorView {
         self.panes[new_index].state = state;
 
         self.focused_pane_id = pane_id;
-        self.reading_mode = false;
 
         // Cancel animations that were driving the previous pane's root fields.
         self.scroll_anim_epoch = self.scroll_anim_epoch.wrapping_add(1);

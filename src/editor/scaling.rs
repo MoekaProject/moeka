@@ -1116,6 +1116,9 @@ impl EditorView {
 
     pub(crate) fn toggle_reading_mode(&mut self, cx: &mut Context<Self>) {
         self.reading_mode = !self.reading_mode;
+        if let Some(index) = self.active_tab_index() {
+            self.tabs[index].reading_mode = self.reading_mode;
+        }
         if self.reading_mode {
             self.selected_handle = None;
             self.table_drag = None;

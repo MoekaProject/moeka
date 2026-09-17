@@ -7,6 +7,7 @@
 //! (substring / case sensitivity / whole word / regex) identical to a full
 //! scan while skipping files that cannot possibly match.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use tantivy::collector::DocSetCollector;
@@ -23,6 +24,9 @@ const NGRAM_TOKENIZER: &str = "moeka_ngram2";
 const INDEX_WRITER_BUDGET_BYTES: usize = 50_000_000;
 /// Files larger than this are not indexed and are always scanned instead.
 const MAX_INDEXED_FILE_BYTES: usize = 4 * 1024 * 1024;
+/// Bounds source text retained while constructing the in-memory n-gram index.
+const MAX_INDEXED_WORKSPACE_BYTES: usize = 64 * 1024 * 1024;
+const FILE_KIND_SAMPLE_BYTES: usize = 4096;
 
 pub(crate) struct WorkspaceSearchIndex {
     root: PathBuf,
@@ -66,6 +70,7 @@ impl WorkspaceSearchIndex {
 
         let mut writer = index.writer::<TantivyDocument>(INDEX_WRITER_BUDGET_BYTES)?;
         let mut unindexed_paths = Vec::new();
+        let mut indexed_source_bytes = 0usize;
         let mut pending = vec![root.to_path_buf()];
         while let Some(path) = pending.pop() {
             let is_dir = path.is_dir();
@@ -75,6 +80,25 @@ impl WorkspaceSearchIndex {
             if is_dir {
                 if let Ok(entries) = std::fs::read_dir(&path) {
                     pending.extend(entries.flatten().map(|entry| entry.path()));
+                }
+                continue;
+            }
+            let should_skip_full_read = std::fs::metadata(&path).is_ok_and(|metadata| {
+                metadata.len() > MAX_INDEXED_FILE_BYTES as u64
+                    || metadata.len()
+                        > MAX_INDEXED_WORKSPACE_BYTES.saturating_sub(indexed_source_bytes) as u64
+            });
+            if should_skip_full_read {
+                let mut sample = [0; FILE_KIND_SAMPLE_BYTES];
+                let Ok(mut file) = std::fs::File::open(&path) else {
+                    continue;
+                };
+                let Ok(sample_len) = file.read(&mut sample) else {
+                    continue;
+                };
+                if classify_file_kind_for_bytes(&path, &sample[..sample_len]).supports_text_search()
+                {
+                    unindexed_paths.push(path);
                 }
                 continue;
             }
@@ -88,6 +112,7 @@ impl WorkspaceSearchIndex {
                 unindexed_paths.push(path);
                 continue;
             }
+            indexed_source_bytes = indexed_source_bytes.saturating_add(bytes.len());
             let content = String::from_utf8_lossy(&bytes);
             let mut document = TantivyDocument::default();
             document.add_text(path_field, path.to_string_lossy());
@@ -213,6 +238,23 @@ mod tests {
         let index = WorkspaceSearchIndex::build(&root).unwrap();
         let candidates = index.candidate_paths("needle", false).unwrap();
         assert_eq!(candidates, vec![root.join("real.md")]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_text_files_remain_search_candidates() {
+        let root = temp_workspace("oversized");
+        let large_text = root.join("large.md");
+        let file = fs::File::create(&large_text).unwrap();
+        file.set_len(MAX_INDEXED_FILE_BYTES as u64 + 1).unwrap();
+        let large_binary = root.join("large.bin");
+        let binary = fs::File::create(&large_binary).unwrap();
+        binary.set_len(MAX_INDEXED_FILE_BYTES as u64 + 1).unwrap();
+
+        let index = WorkspaceSearchIndex::build(&root).unwrap();
+        let candidates = index.candidate_paths("needle", false).unwrap();
+        assert_eq!(candidates, vec![large_text]);
 
         fs::remove_dir_all(root).unwrap();
     }

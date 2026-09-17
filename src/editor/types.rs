@@ -215,6 +215,7 @@ pub(crate) struct OpenTab {
     pub path: Option<PathBuf>,
     pub file_kind: Option<FileKind>,
     pub editor_left_aligned: bool,
+    pub reading_mode: bool,
     pub snapshot: EditorSnapshot,
     pub image_view: ImageViewState,
     pub whiteboard: Option<WhiteboardTabState>,

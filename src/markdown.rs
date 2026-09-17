@@ -1,5 +1,6 @@
 use emojis::get_by_shortcode;
 use pulldown_cmark::{CodeBlockKind, Event, LinkType, Options, Parser, Tag, TagEnd};
+use regex::Regex;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -174,6 +175,19 @@ fn inline_span_source_range(
         })
         .map(|syntax_range| syntax_range.trigger_range.clone())
         .min_by_key(|range| (range.end.saturating_sub(range.start), range.start))
+}
+
+pub(crate) fn link_target_at_column(decoration: &LineDecoration, column: usize) -> Option<&str> {
+    decoration.inline_spans.iter().find_map(|span| {
+        if span.kind != InlineKind::Link {
+            return None;
+        }
+        let source_range =
+            inline_span_source_range(decoration, span).unwrap_or_else(|| span.range.clone());
+        (column >= source_range.start && column <= source_range.end)
+            .then(|| span.target.as_deref())
+            .flatten()
+    })
 }
 
 fn structural_excluded_ranges(decoration: &LineDecoration) -> Vec<Range<usize>> {
@@ -1395,6 +1409,7 @@ fn parse_decorations_with_options(
 
     detect_raw_wiki_links(&mut decorations, text, &line_starts);
     detect_raw_footnote_references(&mut decorations, text, &line_starts);
+    detect_bare_urls(&mut decorations, text, &line_starts);
     detect_underlines(&mut decorations, text, &line_starts);
     detect_highlights(&mut decorations, text, &line_starts);
     detect_superscript_spans(&mut decorations, text, &line_starts);
@@ -3017,6 +3032,108 @@ fn detect_raw_wiki_links(decorations: &mut [LineDecoration], text: &str, line_st
     }
 }
 
+fn detect_bare_urls(decorations: &mut [LineDecoration], text: &str, line_starts: &[usize]) {
+    static BARE_URL: OnceLock<Regex> = OnceLock::new();
+    let matcher = BARE_URL.get_or_init(|| {
+        Regex::new(r"(?i)(?:https?://|mailto:)[^\s<>]+")
+            .expect("bare URL regular expression is valid")
+    });
+    let line_count = decorations.len();
+
+    for (line, decoration) in decorations.iter_mut().enumerate() {
+        if matches!(
+            decoration.block_type,
+            BlockType::CodeBlock | BlockType::CodeBlockFence
+        ) || decoration
+            .table_info
+            .as_ref()
+            .is_some_and(|table| table.is_front_matter)
+        {
+            continue;
+        }
+
+        let line_content = get_line_content(text, line_starts, line, line_count);
+        let mut excluded = structural_excluded_ranges(decoration);
+        excluded.extend(
+            decoration
+                .wiki_links
+                .iter()
+                .map(|link| link.full_range.clone()),
+        );
+        excluded.extend(
+            decoration
+                .footnote_references
+                .iter()
+                .map(|reference| reference.full_range.clone()),
+        );
+        let excluded = merge_byte_ranges(excluded);
+
+        for candidate in matcher.find_iter(line_content) {
+            let start = candidate.start();
+            if line_content[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '<'))
+            {
+                continue;
+            }
+            let end = trim_bare_url_end(line_content, start, candidate.end());
+            if end <= start
+                || (line_content[..start].trim_end().ends_with('<')
+                    && line_content[end..].trim_start().starts_with('>'))
+                || excluded
+                    .iter()
+                    .any(|range| range_intersects_byte(range, start, end))
+            {
+                continue;
+            }
+            let target = line_content[start..end].to_string();
+            decoration.inline_spans.push(InlineSpan {
+                kind: InlineKind::Link,
+                range: start..end,
+                target: Some(target),
+            });
+        }
+        decoration.inline_spans.sort_by_key(|span| span.range.start);
+    }
+}
+
+fn trim_bare_url_end(text: &str, start: usize, mut end: usize) -> usize {
+    loop {
+        let Some(ch) = text[start..end].chars().next_back() else {
+            return start;
+        };
+        let trim = matches!(
+            ch,
+            '.' | ','
+                | ';'
+                | ':'
+                | '!'
+                | '?'
+                | '"'
+                | '\''
+                | '。'
+                | '，'
+                | '；'
+                | '：'
+                | '！'
+                | '？'
+                | '、'
+                | '”'
+                | '’'
+        ) || (ch == ')'
+            && text[start..end].matches(')').count() > text[start..end].matches('(').count())
+            || (ch == ']'
+                && text[start..end].matches(']').count() > text[start..end].matches('[').count())
+            || (ch == '}'
+                && text[start..end].matches('}').count() > text[start..end].matches('{').count());
+        if !trim {
+            return end;
+        }
+        end -= ch.len_utf8();
+    }
+}
+
 fn detect_underlines(decorations: &mut [LineDecoration], text: &str, line_starts: &[usize]) {
     let line_count = decorations.len();
     for (line, decoration) in decorations.iter_mut().enumerate() {
@@ -3707,9 +3824,9 @@ mod tests {
 
     use super::{
         BlockContext, BlockPreviewKind, BlockType, CalloutKind, InlineKind, LineDecoration,
-        LocalLinkSyntax, TableAlign, blockquote_prefix_len, parse_decorations,
-        parse_local_link_targets, parse_table_cells_with_ranges, raw_wiki_link_ranges,
-        split_continuation_prefix, unclosed_code_fence_marker,
+        LocalLinkSyntax, TableAlign, blockquote_prefix_len, link_target_at_column,
+        parse_decorations, parse_local_link_targets, parse_table_cells_with_ranges,
+        raw_wiki_link_ranges, split_continuation_prefix, unclosed_code_fence_marker,
     };
 
     #[test]
@@ -4200,6 +4317,51 @@ mod tests {
     }
 
     #[test]
+    fn bare_urls_become_links_without_trailing_punctuation() {
+        let text = "See https://example.com/a_(b)。 Email mailto:hello@example.com!";
+        let decorations = parse_decorations(text);
+        let links = decorations[0]
+            .inline_spans
+            .iter()
+            .filter(|span| span.kind == InlineKind::Link)
+            .collect::<Vec<_>>();
+
+        assert_eq!(links.len(), 2);
+        assert_eq!(
+            links[0].target.as_deref(),
+            Some("https://example.com/a_(b)")
+        );
+        assert_eq!(links[1].target.as_deref(), Some("mailto:hello@example.com"));
+    }
+
+    #[test]
+    fn bare_url_detection_skips_code_and_existing_links() {
+        let text = "`https://code.example` [label](https://target.example)";
+        let decorations = parse_decorations(text);
+        let links = decorations[0]
+            .inline_spans
+            .iter()
+            .filter(|span| span.kind == InlineKind::Link)
+            .collect::<Vec<_>>();
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target.as_deref(), Some("https://target.example"));
+    }
+
+    #[test]
+    fn links_in_table_rows_are_navigable_by_source_column() {
+        let text = "| Link |\n| --- |\n| https://example.com |";
+        let decorations = parse_decorations(text);
+        let row = &decorations[2];
+        let column = text.lines().nth(2).unwrap().find("https://").unwrap() + 4;
+
+        assert_eq!(
+            link_target_at_column(row, column),
+            Some("https://example.com")
+        );
+    }
+
+    #[test]
     fn commonmark_reference_links_get_link_spans_and_targets() {
         assert_first_line_link(527, 1..4);
         assert_first_line_link(553, 1..4);
@@ -4334,7 +4496,13 @@ mod tests {
                     }
                 }
                 if expects_link || !image_description_can_contain_inlines {
-                    record("link", has_link, expects_link);
+                    let allows_bare_link_extension = example.markdown.lines().any(|line| {
+                        let line = line.trim_start();
+                        line.starts_with("http://")
+                            || line.starts_with("https://")
+                            || line.starts_with("mailto:")
+                    });
+                    record("link", has_link, expects_link || allows_bare_link_extension);
                 }
                 record("image", has_image, expects_image);
             }

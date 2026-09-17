@@ -26,10 +26,7 @@ use crate::markdown::{
 };
 use crate::theme::{CodeSyntaxPalette, Theme};
 
-pub(crate) use super::text_layout::{
-    code_block_soft_wrap_width, effective_monospace_wrap_width_for_letter_spacing,
-    effective_wrap_width_for_letter_spacing, table_cell_content_offset,
-};
+pub(crate) use super::text_layout::{code_block_soft_wrap_width, table_cell_content_offset};
 use super::*;
 
 const CODE_HIGHLIGHT_CACHE_MAX_ENTRIES: usize = 8192;
@@ -151,6 +148,8 @@ fn apply_code_highlight_segments(
 pub(crate) const GENERATED_PREVIEW_RASTER_SCALE: f32 = 2.0;
 pub(crate) const GENERATED_PREVIEW_MATH_RASTER_SCALE: f32 = 3.0;
 pub(crate) const GENERATED_PREVIEW_EDITOR_MERMAID_SCALE: f32 = 0.75;
+const GENERATED_PREVIEW_EDITOR_MAX_RASTER_EDGE: f32 = 3072.0;
+const GENERATED_PREVIEW_EDITOR_MAX_RASTER_PIXELS: f32 = 4_194_304.0;
 const GENERATED_PREVIEW_MATH_DISPLAY_SCALE: f32 = 1.5;
 const GENERATED_PREVIEW_DEFAULT_MONOSPACE_FONT_FAMILY: &str =
     "ui-monospace, Menlo, Monaco, Consolas, monospace";
@@ -2324,9 +2323,9 @@ mod tests {
         apply_search_match_text_styles, build_display_text, build_generated_block_preview_svg,
         build_table_display_text, build_text_runs_for_display, compute_display_prefix_bytes,
         compute_generated_preview_size, compute_table_layout,
-        effective_monospace_wrap_width_for_letter_spacing, effective_wrap_width_for_letter_spacing,
-        load_generated_preview_image_from_svg, prefix_is_folded, table_cell_content_offset,
-        table_cell_decoration, task_prefix_is_folded, wrap_segment_byte_ranges,
+        load_generated_preview_image_from_svg, load_generated_preview_image_from_svg_for_editor,
+        prefix_is_folded, table_cell_content_offset, table_cell_decoration, task_prefix_is_folded,
+        wrap_segment_byte_ranges,
     };
 
     #[test]
@@ -2485,26 +2484,20 @@ mod tests {
     }
 
     #[test]
-    fn letter_spaced_table_wrap_width_reserves_spacing_inside_the_cell() {
-        assert_eq!(
-            effective_wrap_width_for_letter_spacing(150.0, 15.0, 1.0),
-            140.625
-        );
-        assert_eq!(
-            effective_wrap_width_for_letter_spacing(150.0, 15.0, 0.0),
-            150.0
-        );
-    }
+    fn editor_mermaid_raster_stays_within_texture_budget() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10000" height="2000" viewBox="0 0 10000 2000"><rect width="10000" height="2000" fill="black"/></svg>"#;
+        let image = load_generated_preview_image_from_svg_for_editor(
+            svg,
+            markdown::BlockPreviewKind::Mermaid,
+        )
+        .expect("large Mermaid SVG should rasterize");
+        let size = image.size(0);
+        let width = size.width.0 as u64;
+        let height = size.height.0 as u64;
 
-    #[test]
-    fn letter_spaced_code_wrap_uses_the_measured_character_advance() {
-        let width = effective_monospace_wrap_width_for_letter_spacing(460.0, 8.0, 1.0);
-        assert!((width - 408.8889).abs() < 0.001);
-        assert!(width < effective_wrap_width_for_letter_spacing(460.0, 14.0, 1.0));
-        assert_eq!(
-            effective_monospace_wrap_width_for_letter_spacing(460.0, 8.0, 0.0),
-            460.0,
-        );
+        assert!(width <= 3072);
+        assert!(height <= 3072);
+        assert!(width * height <= 4_194_304);
     }
 
     #[test]
@@ -5388,6 +5381,7 @@ fn load_render_image_from_bytes(bytes: &[u8]) -> anyhow::Result<RenderImage> {
     Ok(RenderImage::new([frame]))
 }
 
+#[cfg(test)]
 pub(crate) fn load_generated_preview_image_from_svg(
     svg: &str,
     kind: BlockPreviewKind,
@@ -5395,14 +5389,49 @@ pub(crate) fn load_generated_preview_image_from_svg(
     load_render_image_from_svg_with_scale(svg, generated_preview_raster_scale(kind))
 }
 
+pub(crate) fn load_generated_preview_image_from_svg_for_editor(
+    svg: &str,
+    kind: BlockPreviewKind,
+) -> anyhow::Result<RenderImage> {
+    let raster_scale = generated_preview_raster_scale(kind);
+    if kind == BlockPreviewKind::Math {
+        return load_render_image_from_svg_with_scale(svg, raster_scale);
+    }
+    load_render_image_from_svg_with_limits(
+        svg,
+        raster_scale,
+        Some(GENERATED_PREVIEW_EDITOR_MAX_RASTER_EDGE),
+        Some(GENERATED_PREVIEW_EDITOR_MAX_RASTER_PIXELS),
+    )
+}
+
 pub(crate) fn load_render_image_from_svg_with_scale(
     svg: &str,
     raster_scale: f32,
+) -> anyhow::Result<RenderImage> {
+    load_render_image_from_svg_with_limits(svg, raster_scale, None, None)
+}
+
+fn load_render_image_from_svg_with_limits(
+    svg: &str,
+    raster_scale: f32,
+    max_edge: Option<f32>,
+    max_pixels: Option<f32>,
 ) -> anyhow::Result<RenderImage> {
     let mut options = usvg::Options::default();
     options.fontdb = generated_preview_fontdb().clone();
     let tree = usvg::Tree::from_str(svg, &options)?;
     let size = tree.size().to_int_size();
+    let mut raster_scale = raster_scale.max(0.1);
+    if let Some(max_edge) = max_edge {
+        raster_scale = raster_scale
+            .min(max_edge / size.width().max(1) as f32)
+            .min(max_edge / size.height().max(1) as f32);
+    }
+    if let Some(max_pixels) = max_pixels {
+        let source_pixels = size.width().max(1) as f32 * size.height().max(1) as f32;
+        raster_scale = raster_scale.min((max_pixels / source_pixels).sqrt());
+    }
     let raster_scale = raster_scale.max(0.1);
     let raster_width = ((size.width() as f32) * raster_scale).round().max(1.0) as u32;
     let raster_height = ((size.height() as f32) * raster_scale).round().max(1.0) as u32;
@@ -6787,6 +6816,7 @@ pub(crate) fn apply_letter_spacing(wrapped: &mut WrappedLine, spacing_px: f32) {
 
     let text = wrapped.text.clone();
     let old_layout = &**wrapped;
+    let wrap_width = old_layout.wrap_width;
     let old_line = &old_layout.unwrapped_layout;
     let mut new_runs: Vec<ShapedRun> = Vec::with_capacity(old_line.runs.len());
     let mut columns: usize = 0;
@@ -6831,4 +6861,7 @@ pub(crate) fn apply_letter_spacing(wrapped: &mut WrappedLine, spacing_px: f32) {
 
     let arc_mut: &mut Arc<WrappedLineLayout> = &mut *wrapped;
     *arc_mut = new_wrapped_layout;
+    if let Some(wrap_width) = wrap_width {
+        wrapped.rewrap(wrap_width);
+    }
 }

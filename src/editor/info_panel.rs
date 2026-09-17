@@ -3013,6 +3013,7 @@ impl EditorView {
             path: Some(path),
             file_kind: Some(file_kind),
             editor_left_aligned: false,
+            reading_mode: false,
             snapshot,
             image_view: ImageViewState::default(),
             whiteboard: None,

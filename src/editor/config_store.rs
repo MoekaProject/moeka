@@ -114,6 +114,8 @@ pub(crate) struct TabViewState {
     #[serde(default)]
     pub editor_left_aligned: bool,
     #[serde(default)]
+    pub reading_mode: bool,
+    #[serde(default)]
     pub extra_cursors: Vec<(usize, usize)>,
 }
 
@@ -419,6 +421,7 @@ mod tests {
                     cursor_anchor: 4,
                     scroll_offset: 25.5,
                     editor_left_aligned: true,
+                    reading_mode: true,
                     extra_cursors: vec![(9, 3)],
                 },
                 recovery: TabRecoveryState {

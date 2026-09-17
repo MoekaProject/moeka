@@ -80,17 +80,18 @@ impl EditorView {
         self.styles.editor.editor_heading_line_height_factor = self.app_settings.line_height;
         self.styles.editor.editor_letter_spacing_px = self.app_settings.letter_spacing;
         self.styles.editor.editor_max_width_px = self.app_settings.effective_editor_content_width();
-        self.styles.ui_font_family = Box::leak(self.app_settings.ui_font.clone().into_boxed_str());
+        self.styles.ui_font_family =
+            crate::platform::fonts::intern_family(&self.app_settings.ui_font);
         self.styles.editor.editor_body_latin_font_family =
-            Box::leak(self.app_settings.body_latin_font.clone().into_boxed_str());
+            crate::platform::fonts::intern_family(&self.app_settings.body_latin_font);
         self.styles.editor.editor_body_cjk_font_family =
-            Box::leak(self.app_settings.body_cjk_font.clone().into_boxed_str());
+            crate::platform::fonts::intern_family(&self.app_settings.body_cjk_font);
         self.styles.editor.editor_heading_latin_font_family =
             self.styles.editor.editor_body_latin_font_family;
         self.styles.editor.editor_heading_cjk_font_family =
             self.styles.editor.editor_body_cjk_font_family;
         self.styles.editor.editor_monospace_font_family =
-            Box::leak(self.app_settings.code_font.clone().into_boxed_str());
+            crate::platform::fonts::intern_family(&self.app_settings.code_font);
         self.clear_all_tab_layout_caches();
         self.invalidate_generated_block_preview_render_caches();
         self.rerender_generated_block_previews();

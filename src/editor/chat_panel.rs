@@ -38,8 +38,15 @@ use super::*;
 const CHAT_PANEL_DEFAULT_ROWS: u16 = 28;
 const CHAT_PANEL_DEFAULT_COLS: u16 = 96;
 const CHAT_PANEL_POLL_MS: u64 = 33;
+const CHAT_PANEL_IDLE_POLL_MAX_MS: u64 = 132;
 const TERMINAL_PROCESS_INFO_POLL_MS: u64 = 500;
 const TERMINAL_SEARCH_MAX_MATCHES: usize = 1000;
+
+fn chat_terminal_poll_interval_ms(consecutive_idle_polls: u8) -> u64 {
+    CHAT_PANEL_POLL_MS
+        .saturating_mul(1u64 << consecutive_idle_polls.min(2))
+        .min(CHAT_PANEL_IDLE_POLL_MAX_MS)
+}
 
 fn alacritty_cursor_style(shape: TerminalCursorShape) -> AlacCursorStyle {
     let shape = match shape {
@@ -2732,6 +2739,7 @@ impl EditorView {
             path: None,
             file_kind: None,
             editor_left_aligned: false,
+            reading_mode: false,
             snapshot: EditorSnapshot {
                 text: String::new(),
                 cursor_offset: 0,
@@ -3159,15 +3167,16 @@ impl EditorView {
         };
 
         session.poll_task = Some(cx.spawn(async move |this, cx| {
+            let mut consecutive_idle_polls = 0u8;
             loop {
-                let done = this
+                let (done, had_events) = this
                     .update(cx, |this, cx| {
-                        let (mut changed, exited, title_update) = {
+                        let (mut changed, exited, title_update, had_events) = {
                             let Some(state) = this.terminal_tab_states.get_mut(&tab_id) else {
-                                return true;
+                                return (true, false);
                             };
                             let Some(session) = state.session.as_mut() else {
-                                return true;
+                                return (true, false);
                             };
 
                             let mut changed = false;
@@ -3178,6 +3187,7 @@ impl EditorView {
                                 .as_ref()
                                 .map(|receiver| receiver.try_iter().collect::<Vec<_>>())
                                 .unwrap_or_default();
+                            let had_events = !events.is_empty();
                             for event in events {
                                 changed = true;
                                 match event {
@@ -3216,7 +3226,7 @@ impl EditorView {
                             if clear_interaction_state {
                                 state.clear_interaction_state();
                             }
-                            (changed, exited, title_update)
+                            (changed, exited, title_update, had_events)
                         };
 
                         if let Some(title) = title_update
@@ -3230,15 +3240,22 @@ impl EditorView {
                             cx.notify();
                         }
 
-                        exited
+                        (exited, had_events)
                     })
-                    .unwrap_or(true);
+                    .unwrap_or((true, false));
                 if done {
                     return;
                 }
 
+                if had_events {
+                    consecutive_idle_polls = 0;
+                } else {
+                    consecutive_idle_polls = consecutive_idle_polls.saturating_add(1);
+                }
                 cx.background_executor()
-                    .timer(Duration::from_millis(CHAT_PANEL_POLL_MS))
+                    .timer(Duration::from_millis(chat_terminal_poll_interval_ms(
+                        consecutive_idle_polls,
+                    )))
                     .await;
             }
         }));
@@ -4730,6 +4747,14 @@ fn chat_reference_path(path: &std::path::Path, workspace_root: Option<&std::path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_poll_interval_backs_off_with_a_small_cap() {
+        assert_eq!(chat_terminal_poll_interval_ms(0), 33);
+        assert_eq!(chat_terminal_poll_interval_ms(1), 66);
+        assert_eq!(chat_terminal_poll_interval_ms(2), 132);
+        assert_eq!(chat_terminal_poll_interval_ms(10), 132);
+    }
 
     struct SharedWriter(Arc<Mutex<Vec<u8>>>);
 

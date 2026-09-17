@@ -125,7 +125,7 @@ impl LineLayout {
         None
     }
 
-    fn compute_wrap_boundaries(
+    pub(super) fn compute_wrap_boundaries(
         &self,
         text: &str,
         wrap_width: Pixels,

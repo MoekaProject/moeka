@@ -154,6 +154,14 @@ fn generated_preview_intersects_range(
     preview_start <= visible_end && preview_end >= visible_start
 }
 
+fn generated_preview_content_in_range(decorations: &[LineDecoration], range: Range<usize>) -> bool {
+    let start = range.start.min(decorations.len());
+    let end = range.end.min(decorations.len()).max(start);
+    decorations[start..end].iter().any(|decoration| {
+        decoration.block_preview.is_some() || !decoration.inline_math_spans.is_empty()
+    })
+}
+
 #[derive(Clone, Copy, Default)]
 struct GitMetadataImpact {
     affects_sidebar_status: bool,
@@ -816,12 +824,21 @@ pub(crate) struct LargeDocumentFrameBench {
     newline_buffer_times: Vec<Duration>,
     newline_reparse_times: Vec<Duration>,
     newline_history_times: Vec<Duration>,
+    delete_line_times: Vec<Duration>,
+    delete_line_buffer_times: Vec<Duration>,
+    delete_line_reparse_times: Vec<Duration>,
+    reparse_prepare_times: Vec<Duration>,
+    reparse_decorations_times: Vec<Duration>,
+    reparse_outline_times: Vec<Duration>,
+    reparse_line_display_times: Vec<Duration>,
+    reparse_finalize_times: Vec<Duration>,
     selection_times: Vec<Duration>,
     scrollbar_jump_times: Vec<Duration>,
     history_times: Vec<Duration>,
     frame_work_started: Option<Instant>,
     pending_edit_offset: Option<usize>,
     pending_newline_offset: Option<usize>,
+    pending_deleted_line: Option<(usize, String)>,
     syntax_view_samples: usize,
     syntax_view_misses: usize,
 }
@@ -841,12 +858,21 @@ impl LargeDocumentFrameBench {
             newline_buffer_times: Vec::new(),
             newline_reparse_times: Vec::new(),
             newline_history_times: Vec::new(),
+            delete_line_times: Vec::new(),
+            delete_line_buffer_times: Vec::new(),
+            delete_line_reparse_times: Vec::new(),
+            reparse_prepare_times: Vec::new(),
+            reparse_decorations_times: Vec::new(),
+            reparse_outline_times: Vec::new(),
+            reparse_line_display_times: Vec::new(),
+            reparse_finalize_times: Vec::new(),
             selection_times: Vec::new(),
             scrollbar_jump_times: Vec::new(),
             history_times: Vec::new(),
             frame_work_started: None,
             pending_edit_offset: None,
             pending_newline_offset: None,
+            pending_deleted_line: None,
             syntax_view_samples: 0,
             syntax_view_misses: 0,
         })
@@ -881,7 +907,6 @@ impl LazyMarkdownDecorations {
         if range.is_empty() || self.parsed_chunks.is_empty() {
             return;
         }
-        self.fenced_code_spans = None;
         let first = range.start / LARGE_MARKDOWN_CHUNK_LINES;
         let last = range.end.saturating_sub(1) / LARGE_MARKDOWN_CHUNK_LINES;
         for chunk in first..=last.min(self.parsed_chunks.len().saturating_sub(1)) {
@@ -889,13 +914,34 @@ impl LazyMarkdownDecorations {
         }
     }
 
-    fn resize_after_structural_edit(&mut self, line_count: usize, start_line: usize) {
+    fn resize_after_structural_edit(
+        &mut self,
+        line_count: usize,
+        start_line: usize,
+        old_end_line_exclusive: usize,
+        new_end_line_exclusive: usize,
+    ) {
         let chunk_count = line_count.div_ceil(LARGE_MARKDOWN_CHUNK_LINES);
         self.parsed_chunks.resize(chunk_count, false);
-        self.fenced_code_spans = None;
         let first_invalid = start_line / LARGE_MARKDOWN_CHUNK_LINES;
         for parsed in self.parsed_chunks.iter_mut().skip(first_invalid) {
             *parsed = false;
+        }
+
+        let line_delta = new_end_line_exclusive as isize - old_end_line_exclusive as isize;
+        if line_delta == 0 {
+            return;
+        }
+        if let Some(spans) = self.fenced_code_spans.as_mut() {
+            for span in spans {
+                if span.end <= start_line {
+                    continue;
+                }
+                if span.start > start_line {
+                    span.start = apply_offset_delta(span.start, line_delta);
+                }
+                span.end = apply_offset_delta(span.end, line_delta);
+            }
         }
     }
 }
@@ -956,9 +1002,10 @@ pub(crate) fn parse_lazy_markdown_range(
             scanned += 1;
         }
         if let Some(fenced_code_spans) = lazy.fenced_code_spans.as_ref() {
-            for span in fenced_code_spans
+            let first_candidate = fenced_code_spans.partition_point(|span| span.end <= core_start);
+            for span in fenced_code_spans[first_candidate..]
                 .iter()
-                .filter(|span| span.start < core_end && span.end > core_start)
+                .take_while(|span| span.start < core_end)
             {
                 parse_start = parse_start.min(span.start);
                 parse_end = parse_end.max(span.end);
@@ -1534,6 +1581,18 @@ impl PendingLineDisplayTransfer {
                 (0..inserted_line_count).map(move |_| default_decoration.clone()),
             );
         }
+        if code_language.is_none() {
+            let line_delta =
+                self.new_end_line_exclusive as isize - self.old_end_line_exclusive as isize;
+            if line_delta != 0 || self.byte_delta != 0 {
+                for decoration in decorations
+                    .iter_mut()
+                    .skip(replace_start + inserted_line_count)
+                {
+                    offset_decoration_positions(decoration, line_delta, self.byte_delta);
+                }
+            }
+        }
         if decorations.is_empty() {
             decorations.push(LineDecoration::default());
         }
@@ -1565,6 +1624,92 @@ fn line_display_transfer_line_bounds(
     let new_end_line_exclusive = start_line + new_line_count;
 
     (start_line, old_end_line_exclusive, new_end_line_exclusive)
+}
+
+fn ordered_list_near_line(decorations: &[LineDecoration], line: usize) -> bool {
+    (line.saturating_sub(1)
+        ..=line
+            .saturating_add(1)
+            .min(decorations.len().saturating_sub(1)))
+        .any(|line| {
+            decorations
+                .get(line)
+                .is_some_and(|decoration| decoration.block_type == BlockType::OrderedList)
+        })
+}
+
+fn markdown_plain_structural_edit_is_safe(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    replaced_range: &Range<usize>,
+    inserted_text: &str,
+    start_line: usize,
+    old_end_line_exclusive: usize,
+) -> bool {
+    if !inserted_text.contains('\n') && old_end_line_exclusive == start_line.saturating_add(1) {
+        return false;
+    }
+    if old_end_line_exclusive > decorations.len()
+        || !decorations[start_line..old_end_line_exclusive]
+            .iter()
+            .all(markdown_decoration_is_plain_text)
+    {
+        return false;
+    }
+
+    let region_start = buffer.line_start(start_line);
+    let region_end = if old_end_line_exclusive < buffer.line_count() {
+        buffer.line_start(old_end_line_exclusive)
+    } else {
+        buffer.len()
+    };
+    if replaced_range.start < region_start || replaced_range.end > region_end {
+        return false;
+    }
+
+    let mut edited = String::with_capacity(
+        region_end - region_start - (replaced_range.end - replaced_range.start)
+            + inserted_text.len(),
+    );
+    edited.push_str(&buffer.text()[region_start..replaced_range.start]);
+    edited.push_str(inserted_text);
+    edited.push_str(&buffer.text()[replaced_range.end..region_end]);
+    edited.split('\n').all(markdown_plain_line_is_safe)
+}
+
+fn markdown_plain_line_is_safe(line: &str) -> bool {
+    if line.starts_with('\t') || line.starts_with("    ") || line.ends_with("  ") {
+        return false;
+    }
+    if line.chars().any(|ch| {
+        matches!(
+            ch,
+            '#' | '*'
+                | '_'
+                | '`'
+                | '~'
+                | '['
+                | ']'
+                | '('
+                | ')'
+                | '!'
+                | '<'
+                | '>'
+                | '|'
+                | ':'
+                | '-'
+                | '+'
+                | '='
+                | '\\'
+                | '$'
+                | '&'
+        )
+    }) {
+        return false;
+    }
+
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    crate::markdown::ordered_list_prefix_len(trimmed) == 0
 }
 
 #[derive(Default)]
@@ -1900,6 +2045,7 @@ pub struct EditorView {
     /// Which specific handle is selected: (table_start_line, is_column, index)
     pub(crate) selected_handle: Option<(usize, bool, usize)>,
     pub(crate) image_cache: HashMap<String, Option<Arc<RenderImage>>>,
+    pub(crate) retired_images: Vec<Arc<RenderImage>>,
     pub(crate) generated_preview_svg_cache: HashMap<String, Arc<str>>,
     pub(crate) generated_preview_overlay_cache: HashMap<String, (u16, Arc<RenderImage>)>,
     pub(crate) generated_preview_views: HashMap<String, ImageViewState>,
@@ -2505,16 +2651,16 @@ impl EditorView {
         styles.editor.editor_heading_line_height_factor = app_settings.line_height;
         styles.editor.editor_letter_spacing_px = app_settings.letter_spacing;
         styles.editor.editor_max_width_px = app_settings.effective_editor_content_width();
-        styles.ui_font_family = Box::leak(app_settings.ui_font.clone().into_boxed_str());
+        styles.ui_font_family = crate::platform::fonts::intern_family(&app_settings.ui_font);
         styles.editor.editor_body_latin_font_family =
-            Box::leak(app_settings.body_latin_font.clone().into_boxed_str());
+            crate::platform::fonts::intern_family(&app_settings.body_latin_font);
         styles.editor.editor_body_cjk_font_family =
-            Box::leak(app_settings.body_cjk_font.clone().into_boxed_str());
+            crate::platform::fonts::intern_family(&app_settings.body_cjk_font);
         styles.editor.editor_heading_latin_font_family =
             styles.editor.editor_body_latin_font_family;
         styles.editor.editor_heading_cjk_font_family = styles.editor.editor_body_cjk_font_family;
         styles.editor.editor_monospace_font_family =
-            Box::leak(app_settings.code_font.clone().into_boxed_str());
+            crate::platform::fonts::intern_family(&app_settings.code_font);
         if embedded_editor {
             // Panel-embedded editors (agent transcript/composer) use compact
             // chrome: tight padding, full-width wrapping, and a smaller body
@@ -2662,6 +2808,7 @@ impl EditorView {
             table_size_hover: None,
             selected_handle: None,
             image_cache: HashMap::new(),
+            retired_images: Vec::new(),
             generated_preview_svg_cache: HashMap::new(),
             generated_preview_overlay_cache: HashMap::new(),
             generated_preview_views: HashMap::new(),
@@ -4976,11 +5123,24 @@ impl EditorView {
                 self.rewrite_open_tab_paths_after_move(&from, &to);
             }
         }
+        let structure_changed = Self::fs_events_require_structure_refresh(events);
         let changed_paths = events
             .iter()
             .flat_map(|event| event.paths.iter().cloned())
             .collect::<Vec<_>>();
-        self.handle_fs_events(&changed_paths, cx);
+        self.handle_fs_events_with_structure_hint(&changed_paths, structure_changed, cx);
+    }
+
+    fn fs_events_require_structure_refresh(events: &[notify::Event]) -> bool {
+        events.iter().any(|event| {
+            matches!(
+                event.kind,
+                notify::EventKind::Any
+                    | notify::EventKind::Create(_)
+                    | notify::EventKind::Remove(_)
+                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+            )
+        })
     }
 
     /// A rename outside the app arrives as "old path gone, new path appeared".
@@ -5045,6 +5205,15 @@ impl EditorView {
     }
 
     pub(crate) fn handle_fs_events(&mut self, changed_paths: &[PathBuf], cx: &mut Context<Self>) {
+        self.handle_fs_events_with_structure_hint(changed_paths, false, cx);
+    }
+
+    fn handle_fs_events_with_structure_hint(
+        &mut self,
+        changed_paths: &[PathBuf],
+        structure_changed: bool,
+        cx: &mut Context<Self>,
+    ) {
         let mut changed_paths_in_workspace = Vec::new();
         let mut seen_paths_in_workspace = HashSet::new();
         let mut git_metadata_impact = GitMetadataImpact::default();
@@ -5099,7 +5268,9 @@ impl EditorView {
                     .iter()
                     .filter_map(|path| path.parent().map(Path::to_path_buf)),
             );
-            if self.sidebar_paths_require_structure_refresh(&changed_paths_in_workspace) {
+            if structure_changed
+                || self.sidebar_paths_require_structure_refresh(&changed_paths_in_workspace)
+            {
                 self.invalidate_sidebar_items_cache();
             } else {
                 self.refresh_file_list_content_paths(&changed_paths_in_workspace, cx);
@@ -6296,11 +6467,22 @@ impl EditorView {
     // ── Shared utilities ────────────────────────────────────────────
 
     pub(crate) fn reparse(&mut self) {
+        let reparse_started = Instant::now();
         let file_kind = self
             .active_file_kind()
             .cloned()
             .unwrap_or(FileKind::Markdown);
         let pending_line_display_transfer = self.pending_line_display_transfer.take();
+        let generated_preview_edit_range = pending_line_display_transfer.as_ref().map(|transfer| {
+            transfer.start_line
+                ..transfer
+                    .old_end_line_exclusive
+                    .max(transfer.new_end_line_exclusive)
+        });
+        let generated_preview_was_affected =
+            generated_preview_edit_range.as_ref().is_some_and(|range| {
+                generated_preview_content_in_range(&self.decorations, range.clone())
+            });
         if let Some(transfer) = pending_line_display_transfer.as_ref() {
             self.shift_active_code_block_display_overrides(transfer);
         }
@@ -6341,6 +6523,7 @@ impl EditorView {
         self.workspace_search_highlight_ranges.clear();
         self.workspace_search_highlight_current_index = None;
         let git_diff_rows = self.active_git_diff_state().map(|diff| diff.rows.clone());
+        let decorations_started = Instant::now();
         if let Some(rows) = git_diff_rows {
             self.set_decorations(rows.into_iter().map(|row| row.decoration).collect());
             if self.decorations.is_empty() {
@@ -6407,7 +6590,9 @@ impl EditorView {
                         if let Some(lazy) = self.lazy_markdown_decorations.as_mut() {
                             lazy.resize_after_structural_edit(
                                 self.buffer.line_count(),
-                                transfer.dirty_start_line,
+                                transfer.start_line,
+                                transfer.old_end_line_exclusive,
+                                transfer.new_end_line_exclusive,
                             );
                         }
                     }
@@ -6436,6 +6621,7 @@ impl EditorView {
                 }
             }
         }
+        let outline_started = Instant::now();
         if file_kind.is_markdown()
             && self.uses_lazy_markdown_decorations()
             && let Some(transfer) = pending_line_display_transfer.as_ref()
@@ -6451,6 +6637,7 @@ impl EditorView {
             }
             self.invalidate_outline_layout_cache();
         }
+        let line_display_started = Instant::now();
         // Restore the per-line shaping cache from the queued transfer whenever one
         // exists. For markdown this now also applies on the full-parse path: the
         // decorations are re-parsed for correctness, but unchanged lines outside
@@ -6472,12 +6659,38 @@ impl EditorView {
             // next scrolls into view.
             self.set_line_display_info(preserved_line_display_info);
         }
-        self.refresh_generated_block_previews();
+        let finalize_started = Instant::now();
+        let generated_preview_is_affected =
+            generated_preview_edit_range.as_ref().is_none_or(|range| {
+                generated_preview_content_in_range(&self.decorations, range.clone())
+            });
+        if !self.generated_preview_keys.is_empty()
+            && (generated_preview_was_affected || generated_preview_is_affected)
+        {
+            self.refresh_generated_block_previews();
+        }
         self.sync_table_boundary_caret_after_reparse();
         self.retain_valid_active_code_block_display_overrides();
         self.layout_dirty = true;
         self.invalidate_info_panel_cache();
         self.mark_inline_diff_dirty(false);
+        if let Some(bench) = self.large_document_frame_bench.as_mut() {
+            bench
+                .reparse_prepare_times
+                .push(decorations_started.duration_since(reparse_started));
+            bench
+                .reparse_decorations_times
+                .push(outline_started.duration_since(decorations_started));
+            bench
+                .reparse_outline_times
+                .push(line_display_started.duration_since(outline_started));
+            bench
+                .reparse_line_display_times
+                .push(finalize_started.duration_since(line_display_started));
+            bench
+                .reparse_finalize_times
+                .push(finalize_started.elapsed());
+        }
     }
 
     fn shift_active_code_block_display_overrides(&mut self, transfer: &PendingLineDisplayTransfer) {
@@ -6716,18 +6929,48 @@ impl EditorView {
 
     pub(crate) fn invalidate_generated_block_preview_render_caches(&mut self) {
         for cache_key in self.generated_preview_keys.clone() {
-            self.image_cache.remove(&cache_key);
+            self.retire_generated_preview_cache_entry(&cache_key);
             self.generated_preview_svg_cache.remove(&cache_key);
-            self.generated_preview_overlay_cache.remove(&cache_key);
         }
-        self.tab_generated_preview_cache.clear();
+        for (_, cache) in self.tab_generated_preview_cache.drain() {
+            self.retired_images
+                .extend(cache.images.into_values().flatten());
+            self.retired_images
+                .extend(cache.overlays.into_values().map(|(_, image)| image));
+        }
+        let mut pane_generated_keys = Vec::new();
         for pane in &mut self.panes {
-            pane.state.tab_generated_preview_cache.clear();
-            for cache_key in pane.state.generated_preview_keys.clone() {
-                self.image_cache.remove(&cache_key);
-                self.generated_preview_svg_cache.remove(&cache_key);
-                self.generated_preview_overlay_cache.remove(&cache_key);
+            for (_, cache) in pane.state.tab_generated_preview_cache.drain() {
+                self.retired_images
+                    .extend(cache.images.into_values().flatten());
+                self.retired_images
+                    .extend(cache.overlays.into_values().map(|(_, image)| image));
             }
+            pane_generated_keys.extend(pane.state.generated_preview_keys.iter().cloned());
+        }
+        for cache_key in pane_generated_keys {
+            self.retire_generated_preview_cache_entry(&cache_key);
+            self.generated_preview_svg_cache.remove(&cache_key);
+        }
+    }
+
+    pub(crate) fn retire_image_cache_entry(&mut self, cache_key: &str) {
+        if let Some(Some(image)) = self.image_cache.remove(cache_key) {
+            self.retired_images.push(image);
+        }
+    }
+
+    fn retire_generated_preview_cache_entry(&mut self, cache_key: &str) {
+        self.retire_image_cache_entry(cache_key);
+        if let Some((_, image)) = self.generated_preview_overlay_cache.remove(cache_key) {
+            self.retired_images.push(image);
+        }
+        self.generated_preview_views.remove(cache_key);
+    }
+
+    pub(crate) fn release_retired_images(&mut self, cx: &mut Context<Self>) {
+        for image in std::mem::take(&mut self.retired_images) {
+            cx.drop_image(image, None);
         }
     }
 
@@ -6926,12 +7169,22 @@ impl EditorView {
             }
             self.generated_preview_svg_cache
                 .insert(preview.cache_key.clone(), svg.clone());
-            let image = helpers::load_generated_preview_image_from_svg(svg.as_ref(), preview.kind)
-                .ok()
-                .map(Arc::new);
-            self.image_cache.insert(preview.cache_key.clone(), image);
-            self.generated_preview_overlay_cache
-                .remove(&preview.cache_key);
+            let image = helpers::load_generated_preview_image_from_svg_for_editor(
+                svg.as_ref(),
+                preview.kind,
+            )
+            .ok()
+            .map(Arc::new);
+            if let Some(Some(previous)) = self.image_cache.insert(preview.cache_key.clone(), image)
+            {
+                self.retired_images.push(previous);
+            }
+            if let Some((_, previous)) = self
+                .generated_preview_overlay_cache
+                .remove(&preview.cache_key)
+            {
+                self.retired_images.push(previous);
+            }
             rendered_count += 1;
         }
 
@@ -6974,13 +7227,15 @@ impl EditorView {
             }
             self.generated_preview_svg_cache
                 .insert(cache_key.clone(), svg.clone());
-            let image = helpers::load_generated_preview_image_from_svg(
+            let image = helpers::load_generated_preview_image_from_svg_for_editor(
                 svg.as_ref(),
                 markdown::BlockPreviewKind::Math,
             )
             .ok()
             .map(Arc::new);
-            self.image_cache.insert(cache_key, image);
+            if let Some(Some(previous)) = self.image_cache.insert(cache_key, image) {
+                self.retired_images.push(previous);
+            }
             rendered_count += 1;
         }
 
@@ -7028,10 +7283,8 @@ impl EditorView {
             if self.generated_preview_keys.contains(&stale_key) {
                 continue;
             }
-            self.image_cache.remove(&stale_key);
+            self.retire_generated_preview_cache_entry(&stale_key);
             self.generated_preview_svg_cache.remove(&stale_key);
-            self.generated_preview_overlay_cache.remove(&stale_key);
-            self.generated_preview_views.remove(&stale_key);
         }
         self.generated_preview_views
             .retain(|cache_key, _| self.generated_preview_keys.contains(cache_key));
@@ -7160,13 +7413,14 @@ impl EditorView {
         if raster_entry_count > GENERATED_PREVIEW_CACHE_RETAIN
             || total_raster_bytes > GENERATED_PREVIEW_CACHE_BYTE_BUDGET
         {
-            for cache_key in self.generated_preview_keys.iter() {
-                if keep_raster_keys.contains(cache_key) {
-                    continue;
-                }
-                self.image_cache.remove(cache_key);
-                self.generated_preview_overlay_cache.remove(cache_key);
-                self.generated_preview_views.remove(cache_key);
+            let stale_keys = self
+                .generated_preview_keys
+                .iter()
+                .filter(|cache_key| !keep_raster_keys.contains(*cache_key))
+                .cloned()
+                .collect::<Vec<_>>();
+            for cache_key in stale_keys {
+                self.retire_generated_preview_cache_entry(&cache_key);
             }
         }
 
@@ -10086,8 +10340,8 @@ impl EditorView {
         start_line: usize,
         next_number: u32,
         indent: usize,
-    ) {
-        let mut items: Vec<(usize, usize, u32)> = Vec::new();
+    ) -> bool {
+        let mut items: Vec<(usize, usize, usize, u32)> = Vec::new();
         let mut number = next_number;
         for line in start_line.. {
             if line >= self.buffer.line_count() {
@@ -10110,18 +10364,28 @@ impl EditorView {
                 break;
             }
             let current_str = &trimmed[..plen - 2];
-            if current_str.parse::<u32>().is_err() {
+            let Ok(current_number) = current_str.parse::<u32>() else {
                 break;
+            };
+            if current_number != number {
+                let num_start = self.buffer.line_start(line) + lws;
+                let num_end = num_start + current_str.len();
+                items.push((line, num_start, num_end, number));
             }
-            let num_start = self.buffer.line_start(line) + lws;
-            let num_end = num_start + current_str.len();
-            items.push((num_start, num_end, number));
             number += 1;
         }
-        for (num_start, num_end, new_num) in items.into_iter().rev() {
+        let changed = !items.is_empty();
+        for (line, num_start, num_end, new_num) in items.into_iter().rev() {
             self.buffer
                 .replace(num_start..num_end, &new_num.to_string());
+            if line < self.line_display_info.len() {
+                self.line_display_info[line] = None;
+            }
         }
+        if changed {
+            self.invalidate_line_geometry_cache();
+        }
+        changed
     }
 
     pub(crate) fn ordered_list_prefix_info(
@@ -10212,8 +10476,8 @@ impl EditorView {
         start_line: usize,
         starting_number: u32,
         indent: usize,
-    ) {
-        let mut items: Vec<(usize, usize, u32)> = Vec::new();
+    ) -> bool {
+        let mut items: Vec<(usize, usize, usize, u32)> = Vec::new();
         let mut number = starting_number;
         for line in start_line.. {
             if line >= self.buffer.line_count() {
@@ -10236,19 +10500,29 @@ impl EditorView {
                 break;
             }
             let current_str = &trimmed[..plen - 2];
-            if current_str.parse::<u32>().is_err() {
+            let Ok(current_number) = current_str.parse::<u32>() else {
                 break;
+            };
+            if current_number != number {
+                let num_start = self.buffer.line_start(line) + lws;
+                let num_end = num_start + current_str.len();
+                items.push((line, num_start, num_end, number));
             }
-            let num_start = self.buffer.line_start(line) + lws;
-            let num_end = num_start + current_str.len();
-            items.push((num_start, num_end, number));
             number += 1;
         }
 
-        for (num_start, num_end, new_num) in items.into_iter().rev() {
+        let changed = !items.is_empty();
+        for (line, num_start, num_end, new_num) in items.into_iter().rev() {
             self.buffer
                 .replace(num_start..num_end, &new_num.to_string());
+            if line < self.line_display_info.len() {
+                self.line_display_info[line] = None;
+            }
         }
+        if changed {
+            self.invalidate_line_geometry_cache();
+        }
+        changed
     }
 
     fn previous_ordered_list_number_before(&self, line: usize, indent: usize) -> Option<u32> {
@@ -10288,7 +10562,7 @@ impl EditorView {
         &mut self,
         line: usize,
         preserve_current_number: bool,
-    ) {
+    ) -> bool {
         let candidate_line = if self.ordered_list_prefix_info(line).is_some() {
             Some(line)
         } else if line + 1 < self.buffer.line_count()
@@ -10300,15 +10574,14 @@ impl EditorView {
         };
 
         let Some(target_line) = candidate_line else {
-            return;
+            return false;
         };
         let Some((_, indent, current_number)) = self.ordered_list_prefix_info(target_line) else {
-            return;
+            return false;
         };
 
         if preserve_current_number {
-            self.renumber_ordered_list_after(target_line + 1, current_number + 1, indent);
-            return;
+            return self.renumber_ordered_list_after(target_line + 1, current_number + 1, indent);
         }
 
         let starting_number = self
@@ -10316,7 +10589,7 @@ impl EditorView {
             .map(|prev_number| prev_number + 1)
             .unwrap_or(current_number);
 
-        self.renumber_ordered_list_block_from(target_line, starting_number, indent);
+        self.renumber_ordered_list_block_from(target_line, starting_number, indent)
     }
 }
 
@@ -10956,7 +11229,7 @@ impl EditorView {
 
     pub(crate) fn initialize_large_document_frame_bench_if_needed(&mut self) {
         if self.large_document_frame_bench.is_none()
-            && self.buffer.line_count() >= LARGE_MARKDOWN_MIN_LINES
+            && self.buffer.line_count() >= LINE_DISPLAY_CACHE_TRIM_MIN_LINES
         {
             self.large_document_frame_bench = LargeDocumentFrameBench::from_env();
         }
@@ -10976,7 +11249,7 @@ impl EditorView {
             let operation = (bench.frame
                 - LARGE_DOCUMENT_FRAME_BENCH_WARMUP
                 - LARGE_DOCUMENT_FRAME_BENCH_SCROLL_FRAMES)
-                % 10;
+                % 12;
             match operation {
                 0 => {
                     let edit_line = self
@@ -11042,15 +11315,73 @@ impl EditorView {
                     bench.newline_edit_times.push(started.elapsed());
                 }
                 4 => {
+                    let line = self
+                        .cursor_line()
+                        .min(self.buffer.line_count().saturating_sub(1));
+                    let start = self.buffer.line_start(line);
+                    let end = self.buffer.line_end(line);
+                    let delete_end = if end < self.buffer.len() {
+                        end + 1
+                    } else {
+                        end
+                    };
+                    let delete_start = if start == delete_end && start > 0 {
+                        start - 1
+                    } else {
+                        start
+                    };
+                    let deleted_text = self.buffer.text()[delete_start..delete_end].to_string();
+                    let should_normalize_ordered_lists =
+                        ordered_list_near_line(&self.decorations, line);
+                    self.checkpoint();
+                    self.queue_non_markdown_line_display_transfer(&(delete_start..delete_end), "");
+                    let buffer_started = Instant::now();
+                    self.buffer.delete(delete_start..delete_end);
+                    bench
+                        .delete_line_buffer_times
+                        .push(buffer_started.elapsed());
+                    self.cursor
+                        .move_to(delete_start.min(self.buffer.len()), &self.buffer);
+                    let reparse_started = Instant::now();
+                    self.reparse();
+                    if should_normalize_ordered_lists
+                        && self.normalize_ordered_list_near_line(self.cursor_line(), false)
+                    {
+                        self.reparse();
+                    }
+                    bench
+                        .delete_line_reparse_times
+                        .push(reparse_started.elapsed());
+                    self.commit_history_transaction();
+                    bench.pending_deleted_line = Some((delete_start, deleted_text));
+                    bench.delete_line_times.push(started.elapsed());
+                }
+                5 => {
+                    if let Some((offset, deleted_text)) = bench.pending_deleted_line.take() {
+                        self.checkpoint();
+                        self.queue_non_markdown_line_display_transfer(
+                            &(offset..offset),
+                            &deleted_text,
+                        );
+                        self.buffer.insert(offset, &deleted_text);
+                        self.cursor.move_to(
+                            (offset + deleted_text.len()).min(self.buffer.len()),
+                            &self.buffer,
+                        );
+                        self.reparse();
+                        self.commit_history_transaction();
+                    }
+                }
+                6 => {
                     self.cursor.anchor = 0;
                     self.cursor.offset = self.buffer.len();
                     bench.selection_times.push(started.elapsed());
                 }
-                5 => {
+                7 => {
                     self.cursor.anchor = self.cursor.offset;
                     bench.selection_times.push(started.elapsed());
                 }
-                6 => {
+                8 => {
                     self.commit_history_transaction();
                     if let Some(index) = self.active_tab_index()
                         && let Some((edits, view)) =
@@ -11063,7 +11394,7 @@ impl EditorView {
                     }
                     bench.history_times.push(started.elapsed());
                 }
-                7 => {
+                9 => {
                     if let Some(index) = self.active_tab_index()
                         && let Some((edits, view)) =
                             self.tabs[index].history.take_redo_transaction()
@@ -11075,7 +11406,7 @@ impl EditorView {
                     }
                     bench.history_times.push(started.elapsed());
                 }
-                8 => {
+                10 => {
                     self.scroll_offset = self.max_scroll_offset() * 0.85;
                     bench.scrollbar_jump_times.push(started.elapsed());
                 }
@@ -11131,6 +11462,14 @@ impl EditorView {
             "newline_buffer_p95_ms": percentile(&bench.newline_buffer_times, 95),
             "newline_reparse_p95_ms": percentile(&bench.newline_reparse_times, 95),
             "newline_history_p95_ms": percentile(&bench.newline_history_times, 95),
+            "delete_line_p95_ms": percentile(&bench.delete_line_times, 95),
+            "delete_line_buffer_p95_ms": percentile(&bench.delete_line_buffer_times, 95),
+            "delete_line_reparse_p95_ms": percentile(&bench.delete_line_reparse_times, 95),
+            "reparse_prepare_p95_ms": percentile(&bench.reparse_prepare_times, 95),
+            "reparse_decorations_p95_ms": percentile(&bench.reparse_decorations_times, 95),
+            "reparse_outline_p95_ms": percentile(&bench.reparse_outline_times, 95),
+            "reparse_line_display_p95_ms": percentile(&bench.reparse_line_display_times, 95),
+            "reparse_finalize_p95_ms": percentile(&bench.reparse_finalize_times, 95),
             "selection_update_p95_ms": percentile(&bench.selection_times, 95),
             "scrollbar_jump_p95_ms": percentile(&bench.scrollbar_jump_times, 95),
             "history_operation_p95_ms": percentile(&bench.history_times, 95),
@@ -11225,11 +11564,18 @@ impl EditorView {
         let (start_line, old_end_line_exclusive, new_end_line_exclusive) =
             line_display_transfer_line_bounds(&self.buffer, replaced_range, inserted_text);
         let markdown_plain_decoration_transfer = file_kind.is_markdown()
-            && self.can_transfer_markdown_plain_decorations(
+            && (markdown_plain_structural_edit_is_safe(
+                &self.buffer,
+                &self.decorations,
+                replaced_range,
                 inserted_text,
                 start_line,
                 old_end_line_exclusive,
-            );
+            ) || self.can_transfer_markdown_plain_decorations(
+                inserted_text,
+                start_line,
+                old_end_line_exclusive,
+            ));
         let (dirty_range, force_full_markdown_reparse) = if file_kind.is_markdown() {
             match self.markdown_line_display_transfer_dirty_range(
                 replaced_range,
@@ -11391,10 +11737,15 @@ impl EditorView {
             || inserted_text.contains("~~~")
             || touched_text.contains("```")
             || touched_text.contains("~~~")
-            || (inserted_text.contains('`')
+            || ((inserted_text.contains('`') || touched_text.contains('`'))
                 && self.markdown_context_contains(start_line, old_end_line_exclusive, "``"))
-            || (inserted_text.contains('~')
-                && self.markdown_context_contains(start_line, old_end_line_exclusive, "~~"));
+            || ((inserted_text.contains('~') || touched_text.contains('~'))
+                && self.markdown_context_contains(start_line, old_end_line_exclusive, "~~"))
+            || (inserted_text.contains('\n')
+                && self
+                    .decorations
+                    .get(start_line)
+                    .is_some_and(|decoration| decoration.block_type == BlockType::CodeBlockFence));
         if changed_text_can_toggle_fence {
             return None;
         }
@@ -11735,6 +12086,7 @@ pub(super) fn builtin_welcome_tab(ui_language: UiLanguage) -> OpenTab {
         path: None,
         file_kind: Some(FileKind::Markdown),
         editor_left_aligned: false,
+        reading_mode: false,
         snapshot: EditorSnapshot {
             text: initial_text,
             cursor_offset: first_line_end,
@@ -11885,12 +12237,14 @@ mod tests {
         EditorView, LazyMarkdownDecorations, SparseLineGeometry, adjacent_html_break_range,
         classify_file_kind_for_bytes, compute_incremental_markdown_decorations,
         edit_may_change_leading_indent, editor_can_start_content_edit, editor_is_read_only,
-        generated_preview_intersects_range, heading_matches_anchor,
-        line_display_transfer_line_bounds, markdown_syntax_expansion_allowed,
+        generated_preview_content_in_range, generated_preview_intersects_range,
+        heading_matches_anchor, line_display_transfer_line_bounds,
+        markdown_plain_structural_edit_is_safe, markdown_syntax_expansion_allowed,
         markdown_table_cell_from_paste, markdown_table_from_tsv, new_lazy_markdown_decorations,
         normalize_ordered_list_numbers_in_buffer, normalize_pasted_newlines,
-        parse_lazy_markdown_range, resolve_markdown_target_path, should_use_lazy_markdown_reparse,
-        split_external_paths, split_markdown_target, text_tab_is_dirty, unique_import_path,
+        ordered_list_near_line, parse_lazy_markdown_range, resolve_markdown_target_path,
+        should_use_lazy_markdown_reparse, split_external_paths, split_markdown_target,
+        text_tab_is_dirty, unique_import_path,
     };
     use crate::buffer::Buffer;
     use crate::markdown::{BlockType, parse_decorations};
@@ -11904,6 +12258,23 @@ mod tests {
             normalize_pasted_newlines("1\n2"),
             std::borrow::Cow::Borrowed(_)
         ));
+    }
+
+    #[test]
+    fn ordered_list_normalization_is_limited_to_the_deleted_line_neighborhood() {
+        let decorations = parse_decorations("plain\nplain\nplain\n1. first\n3. second");
+
+        assert!(!ordered_list_near_line(&decorations, 1));
+        assert!(ordered_list_near_line(&decorations, 2));
+        assert!(ordered_list_near_line(&decorations, 3));
+    }
+
+    #[test]
+    fn generated_preview_refresh_is_limited_to_the_edited_range() {
+        let decorations = parse_decorations("```mermaid\ngraph LR\n```\n\nplain text\n");
+
+        assert!(generated_preview_content_in_range(&decorations, 0..3));
+        assert!(!generated_preview_content_in_range(&decorations, 4..5));
     }
 
     #[test]
@@ -11992,6 +12363,27 @@ mod tests {
             EditorView::fs_rename_mappings(&[from, to]),
             vec![("/workspace/old-dir".into(), "/workspace/new-dir".into())]
         );
+    }
+
+    #[test]
+    fn file_structure_events_force_sidebar_refresh() {
+        use notify::EventKind;
+        use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind, RenameMode};
+
+        for event in [
+            notify::Event::new(EventKind::Create(CreateKind::File)),
+            notify::Event::new(EventKind::Remove(RemoveKind::File)),
+            notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both))),
+            notify::Event::new(EventKind::Any),
+        ] {
+            assert!(EditorView::fs_events_require_structure_refresh(&[event]));
+        }
+
+        let content_write =
+            notify::Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)));
+        assert!(!EditorView::fs_events_require_structure_refresh(&[
+            content_write,
+        ]));
     }
 
     #[test]
@@ -12322,12 +12714,32 @@ mod tests {
     }
 
     #[test]
-    fn lazy_markdown_edits_invalidate_cached_fence_ranges() {
+    fn lazy_markdown_local_edits_preserve_cached_fence_ranges() {
         let mut lazy = LazyMarkdownDecorations::new(512);
         lazy.fenced_code_spans = Some(vec![10..40]);
         lazy.invalidate_range(20..21);
 
-        assert!(lazy.fenced_code_spans.is_none());
+        assert_eq!(lazy.fenced_code_spans, Some(vec![10..40]));
+    }
+
+    #[test]
+    fn lazy_markdown_structural_edits_shift_cached_fence_ranges() {
+        let mut lazy = LazyMarkdownDecorations::new(512);
+        lazy.fenced_code_spans = Some(vec![10..40, 80..90]);
+
+        lazy.resize_after_structural_edit(513, 20, 21, 22);
+
+        assert_eq!(lazy.fenced_code_spans, Some(vec![10..41, 81..91]));
+    }
+
+    #[test]
+    fn lazy_markdown_structural_edits_before_fences_shift_whole_ranges() {
+        let mut lazy = LazyMarkdownDecorations::new(512);
+        lazy.fenced_code_spans = Some(vec![10..40, 80..90]);
+
+        lazy.resize_after_structural_edit(511, 4, 6, 5);
+
+        assert_eq!(lazy.fenced_code_spans, Some(vec![9..39, 79..89]));
     }
 
     #[test]
@@ -12425,6 +12837,60 @@ mod tests {
             line_display_transfer_line_bounds(&buffer, &range, "LP"),
             (0, 1, 1)
         );
+    }
+
+    #[test]
+    fn markdown_plain_structural_transfer_accepts_ordinary_newline_edits() {
+        let insert_buffer = Buffer::from_text("alpha beta\ngamma");
+        let insert_decorations = parse_decorations(insert_buffer.text());
+        let insert_at = "alpha".len();
+        assert!(markdown_plain_structural_edit_is_safe(
+            &insert_buffer,
+            &insert_decorations,
+            &(insert_at..insert_at),
+            "\n",
+            0,
+            1,
+        ));
+
+        let delete_buffer = Buffer::from_text("alpha\nbeta\ngamma");
+        let delete_decorations = parse_decorations(delete_buffer.text());
+        let delete_range = delete_buffer.line_end(0)..delete_buffer.line_start(1);
+        assert!(markdown_plain_structural_edit_is_safe(
+            &delete_buffer,
+            &delete_decorations,
+            &delete_range,
+            "",
+            0,
+            2,
+        ));
+    }
+
+    #[test]
+    fn markdown_plain_structural_transfer_rejects_new_markdown_syntax() {
+        let split_buffer = Buffer::from_text("prefix# heading\nend");
+        let split_decorations = parse_decorations(split_buffer.text());
+        let split_at = "prefix".len();
+        assert!(!markdown_plain_structural_edit_is_safe(
+            &split_buffer,
+            &split_decorations,
+            &(split_at..split_at),
+            "\n",
+            0,
+            1,
+        ));
+
+        let merge_buffer = Buffer::from_text("#\n heading\nend");
+        let merge_decorations = parse_decorations(merge_buffer.text());
+        let merge_range = merge_buffer.line_end(0)..merge_buffer.line_start(1);
+        assert!(!markdown_plain_structural_edit_is_safe(
+            &merge_buffer,
+            &merge_decorations,
+            &merge_range,
+            "",
+            0,
+            2,
+        ));
     }
 
     #[test]

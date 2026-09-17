@@ -1151,29 +1151,72 @@ impl Render for EditorView {
                                         .cursor(CursorStyle::Arrow)
                                         .child(
                                             div()
-                                                .id("empty-workspace-btn")
-                                                .px(px(20.0))
-                                                .py(px(8.0))
-                                                .border(px(self.ui_border_width(1.5)))
-                                                .border_dashed()
-                                                .border_color(border_color)
-                                                .rounded_full()
-                                                .text_size(px(self.scaled(
-                                                    self.styles
-                                                        .sidebar
-                                                        .sidebar_empty_btn_font_size_px,
-                                                )))
-                                                .text_color(btn_color)
-                                                .cursor(CursorStyle::Arrow)
-                                                .hover(move |s| s.bg(bg_hover))
-                                                .child(self.t(crate::i18n::TextKey::NewFile))
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(
-                                                        |this, _: &MouseDownEvent, _, cx| {
-                                                            this.create_scratch_tab(cx);
-                                                        },
-                                                    ),
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(self.scaled(12.0)))
+                                                .child(
+                                                    div()
+                                                        .id("empty-workspace-new-file-btn")
+                                                        .px(px(20.0))
+                                                        .py(px(8.0))
+                                                        .border(px(self.ui_border_width(1.5)))
+                                                        .border_dashed()
+                                                        .border_color(border_color)
+                                                        .rounded_full()
+                                                        .text_size(px(self.scaled(
+                                                            self.styles
+                                                                .sidebar
+                                                                .sidebar_empty_btn_font_size_px,
+                                                        )))
+                                                        .text_color(btn_color)
+                                                        .cursor(CursorStyle::Arrow)
+                                                        .hover(move |s| s.bg(bg_hover))
+                                                        .child(
+                                                            self.t(crate::i18n::TextKey::NewFile),
+                                                        )
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(
+                                                                |this,
+                                                                 _: &MouseDownEvent,
+                                                                 _,
+                                                                 cx| {
+                                                                    this.create_scratch_tab(cx);
+                                                                },
+                                                            ),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("empty-workspace-open-folder-btn")
+                                                        .px(px(20.0))
+                                                        .py(px(8.0))
+                                                        .border(px(self.ui_border_width(1.5)))
+                                                        .border_dashed()
+                                                        .border_color(border_color)
+                                                        .rounded_full()
+                                                        .text_size(px(self.scaled(
+                                                            self.styles
+                                                                .sidebar
+                                                                .sidebar_empty_btn_font_size_px,
+                                                        )))
+                                                        .text_color(btn_color)
+                                                        .cursor(CursorStyle::Arrow)
+                                                        .hover(move |s| s.bg(bg_hover))
+                                                        .child(
+                                                            self.t(crate::i18n::TextKey::OpenFolder),
+                                                        )
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(
+                                                                |this,
+                                                                 _: &MouseDownEvent,
+                                                                 _,
+                                                                 cx| {
+                                                                    this.pick_workspace_folder(cx);
+                                                                },
+                                                            ),
+                                                        ),
                                                 ),
                                         ),
                                 )
@@ -1241,32 +1284,34 @@ impl Render for EditorView {
                                     cx.listener(Self::on_tab_bar_drag_space_mouse_down),
                                 ),
                         )
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(toolbar_left))
-                                .top(px(toolbar_top))
-                                .child(self.render_toolbar_button(
-                                    "empty-toolbar-sidebar-toggle",
-                                    button_size,
-                                    button_size,
-                                    icon_size,
-                                    1.0,
-                                    hover_opacity,
-                                    SIDEBAR_TOGGLE_SVG_PATH,
-                                    anchor,
-                                    sidebar_tooltip,
-                                    Some(crate::editor::shortcut::hint("secondary-shift-s")),
-                                    cx,
-                                    |this, cx| {
-                                        if this.workspaces.is_empty() {
-                                            this.pick_workspace_folder(cx);
-                                        } else {
-                                            this.toggle_sidebar_visibility(cx);
-                                        }
-                                    },
-                                )),
-                        )
+                        .when(!self.app_settings.simple_mode, |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .left(px(toolbar_left))
+                                    .top(px(toolbar_top))
+                                    .child(self.render_toolbar_button(
+                                        "empty-toolbar-sidebar-toggle",
+                                        button_size,
+                                        button_size,
+                                        icon_size,
+                                        1.0,
+                                        hover_opacity,
+                                        SIDEBAR_TOGGLE_SVG_PATH,
+                                        anchor,
+                                        sidebar_tooltip,
+                                        Some(crate::editor::shortcut::hint("secondary-shift-s")),
+                                        cx,
+                                        |this, cx| {
+                                            if this.workspaces.is_empty() {
+                                                this.pick_workspace_folder(cx);
+                                            } else {
+                                                this.toggle_sidebar_visibility(cx);
+                                            }
+                                        },
+                                    )),
+                            )
+                        })
                     }),
             )
             .when(pointer_dragging, |this| {

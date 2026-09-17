@@ -477,7 +477,7 @@ impl EditorView {
                 self.checkpoint();
                 self.buffer
                     .replace(line_start + url_start..line_start + url_end, &new_url);
-                self.image_cache.remove(&old_url);
+                self.retire_image_cache_entry(&old_url);
                 self.reparse();
                 self.pause_blinking(cx);
             }

@@ -1,12 +1,26 @@
 //! Font families and font files available on the host platform.
 
-#[cfg(not(target_os = "macos"))]
 use std::collections::HashSet;
 #[cfg(not(target_os = "macos"))]
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 /// Family name that resolves to the platform's UI font at render time.
 pub(crate) const SYSTEM_UI: &str = ".SystemUIFont";
+
+pub(crate) fn intern_family(family: &str) -> &'static str {
+    static FAMILIES: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let mut families = FAMILIES
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(&interned) = families.get(family) {
+        return interned;
+    }
+    let interned = Box::leak(family.to_string().into_boxed_str());
+    families.insert(interned);
+    interned
+}
 
 #[cfg(target_os = "macos")]
 pub(crate) const MONOSPACE: &str = "Menlo";
@@ -93,4 +107,16 @@ pub(crate) fn pdf_font_candidates() -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     candidates.retain(|path| seen.insert(path.clone()));
     candidates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::intern_family;
+
+    #[test]
+    fn intern_family_reuses_the_same_allocation() {
+        let first = intern_family("Moeka Test Font");
+        let second = intern_family(&"Moeka Test Font".to_string());
+        assert!(std::ptr::eq(first, second));
+    }
 }

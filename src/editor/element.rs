@@ -1307,11 +1307,7 @@ fn build_precise_table_layout(
                     cell_layout.display_text.clone().into()
                 };
                 let inner_width = (cell_layout.width - cell_padding_x * 2.0).max(base_char_width);
-                let shape_width = helpers::effective_wrap_width_for_letter_spacing(
-                    inner_width,
-                    font_size,
-                    letter_spacing,
-                );
+                let shape_width = inner_width;
                 if let Ok(mut shaped_lines) = window.text_system().shape_text(
                     cell_text,
                     px(font_size),
@@ -2235,9 +2231,7 @@ impl Element for EditorElement {
         };
         let text_width = (editor_width - editor.padding_left() - editor.padding_right())
             .max(editor.scaled(120.0));
-        let wrap_width = (text_width
-            - editor.scaled(editor.styles.editor.editor_wrap_right_padding_px))
-        .max(editor.scaled(120.0));
+        let wrap_width = text_width;
         let non_markdown_nowrap =
             editor.active_tab_is_non_markdown_text() && !editor.editor_wraps_to_available_width();
         let non_markdown_horizontal_state = editor.non_markdown_horizontal_scroll_state();
@@ -4240,12 +4234,8 @@ impl Element for EditorElement {
             } else if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
                 helpers::code_block_soft_wrap_width(code_block_viewport_width, base_char_width)
             } else if is_quote_line {
-                (text_width
-                    - quote_horizontal_padding
-                    - quote_indent_px
-                    - quote_content_indent_px
-                    - editor.scaled(editor.styles.editor.editor_wrap_right_padding_px))
-                .max(editor.scaled(80.0))
+                (text_width - quote_horizontal_padding - quote_indent_px - quote_content_indent_px)
+                    .max(editor.scaled(80.0))
             } else {
                 wrap_width
             };
@@ -4256,17 +4246,6 @@ impl Element for EditorElement {
                 base_wrap_width
             };
 
-            let effective_wrap_width = if code_block_group.is_some() {
-                helpers::effective_monospace_wrap_width_for_letter_spacing(
-                    effective_wrap_width,
-                    base_char_width,
-                    letter_spacing,
-                )
-            } else if letter_spacing > 0.0 {
-                effective_wrap_width * font_size / (font_size + letter_spacing)
-            } else {
-                effective_wrap_width
-            };
             let code_block_text_viewport_width = code_block_group
                 .map(|_| code_block_viewport_width)
                 .unwrap_or(effective_wrap_width);
@@ -5247,12 +5226,7 @@ impl Element for EditorElement {
                                     let wrap_width = (cell_layout.width
                                         - layout.cell_padding_x * 2.0)
                                         .max(base_char_width);
-                                    let shape_width =
-                                        helpers::effective_wrap_width_for_letter_spacing(
-                                            wrap_width,
-                                            font_size,
-                                            letter_spacing,
-                                        );
+                                    let shape_width = wrap_width;
 
                                     if let Ok(mut shaped_lines) = window.text_system().shape_text(
                                         cell_text,
@@ -5300,6 +5274,89 @@ impl Element for EditorElement {
                                                     wrap_width,
                                                     f32::from(shaped.unwrapped_layout.width),
                                                 );
+                                            if editor.command_held {
+                                                for span in cell_decoration
+                                                    .inline_spans
+                                                    .iter()
+                                                    .filter(|span| {
+                                                        span.kind
+                                                            == crate::markdown::InlineKind::Link
+                                                    })
+                                                {
+                                                    let global_start = if span.range.start
+                                                        >= cell_layout.buffer_to_display.len()
+                                                    {
+                                                        cell_layout.display_text.len()
+                                                    } else {
+                                                        helpers::buffer_to_display_offset(
+                                                            &cell_layout.buffer_to_display,
+                                                            span.range.start,
+                                                        )
+                                                    };
+                                                    let global_end = if span.range.end
+                                                        >= cell_layout.buffer_to_display.len()
+                                                    {
+                                                        cell_layout.display_text.len()
+                                                    } else {
+                                                        helpers::buffer_to_display_offset(
+                                                            &cell_layout.buffer_to_display,
+                                                            span.range.end,
+                                                        )
+                                                    };
+                                                    let display_start = global_start
+                                                        .saturating_sub(hard_line_range.start)
+                                                        .min(hard_line_range.len());
+                                                    let display_end = global_end
+                                                        .saturating_sub(hard_line_range.start)
+                                                        .min(hard_line_range.len());
+                                                    for link_bounds in
+                                                        helpers::build_highlight_bounds(
+                                                            hard_display_text,
+                                                            &hard_cell_runs,
+                                                            &shaped,
+                                                            display_start,
+                                                            display_end,
+                                                            cell_x,
+                                                            hard_line_y,
+                                                            line_height,
+                                                            font_size,
+                                                            0.0,
+                                                            0.0,
+                                                            letter_spacing,
+                                                            window,
+                                                        )
+                                                    {
+                                                        if editor
+                                                            .hovered_editor_position
+                                                            .is_some_and(|position| {
+                                                                link_bounds.contains(&position)
+                                                            })
+                                                        {
+                                                            link_underlines.push(fill(
+                                                                Bounds::new(
+                                                                    point(
+                                                                        link_bounds.origin.x,
+                                                                        link_bounds.origin.y
+                                                                            + link_bounds
+                                                                                .size
+                                                                                .height
+                                                                            - px(2.0),
+                                                                    ),
+                                                                    size(
+                                                                        link_bounds.size.width,
+                                                                        px(1.5),
+                                                                    ),
+                                                                ),
+                                                                theme.link,
+                                                            ));
+                                                        }
+                                                        link_hitboxes.push(window.insert_hitbox(
+                                                            link_bounds,
+                                                            HitboxBehavior::Normal,
+                                                        ));
+                                                    }
+                                                }
+                                            }
                                             let mut push_search_highlights =
                                                 |matches: &[std::ops::Range<usize>],
                                                  active_index: Option<usize>| {
@@ -8999,6 +9056,7 @@ impl Element for EditorElement {
         }
 
         self.editor.update(cx, |editor, cx| {
+            editor.release_retired_images(cx);
             editor.code_block_horizontal_scrollbars =
                 code_block_horizontal_scrollbars_local.clone();
             if non_markdown_nowrap

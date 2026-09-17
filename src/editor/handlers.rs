@@ -2704,6 +2704,7 @@ impl EditorView {
         }
         self.checkpoint();
         let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
+        let should_normalize_ordered_lists = ordered_list_near_line(&self.decorations, line);
         let start = self.buffer.line_start(line);
         let end = self.buffer.line_end(line);
         let delete_end = if end < self.buffer.len() {
@@ -2722,7 +2723,9 @@ impl EditorView {
         self.cursor.anchor = self.cursor.offset;
         self.mark_active_tab_dirty();
         self.reparse();
-        if self.normalize_all_ordered_lists() {
+        if should_normalize_ordered_lists
+            && self.normalize_ordered_list_near_line(self.cursor_line(), false)
+        {
             self.reparse();
         }
         self.scroll_to_cursor();
@@ -3286,10 +3289,14 @@ impl EditorView {
     pub(crate) fn on_close_active_tab(
         &mut self,
         _: &CloseActiveTab,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_active_tab(cx);
+        if self.tabs.is_empty() {
+            window.remove_window();
+        } else {
+            self.close_active_tab(cx);
+        }
     }
 
     pub(crate) fn on_reopen_closed_tab(

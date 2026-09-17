@@ -769,6 +769,22 @@ impl EditorView {
                     event.position,
                 ) {
                     self.last_mouse_down_target = Some((event.position, offset));
+                    if event.modifiers.secondary() {
+                        let (line, column) = self.buffer.offset_to_line_col(offset);
+                        let link_target = self
+                            .decorations
+                            .get(line)
+                            .and_then(|decoration| {
+                                crate::markdown::link_target_at_column(decoration, column)
+                            })
+                            .map(str::to_string);
+                        if let Some(target) = link_target
+                            && self.navigate_markdown_target(&target, true, cx)
+                        {
+                            self.is_selecting = false;
+                            return;
+                        }
+                    }
                     ime_debug_log(format!(
                         "table cell mouse_down table_start={} visual_row={} col={} offset={} shift={} click_count={}",
                         table_start,
@@ -879,25 +895,11 @@ impl EditorView {
                 return;
             }
 
-            let link_url = self.decorations.get(line).and_then(|dec| {
-                dec.inline_spans.iter().find_map(|span| {
-                    if span.kind != InlineKind::Link {
-                        return None;
-                    }
-                    let prefix_len = 1;
-                    let full_start = span.range.start.saturating_sub(prefix_len);
-                    let full_end = dec
-                        .syntax_ranges
-                        .iter()
-                        .filter(|sr| sr.range.start >= span.range.end)
-                        .map(|sr| sr.range.end)
-                        .max()
-                        .unwrap_or(span.range.end);
-                    (col >= full_start && col <= full_end)
-                        .then(|| span.target.clone())
-                        .flatten()
-                })
-            });
+            let link_url = self
+                .decorations
+                .get(line)
+                .and_then(|decoration| crate::markdown::link_target_at_column(decoration, col))
+                .map(str::to_string);
             if let Some(url) = link_url
                 && self.navigate_markdown_target(&url, true, cx)
             {
@@ -2330,11 +2332,7 @@ impl EditorView {
             display_text.clone().into()
         };
         let letter_spacing = self.styles.editor.editor_letter_spacing_px;
-        let shape_width = helpers::effective_wrap_width_for_letter_spacing(
-            cell_inner_width.max(font_size * 0.5),
-            font_size,
-            letter_spacing,
-        );
+        let shape_width = cell_inner_width.max(font_size * 0.5);
         let mut wrapped_lines = window
             .text_system()
             .shape_text(
@@ -2504,9 +2502,7 @@ impl EditorView {
         };
         let text_width =
             (editor_width - self.padding_left() - self.padding_right()).max(self.scaled(120.0));
-        let wrap_width = (text_width
-            - self.scaled(self.styles.editor.editor_wrap_right_padding_px))
-        .max(self.scaled(120.0));
+        let wrap_width = text_width;
 
         let text_style = window.text_style();
         let editor_styles = &self.styles.editor;
@@ -2889,23 +2885,8 @@ impl EditorView {
         } else {
             wrap_width
         };
-        let effective_wrap_width = if matches!(
-            decoration.block_type,
-            BlockType::CodeBlock | BlockType::CodeBlockFence
-        ) {
-            helpers::effective_monospace_wrap_width_for_letter_spacing(
-                base_wrap_width,
-                base_char_width,
-                letter_spacing,
-            )
-        } else if letter_spacing > 0.0 {
-            base_wrap_width * font_size / (font_size + letter_spacing)
-        } else {
-            base_wrap_width
-        };
-
         let wrap_width_param = if self.editor_wraps_to_available_width() {
-            Some(px(effective_wrap_width))
+            Some(px(base_wrap_width))
         } else {
             None
         };

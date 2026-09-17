@@ -150,7 +150,8 @@ fn collect_sidebar_git_statuses_for_root(
 
     let mut statuses = HashMap::new();
     if let Ok(output) = crate::platform::process::headless_command("git").and_then(|mut git| {
-        git.arg("-c")
+        git.arg("--no-optional-locks")
+            .arg("-c")
             .arg("core.quotepath=false")
             .arg("-C")
             .arg(&repo_root)

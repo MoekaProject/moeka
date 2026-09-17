@@ -124,6 +124,18 @@ impl WrappedLine {
         self.layout.len()
     }
 
+    /// Recompute soft-wrap boundaries after glyph positions have changed.
+    pub fn rewrap(&mut self, wrap_width: Pixels) {
+        let unwrapped_layout = self.layout.unwrapped_layout.clone();
+        let wrap_boundaries =
+            unwrapped_layout.compute_wrap_boundaries(&self.text, wrap_width, None);
+        self.layout = Arc::new(WrappedLineLayout {
+            unwrapped_layout,
+            wrap_boundaries,
+            wrap_width: Some(wrap_width),
+        });
+    }
+
     /// Paint this line of text to the window.
     pub fn paint(
         &self,

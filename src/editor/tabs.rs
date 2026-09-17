@@ -110,11 +110,30 @@ impl EditorView {
     /// the whole session, so a handful of photos is hundreds of megabytes.
     /// With no tab left in the window nothing can display them; the visible
     /// image pass reloads whatever the next document needs.
+    fn retire_tab_generated_preview_cache(&mut self, tab_id: &str) {
+        let Some(cache) = self.tab_generated_preview_cache.remove(tab_id) else {
+            return;
+        };
+        self.retired_images
+            .extend(cache.images.into_values().flatten());
+        self.retired_images
+            .extend(cache.overlays.into_values().map(|(_, image)| image));
+    }
+
     fn release_document_image_cache(&mut self) {
         let generated_keys = std::mem::take(&mut self.generated_preview_keys);
-        self.image_cache.retain(|key, _| {
-            key.starts_with(file_list::FILE_LIST_IMAGE_CACHE_PREFIX) || generated_keys.contains(key)
-        });
+        let stale_keys = self
+            .image_cache
+            .keys()
+            .filter(|key| {
+                !key.starts_with(file_list::FILE_LIST_IMAGE_CACHE_PREFIX)
+                    && !generated_keys.contains(*key)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for cache_key in stale_keys {
+            self.retire_image_cache_entry(&cache_key);
+        }
         self.image_cache.shrink_to_fit();
         self.generated_preview_keys = generated_keys;
     }
@@ -391,6 +410,7 @@ impl EditorView {
             path: closed_tab.path,
             file_kind: closed_tab.file_kind,
             editor_left_aligned: closed_tab.editor_left_aligned,
+            reading_mode: closed_tab.reading_mode,
             snapshot: closed_tab.snapshot,
             image_view: closed_tab.image_view,
             whiteboard: closed_tab.whiteboard,
@@ -548,6 +568,7 @@ impl EditorView {
             path: Some(path.to_path_buf()),
             file_kind: Some(file_kind),
             editor_left_aligned: false,
+            reading_mode: false,
             snapshot,
             image_view: ImageViewState::default(),
             whiteboard,
@@ -689,6 +710,7 @@ impl EditorView {
                     self.tabs[index].snapshot = self.current_snapshot();
                 }
                 self.tabs[index].editor_left_aligned = self.editor_left_aligned;
+                self.tabs[index].reading_mode = self.reading_mode;
                 self.current_file_path = self.tabs[index].path.clone();
             }
         }
@@ -723,10 +745,10 @@ impl EditorView {
         let tab_file_kind = self.tabs[index].file_kind.clone();
         let tab_path = self.tabs[index].path.clone();
         let tab_left_aligned = self.tabs[index].editor_left_aligned;
+        let tab_reading_mode = self.tabs[index].reading_mode;
         let switching_tabs = self.active_tab_id.as_deref() != Some(tab_id.as_str());
         if switching_tabs {
             self.stash_active_tab_generated_preview_cache();
-            self.reading_mode = reading_mode_after_tab_activation(self.reading_mode, true);
             self.table_boundary_caret = None;
         }
         self.invalidate_active_file_panel_caches();
@@ -735,6 +757,7 @@ impl EditorView {
         self.active_file_kind_cache = tab_file_kind.clone();
         self.current_file_path = tab_path.clone();
         self.editor_left_aligned = tab_left_aligned;
+        self.reading_mode = tab_reading_mode;
         if switching_tabs {
             self.restore_generated_preview_cache_for_tab(&tab_id);
         }
@@ -851,7 +874,7 @@ impl EditorView {
             if was_active {
                 self.stash_active_tab_generated_preview_cache();
             }
-            self.tab_generated_preview_cache.remove(tab_id);
+            self.retire_tab_generated_preview_cache(tab_id);
             self.tab_layout_cache.remove(tab_id);
             self.active_tab_id = None;
             self.active_tab_index_cache.set(None);
@@ -863,6 +886,7 @@ impl EditorView {
             if self.panes.len() <= 1 {
                 self.release_document_image_cache();
             }
+            self.release_retired_images(cx);
             // Closing the last tab of a split pane collapses the pane.
             let pane_id = self.current_pane_id();
             self.remove_pane_if_empty(pane_id, cx);
@@ -875,7 +899,8 @@ impl EditorView {
         } else {
             cx.notify();
         }
-        self.tab_generated_preview_cache.remove(tab_id);
+        self.retire_tab_generated_preview_cache(tab_id);
+        self.release_retired_images(cx);
         self.tab_layout_cache.remove(tab_id);
         self.process_pending_close_queue(cx);
         session_store::persist_session(self);
@@ -1168,6 +1193,7 @@ impl EditorView {
             path: None,
             file_kind: Some(FileKind::Markdown),
             editor_left_aligned: false,
+            reading_mode: false,
             snapshot: EditorSnapshot {
                 text: String::new(),
                 cursor_offset: 0,
@@ -1268,6 +1294,7 @@ impl EditorView {
             path: None,
             file_kind: None,
             editor_left_aligned: false,
+            reading_mode: false,
             snapshot: EditorSnapshot {
                 text: String::new(),
                 cursor_offset: 0,
@@ -3158,10 +3185,6 @@ fn middle_ellipsize_parts(text: &str, max_display_units: usize) -> (String, Opti
     )
 }
 
-fn reading_mode_after_tab_activation(reading_mode: bool, switching_tabs: bool) -> bool {
-    reading_mode && !switching_tabs
-}
-
 /// Returns the byte offset of the end of the first Markdown content line,
 /// skipping YAML front matter when present.
 fn first_markdown_content_line_end(text: &str) -> Option<usize> {
@@ -3205,6 +3228,7 @@ mod tests {
             path,
             file_kind: None,
             editor_left_aligned: false,
+            reading_mode: false,
             snapshot: EditorSnapshot {
                 text: text.to_string(),
                 ..Default::default()
@@ -3258,13 +3282,6 @@ mod tests {
             middle_ellipsize_parts("中文组合字符标题.md", 12),
             ("中".to_string(), Some("题.md".to_string())),
         );
-    }
-
-    #[test]
-    fn reading_mode_closes_only_when_switching_to_another_tab() {
-        assert!(!reading_mode_after_tab_activation(true, true));
-        assert!(reading_mode_after_tab_activation(true, false));
-        assert!(!reading_mode_after_tab_activation(false, true));
     }
 
     #[test]

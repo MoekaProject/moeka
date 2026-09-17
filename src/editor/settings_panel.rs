@@ -2851,24 +2851,24 @@ impl EditorView {
             self.font_picker_trigger_position = None;
             match (picker.role, picker.option_index) {
                 (FontRole::UiFont, _) => {
-                    self.styles.ui_font_family = Box::leak(font_name.clone().into_boxed_str());
+                    self.styles.ui_font_family = crate::platform::fonts::intern_family(&font_name);
                     self.app_settings.ui_font = font_name;
                 }
                 (FontRole::BodyFont, 0) => {
-                    let leaked = Box::leak(font_name.clone().into_boxed_str());
-                    self.styles.editor.editor_body_latin_font_family = leaked;
-                    self.styles.editor.editor_heading_latin_font_family = leaked;
+                    let interned = crate::platform::fonts::intern_family(&font_name);
+                    self.styles.editor.editor_body_latin_font_family = interned;
+                    self.styles.editor.editor_heading_latin_font_family = interned;
                     self.app_settings.body_latin_font = font_name;
                 }
                 (FontRole::BodyFont, 1) => {
-                    let leaked = Box::leak(font_name.clone().into_boxed_str());
-                    self.styles.editor.editor_body_cjk_font_family = leaked;
-                    self.styles.editor.editor_heading_cjk_font_family = leaked;
+                    let interned = crate::platform::fonts::intern_family(&font_name);
+                    self.styles.editor.editor_body_cjk_font_family = interned;
+                    self.styles.editor.editor_heading_cjk_font_family = interned;
                     self.app_settings.body_cjk_font = font_name;
                 }
                 (FontRole::CodeFont, _) => {
                     self.styles.editor.editor_monospace_font_family =
-                        Box::leak(font_name.clone().into_boxed_str());
+                        crate::platform::fonts::intern_family(&font_name);
                     self.app_settings.code_font = font_name;
                 }
                 (FontRole::TerminalFont, _) => {
