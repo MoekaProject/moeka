@@ -773,6 +773,188 @@ impl CodeSyntaxPalette {
     };
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct MarkdownSyntaxPalette {
+    heading: u32,
+    bold: u32,
+    italic: u32,
+    strikethrough: u32,
+    inline_code: u32,
+    link: u32,
+    list_marker: u32,
+}
+
+const fn markdown_syntax(
+    heading: u32,
+    bold: u32,
+    italic: u32,
+    strikethrough: u32,
+    inline_code: u32,
+    link: u32,
+    list_marker: u32,
+) -> MarkdownSyntaxPalette {
+    MarkdownSyntaxPalette {
+        heading,
+        bold,
+        italic,
+        strikethrough,
+        inline_code,
+        link,
+        list_marker,
+    }
+}
+
+fn markdown_syntax_for(code: CodeSyntaxPalette) -> MarkdownSyntaxPalette {
+    if code == CodeSyntaxPalette::GITHUB_LIGHT {
+        markdown_syntax(
+            0xCF222E, 0x953800, 0x8250DF, 0x6E7781, 0x0A3069, 0x0969DA, 0xCF222E,
+        )
+    } else if code == CodeSyntaxPalette::GRUVBOX_LIGHT {
+        markdown_syntax(
+            0xAF3A03, 0xB57614, 0x8F3F71, 0x928374, 0x79740E, 0x076678, 0x9D0006,
+        )
+    } else if code == CodeSyntaxPalette::XCODE_LIGHT {
+        markdown_syntax(
+            0x9B2393, 0x643820, 0x3900A0, 0x5D6C79, 0xC41A16, 0x326D74, 0x947100,
+        )
+    } else if code == CodeSyntaxPalette::ROSE_PINE_DAWN {
+        markdown_syntax(
+            0xB4637A, 0x9D640E, 0x907AA9, 0x9893A5, 0x286983, 0x56949F, 0xB4637A,
+        )
+    } else if code == CodeSyntaxPalette::CATPPUCCIN_LATTE {
+        markdown_syntax(
+            0x8839EF, 0xB94700, 0xA83A91, 0x8C8FA1, 0x367F28, 0x1E66F5, 0xA86A00,
+        )
+    } else if code == CodeSyntaxPalette::EVERFOREST_LIGHT {
+        markdown_syntax(
+            0xC84C49, 0xA66B00, 0xB44B91, 0x939F91, 0x708600, 0x287FA9, 0xD06422,
+        )
+    } else if code == CodeSyntaxPalette::NORD_LIGHT {
+        markdown_syntax(
+            0x5E81AC, 0x965C44, 0x9A6590, 0x8892A5, 0x6C8A55, 0x3E7B91, 0x497D7B,
+        )
+    } else if code == CodeSyntaxPalette::SOLARIZED_LIGHT {
+        markdown_syntax(
+            0xCB4B16, 0xB58900, 0x6C71C4, 0x7B8D8D, 0x1B756F, 0x268BD2, 0x697A00,
+        )
+    } else if code == CodeSyntaxPalette::AYU_LIGHT {
+        markdown_syntax(
+            0xC35F00, 0x8B5FB3, 0x287E9A, 0x787B80, 0x668A00, 0x247BB5, 0xC66C48,
+        )
+    } else if code == CodeSyntaxPalette::TOKYO_NIGHT_LIGHT {
+        markdown_syntax(
+            0x34548A, 0x965027, 0x5A4A78, 0x9699A3, 0x485E30, 0x0F4B6E, 0x33635C,
+        )
+    } else if code == CodeSyntaxPalette::ONE_LIGHT {
+        markdown_syntax(
+            0xA626A4, 0x986801, 0x4078F2, 0x7C7D83, 0x50A14F, 0x2F6EDB, 0x0184BC,
+        )
+    } else if code == CodeSyntaxPalette::WILLOW_LIGHT {
+        markdown_syntax(
+            0x556B2F, 0x8A632A, 0x744F75, 0x879284, 0x6B7F38, 0x376E72, 0x52766C,
+        )
+    } else if code == CodeSyntaxPalette::COASTAL_LIGHT {
+        markdown_syntax(
+            0x2D5F8B, 0x9A6543, 0x74639A, 0x7C8993, 0x4E7A64, 0x356FA8, 0x287D83,
+        )
+    } else if code == CodeSyntaxPalette::LAVENDER_LIGHT {
+        markdown_syntax(
+            0x7252A3, 0x9A623B, 0xA04B58, 0x898494, 0x56805B, 0x4169A1, 0x526AA3,
+        )
+    } else if code == CodeSyntaxPalette::APRICOT_LIGHT {
+        markdown_syntax(
+            0xB04C38, 0x9B642C, 0x8E5590, 0x8C8178, 0x627A36, 0x397A78, 0xA64D5C,
+        )
+    } else if code == CodeSyntaxPalette::SILVER_LIGHT {
+        markdown_syntax(
+            0x4C5E88, 0x8B6046, 0x7D5F87, 0x7F8791, 0x587447, 0x3C6F9C, 0x39747B,
+        )
+    } else if code == CodeSyntaxPalette::ONE_DARK {
+        markdown_syntax(
+            0xE06C75, 0xD19A66, 0xC678DD, 0x636D83, 0x98C379, 0x61AFEF, 0xE06C75,
+        )
+    } else if code == CodeSyntaxPalette::MILKY_NIGHT {
+        markdown_syntax(
+            0xE58D91, 0xEBCB8B, 0xC792D4, 0x7E838D, 0xA7C080, 0x82AAFF, 0x89DDFF,
+        )
+    } else if code == CodeSyntaxPalette::DRACULA {
+        markdown_syntax(
+            0xFF79C6, 0xFFB86C, 0xBD93F9, 0x6272A4, 0x50FA7B, 0x8BE9FD, 0xFF79C6,
+        )
+    } else if code == CodeSyntaxPalette::NORD {
+        markdown_syntax(
+            0x88C0D0, 0xEBCB8B, 0xB48EAD, 0x616E88, 0xA3BE8C, 0x81A1C1, 0x8FBCBB,
+        )
+    } else if code == CodeSyntaxPalette::TOKYO_NIGHT {
+        markdown_syntax(
+            0x7AA2F7, 0xFF9E64, 0xBB9AF7, 0x565F89, 0x73DACA, 0x7DCFFF, 0x2AC3DE,
+        )
+    } else if code == CodeSyntaxPalette::CATPPUCCIN_MOCHA {
+        markdown_syntax(
+            0xCBA6F7, 0xFAB387, 0xF5C2E7, 0x6C7086, 0xA6E3A1, 0x89B4FA, 0xF9E2AF,
+        )
+    } else if code == CodeSyntaxPalette::GITHUB_DARK {
+        markdown_syntax(
+            0x79C0FF, 0xFFA657, 0xD2A8FF, 0x8B949E, 0xA5D6FF, 0x58A6FF, 0xFF7B72,
+        )
+    } else if code == CodeSyntaxPalette::SOLARIZED_DARK {
+        markdown_syntax(
+            0xCB4B16, 0xB58900, 0x6C71C4, 0x586E75, 0x2AA198, 0x268BD2, 0x859900,
+        )
+    } else if code == CodeSyntaxPalette::GRUVBOX_DARK {
+        markdown_syntax(
+            0xFE8019, 0xFABD2F, 0xD3869B, 0x928374, 0xB8BB26, 0x83A598, 0xFB4934,
+        )
+    } else if code == CodeSyntaxPalette::ROSE_PINE {
+        markdown_syntax(
+            0xEB6F92, 0xF6C177, 0xC4A7E7, 0x6E6A86, 0x9CCFD8, 0xC4A7E7, 0xEBBCBA,
+        )
+    } else if code == CodeSyntaxPalette::EVERFOREST_DARK {
+        markdown_syntax(
+            0xE67E80, 0xDBBC7F, 0xD699B6, 0x859289, 0xA7C080, 0x7FBBB3, 0xE69875,
+        )
+    } else if code == CodeSyntaxPalette::MONOKAI_PRO {
+        markdown_syntax(
+            0xFF6188, 0xFC9867, 0xAB9DF2, 0x727072, 0xA9DC76, 0x78DCE8, 0xFFD866,
+        )
+    } else if code == CodeSyntaxPalette::AYU_MIRAGE {
+        markdown_syntax(
+            0xFF8F40, 0xFFB454, 0xD2A6FF, 0x6C7A89, 0xAAD94C, 0x59C2FF, 0xF29E74,
+        )
+    } else if code == CodeSyntaxPalette::MOONLIGHT_HARBOR {
+        markdown_syntax(
+            0xC099FF, 0xF5A97F, 0xE6B0D8, 0x65708A, 0xA9DC76, 0x82B1FF, 0x7FDBCA,
+        )
+    } else if code == CodeSyntaxPalette::COBALT_VELVET {
+        markdown_syntax(
+            0xFF78B4, 0xE9C46A, 0xD6A2E8, 0x7180A6, 0xB5E88C, 0x7FA7FF, 0x67D4E8,
+        )
+    } else if code == CodeSyntaxPalette::OBSIDIAN_EMBER {
+        markdown_syntax(
+            0xF0785A, 0xE8C170, 0xD98AA7, 0x81756D, 0xB4C96B, 0x74B6A0, 0xE6A15C,
+        )
+    } else {
+        markdown_syntax(
+            code.variable,
+            code.number,
+            code.keyword,
+            code.comment,
+            code.string,
+            code.function,
+            code.operator,
+        )
+    }
+}
+
+fn packed_rgb_to_hsla(rgb: u32) -> Hsla {
+    rgb_to_hsla(
+        ((rgb >> 16) & 0xFF) as f32 / 255.0,
+        ((rgb >> 8) & 0xFF) as f32 / 255.0,
+        (rgb & 0xFF) as f32 / 255.0,
+        1.0,
+    )
+}
+
 #[derive(Clone, Copy)]
 struct CuratedThemeSpec {
     dark: bool,
@@ -1540,6 +1722,7 @@ pub struct Theme {
 impl Theme {
     fn curated(spec: CuratedThemeSpec) -> Self {
         let color = hex_to_hsla;
+        let markdown = markdown_syntax_for(spec.code_palette);
         let background = color(spec.background);
         let surface = color(spec.surface);
         let elevated = color(spec.elevated);
@@ -1550,7 +1733,7 @@ impl Theme {
         let muted = color(spec.muted);
         let bright = color(spec.bright);
         let accent = color(spec.accent);
-        let secondary = color(spec.secondary);
+        let _secondary = color(spec.secondary);
         let danger = color(spec.danger);
         let warning = color(spec.warning);
         let success = color(spec.success);
@@ -1594,16 +1777,16 @@ impl Theme {
             cursor: accent,
             selection: with_alpha(accent, if spec.dark { 0.3 } else { 0.2 }),
             line_highlight: with_alpha(accent, if spec.dark { 0.09 } else { 0.06 }),
-            heading: accent,
-            bold: bright,
-            italic: secondary,
-            strikethrough: muted,
-            inline_code: secondary,
+            heading: packed_rgb_to_hsla(markdown.heading),
+            bold: packed_rgb_to_hsla(markdown.bold),
+            italic: packed_rgb_to_hsla(markdown.italic),
+            strikethrough: packed_rgb_to_hsla(markdown.strikethrough),
+            inline_code: packed_rgb_to_hsla(markdown.inline_code),
             inline_code_bg: color(spec.inline_background),
             highlight_bg: with_alpha(warning, if spec.dark { 0.28 } else { 0.24 }),
-            link: accent,
+            link: packed_rgb_to_hsla(markdown.link),
             syntax_marker: with_alpha(muted, 0.9),
-            list_marker: secondary,
+            list_marker: packed_rgb_to_hsla(markdown.list_marker),
             checkbox_checked: success,
             gutter_heading: with_alpha(text, if spec.dark { 0.28 } else { 0.22 }),
             git_status_added: success,
@@ -3467,7 +3650,28 @@ fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditorThemeMode, ThemeColorField, ThemeKind, apply_editor_theme_mode, with_alpha};
+    use super::{
+        EditorThemeMode, ThemeColorField, ThemeKind, apply_editor_theme_mode, hsla_to_rgb,
+        markdown_syntax_for, with_alpha,
+    };
+
+    fn contrast_ratio(foreground: gpui::Hsla, background: gpui::Hsla) -> f32 {
+        fn luminance(color: gpui::Hsla) -> f32 {
+            let (red, green, blue) = hsla_to_rgb(color.h, color.s, color.l);
+            let linear = |channel: f32| {
+                if channel <= 0.04045 {
+                    channel / 12.92
+                } else {
+                    ((channel + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+        }
+
+        let foreground = luminance(foreground);
+        let background = luminance(background);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+    }
 
     #[test]
     fn first_twelve_dark_themes_preserve_the_original_catalog() {
@@ -3562,6 +3766,7 @@ mod tests {
     #[test]
     fn curated_themes_have_complete_surfaces_and_syntax_palettes() {
         let mut code_palettes = std::collections::HashSet::new();
+        let mut markdown_palettes = std::collections::HashSet::new();
         for kind in ThemeKind::dark_themes()
             .iter()
             .chain(ThemeKind::light_themes())
@@ -3572,7 +3777,48 @@ mod tests {
             assert_ne!(theme.code_palette.foreground, 0, "{}", kind.label());
             assert_ne!(theme.code_palette.keyword, theme.code_palette.string);
             assert!(code_palettes.insert(theme.code_palette), "{}", kind.label());
+            let markdown = markdown_syntax_for(theme.code_palette);
+            assert_ne!(markdown.heading, markdown.link, "{}", kind.label());
+            assert!(markdown_palettes.insert(markdown), "{}", kind.label());
         }
+    }
+
+    #[test]
+    fn one_dark_uses_its_original_markdown_accents() {
+        let theme = ThemeKind::OneDark.build();
+
+        assert_eq!(theme.heading, crate::hex_hsla!("#E06C75"));
+        assert_eq!(theme.bold, crate::hex_hsla!("#D19A66"));
+        assert_eq!(theme.italic, crate::hex_hsla!("#C678DD"));
+        assert_eq!(theme.inline_code, crate::hex_hsla!("#98C379"));
+        assert_eq!(theme.link, crate::hex_hsla!("#61AFEF"));
+    }
+
+    #[test]
+    fn markdown_semantic_colors_remain_readable_in_every_theme() {
+        let mut failures = Vec::new();
+        for kind in ThemeKind::dark_themes()
+            .iter()
+            .chain(ThemeKind::light_themes())
+        {
+            let theme = kind.build();
+            for (name, color) in [
+                ("heading", theme.heading),
+                ("bold", theme.bold),
+                ("italic", theme.italic),
+                ("inline_code", theme.inline_code),
+                ("link", theme.link),
+                ("list_marker", theme.list_marker),
+            ] {
+                if contrast_ratio(color, theme.bg_primary) < 3.0 {
+                    failures.push(format!("{} {name}", kind.label()));
+                }
+            }
+            if contrast_ratio(theme.strikethrough, theme.bg_primary) < 2.5 {
+                failures.push(format!("{} strikethrough", kind.label()));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join(", "));
     }
 
     #[test]
