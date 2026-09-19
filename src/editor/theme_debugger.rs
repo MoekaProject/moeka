@@ -72,9 +72,6 @@ impl EditorView {
             &ui_theme,
             self.app_settings.sidebar_always_dark,
         );
-        if self.theme_kind.is_moeka_retro() {
-            self.styles.apply_moeka_retro_chrome(&self.theme, &ui_theme);
-        }
         self.styles.editor.editor_font_size_px = self.app_settings.effective_editor_font_size();
         self.styles.editor.editor_paragraph_line_height_factor = self.app_settings.line_height;
         self.styles.editor.editor_heading_line_height_factor = self.app_settings.line_height;

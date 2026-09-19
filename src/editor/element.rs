@@ -5,15 +5,20 @@ use std::sync::Arc;
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Element, ElementId,
     ElementInputHandler, Entity, Font, FontFallbacks, FontWeight, GlobalElementId, Hitbox,
-    HitboxBehavior, Hsla, IntoElement, LayoutId, PaintQuad, Path, Pixels, Point, ShapedLine,
-    SharedString, Style, TextAlign, TextRun, TransformationMatrix, Window, WrappedLine, fill,
-    point, px, quad, relative, size,
+    HitboxBehavior, Hsla, IntoElement, LayoutId, MouseMoveEvent, PaintQuad, Path, Pixels, Point,
+    ShapedLine, SharedString, Style, TextAlign, TextRun, TransformationMatrix, Window, WrappedLine,
+    fill, point, px, quad, relative, size,
 };
 
 use crate::markdown::{BlockType, CalloutKind};
 
 use super::helpers;
 use super::*;
+
+const LINE_FORMAT_ICON_SIZE_PX: f32 = 18.0;
+const LINE_FORMAT_ICON_GAP_PX: f32 = 4.0;
+const LINE_FORMAT_CONTENT_GAP_PX: f32 = 6.0;
+const LINE_FORMAT_FOLD_SLIDE_END_OPACITY: f32 = 0.08;
 
 fn callout_icon_path(kind: CalloutKind) -> &'static str {
     match kind {
@@ -290,6 +295,7 @@ pub(crate) struct EditorPrepaintState {
     gutter_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
     inline_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
     gutter_fold_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
+    format_icons: Vec<(Bounds<Pixels>, Hsla)>,
     /// HR lines: (y_position, start_x, width, is_dashed). `***` renders dashed,
     /// `---`/`___` render solid.
     hr_lines: Vec<(f32, f32, f32, bool)>,
@@ -315,6 +321,7 @@ pub(crate) struct EditorPrepaintState {
     code_block_copy_buttons: Vec<CodeBlockCopyButtonPaint>,
     inline_diff_revert_buttons: Vec<CodeBlockCopyButtonPaint>,
     code_block_copy_hitboxes: Vec<Hitbox>,
+    format_trigger_hitboxes: Vec<(Hitbox, usize)>,
     preview_zoom_buttons: Vec<CodeBlockCopyButtonPaint>,
     preview_zoom_hitboxes: Vec<Hitbox>,
     tooltips: Vec<(Hitbox, Bounds<Pixels>, SharedString)>,
@@ -2442,6 +2449,7 @@ impl Element for EditorElement {
         let mut gutter_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
         let mut inline_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
         let mut gutter_fold_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
+        let mut format_icons: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
         let mut checkbox_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut image_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut generated_preview_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
@@ -2496,6 +2504,9 @@ impl Element for EditorElement {
         let mut image_edit_icons: Vec<(Bounds<Pixels>, usize, f32)> = Vec::new();
         let mut image_edit_hit_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut gutter_fold_hit_areas_local: Vec<(Bounds<Pixels>, usize, bool)> = Vec::new();
+        let mut format_line_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
+        let mut format_trigger_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
+        let mut line_format_toolbar_geometries_local = Vec::new();
         let mut code_block_group_bounds: HashMap<usize, CodeBlockGroupBounds> = HashMap::new();
         let mut code_block_horizontal_extents: HashMap<usize, f32> = HashMap::new();
         let mut code_block_horizontal_scrollbars_local: Vec<CodeBlockHorizontalScrollbarGeometry> =
@@ -4533,6 +4544,63 @@ impl Element for EditorElement {
             } else {
                 content_x
             };
+            if editor.app_settings.format_toolbar_visible
+                && editor.active_tab_is_markdown()
+                && !editor.active_tab_is_read_only()
+            {
+                let viewport = bounds.intersect(&window.content_mask().bounds);
+                let icon_size = editor.scaled(LINE_FORMAT_ICON_SIZE_PX);
+                let icon_gap = editor.scaled(LINE_FORMAT_ICON_GAP_PX);
+                let content_gap = editor.scaled(LINE_FORMAT_CONTENT_GAP_PX);
+                let trigger_padding = editor.scaled(4.0);
+                let fold_icon_size = editor.scaled(editor.styles.gutter.gutter_fold_icon_size_px);
+                let icon_x = editor_left + editor.padding_left() - icon_size - content_gap;
+                let icon_y = text_line_top + (line_height - icon_size) * 0.5;
+                let icon_bounds = Bounds::new(
+                    point(px(icon_x), px(icon_y)),
+                    size(px(icon_size), px(icon_size)),
+                );
+                let trigger_bounds = Bounds::new(
+                    point(px(icon_x - trigger_padding), px(text_line_top)),
+                    size(
+                        px(icon_size + trigger_padding * 2.0),
+                        px(line_height.max(icon_size)),
+                    ),
+                );
+                let row_hover_left =
+                    (icon_x - fold_icon_size - icon_gap - trigger_padding).min(origin_x);
+                let row_hover_right = editor_left + editor.padding_left();
+                format_line_areas_local.push((
+                    Bounds::new(
+                        point(px(row_hover_left), px(line_top)),
+                        size(
+                            px((row_hover_right - row_hover_left).max(0.0)),
+                            px(total_line_height),
+                        ),
+                    ),
+                    line_idx,
+                ));
+                format_trigger_areas_local.push((trigger_bounds, line_idx));
+                line_format_toolbar_geometries_local.push(
+                    selection_toolbar::LineFormatToolbarGeometry {
+                        line: line_idx,
+                        viewport,
+                        content_left: px(icon_x),
+                        trigger_bounds,
+                        line_top: px(line_top),
+                        line_bottom: px(line_top + total_line_height),
+                    },
+                );
+                if editor.format_trigger_line == Some(line_idx)
+                    && editor.format_trigger_opacity > 0.01
+                {
+                    let mut color = editor.styles.format_toolbar.format_toolbar_icon_color;
+                    color.a = editor.format_trigger_opacity;
+                    if color.a > 0.01 {
+                        format_icons.push((icon_bounds, color));
+                    }
+                }
+            }
             let selection_padding_left_px = if image_caption_centered {
                 0.0
             } else {
@@ -6118,18 +6186,10 @@ impl Element for EditorElement {
             }
 
             // Gutter decorations
-            let gutter_center_y = text_line_top + line_height / 2.0;
             let fold_range = if hidden_lines.contains(&line_idx) {
                 None
             } else {
                 editor.fold_range_for_line(line_idx)
-            };
-            let fold_icon_visible = if fold_range.is_some() {
-                editor.folded_sections.contains(&line_idx)
-                    || editor.hovering_gutter_fold_area
-                    || editor.hovering_fold_line == Some(line_idx)
-            } else {
-                false
             };
             if editor.active_tab_is_non_markdown_text() {
                 let gutter_styles = &editor.styles.gutter;
@@ -6148,46 +6208,6 @@ impl Element for EditorElement {
                     gutter_styles.gutter_line_number_text_color,
                     gutter_styles.gutter_line_number_active_text_color,
                 );
-            }
-
-            match block_type {
-                BlockType::Heading(level) if is_cursor_line && !fold_icon_visible => {
-                    let gutter_styles = &editor.styles.gutter;
-                    let heading_offset = editor.scaled(gutter_styles.gutter_heading_icon_offset_px);
-                    let icon_size = match *level {
-                        1 => editor.scaled(gutter_styles.gutter_heading_h1_icon_size_px),
-                        2 => editor.scaled(gutter_styles.gutter_heading_h2_icon_size_px),
-                        3 => editor.scaled(gutter_styles.gutter_heading_h3_icon_size_px),
-                        _ => editor.scaled(gutter_styles.gutter_heading_h4_icon_size_px),
-                    };
-                    let icon_path = match *level {
-                        1 => HEADING_1_SVG_PATH,
-                        2 => HEADING_2_SVG_PATH,
-                        3 => HEADING_3_SVG_PATH,
-                        4 => HEADING_4_SVG_PATH,
-                        5 => HEADING_5_SVG_PATH,
-                        _ => HEADING_6_SVG_PATH,
-                    };
-                    let icon_x = if editor.active_tab_is_non_markdown_text() {
-                        editor.gutter_icon_x(editor_left, icon_size)
-                    } else {
-                        editor_left + editor.padding_left() - icon_size - heading_offset
-                    };
-                    let icon_y = gutter_center_y + 0.0 - icon_size / 2.0;
-                    inline_svgs.push((
-                        Bounds::new(
-                            point(px(icon_x), px(icon_y)),
-                            size(px(icon_size), px(icon_size)),
-                        ),
-                        icon_path,
-                        crate::theme::with_alpha(
-                            gutter_styles.gutter_heading_color,
-                            gutter_styles.gutter_heading_color.a
-                                * gutter_styles.gutter_heading_opacity,
-                        ),
-                    ));
-                }
-                _ => {}
             }
 
             if let Some(callout_kind) = render_decoration.callout_kind
@@ -6292,10 +6312,21 @@ impl Element for EditorElement {
                 let fi_size = editor.scaled(gs.gutter_fold_icon_size_px);
                 let fi_offset = editor.scaled(gs.gutter_fold_icon_offset_px);
                 let fi_hit_padding = editor.scaled(gs.gutter_fold_hit_padding_px);
-                let fi_x = if editor.active_tab_is_non_markdown_text() {
+                let format_icon_size = editor.scaled(LINE_FORMAT_ICON_SIZE_PX);
+                let format_icon_x = editor_left + editor.padding_left()
+                    - format_icon_size
+                    - editor.scaled(LINE_FORMAT_CONTENT_GAP_PX);
+                let format_icon_progress = if editor.format_trigger_line == Some(line_idx) {
+                    (editor.format_trigger_opacity / LINE_FORMAT_FOLD_SLIDE_END_OPACITY)
+                        .clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let fold_icon_resting_x = format_icon_x + (format_icon_size - fi_size) * 0.5;
+                let fold_icon_expanded_x = if editor.active_tab_is_non_markdown_text() {
                     editor.gutter_icon_x(editor_left, fi_size)
                 } else {
-                    editor_left + editor.padding_left() - fi_size - fi_offset
+                    format_icon_x - editor.scaled(LINE_FORMAT_ICON_GAP_PX) - fi_size
                 };
 
                 if fold_range.is_some() {
@@ -6307,11 +6338,25 @@ impl Element for EditorElement {
                             editor.folded_sections.contains(&preview.start_line)
                         })
                         || editor.folded_sections.contains(&line_idx);
-                    let is_hovered = editor.hovering_gutter_fold_area
-                        || editor.hovering_fold_line == Some(line_idx);
+                    let fold_icon_x = if is_folded && !editor.active_tab_is_non_markdown_text() {
+                        fold_icon_resting_x
+                            + (fold_icon_expanded_x - fold_icon_resting_x) * format_icon_progress
+                    } else {
+                        fold_icon_expanded_x
+                    };
+                    let is_hovered = if editor.active_tab_is_non_markdown_text() {
+                        editor.hovering_gutter_fold_area
+                            || editor.hovering_fold_line == Some(line_idx)
+                    } else {
+                        editor.format_trigger_line == Some(line_idx)
+                    };
                     let fi_y = text_line_top + (line_height - fi_size) / 2.0;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
-                    let fi_alpha = if is_folded {
+                    let fi_alpha = if !editor.active_tab_is_non_markdown_text() && is_hovered {
+                        editor.format_trigger_opacity
+                    } else if is_folded {
+                        gs.gutter_fold_folded_opacity
+                    } else if editor.active_tab_is_non_markdown_text() && is_folded {
                         gs.gutter_fold_folded_opacity
                     } else if is_hovered {
                         gs.gutter_fold_hover_opacity * reveal
@@ -6319,13 +6364,18 @@ impl Element for EditorElement {
                         gs.gutter_fold_default_opacity * reveal
                     };
                     if fi_alpha > 0.0 {
-                        let icon_bounds =
-                            Bounds::new(point(px(fi_x), px(fi_y)), size(px(fi_size), px(fi_size)));
-                        let mut fi_color = if is_folded {
-                            gs.gutter_fold_folded_color
-                        } else {
-                            gs.gutter_fold_hover_color
-                        };
+                        let icon_bounds = Bounds::new(
+                            point(px(fold_icon_x), px(fi_y)),
+                            size(px(fi_size), px(fi_size)),
+                        );
+                        let mut fi_color =
+                            if !editor.active_tab_is_non_markdown_text() && is_hovered {
+                                editor.styles.format_toolbar.format_toolbar_icon_color
+                            } else if is_folded {
+                                gs.gutter_fold_folded_color
+                            } else {
+                                gs.gutter_fold_hover_color
+                            };
                         fi_color.a = fi_alpha;
                         gutter_fold_icons.push((
                             icon_bounds,
@@ -6355,7 +6405,7 @@ impl Element for EditorElement {
                             )
                         } else {
                             Bounds::new(
-                                point(px(fi_x - fi_hit_padding), px(line_top)),
+                                point(px(fold_icon_x - fi_hit_padding), px(line_top)),
                                 size(
                                     px(fi_size + fi_hit_padding * 2.0 + fi_offset),
                                     px(total_line_height),
@@ -6374,8 +6424,19 @@ impl Element for EditorElement {
                     .is_some_and(|p| image_cache.get(p).is_some_and(|v| v.is_some()))
                 {
                     let is_img_folded = editor.folded_image_previews.contains(&line_idx);
-                    let is_hovered = editor.hovering_gutter_fold_area
-                        || editor.hovering_fold_line == Some(line_idx);
+                    let fold_icon_x = if is_img_folded && !editor.active_tab_is_non_markdown_text()
+                    {
+                        fold_icon_resting_x
+                            + (fold_icon_expanded_x - fold_icon_resting_x) * format_icon_progress
+                    } else {
+                        fold_icon_expanded_x
+                    };
+                    let is_hovered = if editor.active_tab_is_non_markdown_text() {
+                        editor.hovering_gutter_fold_area
+                            || editor.hovering_fold_line == Some(line_idx)
+                    } else {
+                        editor.format_trigger_line == Some(line_idx)
+                    };
                     // Align the fold icon with the top of the rendered preview
                     // (painted above the syntax text); fall back to the syntax
                     // row when the preview is folded or not loaded.
@@ -6386,7 +6447,11 @@ impl Element for EditorElement {
                     };
                     let gs = &editor.styles.gutter;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
-                    let fi_alpha = if is_img_folded {
+                    let fi_alpha = if !editor.active_tab_is_non_markdown_text() && is_hovered {
+                        editor.format_trigger_opacity
+                    } else if is_img_folded {
+                        gs.gutter_fold_folded_opacity
+                    } else if editor.active_tab_is_non_markdown_text() && is_img_folded {
                         gs.gutter_fold_folded_opacity
                     } else if is_hovered {
                         gs.gutter_fold_hover_opacity * reveal
@@ -6394,13 +6459,18 @@ impl Element for EditorElement {
                         gs.gutter_fold_default_opacity * reveal
                     };
                     if fi_alpha > 0.0 {
-                        let icon_bounds =
-                            Bounds::new(point(px(fi_x), px(fi_y)), size(px(fi_size), px(fi_size)));
-                        let mut fi_color = if is_img_folded {
-                            gs.gutter_fold_folded_color
-                        } else {
-                            gs.gutter_fold_hover_color
-                        };
+                        let icon_bounds = Bounds::new(
+                            point(px(fold_icon_x), px(fi_y)),
+                            size(px(fi_size), px(fi_size)),
+                        );
+                        let mut fi_color =
+                            if !editor.active_tab_is_non_markdown_text() && is_hovered {
+                                editor.styles.format_toolbar.format_toolbar_icon_color
+                            } else if is_img_folded {
+                                gs.gutter_fold_folded_color
+                            } else {
+                                gs.gutter_fold_hover_color
+                            };
                         fi_color.a = fi_alpha;
                         gutter_fold_icons.push((
                             icon_bounds,
@@ -6430,7 +6500,7 @@ impl Element for EditorElement {
                             )
                         } else {
                             Bounds::new(
-                                point(px(fi_x - fi_hit_padding), px(line_top)),
+                                point(px(fold_icon_x - fi_hit_padding), px(line_top)),
                                 size(
                                     px(fi_size + fi_hit_padding * 2.0 + fi_offset),
                                     px(total_line_height),
@@ -9054,7 +9124,6 @@ impl Element for EditorElement {
             let hitbox = window.insert_hitbox(tooltip_bounds, HitboxBehavior::Normal);
             generated_preview_tooltips.push((hitbox, tooltip_bounds, tooltip_title));
         }
-
         self.editor.update(cx, |editor, cx| {
             editor.release_retired_images(cx);
             editor.code_block_horizontal_scrollbars =
@@ -9088,6 +9157,9 @@ impl Element for EditorElement {
             editor.table_corner_areas = table_corner_areas_local.clone();
             editor.table_boundary_caret_areas = table_boundary_caret_areas_local.clone();
             editor.gutter_fold_areas = gutter_fold_hit_areas_local.clone();
+            editor.format_line_areas = format_line_areas_local.clone();
+            editor.format_trigger_areas = format_trigger_areas_local.clone();
+            editor.line_format_toolbar_geometries = line_format_toolbar_geometries_local.clone();
             editor.inline_diff_gutter_areas = inline_diff_gutter_areas_local.clone();
             editor.inline_diff_hunk_areas = inline_diff_hunk_areas_local.clone();
             editor.inline_diff_revert_areas = inline_diff_revert_areas_local.clone();
@@ -9261,6 +9333,12 @@ impl Element for EditorElement {
         }
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        // Keep the format triggers above the editor's full-size hitbox so they
+        // receive hover events and can reveal the line toolbar.
+        let format_trigger_hitboxes = format_trigger_areas_local
+            .iter()
+            .map(|(bounds, line)| (window.insert_hitbox(*bounds, HitboxBehavior::Normal), *line))
+            .collect::<Vec<_>>();
 
         // Tooltips must be requested during prepaint (gpui asserts the phase).
         for (_, tooltip_bounds, tooltip_title) in &generated_preview_tooltips {
@@ -9316,6 +9394,7 @@ impl Element for EditorElement {
             gutter_svgs,
             inline_svgs,
             gutter_fold_icons,
+            format_icons,
             hr_lines,
             image_previews,
             image_borders,
@@ -9326,6 +9405,7 @@ impl Element for EditorElement {
             code_block_copy_buttons,
             inline_diff_revert_buttons,
             code_block_copy_hitboxes,
+            format_trigger_hitboxes,
             preview_zoom_buttons,
             preview_zoom_hitboxes,
             tooltips: generated_preview_tooltips,
@@ -9440,12 +9520,34 @@ impl Element for EditorElement {
         for hitbox in &prepaint.code_block_copy_hitboxes {
             window.set_cursor_style(CursorStyle::Arrow, hitbox);
         }
+        for (hitbox, _) in &prepaint.format_trigger_hitboxes {
+            window.set_cursor_style(CursorStyle::Arrow, hitbox);
+        }
         for hitbox in &prepaint.preview_zoom_hitboxes {
             window.set_cursor_style(CursorStyle::Arrow, hitbox);
         }
         for link_hitbox in &prepaint.link_hitboxes {
             window.set_cursor_style(CursorStyle::PointingHand, link_hitbox);
         }
+        let format_trigger_hitboxes = prepaint.format_trigger_hitboxes.clone();
+        let editor_entity = self.editor.clone();
+        let pane_id = self.pane_id;
+        window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+            if phase != gpui::DispatchPhase::Capture {
+                return;
+            }
+            let hovered_line = format_trigger_hitboxes
+                .iter()
+                .find(|(hitbox, _)| hitbox.is_hovered(window))
+                .map(|(_, line)| *line);
+            if let Some(line) = hovered_line {
+                editor_entity.update(cx, |this, cx| {
+                    this.with_pane(pane_id, |this| {
+                        this.update_line_format_hover(Some(line), Some(line), cx);
+                    });
+                });
+            }
+        });
         // IME/text input is routed to the focused pane only.
         if is_focused_pane {
             window.handle_input(
@@ -9825,6 +9927,17 @@ impl Element for EditorElement {
                 .paint_svg(
                     *icon_bounds,
                     (*icon_path).into(),
+                    TransformationMatrix::default(),
+                    *color,
+                    cx,
+                )
+                .ok();
+        }
+        for (icon_bounds, color) in &prepaint.format_icons {
+            window
+                .paint_svg(
+                    *icon_bounds,
+                    FMT_FORMAT_SVG.into(),
                     TransformationMatrix::default(),
                     *color,
                     cx,

@@ -261,7 +261,7 @@ pub(crate) struct AppSettings {
 }
 
 fn default_theme() -> String {
-    "OneDark".to_string()
+    "One Dark".to_string()
 }
 
 /// Settings files written before the auto mode existed keep their explicit
@@ -271,11 +271,11 @@ fn default_stored_theme_mode() -> String {
 }
 
 fn default_dark_theme() -> String {
-    "OneDark".to_string()
+    "One Dark".to_string()
 }
 
 fn default_light_theme() -> String {
-    "OneLight".to_string()
+    "Porcelain Mist".to_string()
 }
 
 fn default_ui_font() -> String {
@@ -525,11 +525,7 @@ impl AppSettings {
     }
 
     pub(crate) fn ui_theme_for(&self, editor_theme_kind: ThemeKind) -> Theme {
-        if editor_theme_kind.is_moeka_retro() {
-            editor_theme_kind.build()
-        } else {
-            self.dark_theme_kind().build()
-        }
+        editor_theme_kind.build()
     }
 
     pub(crate) fn dark_theme_kind(&self) -> ThemeKind {
@@ -547,47 +543,17 @@ impl AppSettings {
             Some(kind) if !kind.is_dark() => kind,
             _ => match Self::parse_theme_kind(&self.theme) {
                 Some(kind) if !kind.is_dark() => kind,
-                _ => ThemeKind::OneLight,
+                _ => ThemeKind::PorcelainMist,
             },
         }
     }
 
     fn parse_theme_kind(value: &str) -> Option<ThemeKind> {
-        match value {
-            "MoekaPrint" | "MoekaPrintDark" => Some(ThemeKind::MoekaPrintDark),
-            "MoekaPrintLight" => Some(ThemeKind::MoekaPrintLight),
-            "MoekaMonoDark" => Some(ThemeKind::MoekaMonoDark),
-            "MoekaMonoLight" => Some(ThemeKind::MoekaMonoLight),
-            "MoekaNewspaperDark" => Some(ThemeKind::MoekaNewspaperDark),
-            "MoekaNewspaperLight" => Some(ThemeKind::MoekaNewspaperLight),
-            "MoekaKraftDark" => Some(ThemeKind::MoekaKraftDark),
-            "MoekaKraftLight" => Some(ThemeKind::MoekaKraftLight),
-            "OneDark" => Some(ThemeKind::OneDark),
-            "OneLight" => Some(ThemeKind::OneLight),
-            "MilkyDark" | "AyuDark" => Some(ThemeKind::MilkyDark),
-            "MilkyLight" | "Milky" => Some(ThemeKind::MilkyLight),
-            "Dracula" => Some(ThemeKind::Dracula),
-            "Nord" => Some(ThemeKind::Nord),
-            "TokyoNight" => Some(ThemeKind::TokyoNight),
-            "CatppuccinMocha" => Some(ThemeKind::CatppuccinMocha),
-            "GithubDark" | "GitHubDark" => Some(ThemeKind::GithubDark),
-            "SolarizedDark" => Some(ThemeKind::SolarizedDark),
-            "GruvboxDark" => Some(ThemeKind::GruvboxDark),
-            "RosePine" => Some(ThemeKind::RosePine),
-            "EverforestDark" => Some(ThemeKind::EverforestDark),
-            "MonokaiPro" => Some(ThemeKind::MonokaiPro),
-            "GithubLight" | "GitHubLight" => Some(ThemeKind::GithubLight),
-            "SolarizedLight" => Some(ThemeKind::SolarizedLight),
-            "CatppuccinLatte" => Some(ThemeKind::CatppuccinLatte),
-            "RosePineDawn" => Some(ThemeKind::RosePineDawn),
-            "GruvboxLight" => Some(ThemeKind::GruvboxLight),
-            "EverforestLight" => Some(ThemeKind::EverforestLight),
-            "TokyoNightLight" => Some(ThemeKind::TokyoNightLight),
-            "NordLight" => Some(ThemeKind::NordLight),
-            "AyuLight" => Some(ThemeKind::AyuLight),
-            "XcodeLight" => Some(ThemeKind::XcodeLight),
-            _ => None,
-        }
+        ThemeKind::dark_themes()
+            .iter()
+            .chain(ThemeKind::light_themes())
+            .copied()
+            .find(|kind| kind.label() == value)
     }
 
     pub(crate) fn sidebar_sort_mode(&self) -> SidebarSortMode {
@@ -737,41 +703,7 @@ impl AppSettings {
 }
 
 pub(crate) fn theme_kind_to_string(kind: ThemeKind) -> String {
-    match kind {
-        ThemeKind::MoekaPrintDark => "MoekaPrintDark",
-        ThemeKind::MoekaPrintLight => "MoekaPrintLight",
-        ThemeKind::MoekaMonoDark => "MoekaMonoDark",
-        ThemeKind::MoekaMonoLight => "MoekaMonoLight",
-        ThemeKind::MoekaNewspaperDark => "MoekaNewspaperDark",
-        ThemeKind::MoekaNewspaperLight => "MoekaNewspaperLight",
-        ThemeKind::MoekaKraftDark => "MoekaKraftDark",
-        ThemeKind::MoekaKraftLight => "MoekaKraftLight",
-        ThemeKind::OneDark => "OneDark",
-        ThemeKind::OneLight => "OneLight",
-        ThemeKind::MilkyDark => "MilkyDark",
-        ThemeKind::MilkyLight => "MilkyLight",
-        ThemeKind::Dracula => "Dracula",
-        ThemeKind::Nord => "Nord",
-        ThemeKind::TokyoNight => "TokyoNight",
-        ThemeKind::CatppuccinMocha => "CatppuccinMocha",
-        ThemeKind::GithubDark => "GithubDark",
-        ThemeKind::SolarizedDark => "SolarizedDark",
-        ThemeKind::GruvboxDark => "GruvboxDark",
-        ThemeKind::RosePine => "RosePine",
-        ThemeKind::EverforestDark => "EverforestDark",
-        ThemeKind::MonokaiPro => "MonokaiPro",
-        ThemeKind::GithubLight => "GithubLight",
-        ThemeKind::SolarizedLight => "SolarizedLight",
-        ThemeKind::CatppuccinLatte => "CatppuccinLatte",
-        ThemeKind::RosePineDawn => "RosePineDawn",
-        ThemeKind::GruvboxLight => "GruvboxLight",
-        ThemeKind::EverforestLight => "EverforestLight",
-        ThemeKind::TokyoNightLight => "TokyoNightLight",
-        ThemeKind::NordLight => "NordLight",
-        ThemeKind::AyuLight => "AyuLight",
-        ThemeKind::XcodeLight => "XcodeLight",
-    }
-    .to_string()
+    kind.label().to_string()
 }
 
 #[cfg(test)]
@@ -782,38 +714,34 @@ mod tests {
     use crate::theme::{EditorThemeMode, ThemeKind};
 
     #[test]
-    fn moeka_retro_theme_names_round_trip_and_legacy_print_migrates() {
-        let kinds = [
-            ThemeKind::MoekaPrintDark,
-            ThemeKind::MoekaPrintLight,
-            ThemeKind::MoekaMonoDark,
-            ThemeKind::MoekaMonoLight,
-            ThemeKind::MoekaNewspaperDark,
-            ThemeKind::MoekaNewspaperLight,
-            ThemeKind::MoekaKraftDark,
-            ThemeKind::MoekaKraftLight,
-        ];
-
-        for kind in kinds {
+    fn curated_theme_names_round_trip() {
+        for kind in ThemeKind::dark_themes()
+            .iter()
+            .chain(ThemeKind::light_themes())
+            .copied()
+        {
             assert_eq!(
                 AppSettings::parse_theme_kind(&theme_kind_to_string(kind)),
                 Some(kind)
             );
         }
-        assert_eq!(
-            AppSettings::parse_theme_kind("MoekaPrint"),
-            Some(ThemeKind::MoekaPrintDark)
+        assert_eq!(ThemeKind::dark_themes().len(), 16);
+        assert_eq!(ThemeKind::light_themes().len(), 16);
+        assert!(
+            ThemeKind::dark_themes()
+                .iter()
+                .chain(ThemeKind::light_themes())
+                .all(|kind| kind.label().split_whitespace().count() >= 2)
         );
     }
 
     #[test]
-    fn moeka_retro_ui_theme_uses_the_same_appearance() {
+    fn every_curated_theme_drives_the_complete_ui() {
         let settings = AppSettings::default();
         for kind in ThemeKind::dark_themes()
             .iter()
             .chain(ThemeKind::light_themes())
             .copied()
-            .filter(|kind| kind.is_moeka_retro())
         {
             let editor = kind.build();
             let ui = settings.ui_theme_for(kind);
@@ -975,7 +903,7 @@ mod tests {
     #[test]
     fn appearance_specific_editor_theme_mode_uses_matching_slot() {
         let settings = AppSettings {
-            theme: "OneDark".to_string(),
+            theme: "One Dark".to_string(),
             dark_editor_theme_mode: "monochrome".to_string(),
             light_editor_theme_mode: "colorful".to_string(),
             ..AppSettings::default()

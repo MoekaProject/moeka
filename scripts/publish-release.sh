@@ -9,7 +9,7 @@ die() { printf 'Release refused: %s\n' "$*" >&2; exit 1; }
 mode=${1:-}
 tag=${2:-}
 repo=${3:-MoekaProject/community}
-[[ $# -le 3 && ( "$mode" == check || "$mode" == publish ) ]] || die 'Usage: publish-release.sh check|publish vX.Y.Z [MoekaProject/community]'
+[[ $# -le 3 && ( "$mode" == check || "$mode" == publish || "$mode" == publish-beta ) ]] || die 'Usage: publish-release.sh check|publish|publish-beta vX.Y.Z [MoekaProject/community]'
 [[ "$repo" == MoekaProject/community ]] || die 'Official releases must stay in MoekaProject/community.'
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'Expected a stable vX.Y.Z tag.'
 [[ "$tag" != v0.1.12 ]] || die 'v0.1.12 is protected; never modify or republish it.'
@@ -240,5 +240,10 @@ assert_draft
 load_assets
 for asset in "${assets[@]}"; do verify_asset "$asset"; done
 assert_draft
-gh release edit "$tag" --repo "$repo" --draft=false --latest
-printf 'Published %s in %s. Assets will not be replaced by this script.\n' "$tag" "$repo"
+if [[ "$mode" == publish-beta ]]; then
+    gh release edit "$tag" --repo "$repo" --draft=false --prerelease --latest=false
+    printf 'Published beta %s in %s. Assets will not be replaced by this script.\n' "$tag" "$repo"
+else
+    gh release edit "$tag" --repo "$repo" --draft=false --latest
+    printf 'Published %s in %s. Assets will not be replaced by this script.\n' "$tag" "$repo"
+fi

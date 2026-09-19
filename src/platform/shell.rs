@@ -83,6 +83,7 @@ pub(crate) fn reveal(path: &Path) -> Result<(), ShellError> {
 mod backend {
     use std::path::Path;
 
+    use block::ConcreteBlock;
     use objc::runtime::Object;
     use objc::{class, msg_send, sel, sel_impl};
 
@@ -97,9 +98,6 @@ mod backend {
         ShellError::Open(format!("`{}` is not a valid path", path.display()))
     }
 
-    // `NSWorkspace` hands the request to LaunchServices and returns, so these
-    // run on the caller's thread without the re-entrancy hazard that made the
-    // Windows path need a helper thread.
     pub(super) fn open_url(url: &str) -> Result<(), ShellError> {
         unsafe {
             let target: *mut Object = msg_send![class!(NSURL), URLWithString: nsstring(url)];
@@ -129,16 +127,24 @@ mod backend {
     }
 
     pub(super) fn reveal(path: &Path) -> Result<(), ShellError> {
-        unsafe {
-            let target = file_url(path);
-            if target.is_null() {
-                return Err(invalid_path(path));
-            }
-
-            let urls: *mut Object = msg_send![class!(NSArray), arrayWithObject: target];
-            let _: () = msg_send![workspace(), activateFileViewerSelectingURLs: urls];
-            Ok(())
+        if path.to_str().is_none() {
+            return Err(invalid_path(path));
         }
+        let path = path.to_owned();
+        unsafe {
+            let reveal = ConcreteBlock::new(move || {
+                let target = file_url(&path);
+                if target.is_null() {
+                    return;
+                }
+                let urls: *mut Object = msg_send![class!(NSArray), arrayWithObject: target];
+                let _: () = msg_send![workspace(), activateFileViewerSelectingURLs: urls];
+            })
+            .copy();
+            let queue: *mut Object = msg_send![class!(NSOperationQueue), mainQueue];
+            let _: () = msg_send![queue, addOperationWithBlock: &*reveal];
+        }
+        Ok(())
     }
 }
 
@@ -184,8 +190,29 @@ mod backend {
     }
 
     pub(super) fn reveal(path: &Path) -> Result<(), ShellError> {
-        let path = path.to_owned();
-        away_from_ui(move || opener::reveal(path))
+        #[cfg(target_os = "windows")]
+        {
+            use std::ffi::OsString;
+            use std::process::Command;
+
+            let mut select_argument = OsString::from("/select,");
+            select_argument.push(path.as_os_str());
+            return match std::thread::spawn(move || {
+                Command::new("explorer.exe").arg(select_argument).spawn()
+            })
+            .join()
+            {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(error)) => Err(ShellError::Open(error.to_string())),
+                Err(_) => Err(ShellError::Open("the system handler crashed".to_owned())),
+            };
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let path = path.to_owned();
+            away_from_ui(move || opener::reveal(path))
+        }
     }
 }
 

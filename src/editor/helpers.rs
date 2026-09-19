@@ -148,8 +148,8 @@ fn apply_code_highlight_segments(
 pub(crate) const GENERATED_PREVIEW_RASTER_SCALE: f32 = 2.0;
 pub(crate) const GENERATED_PREVIEW_MATH_RASTER_SCALE: f32 = 3.0;
 pub(crate) const GENERATED_PREVIEW_EDITOR_MERMAID_SCALE: f32 = 0.75;
-const GENERATED_PREVIEW_EDITOR_MAX_RASTER_EDGE: f32 = 3072.0;
-const GENERATED_PREVIEW_EDITOR_MAX_RASTER_PIXELS: f32 = 4_194_304.0;
+const GENERATED_PREVIEW_EDITOR_MAX_RASTER_EDGE: f32 = 2048.0;
+const GENERATED_PREVIEW_EDITOR_MAX_RASTER_PIXELS: f32 = 2_097_152.0;
 const GENERATED_PREVIEW_MATH_DISPLAY_SCALE: f32 = 1.5;
 const GENERATED_PREVIEW_DEFAULT_MONOSPACE_FONT_FAMILY: &str =
     "ui-monospace, Menlo, Monaco, Consolas, monospace";
@@ -2495,9 +2495,9 @@ mod tests {
         let width = size.width.0 as u64;
         let height = size.height.0 as u64;
 
-        assert!(width <= 3072);
-        assert!(height <= 3072);
-        assert!(width * height <= 4_194_304);
+        assert!(width <= 2048);
+        assert!(height <= 2048);
+        assert!(width * height <= 2_097_152);
     }
 
     #[test]
@@ -4060,7 +4060,7 @@ mod tests {
     }
 
     #[test]
-    fn folded_strikethrough_uses_primary_text_color() {
+    fn folded_strikethrough_uses_muted_text_color() {
         let line = "use ~~gone~~ here";
         let decoration = markdown::parse_decorations(line)
             .into_iter()
@@ -4115,7 +4115,7 @@ mod tests {
         assert_eq!(display_text, "use gone here");
         assert!(
             runs.iter()
-                .any(|run| { run.strikethrough.is_some() && run.color == theme.text_primary })
+                .any(|run| { run.strikethrough.is_some() && run.color == theme.strikethrough })
         );
     }
 
@@ -4245,7 +4245,11 @@ mod tests {
             None,
             false,
         );
-        assert!(runs.iter().any(|run| run.font.weight == FontWeight::BOLD));
+        assert!(
+            runs.iter().any(|run| {
+                run.font.weight == FontWeight::EXTRA_BOLD && run.color == theme.bold
+            })
+        );
     }
 
     #[test]
@@ -5397,6 +5401,7 @@ pub(crate) fn load_generated_preview_image_from_svg_for_editor(
     if kind == BlockPreviewKind::Math {
         return load_render_image_from_svg_with_scale(svg, raster_scale);
     }
+    let raster_scale = raster_scale * GENERATED_PREVIEW_EDITOR_MERMAID_SCALE;
     load_render_image_from_svg_with_limits(
         svg,
         raster_scale,
@@ -6314,14 +6319,14 @@ pub(crate) fn build_text_runs_for_display_with_language(
             match span.kind {
                 InlineKind::Bold => {
                     buf_colors[i] = theme.bold;
-                    buf_weights[i] = FontWeight::BOLD;
+                    buf_weights[i] = FontWeight::EXTRA_BOLD;
                 }
                 InlineKind::Italic => {
                     buf_colors[i] = theme.text_primary;
                     buf_font_styles[i] = FontStyle::Italic;
                 }
                 InlineKind::Strikethrough => {
-                    buf_colors[i] = theme.text_primary;
+                    buf_colors[i] = theme.strikethrough;
                     buf_strikethroughs[i] = true;
                 }
                 InlineKind::Underline => {

@@ -87,7 +87,7 @@ MAS_INSTALLER_IDENTITY ?= $(shell security find-identity -v 2>/dev/null | sed -n
 # public `CGShieldingWindowLevel` that cocoa references.
 MAS_FORBIDDEN_SYMBOLS := _CGS[A-Z]|_AXUIElement|_AXIsProcessTrusted
 
-.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-check test-publish-release publish-tools-check check-targets windows windows-one windows-arm64 windows-x86_64 windows-icon linux linux-one linux-arm64 linux-x86_64 mas mas-app clean-mas
+.PHONY: dmg dmg-one dmg-arm64 dmg-x86_64 zip zip-arm64 zip-x86_64 zip-one signed-release signed-release-one signed-release-arm64 signed-release-x86_64 notary-setup app build-release clean-dmg clean-app tag dist publish publish-beta publish-check test-publish-release publish-tools-check check-targets windows windows-one windows-arm64 windows-x86_64 windows-icon linux linux-one linux-arm64 linux-x86_64 mas mas-app clean-mas
 
 dmg: $(ICON_FILE)
 	@rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -228,6 +228,9 @@ linux-one:
 
 publish: publish-check
 	@bash scripts/publish-release.sh publish "$(TAG)" "$(RELEASE_REPO)"
+
+publish-beta: publish-check
+	@bash scripts/publish-release.sh publish-beta "$(TAG)" "$(RELEASE_REPO)"
 
 publish-check:
 	@bash scripts/publish-release.sh check "$(TAG)" "$(RELEASE_REPO)"

@@ -2,16 +2,26 @@ use gpui::Hsla;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemeKind {
-    MoekaPrintDark,
-    MoekaMonoDark,
-    MoekaNewspaperDark,
-    MoekaKraftDark,
+    PorcelainMist,
+    LinenPaper,
+    StudioDaylight,
+    RoseDawn,
+    VanillaLatte,
+    SageGarden,
+    NordicSnow,
+    SolarizedLight,
+    SunlitCanvas,
+    PaperWhite,
+    PearlMorning,
+    WillowMist,
+    CoastalFog,
+    LavenderHaze,
+    ApricotBloom,
+    SilverMorning,
     OneDark,
-    OneLight,
     MilkyDark,
-    MilkyLight,
-    Dracula,
-    Nord,
+    DraculaNight,
+    NordicNight,
     TokyoNight,
     CatppuccinMocha,
     GithubDark,
@@ -20,20 +30,10 @@ pub enum ThemeKind {
     RosePine,
     EverforestDark,
     MonokaiPro,
-    MoekaPrintLight,
-    MoekaMonoLight,
-    MoekaNewspaperLight,
-    MoekaKraftLight,
-    GithubLight,
-    SolarizedLight,
-    CatppuccinLatte,
-    RosePineDawn,
-    GruvboxLight,
-    EverforestLight,
-    TokyoNightLight,
-    NordLight,
-    AyuLight,
-    XcodeLight,
+    AyuMirage,
+    MoonlightHarbor,
+    CobaltVelvet,
+    ObsidianEmber,
 }
 
 impl ThemeKind {
@@ -41,8 +41,8 @@ impl ThemeKind {
         &[
             Self::OneDark,
             Self::MilkyDark,
-            Self::Dracula,
-            Self::Nord,
+            Self::DraculaNight,
+            Self::NordicNight,
             Self::TokyoNight,
             Self::CatppuccinMocha,
             Self::GithubDark,
@@ -51,101 +51,73 @@ impl ThemeKind {
             Self::RosePine,
             Self::EverforestDark,
             Self::MonokaiPro,
-            Self::MoekaPrintDark,
-            Self::MoekaMonoDark,
-            Self::MoekaNewspaperDark,
-            Self::MoekaKraftDark,
+            Self::AyuMirage,
+            Self::MoonlightHarbor,
+            Self::CobaltVelvet,
+            Self::ObsidianEmber,
         ]
     }
 
     pub fn light_themes() -> &'static [ThemeKind] {
         &[
-            Self::OneLight,
-            Self::MilkyLight,
-            Self::NordLight,
-            Self::TokyoNightLight,
-            Self::CatppuccinLatte,
-            Self::GithubLight,
+            Self::PorcelainMist,
+            Self::LinenPaper,
+            Self::StudioDaylight,
+            Self::RoseDawn,
+            Self::VanillaLatte,
+            Self::SageGarden,
+            Self::NordicSnow,
             Self::SolarizedLight,
-            Self::GruvboxLight,
-            Self::RosePineDawn,
-            Self::EverforestLight,
-            Self::AyuLight,
-            Self::XcodeLight,
-            Self::MoekaPrintLight,
-            Self::MoekaMonoLight,
-            Self::MoekaNewspaperLight,
-            Self::MoekaKraftLight,
+            Self::SunlitCanvas,
+            Self::PaperWhite,
+            Self::PearlMorning,
+            Self::WillowMist,
+            Self::CoastalFog,
+            Self::LavenderHaze,
+            Self::ApricotBloom,
+            Self::SilverMorning,
         ]
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::MoekaPrintDark => "Moeka Print Dark",
-            Self::MoekaPrintLight => "Moeka Print Light",
-            Self::MoekaMonoDark => "Moeka Mono Dark",
-            Self::MoekaMonoLight => "Moeka Mono Light",
-            Self::MoekaNewspaperDark => "Moeka Newspaper Dark",
-            Self::MoekaNewspaperLight => "Moeka Newspaper Light",
-            Self::MoekaKraftDark => "Moeka Kraft Dark",
-            Self::MoekaKraftLight => "Moeka Kraft Light",
+            Self::PorcelainMist => "Porcelain Mist",
+            Self::LinenPaper => "Linen Paper",
+            Self::StudioDaylight => "Studio Daylight",
+            Self::RoseDawn => "Rose Dawn",
+            Self::VanillaLatte => "Vanilla Latte",
+            Self::SageGarden => "Sage Garden",
+            Self::NordicSnow => "Nordic Snow",
+            Self::SolarizedLight => "Solarized Light",
+            Self::SunlitCanvas => "Sunlit Canvas",
+            Self::PaperWhite => "Paper White",
+            Self::PearlMorning => "Pearl Morning",
+            Self::WillowMist => "Willow Mist",
+            Self::CoastalFog => "Coastal Fog",
+            Self::LavenderHaze => "Lavender Haze",
+            Self::ApricotBloom => "Apricot Bloom",
+            Self::SilverMorning => "Silver Morning",
             Self::OneDark => "One Dark",
-            Self::OneLight => "One Light",
             Self::MilkyDark => "Milky Dark",
-            Self::MilkyLight => "Milky Light",
-            Self::Dracula => "Dracula",
-            Self::Nord => "Nord",
+            Self::DraculaNight => "Dracula Night",
+            Self::NordicNight => "Nordic Night",
             Self::TokyoNight => "Tokyo Night",
             Self::CatppuccinMocha => "Catppuccin Mocha",
             Self::GithubDark => "GitHub Dark",
             Self::SolarizedDark => "Solarized Dark",
             Self::GruvboxDark => "Gruvbox Dark",
-            Self::RosePine => "Rosé Pine",
+            Self::RosePine => "Rose Pine",
             Self::EverforestDark => "Everforest Dark",
             Self::MonokaiPro => "Monokai Pro",
-            Self::GithubLight => "GitHub Light",
-            Self::SolarizedLight => "Solarized Light",
-            Self::CatppuccinLatte => "Catppuccin Latte",
-            Self::RosePineDawn => "Rosé Pine Dawn",
-            Self::GruvboxLight => "Gruvbox Light",
-            Self::EverforestLight => "Everforest Light",
-            Self::TokyoNightLight => "Tokyo Night Light",
-            Self::NordLight => "Nord Light",
-            Self::AyuLight => "Ayu Light",
-            Self::XcodeLight => "Xcode Light",
+            Self::AyuMirage => "Ayu Mirage",
+            Self::MoonlightHarbor => "Moonlight Harbor",
+            Self::CobaltVelvet => "Cobalt Velvet",
+            Self::ObsidianEmber => "Obsidian Ember",
         }
     }
 
     pub fn is_dark(self) -> bool {
         Self::dark_themes().contains(&self)
-    }
-
-    pub fn is_moeka_retro(self) -> bool {
-        matches!(
-            self,
-            Self::MoekaPrintDark
-                | Self::MoekaPrintLight
-                | Self::MoekaMonoDark
-                | Self::MoekaMonoLight
-                | Self::MoekaNewspaperDark
-                | Self::MoekaNewspaperLight
-                | Self::MoekaKraftDark
-                | Self::MoekaKraftLight
-        )
-    }
-
-    pub fn moeka_companion(self) -> Option<Self> {
-        match self {
-            Self::MoekaPrintDark => Some(Self::MoekaPrintLight),
-            Self::MoekaPrintLight => Some(Self::MoekaPrintDark),
-            Self::MoekaMonoDark => Some(Self::MoekaMonoLight),
-            Self::MoekaMonoLight => Some(Self::MoekaMonoDark),
-            Self::MoekaNewspaperDark => Some(Self::MoekaNewspaperLight),
-            Self::MoekaNewspaperLight => Some(Self::MoekaNewspaperDark),
-            Self::MoekaKraftDark => Some(Self::MoekaKraftLight),
-            Self::MoekaKraftLight => Some(Self::MoekaKraftDark),
-            _ => None,
-        }
     }
 
     pub fn build(self) -> Theme {
@@ -158,38 +130,38 @@ impl ThemeKind {
 
     fn palette(self) -> Theme {
         match self {
-            Self::MoekaPrintDark => Theme::moeka_print_dark(),
-            Self::MoekaPrintLight => Theme::moeka_print_light(),
-            Self::MoekaMonoDark => Theme::moeka_mono_dark(),
-            Self::MoekaMonoLight => Theme::moeka_mono_light(),
-            Self::MoekaNewspaperDark => Theme::moeka_newspaper_dark(),
-            Self::MoekaNewspaperLight => Theme::moeka_newspaper_light(),
-            Self::MoekaKraftDark => Theme::moeka_kraft_dark(),
-            Self::MoekaKraftLight => Theme::moeka_kraft_light(),
-            Self::OneDark => Theme::one_dark(),
-            Self::OneLight => Theme::one_light(),
-            Self::MilkyDark => Theme::ayu_dark(),
-            Self::MilkyLight => Theme::milky(),
-            Self::Dracula => Theme::dracula(),
-            Self::Nord => Theme::nord(),
-            Self::TokyoNight => Theme::tokyo_night(),
-            Self::CatppuccinMocha => Theme::catppuccin_mocha(),
-            Self::GithubDark => Theme::github_dark(),
-            Self::SolarizedDark => Theme::solarized_dark(),
-            Self::GruvboxDark => Theme::gruvbox_dark(),
-            Self::RosePine => Theme::rose_pine(),
-            Self::EverforestDark => Theme::everforest_dark(),
-            Self::MonokaiPro => Theme::monokai_pro(),
-            Self::GithubLight => Theme::github_light(),
-            Self::SolarizedLight => Theme::solarized_light(),
-            Self::CatppuccinLatte => Theme::catppuccin_latte(),
-            Self::RosePineDawn => Theme::rose_pine_dawn(),
-            Self::GruvboxLight => Theme::gruvbox_light(),
-            Self::EverforestLight => Theme::everforest_light(),
-            Self::TokyoNightLight => Theme::tokyo_night_light(),
-            Self::NordLight => Theme::nord_light(),
-            Self::AyuLight => Theme::ayu_light(),
-            Self::XcodeLight => Theme::xcode_light(),
+            Self::PorcelainMist => Theme::curated(PORCELAIN_MIST),
+            Self::LinenPaper => Theme::curated(LINEN_PAPER),
+            Self::StudioDaylight => Theme::curated(STUDIO_DAYLIGHT),
+            Self::RoseDawn => Theme::curated(ROSE_DAWN),
+            Self::VanillaLatte => Theme::curated(VANILLA_LATTE),
+            Self::SageGarden => Theme::curated(SAGE_GARDEN),
+            Self::NordicSnow => Theme::curated(NORDIC_SNOW),
+            Self::SolarizedLight => Theme::curated(SOLARIZED_LIGHT_THEME),
+            Self::SunlitCanvas => Theme::curated(SUNLIT_CANVAS),
+            Self::PaperWhite => Theme::curated(PAPER_WHITE),
+            Self::PearlMorning => Theme::curated(PEARL_MORNING),
+            Self::WillowMist => Theme::curated(WILLOW_MIST),
+            Self::CoastalFog => Theme::curated(COASTAL_FOG),
+            Self::LavenderHaze => Theme::curated(LAVENDER_HAZE),
+            Self::ApricotBloom => Theme::curated(APRICOT_BLOOM),
+            Self::SilverMorning => Theme::curated(SILVER_MORNING),
+            Self::OneDark => Theme::curated(ONE_DARK_THEME),
+            Self::MilkyDark => Theme::curated(MILKY_NIGHT),
+            Self::DraculaNight => Theme::curated(DRACULA_NIGHT),
+            Self::NordicNight => Theme::curated(NORDIC_NIGHT),
+            Self::TokyoNight => Theme::curated(TOKYO_NIGHT_THEME),
+            Self::CatppuccinMocha => Theme::curated(CATPPUCCIN_MOCHA_THEME),
+            Self::GithubDark => Theme::curated(GITHUB_DARK_THEME),
+            Self::SolarizedDark => Theme::curated(SOLARIZED_DARK_THEME),
+            Self::GruvboxDark => Theme::curated(GRUVBOX_DARK_THEME),
+            Self::RosePine => Theme::curated(ROSE_PINE_THEME),
+            Self::EverforestDark => Theme::curated(EVERFOREST_DARK_THEME),
+            Self::MonokaiPro => Theme::curated(MONOKAI_PRO_THEME),
+            Self::AyuMirage => Theme::curated(AYU_MIRAGE),
+            Self::MoonlightHarbor => Theme::curated(MOONLIGHT_HARBOR),
+            Self::CobaltVelvet => Theme::curated(COBALT_VELVET),
+            Self::ObsidianEmber => Theme::curated(OBSIDIAN_EMBER),
         }
     }
 }
@@ -387,7 +359,6 @@ macro_rules! hex_hsla {
 /// against bright surroundings. Used as the `window_border` field value for
 /// light theme builders; also tunable per-theme via the theme debugger.
 pub const LIGHT_WINDOW_BORDER: Hsla = hex_to_hsla("#00000033");
-pub const DARK_EDITOR_LINK: Hsla = hex_to_hsla("#5AA0FF");
 /// Theme-independent caret colour.
 pub const EDITOR_CARET: Hsla = hex_to_hsla("#2F7CF6");
 
@@ -410,6 +381,7 @@ pub struct CodeSyntaxPalette {
     pub foreground: u32,
 }
 
+#[allow(dead_code)]
 impl CodeSyntaxPalette {
     /// One Dark Pro — also used by Milky Dark (legacy behavior).
     pub const ONE_DARK: Self = Self {
@@ -679,7 +651,821 @@ impl CodeSyntaxPalette {
         comment: 0x939F91,
         foreground: 0x5C6A72,
     };
+
+    pub const MILKY_NIGHT: Self = Self {
+        keyword: 0xC792D4,
+        operator: 0x89DDFF,
+        string: 0xA7C080,
+        function: 0x82AAFF,
+        type_name: 0xEBCB8B,
+        number: 0xF0A47A,
+        variable: 0xE58D91,
+        comment: 0x7E838D,
+        foreground: 0xD8D6D1,
+    };
+
+    pub const AYU_MIRAGE: Self = Self {
+        keyword: 0xFF8F40,
+        operator: 0xF29E74,
+        string: 0xAAD94C,
+        function: 0xFFB454,
+        type_name: 0x59C2FF,
+        number: 0xD2A6FF,
+        variable: 0x95E6CB,
+        comment: 0x6C7A89,
+        foreground: 0xCCCAC2,
+    };
+
+    pub const MOONLIGHT_HARBOR: Self = Self {
+        keyword: 0xC099FF,
+        operator: 0x7FDBCA,
+        string: 0xA9DC76,
+        function: 0x82B1FF,
+        type_name: 0x66D9EF,
+        number: 0xF5A97F,
+        variable: 0xE6B0D8,
+        comment: 0x65708A,
+        foreground: 0xD7DEEA,
+    };
+
+    pub const COBALT_VELVET: Self = Self {
+        keyword: 0xFF78B4,
+        operator: 0x67D4E8,
+        string: 0xB5E88C,
+        function: 0x7FA7FF,
+        type_name: 0xE9C46A,
+        number: 0xD6A2E8,
+        variable: 0xF29B8F,
+        comment: 0x7180A6,
+        foreground: 0xDCE4FF,
+    };
+
+    pub const OBSIDIAN_EMBER: Self = Self {
+        keyword: 0xF0785A,
+        operator: 0xE6A15C,
+        string: 0xB4C96B,
+        function: 0xE8C170,
+        type_name: 0x74B6A0,
+        number: 0xD98AA7,
+        variable: 0xE89A72,
+        comment: 0x81756D,
+        foreground: 0xDDD3C8,
+    };
+
+    pub const WILLOW_LIGHT: Self = Self {
+        keyword: 0x556B2F,
+        operator: 0x52766C,
+        string: 0x6B7F38,
+        function: 0x376E72,
+        type_name: 0x8A632A,
+        number: 0x985F45,
+        variable: 0x744F75,
+        comment: 0x879284,
+        foreground: 0x34413A,
+    };
+
+    pub const COASTAL_LIGHT: Self = Self {
+        keyword: 0x2D5F8B,
+        operator: 0x287D83,
+        string: 0x4E7A64,
+        function: 0x356FA8,
+        type_name: 0x74639A,
+        number: 0x9A6543,
+        variable: 0x8C5267,
+        comment: 0x7C8993,
+        foreground: 0x334550,
+    };
+
+    pub const LAVENDER_LIGHT: Self = Self {
+        keyword: 0x7252A3,
+        operator: 0x526AA3,
+        string: 0x56805B,
+        function: 0x4169A1,
+        type_name: 0x9A623B,
+        number: 0x9A5278,
+        variable: 0xA04B58,
+        comment: 0x898494,
+        foreground: 0x433E50,
+    };
+
+    pub const APRICOT_LIGHT: Self = Self {
+        keyword: 0xB04C38,
+        operator: 0x9B642C,
+        string: 0x627A36,
+        function: 0x9A5B33,
+        type_name: 0x397A78,
+        number: 0x8E5590,
+        variable: 0xA64D5C,
+        comment: 0x8C8178,
+        foreground: 0x4A3B34,
+    };
+
+    pub const SILVER_LIGHT: Self = Self {
+        keyword: 0x4C5E88,
+        operator: 0x39747B,
+        string: 0x587447,
+        function: 0x3C6F9C,
+        type_name: 0x7D5F87,
+        number: 0x8B6046,
+        variable: 0x865263,
+        comment: 0x7F8791,
+        foreground: 0x343A43,
+    };
 }
+
+#[derive(Clone, Copy)]
+struct CuratedThemeSpec {
+    dark: bool,
+    background: &'static str,
+    surface: &'static str,
+    elevated: &'static str,
+    hover: &'static str,
+    selected: &'static str,
+    border: &'static str,
+    text: &'static str,
+    muted: &'static str,
+    bright: &'static str,
+    accent: &'static str,
+    secondary: &'static str,
+    danger: &'static str,
+    warning: &'static str,
+    success: &'static str,
+    code_background: &'static str,
+    inline_background: &'static str,
+    code_palette: CodeSyntaxPalette,
+}
+
+const PORCELAIN_MIST: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#FCFCFD",
+    surface: "#F5F6F8",
+    elevated: "#FFFFFF",
+    hover: "#ECEFF3",
+    selected: "#E4ECF7",
+    border: "#D9DEE7",
+    text: "#24272D",
+    muted: "#68707C",
+    bright: "#111318",
+    accent: "#2468B2",
+    secondary: "#7A4DA3",
+    danger: "#C43D4B",
+    warning: "#A56800",
+    success: "#2B7A52",
+    code_background: "#F4F6F8",
+    inline_background: "#EDEFF2",
+    code_palette: CodeSyntaxPalette::GITHUB_LIGHT,
+};
+
+const LINEN_PAPER: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#FFFCF4",
+    surface: "#F4F0E5",
+    elevated: "#FFFDF8",
+    hover: "#EAE4D5",
+    selected: "#E7E1D3",
+    border: "#D8D1C1",
+    text: "#2D2B27",
+    muted: "#756F65",
+    bright: "#171613",
+    accent: "#1F6F67",
+    secondary: "#9A5A38",
+    danger: "#B43D35",
+    warning: "#9B6B12",
+    success: "#557A3E",
+    code_background: "#F5F1E7",
+    inline_background: "#ECE7DB",
+    code_palette: CodeSyntaxPalette::GRUVBOX_LIGHT,
+};
+
+const STUDIO_DAYLIGHT: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#F8FAFC",
+    surface: "#EEF2F6",
+    elevated: "#FFFFFF",
+    hover: "#E4EAF1",
+    selected: "#DCE8F8",
+    border: "#D2D9E3",
+    text: "#20242B",
+    muted: "#626B78",
+    bright: "#0D1117",
+    accent: "#1769AA",
+    secondary: "#6D4BA3",
+    danger: "#C2303F",
+    warning: "#986500",
+    success: "#287849",
+    code_background: "#F1F4F7",
+    inline_background: "#E8EDF3",
+    code_palette: CodeSyntaxPalette::XCODE_LIGHT,
+};
+
+const ROSE_DAWN: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#FFF9F2",
+    surface: "#F6EFE8",
+    elevated: "#FFFCF8",
+    hover: "#EDE4DF",
+    selected: "#E9DFDA",
+    border: "#D9CEC9",
+    text: "#575279",
+    muted: "#797593",
+    bright: "#3C3858",
+    accent: "#B4637A",
+    secondary: "#286983",
+    danger: "#B84B5D",
+    warning: "#A86F16",
+    success: "#39725E",
+    code_background: "#FAF4ED",
+    inline_background: "#F0E8E3",
+    code_palette: CodeSyntaxPalette::ROSE_PINE_DAWN,
+};
+
+const VANILLA_LATTE: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#F7F7FB",
+    surface: "#ECEEF5",
+    elevated: "#FCFCFF",
+    hover: "#E1E4EE",
+    selected: "#DCE3F3",
+    border: "#CDD1DE",
+    text: "#4C4F69",
+    muted: "#6C6F85",
+    bright: "#303247",
+    accent: "#1E66F5",
+    secondary: "#8839EF",
+    danger: "#D20F39",
+    warning: "#9A5C00",
+    success: "#2F7D26",
+    code_background: "#EFF1F5",
+    inline_background: "#E6E9F0",
+    code_palette: CodeSyntaxPalette::CATPPUCCIN_LATTE,
+};
+
+const SAGE_GARDEN: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#F7F8F2",
+    surface: "#ECEFE5",
+    elevated: "#FBFCF8",
+    hover: "#E1E6D9",
+    selected: "#DCE6D3",
+    border: "#CDD4C4",
+    text: "#46514A",
+    muted: "#6C796F",
+    bright: "#26312A",
+    accent: "#3B7662",
+    secondary: "#8A5D3B",
+    danger: "#B24743",
+    warning: "#916915",
+    success: "#557A3C",
+    code_background: "#EEF1E8",
+    inline_background: "#E3E8DE",
+    code_palette: CodeSyntaxPalette::EVERFOREST_LIGHT,
+};
+
+const NORDIC_SNOW: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#F8FAFD",
+    surface: "#EDF1F7",
+    elevated: "#FFFFFF",
+    hover: "#E1E7EF",
+    selected: "#D7E3F1",
+    border: "#CCD5E1",
+    text: "#2E3440",
+    muted: "#667286",
+    bright: "#18202B",
+    accent: "#4A6F9B",
+    secondary: "#8A5F8D",
+    danger: "#B34855",
+    warning: "#8D6818",
+    success: "#55754B",
+    code_background: "#EEF2F7",
+    inline_background: "#E4E9F0",
+    code_palette: CodeSyntaxPalette::NORD_LIGHT,
+};
+
+const SOLARIZED_LIGHT_THEME: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#FDF8E7",
+    surface: "#F0EAD7",
+    elevated: "#FFFBEE",
+    hover: "#E5DECA",
+    selected: "#E2DCCB",
+    border: "#D2CBB7",
+    text: "#3D5358",
+    muted: "#687C7F",
+    bright: "#20383D",
+    accent: "#16739A",
+    secondary: "#9A5D23",
+    danger: "#C0443E",
+    warning: "#956B00",
+    success: "#647A12",
+    code_background: "#F3EDDA",
+    inline_background: "#E9E2CE",
+    code_palette: CodeSyntaxPalette::SOLARIZED_LIGHT,
+};
+
+const SUNLIT_CANVAS: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#FBFCFD",
+    surface: "#F1F3F5",
+    elevated: "#FFFFFF",
+    hover: "#E7EAED",
+    selected: "#DEEAF4",
+    border: "#D5DADF",
+    text: "#44494F",
+    muted: "#717981",
+    bright: "#262A2E",
+    accent: "#2778AF",
+    secondary: "#A45B24",
+    danger: "#C34249",
+    warning: "#996700",
+    success: "#4E7A32",
+    code_background: "#F2F4F6",
+    inline_background: "#E8EBEE",
+    code_palette: CodeSyntaxPalette::AYU_LIGHT,
+};
+
+const PAPER_WHITE: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#FAFAF7",
+    surface: "#F1F0EA",
+    elevated: "#FEFEFC",
+    hover: "#E7E6DF",
+    selected: "#DCE9E2",
+    border: "#D4D3CB",
+    text: "#393A34",
+    muted: "#6D7068",
+    bright: "#20211D",
+    accent: "#1C6B48",
+    secondary: "#8B5E31",
+    danger: "#AB4C4C",
+    warning: "#8B6C14",
+    success: "#397353",
+    code_background: "#F1F0E9",
+    inline_background: "#E7E5DB",
+    code_palette: CodeSyntaxPalette::TOKYO_NIGHT_LIGHT,
+};
+
+const PEARL_MORNING: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#FBFCFF",
+    surface: "#F0F3F9",
+    elevated: "#FFFFFF",
+    hover: "#E5EAF3",
+    selected: "#DCE5F4",
+    border: "#CFD7E5",
+    text: "#383A42",
+    muted: "#6F7582",
+    bright: "#1E2027",
+    accent: "#4B6FB5",
+    secondary: "#8A5A96",
+    danger: "#C44755",
+    warning: "#946813",
+    success: "#39754F",
+    code_background: "#F2F5FA",
+    inline_background: "#E7EBF3",
+    code_palette: CodeSyntaxPalette::ONE_LIGHT,
+};
+
+const WILLOW_MIST: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#F8FAF5",
+    surface: "#EDF1E8",
+    elevated: "#FCFDFB",
+    hover: "#E2E8DC",
+    selected: "#D9E6D8",
+    border: "#CAD4C7",
+    text: "#34413A",
+    muted: "#6B786F",
+    bright: "#1E2922",
+    accent: "#52766C",
+    secondary: "#88684A",
+    danger: "#B44B49",
+    warning: "#8D6A1B",
+    success: "#5C7B43",
+    code_background: "#EEF2EA",
+    inline_background: "#E3E9DF",
+    code_palette: CodeSyntaxPalette::WILLOW_LIGHT,
+};
+
+const COASTAL_FOG: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#F6FAFB",
+    surface: "#EAF1F3",
+    elevated: "#FCFEFE",
+    hover: "#DFE9EC",
+    selected: "#D5E5EA",
+    border: "#C7D5D9",
+    text: "#334550",
+    muted: "#687982",
+    bright: "#1B303A",
+    accent: "#287D83",
+    secondary: "#76639A",
+    danger: "#B84A55",
+    warning: "#916716",
+    success: "#4E7A64",
+    code_background: "#EAF1F3",
+    inline_background: "#DDE7EA",
+    code_palette: CodeSyntaxPalette::COASTAL_LIGHT,
+};
+
+const LAVENDER_HAZE: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#FAF8FC",
+    surface: "#F0EDF5",
+    elevated: "#FEFCFF",
+    hover: "#E7E2ED",
+    selected: "#E1DDF0",
+    border: "#D4CDDC",
+    text: "#433E50",
+    muted: "#756F80",
+    bright: "#292432",
+    accent: "#7252A3",
+    secondary: "#A05F72",
+    danger: "#BD4657",
+    warning: "#956713",
+    success: "#56805B",
+    code_background: "#F1EDF5",
+    inline_background: "#E7E1EC",
+    code_palette: CodeSyntaxPalette::LAVENDER_LIGHT,
+};
+
+const APRICOT_BLOOM: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#FFF9F5",
+    surface: "#F7EEE8",
+    elevated: "#FFFCFA",
+    hover: "#EDE2DB",
+    selected: "#F0DDD4",
+    border: "#DECEC4",
+    text: "#4A3B34",
+    muted: "#7C6D65",
+    bright: "#2C211C",
+    accent: "#B75C42",
+    secondary: "#397A78",
+    danger: "#C8444B",
+    warning: "#986512",
+    success: "#627A36",
+    code_background: "#F8EFE9",
+    inline_background: "#EEDFD7",
+    code_palette: CodeSyntaxPalette::APRICOT_LIGHT,
+};
+
+const SILVER_MORNING: CuratedThemeSpec = CuratedThemeSpec {
+    dark: false,
+    background: "#F7F9FB",
+    surface: "#ECEFF3",
+    elevated: "#FDFEFF",
+    hover: "#E1E5EA",
+    selected: "#D9E2EC",
+    border: "#CBD2DA",
+    text: "#343A43",
+    muted: "#69727D",
+    bright: "#1C222A",
+    accent: "#4C6F96",
+    secondary: "#7D5F87",
+    danger: "#B94753",
+    warning: "#8C6717",
+    success: "#587447",
+    code_background: "#EDF1F5",
+    inline_background: "#E2E7EC",
+    code_palette: CodeSyntaxPalette::SILVER_LIGHT,
+};
+
+const ONE_DARK_THEME: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#1E2025",
+    surface: "#25282F",
+    elevated: "#2B2F37",
+    hover: "#333842",
+    selected: "#39414D",
+    border: "#3D434D",
+    text: "#D7DAE0",
+    muted: "#8D949F",
+    bright: "#F2F4F7",
+    accent: "#6EA8E6",
+    secondary: "#C18AD6",
+    danger: "#E06C75",
+    warning: "#D6A85F",
+    success: "#86B97B",
+    code_background: "#191B20",
+    inline_background: "#30343C",
+    code_palette: CodeSyntaxPalette::ONE_DARK,
+};
+
+const TOKYO_NIGHT_THEME: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#171925",
+    surface: "#1E2130",
+    elevated: "#25293A",
+    hover: "#2D3348",
+    selected: "#333B54",
+    border: "#343B50",
+    text: "#C4C9E0",
+    muted: "#7F879F",
+    bright: "#EEF0FA",
+    accent: "#7AA2F7",
+    secondary: "#BB9AF7",
+    danger: "#F7768E",
+    warning: "#E0AF68",
+    success: "#9ECE6A",
+    code_background: "#131520",
+    inline_background: "#292D40",
+    code_palette: CodeSyntaxPalette::TOKYO_NIGHT,
+};
+
+const CATPPUCCIN_MOCHA_THEME: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#1E1E2E",
+    surface: "#252536",
+    elevated: "#2D2D40",
+    hover: "#36364A",
+    selected: "#3D3D55",
+    border: "#45475A",
+    text: "#CDD6F4",
+    muted: "#9399B2",
+    bright: "#F0F2FA",
+    accent: "#89B4FA",
+    secondary: "#CBA6F7",
+    danger: "#F38BA8",
+    warning: "#E5C890",
+    success: "#A6E3A1",
+    code_background: "#181825",
+    inline_background: "#313244",
+    code_palette: CodeSyntaxPalette::CATPPUCCIN_MOCHA,
+};
+
+const EVERFOREST_DARK_THEME: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#202622",
+    surface: "#272E29",
+    elevated: "#2E3731",
+    hover: "#374139",
+    selected: "#3D493F",
+    border: "#465148",
+    text: "#D3CDBB",
+    muted: "#8F978B",
+    bright: "#F0E9D8",
+    accent: "#83C092",
+    secondary: "#7FBBB3",
+    danger: "#E67E80",
+    warning: "#DBBC7F",
+    success: "#A7C080",
+    code_background: "#1A1F1C",
+    inline_background: "#303831",
+    code_palette: CodeSyntaxPalette::EVERFOREST_DARK,
+};
+
+const ROSE_PINE_THEME: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#1F1D2E",
+    surface: "#262338",
+    elevated: "#2E2A42",
+    hover: "#38334D",
+    selected: "#403A58",
+    border: "#49445E",
+    text: "#E0DEF4",
+    muted: "#908CAA",
+    bright: "#F4F1FF",
+    accent: "#EBBCBA",
+    secondary: "#9CCFD8",
+    danger: "#EB6F92",
+    warning: "#F6C177",
+    success: "#75B8A3",
+    code_background: "#191724",
+    inline_background: "#312E45",
+    code_palette: CodeSyntaxPalette::ROSE_PINE,
+};
+
+const GRUVBOX_DARK_THEME: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#272320",
+    surface: "#302A26",
+    elevated: "#39312C",
+    hover: "#443A33",
+    selected: "#4B4037",
+    border: "#55483E",
+    text: "#E8DDC9",
+    muted: "#A09586",
+    bright: "#FFF6E8",
+    accent: "#E88B52",
+    secondary: "#D3869B",
+    danger: "#E66B62",
+    warning: "#D8AE55",
+    success: "#A4B86A",
+    code_background: "#211E1B",
+    inline_background: "#3A322C",
+    code_palette: CodeSyntaxPalette::GRUVBOX_DARK,
+};
+
+const MILKY_NIGHT: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#202124",
+    surface: "#282A2E",
+    elevated: "#303238",
+    hover: "#383B42",
+    selected: "#404751",
+    border: "#484C55",
+    text: "#D8D6D1",
+    muted: "#92918D",
+    bright: "#F6F4EF",
+    accent: "#82AAFF",
+    secondary: "#C792D4",
+    danger: "#E58D91",
+    warning: "#EBCB8B",
+    success: "#A7C080",
+    code_background: "#1A1B1E",
+    inline_background: "#303238",
+    code_palette: CodeSyntaxPalette::MILKY_NIGHT,
+};
+
+const DRACULA_NIGHT: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#20212B",
+    surface: "#282A36",
+    elevated: "#303241",
+    hover: "#393C4D",
+    selected: "#414559",
+    border: "#484C60",
+    text: "#E6E6E1",
+    muted: "#9093A6",
+    bright: "#F8F8F2",
+    accent: "#BD93F9",
+    secondary: "#8BE9FD",
+    danger: "#FF6E87",
+    warning: "#F1CA76",
+    success: "#50C878",
+    code_background: "#191A22",
+    inline_background: "#303241",
+    code_palette: CodeSyntaxPalette::DRACULA,
+};
+
+const NORDIC_NIGHT: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#252A34",
+    surface: "#2E3440",
+    elevated: "#353C4A",
+    hover: "#3B4453",
+    selected: "#434E60",
+    border: "#4C566A",
+    text: "#D8DEE9",
+    muted: "#8D98AA",
+    bright: "#ECEFF4",
+    accent: "#88C0D0",
+    secondary: "#B48EAD",
+    danger: "#BF616A",
+    warning: "#D5B36A",
+    success: "#A3BE8C",
+    code_background: "#20242D",
+    inline_background: "#343B48",
+    code_palette: CodeSyntaxPalette::NORD,
+};
+
+const GITHUB_DARK_THEME: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#0D1117",
+    surface: "#161B22",
+    elevated: "#1C2128",
+    hover: "#252C35",
+    selected: "#2D3744",
+    border: "#30363D",
+    text: "#C9D1D9",
+    muted: "#8B949E",
+    bright: "#F0F6FC",
+    accent: "#58A6FF",
+    secondary: "#D2A8FF",
+    danger: "#FF7B72",
+    warning: "#D29922",
+    success: "#56D364",
+    code_background: "#090C10",
+    inline_background: "#21262D",
+    code_palette: CodeSyntaxPalette::GITHUB_DARK,
+};
+
+const SOLARIZED_DARK_THEME: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#002B36",
+    surface: "#073642",
+    elevated: "#0B414D",
+    hover: "#124B57",
+    selected: "#175563",
+    border: "#23616C",
+    text: "#93A1A1",
+    muted: "#718486",
+    bright: "#EEE8D5",
+    accent: "#268BD2",
+    secondary: "#B58900",
+    danger: "#DC5A5F",
+    warning: "#D3A52E",
+    success: "#859900",
+    code_background: "#00232C",
+    inline_background: "#0B3B46",
+    code_palette: CodeSyntaxPalette::SOLARIZED_DARK,
+};
+
+const MONOKAI_PRO_THEME: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#221F22",
+    surface: "#2D2A2E",
+    elevated: "#353237",
+    hover: "#403C42",
+    selected: "#49434C",
+    border: "#514B54",
+    text: "#E8E6E3",
+    muted: "#939094",
+    bright: "#FCFCFA",
+    accent: "#78DCE8",
+    secondary: "#AB9DF2",
+    danger: "#FF6188",
+    warning: "#FFD866",
+    success: "#A9DC76",
+    code_background: "#191719",
+    inline_background: "#363237",
+    code_palette: CodeSyntaxPalette::MONOKAI_PRO,
+};
+
+const AYU_MIRAGE: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#1F2430",
+    surface: "#252B38",
+    elevated: "#2C3341",
+    hover: "#343C4C",
+    selected: "#3B4658",
+    border: "#424D5E",
+    text: "#CCCAC2",
+    muted: "#7E8796",
+    bright: "#F2F0E8",
+    accent: "#FFB454",
+    secondary: "#59C2FF",
+    danger: "#F07178",
+    warning: "#E6B450",
+    success: "#AAD94C",
+    code_background: "#191E28",
+    inline_background: "#2D3442",
+    code_palette: CodeSyntaxPalette::AYU_MIRAGE,
+};
+
+const MOONLIGHT_HARBOR: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#18202C",
+    surface: "#202A38",
+    elevated: "#283342",
+    hover: "#313E50",
+    selected: "#39495E",
+    border: "#425267",
+    text: "#D7DEEA",
+    muted: "#8490A3",
+    bright: "#F3F7FC",
+    accent: "#82B1FF",
+    secondary: "#7FDBCA",
+    danger: "#EF7C8E",
+    warning: "#E8B66D",
+    success: "#A9DC76",
+    code_background: "#121923",
+    inline_background: "#293645",
+    code_palette: CodeSyntaxPalette::MOONLIGHT_HARBOR,
+};
+
+const COBALT_VELVET: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#171C32",
+    surface: "#1E2540",
+    elevated: "#262E4D",
+    hover: "#303A5B",
+    selected: "#394569",
+    border: "#445071",
+    text: "#DCE4FF",
+    muted: "#8792B3",
+    bright: "#F5F7FF",
+    accent: "#7FA7FF",
+    secondary: "#D29AE8",
+    danger: "#F07891",
+    warning: "#E9C46A",
+    success: "#9BCB7B",
+    code_background: "#111629",
+    inline_background: "#28304F",
+    code_palette: CodeSyntaxPalette::COBALT_VELVET,
+};
+
+const OBSIDIAN_EMBER: CuratedThemeSpec = CuratedThemeSpec {
+    dark: true,
+    background: "#1D1A19",
+    surface: "#272321",
+    elevated: "#302A27",
+    hover: "#3A322E",
+    selected: "#463B35",
+    border: "#51443D",
+    text: "#DDD3C8",
+    muted: "#948980",
+    bright: "#FFF8F0",
+    accent: "#E88961",
+    secondary: "#74B6A0",
+    danger: "#E06F61",
+    warning: "#E8C170",
+    success: "#A9BD6A",
+    code_background: "#161312",
+    inline_background: "#312A26",
+    code_palette: CodeSyntaxPalette::OBSIDIAN_EMBER,
+};
 
 /// Color palette organized by visual category: text, background, border, editor.
 ///
@@ -752,6 +1538,82 @@ pub struct Theme {
 }
 
 impl Theme {
+    fn curated(spec: CuratedThemeSpec) -> Self {
+        let color = hex_to_hsla;
+        let background = color(spec.background);
+        let surface = color(spec.surface);
+        let elevated = color(spec.elevated);
+        let hover = color(spec.hover);
+        let selected = color(spec.selected);
+        let border = color(spec.border);
+        let text = color(spec.text);
+        let muted = color(spec.muted);
+        let bright = color(spec.bright);
+        let accent = color(spec.accent);
+        let secondary = color(spec.secondary);
+        let danger = color(spec.danger);
+        let warning = color(spec.warning);
+        let success = color(spec.success);
+        let semantic_alpha = if spec.dark { 0.34 } else { 0.2 };
+
+        Self {
+            text_primary: text,
+            text_secondary: muted,
+            text_bright: bright,
+            text_accent: accent,
+            text_danger: danger,
+            text_on_accent: if spec.dark {
+                color("#14161B")
+            } else {
+                color("#FFFFFF")
+            },
+            text_warning: warning,
+            text_warning_hover: with_alpha(warning, 0.88),
+            bg_primary: background,
+            bg_secondary: surface,
+            bg_tertiary: hover,
+            bg_elevated: elevated,
+            bg_hover: hover,
+            bg_selected: selected,
+            bg_bar: surface,
+            bg_tab: surface,
+            bg_tab_hover: hover,
+            bg_tab_active: background,
+            bg_code: color(spec.code_background),
+            bg_code_inline: color(spec.inline_background),
+            border_primary: border,
+            border_secondary: border,
+            border_tertiary: with_alpha(muted, if spec.dark { 0.62 } else { 0.52 }),
+            border_decorative: with_alpha(muted, 0.42),
+            border_code_block: with_alpha(border, 0.9),
+            window_border: if spec.dark {
+                border
+            } else {
+                LIGHT_WINDOW_BORDER
+            },
+            cursor: accent,
+            selection: with_alpha(accent, if spec.dark { 0.3 } else { 0.2 }),
+            line_highlight: with_alpha(accent, if spec.dark { 0.09 } else { 0.06 }),
+            heading: accent,
+            bold: bright,
+            italic: secondary,
+            strikethrough: muted,
+            inline_code: secondary,
+            inline_code_bg: color(spec.inline_background),
+            highlight_bg: with_alpha(warning, if spec.dark { 0.28 } else { 0.24 }),
+            link: accent,
+            syntax_marker: with_alpha(muted, 0.9),
+            list_marker: secondary,
+            checkbox_checked: success,
+            gutter_heading: with_alpha(text, if spec.dark { 0.28 } else { 0.22 }),
+            git_status_added: success,
+            git_status_modified: warning,
+            diff_added_bg: with_alpha(success, semantic_alpha),
+            diff_removed_bg: with_alpha(danger, semantic_alpha),
+            code_palette: spec.code_palette,
+        }
+    }
+
     pub fn color(&self, field: ThemeColorField) -> Hsla {
         match field {
             ThemeColorField::TextPrimary => self.text_primary,
@@ -856,7 +1718,6 @@ impl Theme {
 pub fn apply_editor_theme_mode(theme: &Theme, mode: EditorThemeMode, is_dark: bool) -> Theme {
     let mut themed = theme.clone();
     if mode == EditorThemeMode::Monochrome {
-        let monochrome_link = crate::hex_hsla!("#0057CDFF");
         let emphasis = if is_dark {
             themed.text_bright
         } else {
@@ -876,18 +1737,16 @@ pub fn apply_editor_theme_mode(theme: &Theme, mode: EditorThemeMode, is_dark: bo
         } else {
             emphasis
         };
-        themed.link = monochrome_link;
+        themed.link = theme.link;
         themed.syntax_marker = subtle;
         themed.list_marker = subtle;
         themed.checkbox_checked = subtle;
         themed.gutter_heading = with_alpha(themed.text_primary, if is_dark { 1.0 } else { 1.0 });
     }
-    if is_dark {
-        themed.link = DARK_EDITOR_LINK;
-    }
     themed
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct MoekaRetroPalette {
     dark: Hsla,
@@ -900,6 +1759,7 @@ struct MoekaRetroPalette {
     secondary_accent: Hsla,
 }
 
+#[allow(dead_code)]
 impl Theme {
     fn moeka_retro(palette: MoekaRetroPalette, dark: bool) -> Self {
         let mut theme = if dark {
@@ -2607,10 +3467,33 @@ fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DARK_EDITOR_LINK, EditorThemeMode, Theme, ThemeColorField, ThemeKind,
-        apply_editor_theme_mode, with_alpha,
-    };
+    use super::{EditorThemeMode, ThemeColorField, ThemeKind, apply_editor_theme_mode, with_alpha};
+
+    #[test]
+    fn first_twelve_dark_themes_preserve_the_original_catalog() {
+        let labels = ThemeKind::dark_themes()[..12]
+            .iter()
+            .map(|kind| kind.label())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            [
+                "One Dark",
+                "Milky Dark",
+                "Dracula Night",
+                "Nordic Night",
+                "Tokyo Night",
+                "Catppuccin Mocha",
+                "GitHub Dark",
+                "Solarized Dark",
+                "Gruvbox Dark",
+                "Rose Pine",
+                "Everforest Dark",
+                "Monokai Pro",
+            ]
+        );
+    }
 
     #[test]
     fn light_chrome_hairlines_match_the_primary_border_weight() {
@@ -2638,14 +3521,11 @@ mod tests {
             ThemeColorField::TextWarningHover,
             ThemeColorField::BgTertiary,
         ];
-        let themes = [
-            Theme::one_dark(),
-            Theme::one_light(),
-            Theme::milky(),
-            Theme::ayu_dark(),
-        ];
-
-        for mut theme in themes {
+        for kind in ThemeKind::dark_themes()
+            .iter()
+            .chain(ThemeKind::light_themes())
+        {
+            let mut theme = kind.build();
             for field in fields {
                 let original = theme.color(field);
                 theme.set_color(field, theme.text_accent);
@@ -2658,7 +3538,7 @@ mod tests {
 
     #[test]
     fn monochrome_mode_preserves_interface_semantic_colors() {
-        let base = Theme::one_dark();
+        let base = ThemeKind::OneDark.build();
         let themed = apply_editor_theme_mode(&base, EditorThemeMode::Monochrome, true);
 
         assert_eq!(themed.text_on_accent, base.text_on_accent);
@@ -2669,122 +3549,40 @@ mod tests {
 
     #[test]
     fn monochrome_mode_keeps_code_block_colors() {
-        let base = Theme::one_dark();
+        let base = ThemeKind::OneDark.build();
         let themed = apply_editor_theme_mode(&base, EditorThemeMode::Monochrome, true);
 
         assert_eq!(themed.bg_code, base.bg_code);
         assert_eq!(themed.border_code_block, base.border_code_block);
         assert_eq!(themed.heading, with_alpha(base.text_bright, 0.88));
         assert_eq!(themed.inline_code, with_alpha(base.text_bright, 0.88));
-        assert_eq!(themed.link, DARK_EDITOR_LINK);
+        assert_eq!(themed.link, base.link);
     }
 
     #[test]
-    fn dark_editor_themes_share_link_color_in_all_modes() {
-        for kind in ThemeKind::dark_themes() {
-            let base = kind.build();
-            for mode in EditorThemeMode::all() {
-                let themed = apply_editor_theme_mode(&base, *mode, true);
-                assert_eq!(themed.link, DARK_EDITOR_LINK, "{}", kind.label());
-            }
-        }
-    }
-
-    #[test]
-    fn moeka_print_uses_reference_four_color_palette() {
-        let editor = Theme::moeka_print_dark();
-        let paper = Theme::moeka_print_light();
-
-        assert_eq!(editor.bg_primary, Theme::ayu_dark().bg_primary);
-        assert_eq!(editor.bg_primary, crate::hex_hsla!("#1E212B"));
-        assert_eq!(editor.text_primary, crate::hex_hsla!("#F3E6BF"));
-        assert_eq!(editor.border_primary, crate::hex_hsla!("#F3E6BF"));
-        assert_eq!(editor.text_accent, crate::hex_hsla!("#D84A2F"));
-        assert_eq!(paper.bg_primary, crate::hex_hsla!("#F3E6BF"));
-        assert_eq!(paper.text_primary, crate::hex_hsla!("#1E212B"));
-        assert_eq!(paper.text_accent, crate::hex_hsla!("#D84A2F"));
-    }
-
-    #[test]
-    fn moeka_retro_themes_form_four_dark_light_pairs() {
-        let pairs = [
-            (ThemeKind::MoekaPrintDark, ThemeKind::MoekaPrintLight),
-            (ThemeKind::MoekaMonoDark, ThemeKind::MoekaMonoLight),
-            (
-                ThemeKind::MoekaNewspaperDark,
-                ThemeKind::MoekaNewspaperLight,
-            ),
-            (ThemeKind::MoekaKraftDark, ThemeKind::MoekaKraftLight),
-        ];
-
-        for (dark, light) in pairs {
-            assert!(dark.is_dark(), "{}", dark.label());
-            assert!(!light.is_dark(), "{}", light.label());
-            assert!(dark.is_moeka_retro());
-            assert!(light.is_moeka_retro());
-            assert_eq!(dark.moeka_companion(), Some(light));
-            assert_eq!(light.moeka_companion(), Some(dark));
-
-            let dark_theme = dark.build();
-            let light_theme = light.build();
-            assert!(dark_theme.bg_primary.l < 0.5, "{}", dark.label());
-            assert!(light_theme.bg_primary.l >= 0.5, "{}", light.label());
-            assert_eq!(dark_theme.bg_primary, light_theme.text_primary);
-            assert_eq!(dark_theme.text_primary, light_theme.bg_primary);
-            assert_ne!(dark_theme.bg_primary, dark_theme.text_primary);
-            assert_ne!(light_theme.bg_primary, light_theme.text_primary);
-        }
-    }
-
-    #[test]
-    fn moeka_retro_themes_are_last_in_settings_lists() {
-        assert_eq!(
-            &ThemeKind::dark_themes()[ThemeKind::dark_themes().len() - 4..],
-            &[
-                ThemeKind::MoekaPrintDark,
-                ThemeKind::MoekaMonoDark,
-                ThemeKind::MoekaNewspaperDark,
-                ThemeKind::MoekaKraftDark,
-            ]
-        );
-        assert_eq!(
-            &ThemeKind::light_themes()[ThemeKind::light_themes().len() - 4..],
-            &[
-                ThemeKind::MoekaPrintLight,
-                ThemeKind::MoekaMonoLight,
-                ThemeKind::MoekaNewspaperLight,
-                ThemeKind::MoekaKraftLight,
-            ]
-        );
-    }
-
-    #[test]
-    fn moeka_retro_inline_code_tracks_surface_contrast() {
+    fn curated_themes_have_complete_surfaces_and_syntax_palettes() {
+        let mut code_palettes = std::collections::HashSet::new();
         for kind in ThemeKind::dark_themes()
             .iter()
             .chain(ThemeKind::light_themes())
-            .copied()
-            .filter(|kind| kind.is_moeka_retro())
         {
             let theme = kind.build();
-            assert_eq!(theme.inline_code, theme.text_primary, "{}", kind.label());
+            assert_ne!(theme.bg_primary, theme.bg_secondary, "{}", kind.label());
             assert_ne!(theme.inline_code_bg, theme.bg_primary, "{}", kind.label());
-            if kind.is_dark() {
-                assert_eq!(theme.inline_code_bg.a, 0.16, "{}", kind.label());
-            } else {
-                assert_eq!(theme.inline_code_bg.a, 1.0, "{}", kind.label());
-            }
+            assert_ne!(theme.code_palette.foreground, 0, "{}", kind.label());
+            assert_ne!(theme.code_palette.keyword, theme.code_palette.string);
+            assert!(code_palettes.insert(theme.code_palette), "{}", kind.label());
         }
     }
 
     #[test]
     fn monochrome_mode_uses_grayscale_markers_in_light_theme() {
-        let base = Theme::one_light();
+        let base = ThemeKind::PorcelainMist.build();
         let themed = apply_editor_theme_mode(&base, EditorThemeMode::Monochrome, false);
 
         assert_eq!(themed.heading, base.text_primary);
         assert_eq!(themed.inline_code, base.text_primary);
-        assert_eq!(themed.link, crate::hex_hsla!("#0057CDFF"));
+        assert_eq!(themed.link, base.link);
         assert_eq!(themed.list_marker, with_alpha(base.text_secondary, 0.82));
         assert_eq!(themed.syntax_marker, with_alpha(base.text_secondary, 0.82));
     }

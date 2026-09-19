@@ -2056,7 +2056,9 @@ impl EditorView {
                     .bg(tab_bg)
                     .border_r(px(ts.tab_item_border_width_px))
                     .border_color(ts.tab_item_border_color)
-                    .hover(move |style| style.bg(tab_hover_bg))
+                    .when(!is_active, |this| {
+                        this.hover(move |style| style.bg(tab_hover_bg))
+                    })
                     .when(true, |this| {
                         this.when(tab_kind == TabKind::Editor, |this| {
                             this.child(self.render_tab_file_indicator(tab, is_active))

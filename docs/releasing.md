@@ -2,8 +2,9 @@
 
 ## Channels
 
-Official GitHub Releases remain in **MoekaProject/community**. The only
-supported official release entry point is local `make publish vX.Y.Z` on the
+Official GitHub Releases remain in **MoekaProject/community**. The supported
+official release entry points are local `make publish vX.Y.Z` and
+`make publish-beta vX.Y.Z` on the
 maintainer's macOS signing machine. **v0.1.12 is permanently refused by the new
 helper:** do not modify its tag, release, or assets and do not republish it.
 Use a reviewed, bumped version for the next release.
@@ -68,7 +69,8 @@ Before creating approval, a human must review at least:
    listing, means absence. The listing also finds hidden drafts. Network,
    authentication, permission, malformed response and non-404 HTTP errors
    fail closed. A published release is refused **before expensive builds**.
-5. After review, run `make publish vX.Y.Z` (not for v0.1.12). A fresh release
+5. After review, run `make publish vX.Y.Z` for a stable release or
+  `make publish-beta vX.Y.Z` for a GitHub prerelease (not for v0.1.12). A fresh release
    checks signing/cross-build prerequisites, then uses the existing signed and
    notarized macOS pipeline plus Windows/Linux cross builds. Keep the default
    Moeka names and dist layout; the official asset allowlist is fixed, not a

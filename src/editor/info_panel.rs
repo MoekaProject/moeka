@@ -207,7 +207,7 @@ fn export_preview_font_families() -> helpers::GeneratedPreviewFontFamilies<'stat
 }
 
 fn render_export_preview_svg(kind: crate::markdown::BlockPreviewKind, source: &str) -> String {
-    let theme = crate::theme::ThemeKind::OneLight.build();
+    let theme = crate::theme::ThemeKind::PorcelainMist.build();
     helpers::build_generated_block_preview_svg(kind, source, &theme, export_preview_font_families())
 }
 

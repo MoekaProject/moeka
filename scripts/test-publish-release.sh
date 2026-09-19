@@ -158,7 +158,12 @@ elif [[ "$1" == release ]]; then
             [[ ! -e "$FIXTURE/remote/${file##*/}" ]] || exit 93
             cp "$file" "$FIXTURE/remote/";;
         edit)
-            [[ "$state" == draft && "$*" == *--draft=false* && "$*" == *--latest* ]] || exit 92
+            [[ "$state" == draft && "$*" == *--draft=false* ]] || exit 92
+            if [[ "$SCENARIO" == beta ]]; then
+                [[ "$*" == *--prerelease* && "$*" == *--latest=false* ]] || exit 92
+            else
+                [[ "$*" == *--latest && "$*" != *--prerelease* ]] || exit 92
+            fi
             echo published >"$FIXTURE/state";;
         *) echo "UNEXPECTED gh release: $*" >&2; exit 99;;
     esac
@@ -241,6 +246,14 @@ for scenario in success no-digest existing-tag; do
     reject 'already published' publish v9.8.7
     printf 'PASS fresh publish + immutability: %s\n' "$scenario"
 done
+
+fixture beta
+invoke publish-beta v9.8.7 || fail 'Beta publish failed'
+[[ "$(cat "$FIXTURE/state")" == published ]] || fail 'Beta draft not published'
+[[ "$(grep -c '^gh release edit ' "$FIXTURE/calls")" == 1 ]] || fail 'Expected one final beta publish'
+grep -q '^gh release edit .*--prerelease.*--latest=false' "$FIXTURE/calls" \
+    || fail 'Beta release was not marked prerelease and non-latest'
+echo 'PASS beta prerelease publish'
 
 for scenario in size-mismatch digest-mismatch extra-asset; do
     fixture "$scenario"

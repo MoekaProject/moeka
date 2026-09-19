@@ -95,7 +95,9 @@ impl EditorView {
         let content = if self.app_settings.format_toolbar_visible
             && pane_id == self.focused_pane_id
             && self.active_tab_is_markdown()
-            && self.cursor.has_selection()
+            && (self.cursor.has_selection()
+                || self.hovering_format_line.is_some()
+                || self.line_format_toolbar_line.is_some())
         {
             content
         } else {
@@ -598,6 +600,7 @@ impl EditorView {
                                     false
                                 };
                                 this.clear_gutter_fold_hover(cx);
+                                this.clear_line_format_hover(cx);
                                 if had_hover || toolbar_changed {
                                     cx.notify();
                                 }
@@ -674,6 +677,13 @@ impl EditorView {
                                 pane_id,
                             })
                             .with_priority(0),
+                        )
+                        .child(
+                            deferred(selection_toolbar::LineFormatToolbarElement {
+                                editor: cx.entity().clone(),
+                                pane_id,
+                            })
+                            .with_priority(1),
                         )
                     })
                     .when(self.active_tab_is_whiteboard(), |this| {

@@ -240,10 +240,10 @@ mod tests {
 
     fn sample_settings() -> AppSettings {
         AppSettings {
-            theme: "MilkyDark".to_string(),
+            theme: "One Dark".to_string(),
             theme_mode: "auto".to_string(),
-            dark_theme: "MilkyDark".to_string(),
-            light_theme: "MilkyLight".to_string(),
+            dark_theme: "One Dark".to_string(),
+            light_theme: "Porcelain Mist".to_string(),
             dark_editor_theme_mode: "monochrome".to_string(),
             light_editor_theme_mode: "colorful".to_string(),
             editor_theme_mode: "colorful".to_string(),
@@ -334,11 +334,11 @@ mod tests {
     fn load_partial_yaml_fills_missing_fields_with_defaults() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.yaml");
-        fs::write(&path, "settings:\n  theme: MilkyDark\n").unwrap();
+        fs::write(&path, "settings:\n  theme: One Dark\n").unwrap();
 
         let loaded = load_yaml_file::<SettingsFile>(&path).unwrap();
 
-        assert_eq!(loaded.settings.theme, "MilkyDark");
+        assert_eq!(loaded.settings.theme, "One Dark");
         assert_eq!(
             loaded.settings.dark_theme,
             AppSettings::default().dark_theme
@@ -382,16 +382,16 @@ mod tests {
         let path = dir.path().join("settings.yaml");
 
         let mut first = SettingsFile::default();
-        first.settings.theme = "OneLight".to_string();
+        first.settings.theme = "Linen Paper".to_string();
         save_yaml_file(&path, &first).unwrap();
 
         let mut second = SettingsFile::default();
-        second.settings.theme = "MilkyLight".to_string();
-        second.settings.light_theme = "MilkyLight".to_string();
+        second.settings.theme = "Porcelain Mist".to_string();
+        second.settings.light_theme = "Porcelain Mist".to_string();
         save_yaml_file(&path, &second).unwrap();
 
         let loaded = load_yaml_file::<SettingsFile>(&path).unwrap();
-        assert_eq!(loaded.settings.theme, "MilkyLight");
+        assert_eq!(loaded.settings.theme, "Porcelain Mist");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 

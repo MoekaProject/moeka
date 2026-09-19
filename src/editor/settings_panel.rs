@@ -1395,16 +1395,8 @@ impl EditorView {
         let swatch_code = preview.inline_code;
         let swatch_secondary_bg = preview.bg_secondary;
         let active_accent = self.theme.text_accent;
-        let inactive_border = if kind.is_moeka_retro() {
-            crate::theme::with_alpha(self.theme.text_primary, 0.24)
-        } else {
-            preview.border_secondary
-        };
-        let inactive_hover_border = if kind.is_moeka_retro() {
-            crate::theme::with_alpha(self.theme.text_primary, 0.48)
-        } else {
-            preview.border_tertiary
-        };
+        let inactive_border = preview.border_secondary;
+        let inactive_hover_border = preview.border_tertiary;
 
         let swatch_size = self.scaled(10.0);
 

@@ -11,8 +11,8 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Element, ElementId, Entity, Focusable,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, Point, Position,
-    Size, Style, Window, point, px, relative, size,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseMoveEvent, PaintQuad, Pixels,
+    Point, Position, Size, Style, Window, point, px, relative, size,
 };
 
 use super::{EditorView, PaneId};
@@ -51,6 +51,7 @@ pub(crate) struct SelectionToolbarSelectionKey {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SelectionToolbarSnapshotKey {
     pub(crate) selection: SelectionToolbarSelectionKey,
+    pub(crate) cursor_at_end: bool,
     pub(crate) scroll_offset: f32,
     /// All code-block pans, not merely the block containing the caret. A
     /// multi-line primary selection can include several independently panned blocks.
@@ -66,8 +67,48 @@ pub(crate) struct SelectionToolbarGeometry {
     pub(crate) viewport: Bounds<Pixels>,
     pub(crate) selected_bounds: Bounds<Pixels>,
     pub(crate) top_row_anchor: Bounds<Pixels>,
+    pub(crate) cursor_endpoint_x: Pixels,
     /// Set only after the floating bar actually prepaints, for Escape routing.
     pub(crate) toolbar_bounds: Option<Bounds<Pixels>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LineFormatToolbarGeometry {
+    pub(crate) line: usize,
+    pub(crate) viewport: Bounds<Pixels>,
+    pub(crate) content_left: Pixels,
+    pub(crate) trigger_bounds: Bounds<Pixels>,
+    pub(crate) line_top: Pixels,
+    pub(crate) line_bottom: Pixels,
+}
+
+impl LineFormatToolbarGeometry {
+    fn toolbar_origin(
+        &self,
+        measured: Size<Pixels>,
+        margin: Pixels,
+        gap: Pixels,
+    ) -> Option<Point<Pixels>> {
+        if !positive_bounds(Bounds::new(point(px(0.0), px(0.0)), measured))
+            || measured.width + margin * 2.0 > self.viewport.size.width
+            || measured.height + margin * 2.0 > self.viewport.size.height
+        {
+            return None;
+        }
+        let left = self.viewport.left() + margin;
+        let right = self.viewport.right() - margin - measured.width;
+        let x = self.content_left.clamp(left, right);
+        let above = self.line_top - gap - measured.height;
+        let below = self.line_bottom + gap;
+        let y = if above >= self.viewport.top() + margin {
+            above
+        } else if below + measured.height <= self.viewport.bottom() - margin {
+            below
+        } else {
+            return None;
+        };
+        Some(point(x, y))
+    }
 }
 
 fn positive_bounds(bounds: Bounds<Pixels>) -> bool {
@@ -130,12 +171,30 @@ impl SelectionToolbarGeometry {
             .copied()
             .filter(|quad| quad.top() < first.bottom() && quad.bottom() > first.top())
             .fold(first, |row, quad| row.union(&quad));
+        let endpoint_seed = if key.cursor_at_end {
+            *visible.iter().max_by_key(|quad| quad.bottom())?
+        } else {
+            first
+        };
+        let endpoint_row = visible
+            .iter()
+            .copied()
+            .filter(|quad| {
+                quad.top() < endpoint_seed.bottom() && quad.bottom() > endpoint_seed.top()
+            })
+            .fold(endpoint_seed, |row, quad| row.union(&quad));
+        let cursor_endpoint_x = if key.cursor_at_end {
+            endpoint_row.right()
+        } else {
+            endpoint_row.left()
+        };
         Some(Self {
             key,
             editor_bounds,
             viewport,
             selected_bounds,
             top_row_anchor,
+            cursor_endpoint_x,
             toolbar_bounds: None,
         })
     }
@@ -162,7 +221,7 @@ impl SelectionToolbarGeometry {
         }
         let left = viewport.left() + margin;
         let right = viewport.right() - margin - measured.width;
-        let x = (self.top_row_anchor.center().x - measured.width / 2.0).clamp(left, right);
+        let x = (self.cursor_endpoint_x - measured.width / 2.0).clamp(left, right);
         let above = self.top_row_anchor.top() - gap - measured.height;
         let below = self.selected_bounds.bottom() + gap;
         let y = if above >= viewport.top() + margin {
@@ -218,10 +277,187 @@ impl SelectionToolbarVisibility {
 }
 
 impl EditorView {
+    fn desired_format_trigger_opacity(&self) -> f32 {
+        if self.hovering_format_trigger_line.is_some() || self.line_format_toolbar_hovered {
+            0.9
+        } else if self.hovering_format_line.is_some() {
+            0.34
+        } else {
+            0.0
+        }
+    }
+
+    fn sync_format_trigger_opacity(&mut self, cx: &mut gpui::Context<Self>) {
+        let target = self.desired_format_trigger_opacity();
+        if (self.format_trigger_opacity_target - target).abs() <= 0.001 {
+            return;
+        }
+        self.format_trigger_opacity_target = target;
+        self.format_trigger_animation_epoch = self.format_trigger_animation_epoch.wrapping_add(1);
+        let epoch = self.format_trigger_animation_epoch;
+        let pane_id = self.current_pane_id();
+        self.format_trigger_animation_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let done = this
+                    .update(cx, |this, cx| {
+                        this.with_pane_if_alive(pane_id, |this| {
+                            if this.format_trigger_animation_epoch != epoch {
+                                return true;
+                            }
+                            let difference =
+                                this.format_trigger_opacity_target - this.format_trigger_opacity;
+                            if difference.abs() <= 0.01 {
+                                this.format_trigger_opacity = this.format_trigger_opacity_target;
+                                this.format_trigger_animation_task = None;
+                                if this.format_trigger_opacity <= 0.0 {
+                                    this.format_trigger_line = None;
+                                }
+                                cx.notify();
+                                return true;
+                            }
+                            this.format_trigger_opacity += difference * 0.22;
+                            cx.notify();
+                            false
+                        })
+                        .unwrap_or(true)
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+            }
+        }));
+    }
+
+    fn desired_line_format_toolbar_opacity(&self) -> f32 {
+        if self.line_format_toolbar_line.is_some()
+            && (self.hovering_format_trigger_line.is_some()
+                || self.line_format_toolbar_hovered
+                || self.format_toolbar_owns_hover_menu())
+        {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    fn sync_line_format_toolbar_opacity(&mut self, cx: &mut gpui::Context<Self>) {
+        let target = self.desired_line_format_toolbar_opacity();
+        if (self.line_format_toolbar_opacity_target - target).abs() <= 0.001 {
+            return;
+        }
+        self.line_format_toolbar_opacity_target = target;
+        self.line_format_toolbar_animation_epoch =
+            self.line_format_toolbar_animation_epoch.wrapping_add(1);
+        let epoch = self.line_format_toolbar_animation_epoch;
+        let pane_id = self.current_pane_id();
+        self.line_format_toolbar_animation_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let done = this
+                    .update(cx, |this, cx| {
+                        this.with_pane_if_alive(pane_id, |this| {
+                            if this.line_format_toolbar_animation_epoch != epoch {
+                                return true;
+                            }
+                            let difference = this.line_format_toolbar_opacity_target
+                                - this.line_format_toolbar_opacity;
+                            if difference.abs() <= 0.01 {
+                                this.line_format_toolbar_opacity =
+                                    this.line_format_toolbar_opacity_target;
+                                this.line_format_toolbar_animation_task = None;
+                                if this.line_format_toolbar_opacity <= 0.0 {
+                                    this.line_format_toolbar_line = None;
+                                    this.line_format_toolbar_bounds = None;
+                                }
+                                cx.notify();
+                                return true;
+                            }
+                            this.line_format_toolbar_opacity += difference * 0.22;
+                            cx.notify();
+                            false
+                        })
+                        .unwrap_or(true)
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+            }
+        }));
+    }
+
+    pub(crate) fn update_line_format_hover(
+        &mut self,
+        line: Option<usize>,
+        trigger_line: Option<usize>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if let (Some(active_line), Some(next_line)) = (self.line_format_toolbar_line, trigger_line)
+            && active_line != next_line
+        {
+            return;
+        }
+        let changed =
+            self.hovering_format_line != line || self.hovering_format_trigger_line != trigger_line;
+        self.hovering_format_line = line;
+        self.hovering_format_trigger_line = trigger_line;
+        if let Some(line) = line {
+            self.format_trigger_line = Some(line);
+        }
+        if let Some(line) = trigger_line {
+            self.line_format_toolbar_line = Some(line);
+        }
+        self.sync_format_trigger_opacity(cx);
+        self.sync_line_format_toolbar_opacity(cx);
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_line_format_toolbar_hovered(
+        &mut self,
+        hovered: bool,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.line_format_toolbar_hovered = hovered;
+        if hovered {
+            self.hovering_format_trigger_line = None;
+        }
+        self.sync_format_trigger_opacity(cx);
+        self.sync_line_format_toolbar_opacity(cx);
+    }
+
+    pub(crate) fn clear_line_format_hover(&mut self, cx: &mut gpui::Context<Self>) {
+        self.update_line_format_hover(None, None, cx);
+    }
+
+    pub(crate) fn dismiss_line_format_toolbar(&mut self, cx: &mut gpui::Context<Self>) {
+        self.hovering_format_line = None;
+        self.hovering_format_trigger_line = None;
+        self.format_trigger_line = None;
+        self.line_format_toolbar_line = None;
+        self.line_format_toolbar_bounds = None;
+        self.line_format_toolbar_hovered = false;
+        self.line_format_toolbar_opacity = 0.0;
+        self.line_format_toolbar_opacity_target = 0.0;
+        self.line_format_toolbar_animation_epoch =
+            self.line_format_toolbar_animation_epoch.wrapping_add(1);
+        self.line_format_toolbar_animation_task = None;
+        self.sync_format_trigger_opacity(cx);
+        cx.notify();
+    }
+
     pub(crate) fn hide_selection_toolbar_for_scroll(&mut self, cx: &mut gpui::Context<Self>) {
         if self.embedded_editor || !self.active_tab_is_markdown() {
             return;
         }
+        self.dismiss_line_format_toolbar(cx);
         let pane_id = self.current_pane_id();
         if let Some(key) = self.selection_toolbar_selection_key() {
             self.selection_toolbar_dismissed = Some((pane_id, key));
@@ -318,6 +554,7 @@ impl EditorView {
         horizontal_offsets.sort_unstable_by_key(|(line, _)| *line);
         Some(SelectionToolbarSnapshotKey {
             selection,
+            cursor_at_end: self.cursor.offset >= self.cursor.anchor,
             scroll_offset: self.scroll_offset,
             horizontal_offsets,
         })
@@ -344,6 +581,9 @@ impl EditorView {
     }
 
     fn selection_toolbar_visible(&self, pane_id: PaneId, window: &Window, cx: &App) -> bool {
+        if self.line_format_toolbar_line.is_some() {
+            return false;
+        }
         let search_focus = self.workspace_search_input_focused
             || [&self.search_query_editor, &self.search_replace_editor]
                 .into_iter()
@@ -526,6 +766,7 @@ impl Element for SelectionToolbarElement {
                 window.request_animation_frame();
             }
             let geometry = animation.geometry.clone();
+            let interactive = animation.visible;
             let margin = px(editor.scaled(6.0));
             let gap = px(editor.scaled(6.0));
             let available_width = geometry.viewport.size.width - margin * 2.0;
@@ -534,7 +775,14 @@ impl Element for SelectionToolbarElement {
             }
             // Parent owns compact grouping, actual bar width, occlusion and
             // selection-preserving actions. Do not wrap it in a pane hitbox.
-            let toolbar = editor.render_format_toolbar(f32::from(available_width), opacity, cx);
+            let toolbar = editor.render_format_toolbar(
+                f32::from(available_width),
+                opacity,
+                interactive,
+                false,
+                None,
+                cx,
+            );
             Some((toolbar, geometry, margin, gap))
         })?;
         let measured = toolbar.layout_as_root(
@@ -632,6 +880,186 @@ impl Element for SelectionToolbarElement {
     }
 }
 
+pub(crate) struct LineFormatToolbarElement {
+    pub(crate) editor: Entity<EditorView>,
+    pub(crate) pane_id: PaneId,
+}
+
+pub(crate) struct LineFormatToolbarPrepaintState {
+    toolbar: AnyElement,
+    viewport: Bounds<Pixels>,
+    toolbar_hitbox: gpui::Hitbox,
+    trigger_hitbox: gpui::Hitbox,
+    interaction_bounds: Bounds<Pixels>,
+}
+
+impl IntoElement for LineFormatToolbarElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for LineFormatToolbarElement {
+    type RequestLayoutState = ();
+    type PrepaintState = Option<LineFormatToolbarPrepaintState>;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(ElementId::Name(
+            format!("line-format-toolbar-{}", self.pane_id).into(),
+        ))
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let mut style = Style::default();
+        style.position = Position::Absolute;
+        style.inset.left = px(0.0).into();
+        style.inset.top = px(0.0).into();
+        style.size = size(relative(1.0).into(), relative(1.0).into());
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let (mut toolbar, geometry, margin, gap) = self.editor.update(cx, |editor, cx| {
+            editor.line_format_toolbar_bounds = None;
+            if editor.focused_pane_id != self.pane_id
+                || (editor.cursor.has_selection() && editor.line_format_toolbar_line.is_none())
+                || !editor.app_settings.format_toolbar_visible
+                || !editor.active_tab_is_markdown()
+                || editor.active_tab_is_read_only()
+            {
+                return None;
+            }
+            let pointer_line = editor
+                .format_trigger_areas
+                .iter()
+                .find(|(bounds, _)| bounds.contains(&window.mouse_position()))
+                .map(|(_, line)| *line);
+            let line = editor.line_format_toolbar_line.or(pointer_line)?;
+            if editor.line_format_toolbar_line.is_none()
+                && pointer_line.is_some()
+                && (editor.hovering_format_trigger_line != Some(line)
+                    || editor.line_format_toolbar_line != Some(line))
+            {
+                editor.update_line_format_hover(Some(line), Some(line), cx);
+            }
+            let geometry = editor
+                .line_format_toolbar_geometries
+                .iter()
+                .find(|geometry| geometry.line == line)
+                .cloned()?;
+            let margin = px(editor.scaled(6.0));
+            let gap = px(0.0);
+            let available_width = geometry.viewport.size.width - margin * 2.0;
+            if available_width <= px(0.0) {
+                return None;
+            }
+            let opacity = editor.line_format_toolbar_opacity.clamp(0.0, 1.0);
+            let toolbar = editor.render_format_toolbar(
+                f32::from(available_width),
+                opacity,
+                true,
+                true,
+                Some(line),
+                cx,
+            );
+            Some((toolbar, geometry, margin, gap))
+        })?;
+        let measured = toolbar.layout_as_root(
+            size(
+                AvailableSpace::Definite(geometry.viewport.size.width - margin * 2.0),
+                AvailableSpace::MinContent,
+            ),
+            window,
+            cx,
+        );
+        let origin = geometry.toolbar_origin(measured, margin, gap)?;
+        let toolbar_bounds = Bounds::new(origin, measured);
+        let interaction_bounds = toolbar_bounds.union(&geometry.trigger_bounds);
+        let toolbar_hitbox =
+            window.insert_hitbox(toolbar_bounds, gpui::HitboxBehavior::BlockMouseExceptScroll);
+        let trigger_hitbox = window.insert_hitbox(
+            geometry.trigger_bounds,
+            gpui::HitboxBehavior::BlockMouseExceptScroll,
+        );
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: geometry.viewport,
+            }),
+            |window| {
+                toolbar.prepaint_at(origin, window, cx);
+            },
+        );
+        self.editor.update(cx, |editor, _| {
+            editor.line_format_toolbar_bounds = Some(toolbar_bounds);
+        });
+        Some(LineFormatToolbarPrepaintState {
+            toolbar,
+            viewport: geometry.viewport,
+            toolbar_hitbox,
+            trigger_hitbox,
+            interaction_bounds,
+        })
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(state) = prepaint {
+            window.set_cursor_style(gpui::CursorStyle::Arrow, &state.toolbar_hitbox);
+            window.set_cursor_style(gpui::CursorStyle::Arrow, &state.trigger_hitbox);
+            let interaction_bounds = state.interaction_bounds;
+            let editor = self.editor.clone();
+            let pane_id = self.pane_id;
+            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Capture {
+                    return;
+                }
+                let hovered = interaction_bounds.contains(&window.mouse_position());
+                editor.update(cx, |this, cx| {
+                    this.with_pane(pane_id, |this| {
+                        this.set_line_format_toolbar_hovered(hovered, cx);
+                    });
+                });
+            });
+            window.with_content_mask(
+                Some(ContentMask {
+                    bounds: state.viewport,
+                }),
+                |window| {
+                    state.toolbar.paint(window, cx);
+                },
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,6 +1074,7 @@ mod tests {
                 tab_id: "tab-a".into(),
                 primary_range: 4..28,
             },
+            cursor_at_end: true,
             scroll_offset: 120.0,
             horizontal_offsets: vec![(3, 18.0)],
         }
@@ -719,6 +1148,56 @@ mod tests {
                 .unwrap()
                 .x,
             px(106.0)
+        );
+    }
+
+    #[test]
+    fn cursor_endpoint_tracks_selection_direction() {
+        let viewport = rect(100.0, 50.0, 400.0, 300.0);
+        let selected = [
+            rect(160.0, 80.0, 120.0, 20.0),
+            rect(120.0, 110.0, 200.0, 20.0),
+        ];
+        let forward =
+            SelectionToolbarGeometry::from_visible_bounds(key(), viewport, viewport, &selected)
+                .unwrap();
+        assert_eq!(forward.cursor_endpoint_x, px(320.0));
+
+        let mut reverse_key = key();
+        reverse_key.cursor_at_end = false;
+        let reverse = SelectionToolbarGeometry::from_visible_bounds(
+            reverse_key,
+            viewport,
+            viewport,
+            &selected,
+        )
+        .unwrap();
+        assert_eq!(reverse.cursor_endpoint_x, px(160.0));
+    }
+
+    #[test]
+    fn line_toolbar_aligns_with_content_and_prefers_above() {
+        let geometry = LineFormatToolbarGeometry {
+            line: 4,
+            viewport: rect(100.0, 50.0, 500.0, 300.0),
+            content_left: px(180.0),
+            trigger_bounds: rect(180.0, 180.0, 18.0, 22.0),
+            line_top: px(180.0),
+            line_bottom: px(202.0),
+        };
+        assert_eq!(
+            geometry.toolbar_origin(size(px(280.0), px(52.0)), px(6.0), px(4.0),),
+            Some(point(px(180.0), px(124.0)))
+        );
+
+        let near_top = LineFormatToolbarGeometry {
+            line_top: px(60.0),
+            line_bottom: px(82.0),
+            ..geometry
+        };
+        assert_eq!(
+            near_top.toolbar_origin(size(px(280.0), px(52.0)), px(6.0), px(4.0),),
+            Some(point(px(180.0), px(86.0)))
         );
     }
 

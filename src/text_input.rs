@@ -547,7 +547,7 @@ impl TextInput {
             .border(px(border_width))
             .border_color(border_color)
             .rounded(px(radius))
-            .when(menu_shadow, |this| this.shadow_lg())
+            .when(menu_shadow, |this| this.shadow_sm())
             .py(px(padding_y))
             .overflow_hidden()
             .flex()

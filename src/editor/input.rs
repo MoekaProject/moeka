@@ -406,6 +406,10 @@ impl EditorView {
             window.focus(&self.focus_handle(cx));
         }
 
+        if event.button == MouseButton::Left && self.line_format_toolbar_line.is_some() {
+            self.dismiss_line_format_toolbar(cx);
+        }
+
         if event.button == MouseButton::Left {
             self.suppress_fold_for_empty_selection_drag = false;
             self.selection_drag_has_moved = false;
@@ -1759,6 +1763,20 @@ impl EditorView {
             }
             return;
         }
+        if self
+            .line_format_toolbar_bounds
+            .is_some_and(|bounds| bounds.contains(&event.position))
+        {
+            self.set_line_format_toolbar_hovered(true, cx);
+            if self.hovering_fold_line.take().is_some() {
+                self.sync_gutter_fold_reveal(cx);
+                cx.notify();
+            }
+            return;
+        }
+        if self.line_format_toolbar_hovered {
+            self.set_line_format_toolbar_hovered(false, cx);
+        }
         // Extend a read-only phantom-row selection while dragging.
         if self.phantom_selecting {
             if event.dragging()
@@ -1996,6 +2014,33 @@ impl EditorView {
         if hovering_image_edit != self.hovering_image_edit_line {
             self.hovering_image_edit_line = hovering_image_edit;
             cx.notify();
+        }
+
+        let line_format_enabled = self.app_settings.format_toolbar_visible
+            && self.active_tab_is_markdown()
+            && !self.active_tab_is_read_only()
+            && !self.cursor.has_selection()
+            && !self.has_extra_cursors();
+        let hovering_format_line = line_format_enabled
+            .then(|| {
+                self.format_line_areas
+                    .iter()
+                    .find(|(bounds, _)| bounds.contains(&event.position))
+                    .map(|(_, line)| *line)
+            })
+            .flatten();
+        let hovering_format_trigger_line = line_format_enabled
+            .then(|| {
+                self.format_trigger_areas
+                    .iter()
+                    .find(|(bounds, _)| bounds.contains(&event.position))
+                    .map(|(_, line)| *line)
+            })
+            .flatten();
+        if hovering_format_line != self.hovering_format_line
+            || hovering_format_trigger_line != self.hovering_format_trigger_line
+        {
+            self.update_line_format_hover(hovering_format_line, hovering_format_trigger_line, cx);
         }
 
         let hovering_fold = self

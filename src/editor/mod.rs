@@ -2114,12 +2114,26 @@ pub struct EditorView {
     pub(crate) context_submenu_hovered: bool,
     pub(crate) format_heading_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) format_more_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// Anchors the heading popup to the format toolbar button; kept separate
-    /// from the menu trigger bounds, which `open_context_menu` clears.
-    pub(crate) format_toolbar_heading_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) selection_toolbar_popup: Option<selection_toolbar::SelectionToolbarPopup>,
     pub(crate) selection_toolbar_animation: Option<selection_toolbar::SelectionToolbarAnimation>,
     pub(crate) selection_toolbar_menu_hover: menus::SelectionToolbarMenuHover,
+    pub(crate) line_format_toolbar_geometries: Vec<selection_toolbar::LineFormatToolbarGeometry>,
+    pub(crate) format_line_areas: Vec<(Bounds<Pixels>, usize)>,
+    pub(crate) format_trigger_areas: Vec<(Bounds<Pixels>, usize)>,
+    pub(crate) hovering_format_line: Option<usize>,
+    pub(crate) hovering_format_trigger_line: Option<usize>,
+    pub(crate) format_trigger_line: Option<usize>,
+    pub(crate) line_format_toolbar_line: Option<usize>,
+    pub(crate) line_format_toolbar_bounds: Option<Bounds<Pixels>>,
+    pub(crate) line_format_toolbar_hovered: bool,
+    pub(crate) line_format_toolbar_opacity: f32,
+    pub(crate) line_format_toolbar_opacity_target: f32,
+    pub(crate) line_format_toolbar_animation_epoch: usize,
+    pub(crate) line_format_toolbar_animation_task: Option<Task<()>>,
+    pub(crate) format_trigger_opacity: f32,
+    pub(crate) format_trigger_opacity_target: f32,
+    pub(crate) format_trigger_animation_epoch: usize,
+    pub(crate) format_trigger_animation_task: Option<Task<()>>,
     pub(crate) export_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) context_menu_opacity: f32,
     pub(crate) context_menu_opacity_target: f32,
@@ -2641,9 +2655,6 @@ impl EditorView {
             &ui_theme,
             app_settings.sidebar_always_dark,
         );
-        if theme_kind.is_moeka_retro() {
-            styles.apply_moeka_retro_chrome(&theme, &ui_theme);
-        }
         // Keep Markdown headings at their original sizes while rendering body
         // text one point smaller than the configured legacy size.
         styles.editor.editor_font_size_px = app_settings.effective_editor_font_size();
@@ -2839,6 +2850,23 @@ impl EditorView {
             selection_toolbar_popup: None,
             selection_toolbar_animation: None,
             selection_toolbar_menu_hover: menus::SelectionToolbarMenuHover::default(),
+            line_format_toolbar_geometries: Vec::new(),
+            format_line_areas: Vec::new(),
+            format_trigger_areas: Vec::new(),
+            hovering_format_line: None,
+            hovering_format_trigger_line: None,
+            format_trigger_line: None,
+            line_format_toolbar_line: None,
+            line_format_toolbar_bounds: None,
+            line_format_toolbar_hovered: false,
+            line_format_toolbar_opacity: 0.0,
+            line_format_toolbar_opacity_target: 0.0,
+            line_format_toolbar_animation_epoch: 0,
+            line_format_toolbar_animation_task: None,
+            format_trigger_opacity: 0.0,
+            format_trigger_opacity_target: 0.0,
+            format_trigger_animation_epoch: 0,
+            format_trigger_animation_task: None,
             tab_drag_split_target: None,
             context_menu_pane_target: None,
             pane_resize_drag: None,
@@ -2862,7 +2890,6 @@ impl EditorView {
             context_submenu_hovered: false,
             format_heading_trigger_bounds: Rc::new(Cell::new(None)),
             format_more_trigger_bounds: Rc::new(Cell::new(None)),
-            format_toolbar_heading_bounds: Rc::new(Cell::new(None)),
             export_trigger_bounds: Rc::new(Cell::new(None)),
             context_menu_opacity: 0.0,
             context_menu_opacity_target: 0.0,
@@ -4841,19 +4868,12 @@ impl EditorView {
         cx.notify();
     }
 
-    /// Picks the theme to use for a light/dark appearance, keeping Moeka retro
-    /// palettes paired with their own companion instead of the global default.
     pub(crate) fn theme_kind_for_appearance(&self, dark: bool) -> ThemeKind {
-        self.theme_kind
-            .moeka_companion()
-            .filter(|kind| kind.is_dark() == dark)
-            .unwrap_or_else(|| {
-                if dark {
-                    self.app_settings.dark_theme_kind()
-                } else {
-                    self.app_settings.light_theme_kind()
-                }
-            })
+        if dark {
+            self.app_settings.dark_theme_kind()
+        } else {
+            self.app_settings.light_theme_kind()
+        }
     }
 
     pub(crate) fn set_theme_mode(
