@@ -802,12 +802,14 @@ impl EditorView {
                         self.clear_extra_cursors();
                         self.clear_wrap_boundary_affinity();
                         self.select_logical_line_at_offset(offset, cx);
+                        self.capture_selection_toolbar_pointer_anchor(event.position);
                         self.selection_drag_position = None;
                         self.is_selecting = false;
                     } else if event.click_count == 2 {
                         self.clear_extra_cursors();
                         self.clear_wrap_boundary_affinity();
                         self.select_word_at_offset(offset);
+                        self.capture_selection_toolbar_pointer_anchor(event.position);
                         self.is_selecting = false;
                     } else if event.modifiers.shift {
                         self.maybe_schedule_preview_reveal_for_click(
@@ -819,6 +821,7 @@ impl EditorView {
                             self.table_visible_selection_target(self.cursor.anchor, offset);
                         self.cursor.select_to(offset, &self.buffer);
                         self.clear_wrap_boundary_affinity();
+                        self.capture_selection_toolbar_pointer_anchor(event.position);
                         self.is_selecting = false;
                     } else {
                         self.maybe_schedule_preview_reveal_for_click(
@@ -849,6 +852,7 @@ impl EditorView {
             } else {
                 self.select_word_at_offset(offset);
             }
+            self.capture_selection_toolbar_pointer_anchor(event.position);
             self.selection_drag_position = None;
             self.is_selecting = false;
             cx.notify();
@@ -1720,6 +1724,7 @@ impl EditorView {
         self.selection_drag_has_moved = false;
         self.table_boundary_drag_origin = None;
         if was_selecting {
+            self.capture_selection_toolbar_pointer_anchor(event.position);
             cx.notify();
         }
     }

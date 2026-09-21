@@ -2728,35 +2728,6 @@ pub(crate) fn preview_action_label(language: UiLanguage, key: &str) -> &'static 
     }
 }
 
-pub(crate) fn fold_action_label(language: UiLanguage, expanded: bool) -> &'static str {
-    match (language, expanded) {
-        (UiLanguage::ChineseSimplified, true) => "展开",
-        (UiLanguage::ChineseSimplified, false) => "折叠",
-        (UiLanguage::ChineseTraditional, true) => "展開",
-        (UiLanguage::ChineseTraditional, false) => "摺疊",
-        (UiLanguage::Japanese, true) => "展開",
-        (UiLanguage::Japanese, false) => "折りたたむ",
-        (UiLanguage::Korean, true) => "펼치기",
-        (UiLanguage::Korean, false) => "접기",
-        (UiLanguage::French, true) => "Développer",
-        (UiLanguage::French, false) => "Réduire",
-        (UiLanguage::German, true) => "Aufklappen",
-        (UiLanguage::German, false) => "Einklappen",
-        (UiLanguage::Spanish, true) => "Expandir",
-        (UiLanguage::Spanish, false) => "Contraer",
-        (UiLanguage::Portuguese, true) => "Expandir",
-        (UiLanguage::Portuguese, false) => "Recolher",
-        (UiLanguage::Russian, true) => "Развернуть",
-        (UiLanguage::Russian, false) => "Свернуть",
-        (UiLanguage::Arabic, true) => "توسيع",
-        (UiLanguage::Arabic, false) => "طي",
-        (UiLanguage::Hindi, true) => "फैलाएँ",
-        (UiLanguage::Hindi, false) => "समेटें",
-        (UiLanguage::English, true) => "Expand",
-        (UiLanguage::English, false) => "Collapse",
-    }
-}
-
 pub(crate) fn adjustment_label(language: UiLanguage, increase: bool) -> &'static str {
     match (language, increase) {
         (UiLanguage::ChineseSimplified, true) => "增大",

@@ -17,6 +17,9 @@ use gpui::{
 
 use super::{EditorView, PaneId};
 
+const POINTER_OFFSET_PX: f32 = 15.0;
+pub(super) const FORMAT_TRIGGER_HOVER_OPACITY: f32 = 0.9;
+
 pub(crate) struct SelectionToolbarAnimation {
     pane_id: PaneId,
     geometry: SelectionToolbarGeometry,
@@ -68,6 +71,7 @@ pub(crate) struct SelectionToolbarGeometry {
     pub(crate) selected_bounds: Bounds<Pixels>,
     pub(crate) top_row_anchor: Bounds<Pixels>,
     pub(crate) cursor_endpoint_x: Pixels,
+    pub(crate) pointer_anchor: Option<Point<Pixels>>,
     /// Set only after the floating bar actually prepaints, for Escape routing.
     pub(crate) toolbar_bounds: Option<Bounds<Pixels>>,
 }
@@ -78,8 +82,6 @@ pub(crate) struct LineFormatToolbarGeometry {
     pub(crate) viewport: Bounds<Pixels>,
     pub(crate) content_left: Pixels,
     pub(crate) trigger_bounds: Bounds<Pixels>,
-    pub(crate) line_top: Pixels,
-    pub(crate) line_bottom: Pixels,
 }
 
 impl LineFormatToolbarGeometry {
@@ -98,8 +100,8 @@ impl LineFormatToolbarGeometry {
         let left = self.viewport.left() + margin;
         let right = self.viewport.right() - margin - measured.width;
         let x = self.content_left.clamp(left, right);
-        let above = self.line_top - gap - measured.height;
-        let below = self.line_bottom + gap;
+        let above = self.trigger_bounds.top() - gap - measured.height;
+        let below = self.trigger_bounds.bottom() + gap;
         let y = if above >= self.viewport.top() + margin {
             above
         } else if below + measured.height <= self.viewport.bottom() - margin {
@@ -195,6 +197,7 @@ impl SelectionToolbarGeometry {
             selected_bounds,
             top_row_anchor,
             cursor_endpoint_x,
+            pointer_anchor: None,
             toolbar_bounds: None,
         })
     }
@@ -218,6 +221,32 @@ impl SelectionToolbarGeometry {
             || measured.height + margin * 2.0 > viewport.size.height
         {
             return None;
+        }
+        if let Some(anchor) = self.pointer_anchor {
+            let pointer_offset = px(POINTER_OFFSET_PX);
+            let right = anchor.x + pointer_offset;
+            let left = anchor.x - pointer_offset - measured.width;
+            let below = anchor.y + pointer_offset;
+            let above = anchor.y - pointer_offset - measured.height;
+            let min_x = viewport.left() + margin;
+            let max_x = viewport.right() - margin - measured.width;
+            let min_y = viewport.top() + margin;
+            let max_y = viewport.bottom() - margin - measured.height;
+            let x = if right <= max_x {
+                right
+            } else if left >= min_x {
+                left
+            } else {
+                right.clamp(min_x, max_x)
+            };
+            let y = if below <= max_y {
+                below
+            } else if above >= min_y {
+                above
+            } else {
+                below.clamp(min_y, max_y)
+            };
+            return Some(point(x, y));
         }
         let left = viewport.left() + margin;
         let right = viewport.right() - margin - measured.width;
@@ -277,9 +306,19 @@ impl SelectionToolbarVisibility {
 }
 
 impl EditorView {
+    pub(crate) fn capture_selection_toolbar_pointer_anchor(&mut self, position: Point<Pixels>) {
+        self.selection_toolbar_pointer_anchor = self
+            .selection_toolbar_selection_key()
+            .map(|selection| (selection, position));
+        self.selection_toolbar_popup = None;
+    }
+
     fn desired_format_trigger_opacity(&self) -> f32 {
-        if self.hovering_format_trigger_line.is_some() || self.line_format_toolbar_hovered {
-            0.9
+        if self.hovering_format_trigger_line.is_some()
+            || self.line_format_toolbar_hovered
+            || self.format_toolbar_owns_hover_menu()
+        {
+            FORMAT_TRIGGER_HOVER_OPACITY
         } else if self.hovering_format_line.is_some() {
             0.34
         } else {
@@ -410,14 +449,26 @@ impl EditorView {
         if let Some(line) = line {
             self.format_trigger_line = Some(line);
         }
-        if let Some(line) = trigger_line {
-            self.line_format_toolbar_line = Some(line);
-        }
         self.sync_format_trigger_opacity(cx);
         self.sync_line_format_toolbar_opacity(cx);
         if changed {
             cx.notify();
         }
+    }
+
+    pub(crate) fn toggle_line_format_toolbar(&mut self, line: usize, cx: &mut gpui::Context<Self>) {
+        if self.line_format_toolbar_line == Some(line) {
+            self.dismiss_line_format_toolbar(cx);
+            return;
+        }
+        self.hovering_format_line = Some(line);
+        self.hovering_format_trigger_line = Some(line);
+        self.format_trigger_line = Some(line);
+        self.line_format_toolbar_line = Some(line);
+        self.line_format_toolbar_hovered = false;
+        self.sync_format_trigger_opacity(cx);
+        self.sync_line_format_toolbar_opacity(cx);
+        cx.notify();
     }
 
     pub(crate) fn set_line_format_toolbar_hovered(
@@ -949,19 +1000,7 @@ impl Element for LineFormatToolbarElement {
             {
                 return None;
             }
-            let pointer_line = editor
-                .format_trigger_areas
-                .iter()
-                .find(|(bounds, _)| bounds.contains(&window.mouse_position()))
-                .map(|(_, line)| *line);
-            let line = editor.line_format_toolbar_line.or(pointer_line)?;
-            if editor.line_format_toolbar_line.is_none()
-                && pointer_line.is_some()
-                && (editor.hovering_format_trigger_line != Some(line)
-                    || editor.line_format_toolbar_line != Some(line))
-            {
-                editor.update_line_format_hover(Some(line), Some(line), cx);
-            }
+            let line = editor.line_format_toolbar_line?;
             let geometry = editor
                 .line_format_toolbar_geometries
                 .iter()
@@ -1152,6 +1191,35 @@ mod tests {
     }
 
     #[test]
+    fn pointer_anchor_prefers_bottom_right_and_flips_each_axis() {
+        let measured = size(px(120.0), px(80.0));
+        let margin = px(6.0);
+        let gap = px(15.0);
+        let mut geometry = geometry(&[rect(180.0, 140.0, 60.0, 20.0)]);
+
+        geometry.pointer_anchor = Some(point(px(180.0), px(100.0)));
+        assert_eq!(
+            geometry.toolbar_origin(measured, margin, gap),
+            Some(point(px(195.0), px(115.0)))
+        );
+        geometry.pointer_anchor = Some(point(px(480.0), px(330.0)));
+        assert_eq!(
+            geometry.toolbar_origin(measured, margin, gap),
+            Some(point(px(345.0), px(235.0)))
+        );
+        geometry.pointer_anchor = Some(point(px(480.0), px(100.0)));
+        assert_eq!(
+            geometry.toolbar_origin(measured, margin, gap),
+            Some(point(px(345.0), px(115.0)))
+        );
+        geometry.pointer_anchor = Some(point(px(180.0), px(330.0)));
+        assert_eq!(
+            geometry.toolbar_origin(measured, margin, gap),
+            Some(point(px(195.0), px(235.0)))
+        );
+    }
+
+    #[test]
     fn cursor_endpoint_tracks_selection_direction() {
         let viewport = rect(100.0, 50.0, 400.0, 300.0);
         let selected = [
@@ -1182,8 +1250,6 @@ mod tests {
             viewport: rect(100.0, 50.0, 500.0, 300.0),
             content_left: px(180.0),
             trigger_bounds: rect(180.0, 180.0, 18.0, 22.0),
-            line_top: px(180.0),
-            line_bottom: px(202.0),
         };
         assert_eq!(
             geometry.toolbar_origin(size(px(280.0), px(52.0)), px(6.0), px(4.0),),
@@ -1191,12 +1257,25 @@ mod tests {
         );
 
         let near_top = LineFormatToolbarGeometry {
-            line_top: px(60.0),
-            line_bottom: px(82.0),
+            trigger_bounds: rect(180.0, 60.0, 18.0, 22.0),
             ..geometry
         };
         assert_eq!(
             near_top.toolbar_origin(size(px(280.0), px(52.0)), px(6.0), px(4.0),),
+            Some(point(px(180.0), px(86.0)))
+        );
+    }
+
+    #[test]
+    fn line_toolbar_below_stays_attached_to_trigger_on_tall_lines() {
+        let geometry = LineFormatToolbarGeometry {
+            line: 4,
+            viewport: rect(100.0, 50.0, 500.0, 300.0),
+            content_left: px(180.0),
+            trigger_bounds: rect(180.0, 60.0, 18.0, 22.0),
+        };
+        assert_eq!(
+            geometry.toolbar_origin(size(px(280.0), px(52.0)), px(6.0), px(4.0)),
             Some(point(px(180.0), px(86.0)))
         );
     }

@@ -2114,6 +2114,10 @@ pub struct EditorView {
     pub(crate) context_submenu_hovered: bool,
     pub(crate) format_heading_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) format_more_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    pub(crate) selection_toolbar_pointer_anchor: Option<(
+        selection_toolbar::SelectionToolbarSelectionKey,
+        Point<Pixels>,
+    )>,
     pub(crate) selection_toolbar_popup: Option<selection_toolbar::SelectionToolbarPopup>,
     pub(crate) selection_toolbar_animation: Option<selection_toolbar::SelectionToolbarAnimation>,
     pub(crate) selection_toolbar_menu_hover: menus::SelectionToolbarMenuHover,
@@ -2847,6 +2851,7 @@ impl EditorView {
             pane_caret_overlay_views: HashMap::new(),
             selection_toolbar_geometry: HashMap::new(),
             selection_toolbar_dismissed: None,
+            selection_toolbar_pointer_anchor: None,
             selection_toolbar_popup: None,
             selection_toolbar_animation: None,
             selection_toolbar_menu_hover: menus::SelectionToolbarMenuHover::default(),

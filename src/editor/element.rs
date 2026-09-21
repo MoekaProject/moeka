@@ -18,7 +18,6 @@ use super::*;
 const LINE_FORMAT_ICON_SIZE_PX: f32 = 18.0;
 const LINE_FORMAT_ICON_GAP_PX: f32 = 4.0;
 const LINE_FORMAT_CONTENT_GAP_PX: f32 = 6.0;
-const LINE_FORMAT_FOLD_SLIDE_END_OPACITY: f32 = 0.08;
 
 fn callout_icon_path(kind: CalloutKind) -> &'static str {
     match kind {
@@ -3365,13 +3364,6 @@ impl Element for EditorElement {
                             },
                             fi_color,
                         ));
-                        editor_icon_tooltips.push((
-                            icon_bounds,
-                            SharedString::from(crate::i18n::fold_action_label(
-                                editor.ui_language,
-                                is_folded,
-                            )),
-                        ));
                     }
                     gutter_fold_hit_areas_local.push((
                         Bounds::new(
@@ -4554,7 +4546,17 @@ impl Element for EditorElement {
                 let content_gap = editor.scaled(LINE_FORMAT_CONTENT_GAP_PX);
                 let trigger_padding = editor.scaled(4.0);
                 let fold_icon_size = editor.scaled(editor.styles.gutter.gutter_fold_icon_size_px);
-                let icon_x = editor_left + editor.padding_left() - icon_size - content_gap;
+                let has_fold_icon = editor.fold_range_for_line(line_idx).is_some()
+                    || decoration.image_path.as_ref().is_some_and(|path| {
+                        image_cache.get(path).is_some_and(|image| image.is_some())
+                    });
+                let fold_slot_width = if has_fold_icon {
+                    icon_gap + fold_icon_size
+                } else {
+                    0.0
+                };
+                let icon_x =
+                    editor_left + editor.padding_left() - icon_size - fold_slot_width - content_gap;
                 let icon_y = text_line_top + (line_height - icon_size) * 0.5;
                 let icon_bounds = Bounds::new(
                     point(px(icon_x), px(icon_y)),
@@ -4567,9 +4569,8 @@ impl Element for EditorElement {
                         px(line_height.max(icon_size)),
                     ),
                 );
-                let row_hover_left =
-                    (icon_x - fold_icon_size - icon_gap - trigger_padding).min(origin_x);
-                let row_hover_right = editor_left + editor.padding_left();
+                let row_hover_left = (icon_x - trigger_padding).min(origin_x);
+                let row_hover_right = f32::from(viewport.right());
                 format_line_areas_local.push((
                     Bounds::new(
                         point(px(row_hover_left), px(line_top)),
@@ -4587,8 +4588,6 @@ impl Element for EditorElement {
                         viewport,
                         content_left: px(icon_x),
                         trigger_bounds,
-                        line_top: px(line_top),
-                        line_bottom: px(line_top + total_line_height),
                     },
                 );
                 if editor.format_trigger_line == Some(line_idx)
@@ -6315,18 +6314,13 @@ impl Element for EditorElement {
                 let format_icon_size = editor.scaled(LINE_FORMAT_ICON_SIZE_PX);
                 let format_icon_x = editor_left + editor.padding_left()
                     - format_icon_size
+                    - editor.scaled(LINE_FORMAT_ICON_GAP_PX)
+                    - fi_size
                     - editor.scaled(LINE_FORMAT_CONTENT_GAP_PX);
-                let format_icon_progress = if editor.format_trigger_line == Some(line_idx) {
-                    (editor.format_trigger_opacity / LINE_FORMAT_FOLD_SLIDE_END_OPACITY)
-                        .clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let fold_icon_resting_x = format_icon_x + (format_icon_size - fi_size) * 0.5;
                 let fold_icon_expanded_x = if editor.active_tab_is_non_markdown_text() {
                     editor.gutter_icon_x(editor_left, fi_size)
                 } else {
-                    format_icon_x - editor.scaled(LINE_FORMAT_ICON_GAP_PX) - fi_size
+                    format_icon_x + format_icon_size + editor.scaled(LINE_FORMAT_ICON_GAP_PX)
                 };
 
                 if fold_range.is_some() {
@@ -6338,12 +6332,7 @@ impl Element for EditorElement {
                             editor.folded_sections.contains(&preview.start_line)
                         })
                         || editor.folded_sections.contains(&line_idx);
-                    let fold_icon_x = if is_folded && !editor.active_tab_is_non_markdown_text() {
-                        fold_icon_resting_x
-                            + (fold_icon_expanded_x - fold_icon_resting_x) * format_icon_progress
-                    } else {
-                        fold_icon_expanded_x
-                    };
+                    let fold_icon_x = fold_icon_expanded_x;
                     let is_hovered = if editor.active_tab_is_non_markdown_text() {
                         editor.hovering_gutter_fold_area
                             || editor.hovering_fold_line == Some(line_idx)
@@ -6352,7 +6341,10 @@ impl Element for EditorElement {
                     };
                     let fi_y = text_line_top + (line_height - fi_size) / 2.0;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
-                    let fi_alpha = if !editor.active_tab_is_non_markdown_text() && is_hovered {
+                    let fold_hovered = editor.hovering_fold_line == Some(line_idx);
+                    let fi_alpha = if !editor.active_tab_is_non_markdown_text() && fold_hovered {
+                        selection_toolbar::FORMAT_TRIGGER_HOVER_OPACITY
+                    } else if !editor.active_tab_is_non_markdown_text() && is_hovered {
                         editor.format_trigger_opacity
                     } else if is_folded {
                         gs.gutter_fold_folded_opacity
@@ -6386,13 +6378,6 @@ impl Element for EditorElement {
                             },
                             fi_color,
                         ));
-                        editor_icon_tooltips.push((
-                            icon_bounds,
-                            SharedString::from(crate::i18n::fold_action_label(
-                                editor.ui_language,
-                                is_folded,
-                            )),
-                        ));
                     }
                     gutter_fold_hit_areas_local.push((
                         if editor.active_tab_is_non_markdown_text() {
@@ -6424,13 +6409,7 @@ impl Element for EditorElement {
                     .is_some_and(|p| image_cache.get(p).is_some_and(|v| v.is_some()))
                 {
                     let is_img_folded = editor.folded_image_previews.contains(&line_idx);
-                    let fold_icon_x = if is_img_folded && !editor.active_tab_is_non_markdown_text()
-                    {
-                        fold_icon_resting_x
-                            + (fold_icon_expanded_x - fold_icon_resting_x) * format_icon_progress
-                    } else {
-                        fold_icon_expanded_x
-                    };
+                    let fold_icon_x = fold_icon_expanded_x;
                     let is_hovered = if editor.active_tab_is_non_markdown_text() {
                         editor.hovering_gutter_fold_area
                             || editor.hovering_fold_line == Some(line_idx)
@@ -6447,7 +6426,10 @@ impl Element for EditorElement {
                     };
                     let gs = &editor.styles.gutter;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
-                    let fi_alpha = if !editor.active_tab_is_non_markdown_text() && is_hovered {
+                    let fold_hovered = editor.hovering_fold_line == Some(line_idx);
+                    let fi_alpha = if !editor.active_tab_is_non_markdown_text() && fold_hovered {
+                        selection_toolbar::FORMAT_TRIGGER_HOVER_OPACITY
+                    } else if !editor.active_tab_is_non_markdown_text() && is_hovered {
                         editor.format_trigger_opacity
                     } else if is_img_folded {
                         gs.gutter_fold_folded_opacity
@@ -6480,13 +6462,6 @@ impl Element for EditorElement {
                                 FOLD_EXPANDED_SVG_PATH
                             },
                             fi_color,
-                        ));
-                        editor_icon_tooltips.push((
-                            icon_bounds,
-                            SharedString::from(crate::i18n::fold_action_label(
-                                editor.ui_language,
-                                is_img_folded,
-                            )),
                         ));
                     }
                     gutter_fold_hit_areas_local.push((
@@ -9418,6 +9393,11 @@ impl Element for EditorElement {
             // Only real text selection paint participates: never search,
             // inline diff, phantom-row highlights, or caret approximations.
             let geometry = selection_toolbar_key.and_then(|key| {
+                let pointer_anchor = editor
+                    .selection_toolbar_pointer_anchor
+                    .as_ref()
+                    .filter(|(selection, _)| *selection == key.selection)
+                    .map(|(_, position)| *position);
                 selection_toolbar::SelectionToolbarGeometry::from_quads(
                     key,
                     bounds,
@@ -9426,6 +9406,10 @@ impl Element for EditorElement {
                     &prepaint_state.selection_quads,
                     &prepaint_state.clipped_code_block_selections,
                 )
+                .map(|mut geometry| {
+                    geometry.pointer_anchor = pointer_anchor;
+                    geometry
+                })
             });
             if let Some(geometry) = geometry {
                 editor
@@ -9544,6 +9528,27 @@ impl Element for EditorElement {
                 editor_entity.update(cx, |this, cx| {
                     this.with_pane(pane_id, |this| {
                         this.update_line_format_hover(Some(line), Some(line), cx);
+                    });
+                });
+            }
+        });
+        let format_trigger_hitboxes = prepaint.format_trigger_hitboxes.clone();
+        let editor_entity = self.editor.clone();
+        let pane_id = self.pane_id;
+        window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, window, cx| {
+            if phase != gpui::DispatchPhase::Capture || event.button != gpui::MouseButton::Left {
+                return;
+            }
+            let clicked_line = format_trigger_hitboxes
+                .iter()
+                .find(|(hitbox, _)| hitbox.is_hovered(window))
+                .map(|(_, line)| *line);
+            if let Some(line) = clicked_line {
+                window.prevent_default();
+                cx.stop_propagation();
+                editor_entity.update(cx, |this, cx| {
+                    this.with_pane(pane_id, |this| {
+                        this.toggle_line_format_toolbar(line, cx);
                     });
                 });
             }
