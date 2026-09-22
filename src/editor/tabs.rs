@@ -748,6 +748,7 @@ impl EditorView {
         let tab_reading_mode = self.tabs[index].reading_mode;
         let switching_tabs = self.active_tab_id.as_deref() != Some(tab_id.as_str());
         if switching_tabs {
+            self.cancel_line_drag(cx);
             self.stash_active_tab_generated_preview_cache();
             self.table_boundary_caret = None;
         }

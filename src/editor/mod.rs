@@ -12,6 +12,7 @@ mod config_store;
 mod element;
 mod file_list;
 pub(crate) mod file_ops;
+mod file_watch;
 mod fold;
 mod git_ops;
 mod git_panel;
@@ -28,6 +29,7 @@ mod input_table;
 mod input_wrap;
 mod language_detection;
 mod language_picker;
+mod line_drag;
 mod list_viewport;
 mod menus;
 mod notifications;
@@ -2112,6 +2114,7 @@ pub struct EditorView {
     pub(crate) context_submenu: Option<ContextMenuKind>,
     pub(crate) context_submenu_aim: Option<ContextSubmenuAim>,
     pub(crate) context_submenu_hovered: bool,
+    pub(crate) format_context_menu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) format_heading_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) format_more_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) selection_toolbar_pointer_anchor: Option<(
@@ -2122,6 +2125,10 @@ pub struct EditorView {
     pub(crate) selection_toolbar_animation: Option<selection_toolbar::SelectionToolbarAnimation>,
     pub(crate) selection_toolbar_menu_hover: menus::SelectionToolbarMenuHover,
     pub(crate) line_format_toolbar_geometries: Vec<selection_toolbar::LineFormatToolbarGeometry>,
+    pub(crate) line_drag: Option<line_drag::LineDrag>,
+    pub(crate) line_drag_scroll_task: Option<Task<()>>,
+    pub(crate) line_drop_flash: Option<line_drag::LineDropFlash>,
+    pub(crate) line_drop_flash_task: Option<Task<()>>,
     pub(crate) format_line_areas: Vec<(Bounds<Pixels>, usize)>,
     pub(crate) format_trigger_areas: Vec<(Bounds<Pixels>, usize)>,
     pub(crate) hovering_format_line: Option<usize>,
@@ -2856,6 +2863,10 @@ impl EditorView {
             selection_toolbar_animation: None,
             selection_toolbar_menu_hover: menus::SelectionToolbarMenuHover::default(),
             line_format_toolbar_geometries: Vec::new(),
+            line_drag: None,
+            line_drag_scroll_task: None,
+            line_drop_flash: None,
+            line_drop_flash_task: None,
             format_line_areas: Vec::new(),
             format_trigger_areas: Vec::new(),
             hovering_format_line: None,
@@ -2893,6 +2904,7 @@ impl EditorView {
             context_submenu: None,
             context_submenu_aim: None,
             context_submenu_hovered: false,
+            format_context_menu_bounds: Rc::new(Cell::new(None)),
             format_heading_trigger_bounds: Rc::new(Cell::new(None)),
             format_more_trigger_bounds: Rc::new(Cell::new(None)),
             export_trigger_bounds: Rc::new(Cell::new(None)),
@@ -3286,7 +3298,7 @@ impl EditorView {
             this.cursor.anchor = this.buffer.len();
         }
         this.start_blinking(cx);
-        if !embedded_editor && !this.sidebar_root.as_os_str().is_empty() {
+        if !embedded_editor {
             this.start_watching(cx);
         }
         if !embedded_editor {
@@ -3320,7 +3332,7 @@ impl EditorView {
 
     /// Global icon tooltips are hidden while any menu-like overlay is open.
     pub(crate) fn global_tooltips_suppressed(&self) -> bool {
-        self.context_menu.is_some()
+        self.context_menu.is_some() || self.line_drag.is_some()
     }
 
     pub(crate) fn refresh_builtin_tab_titles(&mut self) {
@@ -4939,62 +4951,55 @@ impl EditorView {
     // ── File system watcher ─────────────────────────────────────
 
     pub(crate) fn start_watching(&mut self, cx: &mut Context<Self>) {
-        use notify::{RecursiveMode, Watcher};
-
-        let root = self.sidebar_root.clone();
-        if !root.exists() {
-            self._watcher_task = None;
+        if self.embedded_editor || self._watcher_task.is_some() {
             return;
         }
-
-        let pending = Arc::new(std::sync::Mutex::new(Vec::<notify::Event>::new()));
-        let pending_writer = pending.clone();
-
-        let mut watcher = match notify::recommended_watcher(
-            move |result: Result<notify::Event, notify::Error>| {
-                if let Ok(event) = result {
-                    if !event.paths.is_empty()
-                        && let Ok(mut guard) = pending_writer.lock()
-                    {
-                        guard.push(event);
-                    }
-                }
-            },
-        ) {
-            Ok(w) => w,
-            Err(_) => return,
-        };
-
-        if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
-            return;
-        }
-
         self._watcher_task = Some(cx.spawn(async move |this, cx| {
-            // Keep the watcher alive for the lifetime of the task
-            let _watcher = watcher;
+            let mut watcher: Option<file_watch::FileWatch> = None;
             loop {
+                let Ok(request) = this.update(cx, |editor, _| file_watch::WatchRequest {
+                    root: editor.sidebar_root.clone(),
+                    documents: editor
+                        .all_tabs()
+                        .filter_map(|tab| tab.path.clone())
+                        .collect(),
+                }) else {
+                    break;
+                };
+                let (updated, batch) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let mut watcher =
+                            match watcher.map(Ok).unwrap_or_else(file_watch::FileWatch::new) {
+                                Ok(watcher) => watcher,
+                                Err(error) => {
+                                    eprintln!("Cannot start file watcher: {error}");
+                                    return (None, None);
+                                }
+                            };
+                        let batch = watcher.poll(request);
+                        (Some(watcher), Some(batch))
+                    })
+                    .await;
+                watcher = updated;
+                if let Some(batch) = batch
+                    && (!batch.events.is_empty() || !batch.documents_to_check.is_empty())
+                    && this
+                        .update(cx, |editor, cx| {
+                            if !batch.events.is_empty() {
+                                editor.handle_fs_notify_events(&batch.events, cx);
+                            }
+                            if !batch.documents_to_check.is_empty() {
+                                editor.handle_fs_events(&batch.documents_to_check, cx);
+                            }
+                        })
+                        .is_err()
+                {
+                    break;
+                }
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(500))
                     .await;
-
-                let events: Vec<notify::Event> = {
-                    let mut guard = match pending.lock() {
-                        Ok(g) => g,
-                        Err(_) => break,
-                    };
-                    guard.drain(..).collect()
-                };
-
-                if events.is_empty() {
-                    continue;
-                }
-
-                let result = this.update(cx, |editor, cx| {
-                    editor.handle_fs_notify_events(&events, cx);
-                });
-                if result.is_err() {
-                    break;
-                }
             }
         }));
     }
@@ -5243,7 +5248,7 @@ impl EditorView {
         let mut seen_paths_in_workspace = HashSet::new();
         let mut git_metadata_impact = GitMetadataImpact::default();
         for path in changed_paths.iter().map(PathBuf::as_path) {
-            if !path.starts_with(&self.sidebar_root) {
+            if self.sidebar_root.as_os_str().is_empty() || !path.starts_with(&self.sidebar_root) {
                 continue;
             }
             if self.is_internal_temp_change_path(path) {
@@ -5262,14 +5267,18 @@ impl EditorView {
             }
         }
 
-        // Open documents can live outside the watched workspace (the config
-        // file, files opened by path), so reload those on their own paths.
+        // Explicitly opened documents also include paths outside the workspace
+        // and paths excluded from sidebar indexing.
         let mut changed_paths_for_tabs = changed_paths_in_workspace.clone();
         for path in changed_paths.iter().map(PathBuf::as_path) {
-            if path.starts_with(&self.sidebar_root) || self.is_internal_temp_change_path(path) {
+            if self.is_internal_temp_change_path(path) {
                 continue;
             }
-            let is_open = self.all_tabs().any(|tab| tab.path.as_deref() == Some(path));
+            let is_open = self.all_tabs().any(|tab| {
+                tab.path
+                    .as_ref()
+                    .is_some_and(|tab_path| tab_path.starts_with(path))
+            });
             if is_open && seen_paths_in_workspace.insert(path.to_path_buf()) {
                 changed_paths_for_tabs.push(path.to_path_buf());
             }
@@ -5372,12 +5381,11 @@ impl EditorView {
                                 if !tab.is_dirty {
                                     if let Ok(bytes) = std::fs::read(tab_path) {
                                         let new_text = String::from_utf8_lossy(&bytes).into_owned();
-                                        if new_text != tab.snapshot.text {
-                                            tab.snapshot.text = new_text.clone();
-                                            tab.snapshot.cursor_offset =
-                                                tab.snapshot.cursor_offset.min(new_text.len());
-                                            tab.snapshot.cursor_anchor =
-                                                tab.snapshot.cursor_anchor.min(new_text.len());
+                                        if file_watch::refresh_clean_snapshot(
+                                            &mut tab.snapshot,
+                                            tab.is_dirty,
+                                            new_text,
+                                        ) {
                                             needs_notify = true;
                                             active_tab_needs_reload |=
                                                 active_tab_id.as_deref() == Some(tab.id.as_str());
@@ -6492,6 +6500,10 @@ impl EditorView {
     // ── Shared utilities ────────────────────────────────────────────
 
     pub(crate) fn reparse(&mut self) {
+        self.line_drag = None;
+        self.line_drag_scroll_task = None;
+        self.line_drop_flash = None;
+        self.line_drop_flash_task = None;
         let reparse_started = Instant::now();
         let file_kind = self
             .active_file_kind()

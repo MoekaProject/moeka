@@ -19,6 +19,28 @@ const LINE_FORMAT_ICON_SIZE_PX: f32 = 18.0;
 const LINE_FORMAT_ICON_GAP_PX: f32 = 4.0;
 const LINE_FORMAT_CONTENT_GAP_PX: f32 = 6.0;
 
+fn gutter_fold_row_hovered(gutter_hovered: bool, pointer_y: Pixels, top: f32, height: f32) -> bool {
+    gutter_hovered && (top..top + height).contains(&f32::from(pointer_y))
+}
+
+#[cfg(test)]
+#[test]
+fn gutter_hover_reveals_only_the_current_row() {
+    for (top, height, expected) in [
+        (100.0, 20.0, false),
+        (120.0, 80.0, true),
+        (200.0, 20.0, false),
+    ] {
+        assert_eq!(
+            gutter_fold_row_hovered(true, px(150.0), top, height),
+            expected
+        );
+    }
+    assert!(!gutter_fold_row_hovered(false, px(150.0), 120.0, 80.0));
+    assert!(!gutter_fold_row_hovered(true, px(200.0), 120.0, 80.0));
+    assert!(gutter_fold_row_hovered(true, px(200.0), 200.0, 20.0));
+}
+
 fn callout_icon_path(kind: CalloutKind) -> &'static str {
     match kind {
         CalloutKind::Note => FMT_CALLOUT_NOTE_SVG,
@@ -526,6 +548,7 @@ fn paint_code_block_button(button: &CodeBlockCopyButtonPaint, window: &mut Windo
     }
 }
 
+#[derive(Clone)]
 struct PrepaintLine {
     wrapped: WrappedLine,
     /// Baseline-adjusted paint origin, never used for caret/IME/hit geometry.
@@ -536,6 +559,210 @@ struct PrepaintLine {
     segments: Option<Vec<(WrappedLine, Point<Pixels>)>>,
     /// True if this line is a table row rendered via per-cell block mode.
     is_table_block: bool,
+}
+
+pub(crate) struct LineDragGhost {
+    pub(crate) bounds: Bounds<Pixels>,
+    lines: Vec<PrepaintLine>,
+    wrapped: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
+    shaped: Vec<(ShapedLine, Point<Pixels>, Pixels)>,
+    backgrounds: Vec<PaintQuad>,
+    foregrounds: Vec<PaintQuad>,
+    svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
+    images: Vec<(
+        Bounds<Pixels>,
+        Arc<RenderImage>,
+        Pixels,
+        Option<Bounds<Pixels>>,
+    )>,
+    rules: Vec<(f32, f32, f32, bool)>,
+    rule_color: Hsla,
+}
+
+impl LineDragGhost {
+    fn capture(state: &EditorPrepaintState, bounds: Bounds<Pixels>, rule_color: Hsla) -> Self {
+        let intersects =
+            |other: Bounds<Pixels>| other.bottom() > bounds.top() && other.top() < bounds.bottom();
+        let contains_y =
+            |origin: Point<Pixels>| origin.y >= bounds.top() && origin.y < bounds.bottom();
+        Self {
+            bounds,
+            lines: state
+                .lines
+                .iter()
+                .filter(|line| !line.is_table_block && contains_y(line.origin))
+                .cloned()
+                .collect(),
+            wrapped: state
+                .table_cell_texts
+                .iter()
+                .chain(&state.unordered_list_markers)
+                .filter(|(_, origin, _)| contains_y(*origin))
+                .cloned()
+                .collect(),
+            shaped: state
+                .gutter_labels
+                .iter()
+                .chain(&state.inline_overlays)
+                .filter(|(_, origin, _)| contains_y(*origin) && origin.x >= bounds.left())
+                .cloned()
+                .collect(),
+            backgrounds: state
+                .quote_block_bgs
+                .iter()
+                .chain(&state.code_block_bgs)
+                .chain(&state.table_bgs)
+                .chain(&state.gutter_quads)
+                .chain(&state.indent_guide_quads)
+                .filter(|quad| intersects(quad.bounds))
+                .cloned()
+                .collect(),
+            foregrounds: state
+                .table_borders
+                .iter()
+                .chain(&state.image_borders)
+                .chain(&state.link_underlines)
+                .filter(|quad| intersects(quad.bounds))
+                .cloned()
+                .collect(),
+            svgs: state
+                .gutter_svgs
+                .iter()
+                .chain(&state.inline_svgs)
+                .filter(|(rect, _, _)| intersects(*rect))
+                .cloned()
+                .collect(),
+            images: state
+                .image_previews
+                .iter()
+                .filter(|(rect, _, _, _)| intersects(*rect))
+                .cloned()
+                .collect(),
+            rules: state
+                .hr_lines
+                .iter()
+                .filter(|(y, _, _, _)| px(*y) >= bounds.top() && px(*y) < bounds.bottom())
+                .cloned()
+                .collect(),
+            rule_color,
+        }
+    }
+
+    pub(crate) fn paint(&self, origin: Point<Pixels>, window: &mut Window, cx: &mut App) {
+        let offset = origin - self.bounds.origin;
+        let translate = |mut bounds: Bounds<Pixels>| {
+            bounds.origin += offset;
+            bounds
+        };
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: Bounds::new(origin, self.bounds.size),
+            }),
+            |window| {
+                for quad in &self.backgrounds {
+                    let mut quad = quad.clone();
+                    quad.bounds = translate(quad.bounds);
+                    window.paint_quad(quad);
+                }
+                for (rect, path, color) in &self.svgs {
+                    window
+                        .paint_svg(
+                            translate(*rect),
+                            (*path).into(),
+                            TransformationMatrix::default(),
+                            *color,
+                            cx,
+                        )
+                        .ok();
+                }
+                for (shaped, position, height) in &self.shaped {
+                    shaped.paint(*position + offset, *height, window, cx).ok();
+                }
+                for (wrapped, position, height) in &self.wrapped {
+                    wrapped
+                        .paint(
+                            *position + offset,
+                            *height,
+                            TextAlign::Left,
+                            None,
+                            window,
+                            cx,
+                        )
+                        .ok();
+                }
+                for line in &self.lines {
+                    let mask = line.clip_bounds.map(|bounds| ContentMask {
+                        bounds: translate(bounds),
+                    });
+                    window.with_content_mask(mask, |window| {
+                        if let Some(segments) = &line.segments {
+                            for (wrapped, position) in segments {
+                                wrapped
+                                    .paint(
+                                        *position + offset,
+                                        line.line_height,
+                                        TextAlign::Left,
+                                        None,
+                                        window,
+                                        cx,
+                                    )
+                                    .ok();
+                            }
+                        } else {
+                            line.wrapped
+                                .paint(
+                                    line.origin + offset,
+                                    line.line_height,
+                                    TextAlign::Left,
+                                    None,
+                                    window,
+                                    cx,
+                                )
+                                .ok();
+                        }
+                    });
+                }
+                for (rect, image, radius, clip) in &self.images {
+                    window.with_content_mask(
+                        clip.map(|bounds| ContentMask {
+                            bounds: translate(bounds),
+                        }),
+                        |window| {
+                            window
+                                .paint_image(
+                                    translate(*rect),
+                                    Corners::all(*radius),
+                                    image.clone(),
+                                    0,
+                                    false,
+                                )
+                                .ok();
+                        },
+                    );
+                }
+                for quad in &self.foregrounds {
+                    let mut quad = quad.clone();
+                    quad.bounds = translate(quad.bounds);
+                    window.paint_quad(quad);
+                }
+                for (y, left, width, dashed) in &self.rules {
+                    let mut x = *left;
+                    while x < left + width {
+                        let length = if *dashed {
+                            6.0_f32.min(left + width - x)
+                        } else {
+                            *width
+                        };
+                        window.paint_quad(fill(
+                            Bounds::new(point(px(x), px(*y)) + offset, size(px(length), px(1.0))),
+                            self.rule_color,
+                        ));
+                        x += if *dashed { 10.0 } else { *width };
+                    }
+                }
+            },
+        );
+    }
 }
 
 /// Text viewport clipping is horizontal within the editor's vertical viewport.
@@ -3337,14 +3564,19 @@ impl Element for EditorElement {
                     let fi_y = text_line_top + (line_height - fi_size) / 2.0;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
                     let is_folded = editor.folded_sections.contains(&line_idx);
-                    let is_hovered = editor.hovering_gutter_fold_area
-                        || editor.hovering_fold_line == Some(line_idx);
+                    let is_hovered = editor.hovering_fold_line == Some(line_idx)
+                        || gutter_fold_row_hovered(
+                            editor.hovering_gutter_fold_area,
+                            window.mouse_position().y,
+                            line_top,
+                            total_line_height,
+                        );
                     let fi_alpha = if is_folded {
                         gutter_styles.gutter_fold_folded_opacity
                     } else if is_hovered {
                         gutter_styles.gutter_fold_hover_opacity * reveal
                     } else {
-                        gutter_styles.gutter_fold_default_opacity * reveal
+                        0.0
                     };
                     if fi_alpha > 0.0 {
                         let icon_bounds =
@@ -4542,7 +4774,11 @@ impl Element for EditorElement {
             {
                 let viewport = bounds.intersect(&window.content_mask().bounds);
                 let icon_size = editor.scaled(LINE_FORMAT_ICON_SIZE_PX);
-                let icon_gap = editor.scaled(LINE_FORMAT_ICON_GAP_PX);
+                let icon_gap = if matches!(block_type, BlockType::Heading(_)) {
+                    editor.scaled(editor.styles.format_toolbar.line_format_heading_icon_gap_px)
+                } else {
+                    editor.scaled(LINE_FORMAT_ICON_GAP_PX)
+                };
                 let content_gap = editor.scaled(LINE_FORMAT_CONTENT_GAP_PX);
                 let trigger_padding = editor.scaled(4.0);
                 let fold_icon_size = editor.scaled(editor.styles.gutter.gutter_fold_icon_size_px);
@@ -4557,15 +4793,32 @@ impl Element for EditorElement {
                 };
                 let icon_x =
                     editor_left + editor.padding_left() - icon_size - fold_slot_width - content_gap;
-                let icon_y = text_line_top + (line_height - icon_size) * 0.5;
+                let icon_y = if image_extra_height > 0.0 {
+                    text_line_top - image_extra_height + image_gap_top
+                } else {
+                    text_line_top + (line_height - icon_size) * 0.5
+                };
                 let icon_bounds = Bounds::new(
                     point(px(icon_x), px(icon_y)),
                     size(px(icon_size), px(icon_size)),
                 );
                 let trigger_bounds = Bounds::new(
-                    point(px(icon_x - trigger_padding), px(text_line_top)),
+                    point(
+                        px(icon_x - trigger_padding),
+                        px(if image_extra_height > 0.0 {
+                            icon_y
+                        } else {
+                            text_line_top
+                        }),
+                    ),
                     size(
-                        px(icon_size + trigger_padding * 2.0),
+                        px(icon_size
+                            + trigger_padding
+                            + if has_fold_icon {
+                                icon_gap * 0.5
+                            } else {
+                                trigger_padding
+                            }),
                         px(line_height.max(icon_size)),
                     ),
                 );
@@ -6311,6 +6564,12 @@ impl Element for EditorElement {
                 let fi_size = editor.scaled(gs.gutter_fold_icon_size_px);
                 let fi_offset = editor.scaled(gs.gutter_fold_icon_offset_px);
                 let fi_hit_padding = editor.scaled(gs.gutter_fold_hit_padding_px);
+                let markdown_fold_left_padding = if matches!(block_type, BlockType::Heading(_)) {
+                    editor.scaled(editor.styles.format_toolbar.line_format_heading_icon_gap_px)
+                        * 0.5
+                } else {
+                    editor.scaled(LINE_FORMAT_ICON_GAP_PX) * 0.5
+                };
                 let format_icon_size = editor.scaled(LINE_FORMAT_ICON_SIZE_PX);
                 let format_icon_x = editor_left + editor.padding_left()
                     - format_icon_size
@@ -6334,8 +6593,13 @@ impl Element for EditorElement {
                         || editor.folded_sections.contains(&line_idx);
                     let fold_icon_x = fold_icon_expanded_x;
                     let is_hovered = if editor.active_tab_is_non_markdown_text() {
-                        editor.hovering_gutter_fold_area
-                            || editor.hovering_fold_line == Some(line_idx)
+                        editor.hovering_fold_line == Some(line_idx)
+                            || gutter_fold_row_hovered(
+                                editor.hovering_gutter_fold_area,
+                                window.mouse_position().y,
+                                line_top,
+                                total_line_height,
+                            )
                     } else {
                         editor.format_trigger_line == Some(line_idx)
                     };
@@ -6348,12 +6612,10 @@ impl Element for EditorElement {
                         editor.format_trigger_opacity
                     } else if is_folded {
                         gs.gutter_fold_folded_opacity
-                    } else if editor.active_tab_is_non_markdown_text() && is_folded {
-                        gs.gutter_fold_folded_opacity
                     } else if is_hovered {
                         gs.gutter_fold_hover_opacity * reveal
                     } else {
-                        gs.gutter_fold_default_opacity * reveal
+                        0.0
                     };
                     if fi_alpha > 0.0 {
                         let icon_bounds = Bounds::new(
@@ -6390,9 +6652,12 @@ impl Element for EditorElement {
                             )
                         } else {
                             Bounds::new(
-                                point(px(fold_icon_x - fi_hit_padding), px(line_top)),
+                                point(px(fold_icon_x - markdown_fold_left_padding), px(line_top)),
                                 size(
-                                    px(fi_size + fi_hit_padding * 2.0 + fi_offset),
+                                    px(fi_size
+                                        + markdown_fold_left_padding
+                                        + fi_hit_padding
+                                        + fi_offset),
                                     px(total_line_height),
                                 ),
                             )
@@ -6411,8 +6676,13 @@ impl Element for EditorElement {
                     let is_img_folded = editor.folded_image_previews.contains(&line_idx);
                     let fold_icon_x = fold_icon_expanded_x;
                     let is_hovered = if editor.active_tab_is_non_markdown_text() {
-                        editor.hovering_gutter_fold_area
-                            || editor.hovering_fold_line == Some(line_idx)
+                        editor.hovering_fold_line == Some(line_idx)
+                            || gutter_fold_row_hovered(
+                                editor.hovering_gutter_fold_area,
+                                window.mouse_position().y,
+                                line_top,
+                                total_line_height,
+                            )
                     } else {
                         editor.format_trigger_line == Some(line_idx)
                     };
@@ -6433,12 +6703,10 @@ impl Element for EditorElement {
                         editor.format_trigger_opacity
                     } else if is_img_folded {
                         gs.gutter_fold_folded_opacity
-                    } else if editor.active_tab_is_non_markdown_text() && is_img_folded {
-                        gs.gutter_fold_folded_opacity
                     } else if is_hovered {
                         gs.gutter_fold_hover_opacity * reveal
                     } else {
-                        gs.gutter_fold_default_opacity * reveal
+                        0.0
                     };
                     if fi_alpha > 0.0 {
                         let icon_bounds = Bounds::new(
@@ -6475,9 +6743,12 @@ impl Element for EditorElement {
                             )
                         } else {
                             Bounds::new(
-                                point(px(fold_icon_x - fi_hit_padding), px(line_top)),
+                                point(px(fold_icon_x - markdown_fold_left_padding), px(line_top)),
                                 size(
-                                    px(fi_size + fi_hit_padding * 2.0 + fi_offset),
+                                    px(fi_size
+                                        + markdown_fold_left_padding
+                                        + fi_hit_padding
+                                        + fi_offset),
                                     px(total_line_height),
                                 ),
                             )
@@ -9422,6 +9693,33 @@ impl Element for EditorElement {
             // this same prepaint pass.
         });
 
+        self.editor.update(cx, |editor, _| {
+            if let Some(source) = editor.line_drag_ghost_source() {
+                let viewport = bounds.intersect(&window.content_mask().bounds);
+                let source_bounds = editor
+                    .format_line_areas
+                    .iter()
+                    .filter(|(_, line)| source.contains(line))
+                    .map(|(bounds, _)| *bounds)
+                    .reduce(|left, right| left.union(&right));
+                if let Some(source_bounds) = source_bounds {
+                    let top = source_bounds.top().max(viewport.top());
+                    let bottom = source_bounds.bottom().min(viewport.bottom());
+                    if bottom > top {
+                        let ghost_bounds = Bounds::new(
+                            point(px(editor.last_content_left), top),
+                            size(px(editor.last_text_width), bottom - top),
+                        );
+                        editor.set_line_drag_ghost(std::rc::Rc::new(LineDragGhost::capture(
+                            &prepaint_state,
+                            ghost_bounds,
+                            editor.theme.border_decorative,
+                        )));
+                    }
+                }
+            }
+        });
+
         // Only the focused pane publishes caret geometry to its lightweight overlay.
         if self.editor.read(cx).focused_pane_id != self.pane_id {
             cursor_paints.clear();
@@ -9505,7 +9803,7 @@ impl Element for EditorElement {
             window.set_cursor_style(CursorStyle::Arrow, hitbox);
         }
         for (hitbox, _) in &prepaint.format_trigger_hitboxes {
-            window.set_cursor_style(CursorStyle::Arrow, hitbox);
+            window.set_cursor_style(CursorStyle::OpenHand, hitbox);
         }
         for hitbox in &prepaint.preview_zoom_hitboxes {
             window.set_cursor_style(CursorStyle::Arrow, hitbox);
@@ -9547,9 +9845,9 @@ impl Element for EditorElement {
                 window.prevent_default();
                 cx.stop_propagation();
                 editor_entity.update(cx, |this, cx| {
-                    this.with_pane(pane_id, |this| {
-                        this.toggle_line_format_toolbar(line, cx);
-                    });
+                    this.focus_pane(pane_id, cx);
+                    window.focus(&this.focus_handle);
+                    this.begin_line_drag(line, event.position, cx);
                 });
             }
         });
@@ -9959,6 +10257,10 @@ impl Element for EditorElement {
         for quad in prepaint.link_underlines.drain(..) {
             window.paint_quad(quad);
         }
+
+        self.editor
+            .read(cx)
+            .paint_line_drag_feedback(bounds.intersect(&window.content_mask().bounds), window);
 
         if pane_swapped {
             self.editor

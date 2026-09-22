@@ -90,6 +90,7 @@ pub(crate) const CODE_BLOCK_LINE_NUMBERS_SVG_PATH: &str =
     "assets/icons/format/code-block-line-numbers.svg";
 pub(crate) const CODE_BLOCK_WRAP_SVG_PATH: &str = "assets/icons/editor/align-left-mini.svg";
 pub(crate) const FMT_TODO_SVG: &str = "assets/icons/format/todo.svg";
+pub(crate) const FMT_PARAGRAPH_SVG: &str = "assets/icons/format/paragraph.svg";
 pub(crate) const FMT_FORMAT_SVG: &str = "assets/icons/format/format.svg";
 pub(crate) const FMT_LINK_SVG: &str = "assets/icons/format/link.svg";
 pub(crate) const FMT_SPLIT_SVG: &str = "assets/icons/format/split.svg";

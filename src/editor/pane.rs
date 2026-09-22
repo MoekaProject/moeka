@@ -465,6 +465,10 @@ pane_state! {
         Vec::new()
     ),
     (format_line_areas, Vec<(Bounds<Pixels>, usize)>, Vec::new()),
+    (line_drag, Option<super::line_drag::LineDrag>, None),
+    (line_drag_scroll_task, Option<Task<()>>, None),
+    (line_drop_flash, Option<super::line_drag::LineDropFlash>, None),
+    (line_drop_flash_task, Option<Task<()>>, None),
     (format_trigger_areas, Vec<(Bounds<Pixels>, usize)>, Vec::new()),
     (hovering_format_line, Option<usize>, None),
     (hovering_format_trigger_line, Option<usize>, None),
@@ -703,6 +707,8 @@ impl EditorView {
         let Some(new_index) = self.pane_index(pane_id) else {
             return;
         };
+
+        self.cancel_line_drag(cx);
 
         // Park the current root state into the old focused pane's slot.
         if let Some(old_index) = self.pane_index(self.focused_pane_id) {

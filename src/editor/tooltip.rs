@@ -33,22 +33,6 @@ pub(crate) fn with_tooltip(
     .into_any_element()
 }
 
-pub(crate) fn with_tooltip_above(
-    child: impl IntoElement,
-    editor: Entity<EditorView>,
-    title: impl Into<SharedString>,
-    shortcut: Option<impl Into<SharedString>>,
-) -> AnyElement {
-    TooltipTrigger {
-        child: child.into_any_element(),
-        editor,
-        title: title.into(),
-        shortcut: shortcut.map(Into::into),
-        prefer_above: true,
-    }
-    .into_any_element()
-}
-
 /// Requests the tooltip when the pointer is inside `bounds`.
 ///
 /// Must be called during the prepaint phase (`Window::set_tooltip` asserts

@@ -226,7 +226,10 @@ pub(super) fn ime_debug_log(message: impl AsRef<str>) {
 }
 
 impl EditorView {
-    fn selection_drag_scroll_delta_for_position(&self, position: Point<Pixels>) -> Option<f32> {
+    pub(super) fn selection_drag_scroll_delta_for_position(
+        &self,
+        position: Point<Pixels>,
+    ) -> Option<f32> {
         let pos_y: f32 = position.y.into();
         let origin_y: f32 = self.content_origin.y.into();
         let rel_pos_y = pos_y - origin_y;
@@ -382,6 +385,7 @@ impl EditorView {
             self.whiteboard_on_mouse_down(event, window, cx);
             return;
         }
+        self.end_retained_selection_toolbar();
         self.last_mouse_down_target = None;
 
         if event.button == MouseButton::Left {
@@ -1414,6 +1418,8 @@ impl EditorView {
         window.prevent_default();
         cx.stop_propagation();
         self.is_selecting = false;
+        self.cancel_line_drag(cx);
+        self.dismiss_line_format_toolbar(cx);
 
         if self.active_tab_is_whiteboard() {
             self.whiteboard_select_at(event.position);
@@ -2024,7 +2030,6 @@ impl EditorView {
         let line_format_enabled = self.app_settings.format_toolbar_visible
             && self.active_tab_is_markdown()
             && !self.active_tab_is_read_only()
-            && !self.cursor.has_selection()
             && !self.has_extra_cursors();
         let hovering_format_line = line_format_enabled
             .then(|| {
@@ -3188,12 +3193,13 @@ impl EditorView {
                 return;
             }
         }
-        if let Some(start_line) = self
-            .code_block_hover_areas
-            .iter()
-            .find(|(bounds, _)| bounds.contains(&event.position))
-            .map(|(_, start_line)| *start_line)
-            .filter(|start_line| !self.code_block_word_wrap_enabled(*start_line))
+        if !self.line_drag_active()
+            && let Some(start_line) = self
+                .code_block_hover_areas
+                .iter()
+                .find(|(bounds, _)| bounds.contains(&event.position))
+                .map(|(_, start_line)| *start_line)
+                .filter(|start_line| !self.code_block_word_wrap_enabled(*start_line))
         {
             let delta = event.delta.pixel_delta(px(40.0));
             let delta_x = f32::from(delta.x);

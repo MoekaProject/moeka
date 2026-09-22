@@ -42,6 +42,45 @@ pub(crate) struct SelectionToolbarPopup {
     selection: SelectionToolbarSelectionKey,
     origin: Point<Pixels>,
     menu_owned: bool,
+    retained_geometry: Option<SelectionToolbarGeometry>,
+}
+
+impl SelectionToolbarPopup {
+    fn retain_after_format(
+        &mut self,
+        pane_id: PaneId,
+        key: SelectionToolbarSnapshotKey,
+        mut geometry: SelectionToolbarGeometry,
+    ) {
+        if self.pane_id != pane_id || self.selection.tab_id != key.selection.tab_id {
+            return;
+        }
+        self.selection = key.selection.clone();
+        geometry.key = key;
+        self.retained_geometry = Some(geometry);
+    }
+
+    fn retained_for(&self, pane_id: PaneId, selection: &SelectionToolbarSelectionKey) -> bool {
+        self.pane_id == pane_id && self.selection == *selection && self.retained_geometry.is_some()
+    }
+
+    fn retained_snapshot(
+        &self,
+        pane_id: PaneId,
+        key: &SelectionToolbarSnapshotKey,
+        bounds: Bounds<Pixels>,
+        ancestor_clip: Bounds<Pixels>,
+    ) -> Option<SelectionToolbarGeometry> {
+        if !self.retained_for(pane_id, &key.selection) {
+            return None;
+        }
+        let mut geometry = self.retained_geometry.as_ref()?.clone();
+        geometry.key = key.clone();
+        geometry.editor_bounds = bounds;
+        geometry.viewport = visible_intersection(bounds, ancestor_clip)?;
+        geometry.toolbar_bounds = None;
+        Some(geometry)
+    }
 }
 
 /// Escape dismissal follows the selection, not its scroll position.
@@ -541,13 +580,42 @@ impl EditorView {
     }
 
     pub(crate) fn retain_selection_toolbar_after_format(&mut self) {
-        let key = self.selection_toolbar_selection_key();
-        if let (Some(popup), Some(key)) = (&mut self.selection_toolbar_popup, key)
-            && popup.pane_id == self.focused_pane_id
-            && popup.selection.tab_id == key.tab_id
-        {
-            popup.selection = key;
+        let Some(selection) = self.selection_toolbar_cursor_key() else {
+            return;
+        };
+        let key = self.selection_toolbar_snapshot_for(selection);
+        let Some(animation) = self.selection_toolbar_animation.as_ref() else {
+            return;
+        };
+        if let Some(popup) = &mut self.selection_toolbar_popup {
+            popup.retain_after_format(self.focused_pane_id, key, animation.geometry.clone());
+            if self
+                .context_menu
+                .as_ref()
+                .is_some_and(|menu| menu.kind == super::ContextMenuKind::WikiLink)
+            {
+                popup.menu_owned = true;
+            }
         }
+    }
+
+    pub(crate) fn end_retained_selection_toolbar(&mut self) {
+        if self.selection_toolbar_popup.as_ref().is_some_and(|popup| {
+            popup.pane_id == self.current_pane_id() && popup.retained_geometry.is_some()
+        }) {
+            self.selection_toolbar_popup = None;
+            self.selection_toolbar_animation = None;
+            self.selection_toolbar_geometry
+                .remove(&self.current_pane_id());
+        }
+    }
+
+    fn has_retained_selection_toolbar(&self) -> bool {
+        self.selection_toolbar_cursor_key().is_some_and(|key| {
+            self.selection_toolbar_popup
+                .as_ref()
+                .is_some_and(|popup| popup.retained_for(self.current_pane_id(), &key))
+        })
     }
 
     pub(crate) fn mark_selection_toolbar_menu(&mut self) {
@@ -578,8 +646,13 @@ impl EditorView {
     }
 
     fn selection_toolbar_selection_key(&self) -> Option<SelectionToolbarSelectionKey> {
+        let key = self.selection_toolbar_cursor_key()?;
+        (!key.primary_range.is_empty() || self.has_retained_selection_toolbar()).then_some(key)
+    }
+
+    fn selection_toolbar_cursor_key(&self) -> Option<SelectionToolbarSelectionKey> {
         let primary_range = self.cursor.selection_range();
-        if primary_range.is_empty() || self.has_extra_cursors() {
+        if self.has_extra_cursors() {
             return None;
         }
         Some(SelectionToolbarSelectionKey {
@@ -593,6 +666,13 @@ impl EditorView {
             return None;
         }
         let selection = self.selection_toolbar_selection_key()?;
+        Some(self.selection_toolbar_snapshot_for(selection))
+    }
+
+    fn selection_toolbar_snapshot_for(
+        &self,
+        selection: SelectionToolbarSelectionKey,
+    ) -> SelectionToolbarSnapshotKey {
         let mut horizontal_offsets = self
             .code_block_display_overrides
             .get(&selection.tab_id)
@@ -603,12 +683,12 @@ impl EditorView {
             })
             .collect::<Vec<_>>();
         horizontal_offsets.sort_unstable_by_key(|(line, _)| *line);
-        Some(SelectionToolbarSnapshotKey {
+        SelectionToolbarSnapshotKey {
             selection,
             cursor_at_end: self.cursor.offset >= self.cursor.anchor,
             scroll_offset: self.scroll_offset,
             horizontal_offsets,
-        })
+        }
     }
 
     /// Parent's Escape handler should call this before clearing a text selection
@@ -632,7 +712,7 @@ impl EditorView {
     }
 
     fn selection_toolbar_visible(&self, pane_id: PaneId, window: &Window, cx: &App) -> bool {
-        if self.line_format_toolbar_line.is_some() {
+        if self.line_format_toolbar_line.is_some() || self.line_drag.is_some() {
             return false;
         }
         let search_focus = self.workspace_search_input_focused
@@ -647,7 +727,7 @@ impl EditorView {
                 && !self.embedded_editor,
             focused: pane_id == self.focused_pane_id && self.focus_handle.is_focused(window),
             window_active: window.is_window_active(),
-            primary_nonempty: self.cursor.has_selection(),
+            primary_nonempty: self.cursor.has_selection() || self.has_retained_selection_toolbar(),
             extra_cursors: self.has_extra_cursors(),
             selecting: self.is_selecting,
             composing: self.marked_range.is_some() || !self.extra_marked_ranges.is_empty(),
@@ -671,6 +751,7 @@ impl EditorView {
                                     super::ContextMenuKind::Format
                                         | super::ContextMenuKind::FormatHeading
                                         | super::ContextMenuKind::FormatMore
+                                        | super::ContextMenuKind::WikiLink
                                 )
                             })
                     })),
@@ -758,6 +839,11 @@ impl Element for SelectionToolbarElement {
             if editor.focused_pane_id != self.pane_id {
                 return None;
             }
+            if !editor.has_retained_selection_toolbar()
+                && let Some(popup) = &mut editor.selection_toolbar_popup
+            {
+                popup.retained_geometry = None;
+            }
             if editor
                 .selection_toolbar_dismissed
                 .as_ref()
@@ -774,6 +860,14 @@ impl Element for SelectionToolbarElement {
                     .get(&self.pane_id)
                     .filter(|geometry| geometry.matches(&key, bounds))
                     .cloned()
+                    .or_else(|| {
+                        editor.selection_toolbar_popup.as_ref()?.retained_snapshot(
+                            self.pane_id,
+                            &key,
+                            bounds,
+                            window.content_mask().bounds,
+                        )
+                    })
             });
             let visible = editor.selection_toolbar_visible(self.pane_id, window, cx)
                 && current_geometry.is_some();
@@ -886,20 +980,28 @@ impl Element for SelectionToolbarElement {
                         && popup.menu_owned
                         && editor.context_menu.is_some()
                 });
+            let retained_geometry = editor
+                .selection_toolbar_popup
+                .as_ref()
+                .filter(|popup| popup.retained_for(self.pane_id, &geometry.key.selection))
+                .and_then(|popup| popup.retained_geometry.clone());
             editor.selection_toolbar_popup = Some(SelectionToolbarPopup {
                 pane_id: self.pane_id,
                 selection: geometry.key.selection.clone(),
                 origin,
                 menu_owned,
+                retained_geometry,
             });
-            if let Some(snapshot) = editor.selection_toolbar_geometry.get_mut(&self.pane_id) {
-                if editor
-                    .selection_toolbar_animation
-                    .as_ref()
-                    .is_some_and(|state| state.visible)
-                {
-                    snapshot.toolbar_bounds = Some(Bounds::new(origin, measured));
-                }
+            if editor
+                .selection_toolbar_animation
+                .as_ref()
+                .is_some_and(|state| state.visible)
+            {
+                let mut snapshot = geometry.clone();
+                snapshot.toolbar_bounds = Some(Bounds::new(origin, measured));
+                editor
+                    .selection_toolbar_geometry
+                    .insert(self.pane_id, snapshot);
             }
         });
         Some(SelectionToolbarPrepaintState {
@@ -1072,7 +1174,27 @@ impl Element for LineFormatToolbarElement {
     ) {
         if let Some(state) = prepaint {
             window.set_cursor_style(gpui::CursorStyle::Arrow, &state.toolbar_hitbox);
-            window.set_cursor_style(gpui::CursorStyle::Arrow, &state.trigger_hitbox);
+            window.set_cursor_style(gpui::CursorStyle::OpenHand, &state.trigger_hitbox);
+            let trigger_hitbox = state.trigger_hitbox.clone();
+            let editor = self.editor.clone();
+            let pane_id = self.pane_id;
+            window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, window, cx| {
+                if !phase.capture()
+                    || event.button != gpui::MouseButton::Left
+                    || !trigger_hitbox.is_hovered(window)
+                {
+                    return;
+                }
+                editor.update(cx, |this, cx| {
+                    this.focus_pane(pane_id, cx);
+                    if let Some(line) = this.line_format_toolbar_line {
+                        window.focus(&this.focus_handle);
+                        this.begin_line_drag(line, event.position, cx);
+                    }
+                });
+                window.prevent_default();
+                cx.stop_propagation();
+            });
             let interaction_bounds = state.interaction_bounds;
             let editor = self.editor.clone();
             let pane_id = self.pane_id;
@@ -1122,6 +1244,79 @@ mod tests {
     fn geometry(selected: &[Bounds<Pixels>]) -> SelectionToolbarGeometry {
         let viewport = rect(100.0, 50.0, 400.0, 300.0);
         SelectionToolbarGeometry::from_visible_bounds(key(), viewport, viewport, selected).unwrap()
+    }
+
+    #[test]
+    fn formatting_retains_popup_through_collapsed_and_changed_selections() {
+        let original = geometry(&[rect(180.0, 140.0, 60.0, 20.0)]);
+        let origin = point(px(225.0), px(175.0));
+        let mut popup = SelectionToolbarPopup {
+            pane_id: 1,
+            selection: key().selection,
+            origin,
+            menu_owned: false,
+            retained_geometry: None,
+        };
+        assert!(!popup.retained_for(1, &popup.selection));
+        for primary_range in [6..6, 10..10, 10..26, 26..26] {
+            let mut after = key();
+            after.selection.primary_range = primary_range;
+            popup.retain_after_format(1, after.clone(), original.clone());
+            assert!(popup.retained_for(1, &after.selection));
+            let snapshot = popup
+                .retained_snapshot(1, &after, original.editor_bounds, original.viewport)
+                .unwrap();
+            assert_eq!(snapshot.key, after);
+            assert_eq!(popup.origin, origin);
+            assert_eq!(snapshot.toolbar_bounds, None);
+        }
+    }
+
+    #[test]
+    fn retained_popup_survives_format_reflow_but_not_another_selection_or_pane() {
+        let original = geometry(&[rect(180.0, 140.0, 60.0, 20.0)]);
+        let mut popup = SelectionToolbarPopup {
+            pane_id: 2,
+            selection: key().selection,
+            origin: point(px(240.0), px(160.0)),
+            menu_owned: true,
+            retained_geometry: None,
+        };
+        let mut after = key();
+        after.selection.primary_range = 8..8;
+        popup.retain_after_format(2, after.clone(), original.clone());
+        let mut scrolled = after.clone();
+        scrolled.scroll_offset += 80.0;
+        scrolled.horizontal_offsets.clear();
+        let resized = rect(100.0, 50.0, 350.0, 270.0);
+        let snapshot = popup
+            .retained_snapshot(2, &scrolled, resized, resized)
+            .unwrap();
+        assert_eq!(snapshot.key, scrolled);
+        assert_eq!(snapshot.viewport, resized);
+        assert_eq!(popup.origin, point(px(240.0), px(160.0)));
+        assert!(
+            popup
+                .retained_snapshot(3, &after, resized, resized)
+                .is_none()
+        );
+        let mut moved = after.clone();
+        moved.selection.primary_range = 9..9;
+        assert!(
+            popup
+                .retained_snapshot(2, &moved, resized, resized)
+                .is_none()
+        );
+        let mut other_tab = after.clone();
+        other_tab.selection.tab_id = "other".into();
+        assert!(
+            popup
+                .retained_snapshot(2, &other_tab, resized, resized)
+                .is_none()
+        );
+        popup.retain_after_format(3, moved, original.clone());
+        popup.retain_after_format(2, other_tab, original);
+        assert_eq!(popup.selection, after.selection);
     }
 
     #[test]

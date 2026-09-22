@@ -97,6 +97,8 @@ impl EditorView {
             && self.active_tab_is_markdown()
             && (self.cursor.has_selection()
                 || self.hovering_format_line.is_some()
+                || self.line_drag.is_some()
+                || self.line_drop_flash.is_some()
                 || self.line_format_toolbar_line.is_some())
         {
             content

@@ -517,6 +517,9 @@ impl Render for EditorView {
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         let show_window_caption_buttons = true;
         self.execute_pending_command(window, cx);
+        if !window.is_window_active() {
+            self.cancel_line_drag(cx);
+        }
         self.refresh_chat_terminal_metrics(window, cx);
         self.process_pending_inline_diff(cx);
         // Keeps the status-bar branch label and panel badges fresh; only
@@ -583,6 +586,30 @@ impl Render for EditorView {
             canvas(
                 |_, _, _| (),
                 move |_, _, window, _cx| {
+                    window.on_mouse_event({
+                        let editor = editor.clone();
+                        move |event: &MouseMoveEvent, phase, _, cx| {
+                            if phase.capture()
+                                && editor.update(cx, |this, cx| this.update_line_drag(event, cx))
+                            {
+                                cx.stop_propagation();
+                            }
+                        }
+                    });
+                    window.on_mouse_event({
+                        let editor = editor.clone();
+                        move |event: &MouseUpEvent, phase, window, cx| {
+                            if phase.capture()
+                                && event.button == MouseButton::Left
+                                && editor.update(cx, |this, cx| {
+                                    this.finish_line_drag(event.position, cx)
+                                })
+                            {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                            }
+                        }
+                    });
                     window.on_mouse_event({
                         let editor = editor.clone();
                         move |event: &MouseMoveEvent, phase, _window, cx| {
@@ -1515,6 +1542,9 @@ impl Render for EditorView {
             })
             .when(self.context_menu.is_some(), |this| {
                 this.child(deferred(self.render_context_menu(cx)))
+            })
+            .when(self.line_drag_active(), |this| {
+                this.child(deferred(super::line_drag::render_line_drag_overlay(cx.entity().clone())).with_priority(2))
             })
             .when(self.settings_font_picker.is_some(), |this| {
                 if let Some(picker) = &self.settings_font_picker {

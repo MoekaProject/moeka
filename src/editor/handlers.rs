@@ -108,6 +108,9 @@ impl EditorView {
     }
 
     pub(crate) fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cancel_line_drag(cx) {
+            return;
+        }
         if self.active_tab_is_whiteboard() && self.whiteboard_escape() {
             cx.notify();
             return;

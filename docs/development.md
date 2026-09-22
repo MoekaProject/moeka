@@ -105,6 +105,64 @@ The [CI configuration](../.github/workflows/ci.yml) defines lint/test jobs for m
 
 For changes involving shared state or interactions, manually check the affected paths: edit/undo/redo, save/reopen, pane switching and closing, search, selection, Unicode/IME input, and relevant platform behavior. Include the platforms tested and any known gaps in the pull request. Documentation-only changes normally need only content and link review.
 
+## External file updates
+
+The file watcher runs even without an open workspace. It reconciles the current
+workspace and documents from every pane every 500ms: the workspace is recursive,
+while standalone files share non-recursive parent-directory watches. Watching the
+parent keeps tracking a document when an external editor replaces it by rename.
+Closing or switching the workspace does not stop watches needed by open tabs.
+
+Newly opened paths and newly registered watches request a disk check, covering
+changes before registration. Canonical file events are mapped back to the paths
+used by tabs, including directory aliases. Explicitly opened files remain eligible
+for reload even when their directories are excluded from sidebar indexing.
+Dirty tabs are never overwritten by external reloads.
+
+Run `cargo test --release editor::file_watch::tests` for watcher registration,
+workspace transitions, path aliases, clean/dirty snapshots and native write/atomic
+replacement checks. The native test uses disposable files, not user documents.
+
+## Markdown block dragging
+
+The format handle supports click-on-release and drag-after-threshold. The interaction
+follows the block handle and blue guide approach described in
+[Notion's editing guide](https://www.notion.com/help/writing-and-editing-basics),
+but operates on Markdown source rather than Notion's database or column model.
+
+- Drag ranges use pulldown-cmark block boundaries plus Moeka's table, front matter,
+  and generated-preview metadata. Paragraph continuations, code fences, tables,
+  equations, quotes/callouts, HTML blocks and footnotes move together. List items
+  carry their descendants; dragging a nested item does not carry its parent.
+- An expanded heading moves on its own; a folded heading carries its hidden section.
+  Multiline selections expand to complete blocks. Front matter stays at the top.
+- The target block supplies the default indentation. Horizontal movement selects
+  a valid parent, sibling or child indentation level, including the unindented root.
+  Child indentation is offered only beneath list items. Tabs use Markdown's
+  four-column stops; relative indentation and indented-code payload are preserved.
+- Non-list block moves preserve separating blank lines. The move, indentation and
+  separator changes form one undo transaction. A successful drop moves the caret
+  to the first inserted line and flashes the inserted range.
+- Ordered list moves renumber affected source/destination lists, retaining their
+  explicit starting numbers and adjusting child indentation when digit widths change.
+  Numbering is part of the same undo transaction; code samples are not renumbered.
+- The ghost and source content both use 50% opacity. The ghost reuses a snapshot
+  of visible source text layout, block decoration, tables and images at the original
+  content width, without caret/selection/controls. Long blocks are clipped to the
+  captured viewport. The 2px blue insertion guide ends at the content column edge and
+  reflects the target indentation. Wheel scrolling continues during dragging and
+  briefly takes priority over edge scrolling; guides use current prepaint geometry.
+- The format toolbar uses three rows of seven controls: headings/paragraph,
+  inline formats/link/image, and block formats/more. The horizontal rule is in More.
+  Image format handles align with the preview fold handle; heading handle spacing
+  is independently configurable in `FormatToolbarStyles`.
+- Escape, leaving the source pane on release, switching documents and content edits
+  cancel the gesture. New drag behavior should be exercised with split panes,
+  wrapped paragraphs, nested lists, folded blocks and undo/redo in disposable files.
+
+Focused regression tests are in `editor::line_drag::tests`. They check source
+ranges, indentation, separators and undo data, but do not replace GUI verification.
+
 ## Packaging is separate from local development
 
 The [Makefile](../Makefile) and [release workflow](../.github/workflows/release.yml) contain platform packaging and publishing steps. macOS app bundles and disk images, Windows cross-builds, and Linux portable archives have additional tooling requirements. Ordinary source contributors should start with Cargo rather than a publishing target.
