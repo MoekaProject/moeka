@@ -60,7 +60,7 @@ fn pad_cells(cells: &[String], count: usize) -> Vec<String> {
     result
 }
 
-fn cell_display_width(text: &str) -> usize {
+pub(crate) fn cell_display_width(text: &str) -> usize {
     text.chars()
         .map(|ch| {
             let code = ch as u32;
@@ -148,6 +148,124 @@ pub fn parse_table_block(lines: &[String]) -> TableModel {
     }
 }
 
+pub fn selected_table_matrix_to_tsv(
+    lines: &[String],
+    is_column: bool,
+    indices: &[usize],
+) -> String {
+    let model = parse_table_block(lines);
+    if is_column {
+        (0..=model.data_rows.len())
+            .map(|row| {
+                indices
+                    .iter()
+                    .map(|column| {
+                        if row == 0 {
+                            model.header_cells.get(*column)
+                        } else {
+                            model
+                                .data_rows
+                                .get(row - 1)
+                                .and_then(|cells| cells.get(*column))
+                        }
+                        .cloned()
+                        .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        indices
+            .iter()
+            .filter_map(|row| {
+                if *row == 0 {
+                    Some(model.header_cells.join("\t"))
+                } else {
+                    model.data_rows.get(row - 1).map(|cells| cells.join("\t"))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+pub fn selected_cells_to_tsv(
+    lines: &[String],
+    rows: std::ops::RangeInclusive<usize>,
+    columns: std::ops::RangeInclusive<usize>,
+) -> String {
+    let model = parse_table_block(lines);
+    let all = all_rows(&model);
+    rows.filter_map(|row| all.get(row))
+        .map(|row| {
+            columns
+                .clone()
+                .map(|column| row.get(column).cloned().unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\t")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn replace_selected_cells(
+    lines: &[String],
+    rows: std::ops::RangeInclusive<usize>,
+    columns: std::ops::RangeInclusive<usize>,
+    values: &[Vec<String>],
+) -> Option<Vec<String>> {
+    let mut model = parse_table_block(lines);
+    let row_indices = rows.collect::<Vec<_>>();
+    let column_indices = columns.collect::<Vec<_>>();
+    if row_indices.is_empty()
+        || column_indices.is_empty()
+        || values.len() != row_indices.len()
+        || values.iter().any(|row| row.len() != column_indices.len())
+        || row_indices.iter().any(|row| *row > model.data_rows.len())
+        || column_indices.iter().any(|col| *col >= model.col_count)
+    {
+        return None;
+    }
+    for (row_index, values) in row_indices.into_iter().zip(values) {
+        let row = if row_index == 0 {
+            &mut model.header_cells
+        } else {
+            &mut model.data_rows[row_index - 1]
+        };
+        for (&column, value) in column_indices.iter().zip(values) {
+            row[column] = value.clone();
+        }
+    }
+    Some(serialize_table(&model))
+}
+
+#[cfg(test)]
+#[test]
+fn rectangular_cell_edits_preserve_unselected_cells() {
+    let lines = [
+        "| A | B | C |",
+        "| --- | --- | --- |",
+        "| a | b | c |",
+        "| d | e | f |",
+    ]
+    .map(str::to_string);
+    assert_eq!(selected_cells_to_tsv(&lines, 1..=2, 1..=2), "b\tc\ne\tf");
+    let updated = replace_selected_cells(
+        &lines,
+        1..=2,
+        1..=2,
+        &[vec!["x".into(), "y".into()], vec!["z".into(), "w".into()]],
+    )
+    .unwrap();
+    assert_eq!(
+        parse_table_block(&updated).data_rows,
+        vec![vec!["a", "x", "y"], vec!["d", "z", "w"]]
+    );
+    assert!(replace_selected_cells(&lines, 1..=2, 1..=2, &[vec!["x".into()]]).is_none());
+}
+
 fn serialize_row(cells: &[String], widths: &[usize]) -> String {
     let padded = cells
         .iter()
@@ -186,9 +304,36 @@ pub fn serialize_table(model: &TableModel) -> Vec<String> {
     aligns.resize(col_count, TableAlign::Left);
     let widths = table_column_widths(model, col_count);
 
+    serialize_table_with_widths(model, &header, &aligns, &widths)
+}
+
+pub fn format_table_source(lines: &[String]) -> Vec<String> {
+    if lines.iter().any(|line| !line.starts_with('|')) {
+        return lines.to_vec();
+    }
+    let model = parse_table_block(lines);
+    let mut widths = table_column_widths(&model, model.col_count);
+    for (width, align) in widths.iter_mut().zip(&model.aligns) {
+        *width = (*width).max(match align {
+            TableAlign::Left => 3,
+            TableAlign::Center => 5,
+            TableAlign::Right => 4,
+        });
+    }
+    serialize_table_with_widths(&model, &model.header_cells, &model.aligns, &widths)
+}
+
+fn serialize_table_with_widths(
+    model: &TableModel,
+    header: &[String],
+    aligns: &[TableAlign],
+    widths: &[usize],
+) -> Vec<String> {
+    let col_count = widths.len();
+
     let mut result = vec![
-        serialize_row(&header, &widths),
-        serialize_align_row(&aligns, &widths),
+        serialize_row(header, widths),
+        serialize_align_row(aligns, widths),
     ];
     for row in &model.data_rows {
         result.push(serialize_row(&pad_cells(row, col_count), &widths));
@@ -227,6 +372,7 @@ pub fn insert_row(lines: &[String], insert_at: usize) -> Vec<String> {
     serialize_table(&model)
 }
 
+#[cfg(test)]
 pub fn delete_row(lines: &[String], row_index: usize) -> Vec<String> {
     let mut model = parse_table_block(lines);
     let mut rows = all_rows(&model);
@@ -241,6 +387,8 @@ pub fn delete_row(lines: &[String], row_index: usize) -> Vec<String> {
     serialize_table(&model)
 }
 
+#[cfg(test)]
+#[cfg(test)]
 pub fn move_row(lines: &[String], from: usize, to: usize) -> Vec<String> {
     let mut model = parse_table_block(lines);
     let mut rows = all_rows(&model);
@@ -251,6 +399,58 @@ pub fn move_row(lines: &[String], from: usize, to: usize) -> Vec<String> {
     let adjusted_to = if to > from { to.saturating_sub(1) } else { to };
     let clamped = adjusted_to.min(rows.len());
     rows.insert(clamped, row);
+    set_all_rows(&mut model, rows);
+    serialize_table(&model)
+}
+
+#[cfg(test)]
+pub fn delete_rows(lines: &[String], start: usize, end: usize) -> Vec<String> {
+    let mut model = parse_table_block(lines);
+    let mut rows = all_rows(&model);
+    let start = start.min(rows.len());
+    let end = end.min(rows.len()).max(start);
+    if start < end {
+        if start == 0 && end == rows.len() {
+            rows = vec![vec![String::new(); model.col_count.max(1)]];
+        } else {
+            rows.drain(start..end);
+        }
+        set_all_rows(&mut model, rows);
+    }
+    serialize_table(&model)
+}
+
+#[cfg(test)]
+pub fn replace_rows(lines: &[String], start: usize, rows: &[Vec<String>]) -> Option<Vec<String>> {
+    let mut model = parse_table_block(lines);
+    if rows.is_empty() || rows.iter().any(|row| row.len() != model.col_count) {
+        return None;
+    }
+    let mut all = all_rows(&model);
+    let end = start.checked_add(rows.len())?;
+    if end > all.len() {
+        return None;
+    }
+    for (target, replacement) in all[start..end].iter_mut().zip(rows) {
+        *target = replacement.clone();
+    }
+    set_all_rows(&mut model, all);
+    Some(serialize_table(&model))
+}
+
+#[cfg(test)]
+pub fn move_rows(lines: &[String], start: usize, end: usize, to: usize) -> Vec<String> {
+    let mut model = parse_table_block(lines);
+    let mut rows = all_rows(&model);
+    let start = start.min(rows.len());
+    let end = end.min(rows.len()).max(start);
+    let to = to.min(rows.len());
+    if start == end || (start <= to && to <= end) {
+        return serialize_table(&model);
+    }
+    let moved: Vec<_> = rows.drain(start..end).collect();
+    let destination = if to > end { to - (end - start) } else { to };
+    rows.splice(destination..destination, moved);
     set_all_rows(&mut model, rows);
     serialize_table(&model)
 }
@@ -267,6 +467,7 @@ pub fn insert_column(lines: &[String], insert_at: usize) -> Vec<String> {
     serialize_table(&model)
 }
 
+#[cfg(test)]
 pub fn delete_column(lines: &[String], col_idx: usize) -> Vec<String> {
     let mut model = parse_table_block(lines);
     if model.col_count <= 1 || col_idx >= model.col_count {
@@ -282,6 +483,265 @@ pub fn delete_column(lines: &[String], col_idx: usize) -> Vec<String> {
         }
     }
     model.col_count -= 1;
+    serialize_table(&model)
+}
+
+#[cfg(test)]
+pub fn delete_columns(lines: &[String], start: usize, end: usize) -> Vec<String> {
+    let mut model = parse_table_block(lines);
+    let start = start.min(model.col_count);
+    let end = end.min(model.col_count).max(start);
+    if start == end {
+        return serialize_table(&model);
+    }
+    if end - start >= model.col_count {
+        model.col_count = 1;
+        model.header_cells = vec![String::new()];
+        model.aligns = vec![TableAlign::Left];
+        model.data_rows = vec![vec![String::new()]];
+    } else {
+        model.header_cells.drain(start..end);
+        model.aligns.drain(start..end);
+        for row in &mut model.data_rows {
+            row.drain(start..end);
+        }
+        model.col_count -= end - start;
+    }
+    serialize_table(&model)
+}
+
+#[cfg(test)]
+pub fn replace_columns(
+    lines: &[String],
+    start: usize,
+    columns: &[Vec<String>],
+) -> Option<Vec<String>> {
+    let mut model = parse_table_block(lines);
+    if columns.is_empty()
+        || columns
+            .iter()
+            .any(|column| column.len() != model.data_rows.len() + 1)
+    {
+        return None;
+    }
+    let end = start.checked_add(columns.len())?;
+    if end > model.col_count {
+        return None;
+    }
+    for (offset, values) in columns.iter().enumerate() {
+        model.header_cells[start + offset] = values[0].clone();
+        for (row, value) in model.data_rows.iter_mut().zip(values.iter().skip(1)) {
+            row[start + offset] = value.clone();
+        }
+    }
+    Some(serialize_table(&model))
+}
+
+pub fn delete_rows_at(lines: &[String], selected: &[usize]) -> Vec<String> {
+    let mut model = parse_table_block(lines);
+    let mut rows = all_rows(&model);
+    let selected: std::collections::HashSet<_> = selected.iter().copied().collect();
+    let kept = rows
+        .drain(..)
+        .enumerate()
+        .filter_map(|(index, row)| (!selected.contains(&index)).then_some(row))
+        .collect::<Vec<_>>();
+    if kept.is_empty() {
+        rows.push(vec![String::new(); model.col_count.max(1)]);
+    } else {
+        rows = kept;
+    }
+    set_all_rows(&mut model, rows);
+    serialize_table(&model)
+}
+
+pub fn insert_rows_at(lines: &[String], at: usize, rows: &[Vec<String>]) -> Option<Vec<String>> {
+    let mut model = parse_table_block(lines);
+    if rows.is_empty()
+        || rows
+            .iter()
+            .any(|row| row.is_empty() || row.len() > model.col_count)
+    {
+        return None;
+    }
+    let mut all = all_rows(&model);
+    all.splice(
+        at.min(all.len())..at.min(all.len()),
+        rows.iter().map(|row| pad_cells(row, model.col_count)),
+    );
+    set_all_rows(&mut model, all);
+    Some(serialize_table(&model))
+}
+
+pub fn insert_columns_at(lines: &[String], at: usize, rows: &[Vec<String>]) -> Option<Vec<String>> {
+    let mut model = parse_table_block(lines);
+    let width = rows.first()?.len();
+    if width == 0
+        || rows.len() > model.data_rows.len() + 1
+        || rows.iter().any(|row| row.len() != width)
+    {
+        return None;
+    }
+    let at = at.min(model.col_count);
+    model.header_cells.splice(at..at, rows[0].clone());
+    model
+        .aligns
+        .splice(at..at, std::iter::repeat_n(TableAlign::Left, width));
+    for (index, row) in model.data_rows.iter_mut().enumerate() {
+        let values = rows
+            .get(index + 1)
+            .cloned()
+            .unwrap_or_else(|| vec![String::new(); width]);
+        row.splice(at..at, values);
+    }
+    model.col_count += width;
+    Some(serialize_table(&model))
+}
+
+pub fn delete_columns_at(lines: &[String], selected: &[usize]) -> Vec<String> {
+    let mut model = parse_table_block(lines);
+    let selected: std::collections::HashSet<_> = selected.iter().copied().collect();
+    let kept = (0..model.col_count)
+        .filter(|index| !selected.contains(index))
+        .collect::<Vec<_>>();
+    let kept = if kept.is_empty() { vec![0] } else { kept };
+    model.header_cells = kept
+        .iter()
+        .map(|index| model.header_cells.get(*index).cloned().unwrap_or_default())
+        .collect();
+    model.aligns = kept
+        .iter()
+        .map(|index| {
+            model
+                .aligns
+                .get(*index)
+                .copied()
+                .unwrap_or(TableAlign::Left)
+        })
+        .collect();
+    for row in &mut model.data_rows {
+        *row = kept
+            .iter()
+            .map(|index| row.get(*index).cloned().unwrap_or_default())
+            .collect();
+    }
+    model.col_count = kept.len();
+    serialize_table(&model)
+}
+
+pub fn replace_rows_at(
+    lines: &[String],
+    selected: &[usize],
+    replacements: &[Vec<String>],
+) -> Option<Vec<String>> {
+    if selected.len() != replacements.len() {
+        return None;
+    }
+    let mut model = parse_table_block(lines);
+    if replacements.iter().any(|row| row.len() != model.col_count) {
+        return None;
+    }
+    for (&index, row) in selected.iter().zip(replacements) {
+        if index == 0 {
+            model.header_cells = row.clone();
+        } else {
+            *model.data_rows.get_mut(index - 1)? = row.clone();
+        }
+    }
+    Some(serialize_table(&model))
+}
+
+pub fn replace_columns_at(
+    lines: &[String],
+    selected: &[usize],
+    replacements: &[Vec<String>],
+) -> Option<Vec<String>> {
+    if selected.len() != replacements.len() {
+        return None;
+    }
+    let mut model = parse_table_block(lines);
+    if replacements
+        .iter()
+        .any(|column| column.len() != model.data_rows.len() + 1)
+    {
+        return None;
+    }
+    for (&index, column) in selected.iter().zip(replacements) {
+        if index >= model.col_count {
+            return None;
+        }
+        model.header_cells[index] = column[0].clone();
+        for (row, value) in model.data_rows.iter_mut().zip(column.iter().skip(1)) {
+            row[index] = value.clone();
+        }
+    }
+    Some(serialize_table(&model))
+}
+
+pub fn move_selected_rows(lines: &[String], selected: &[usize], to: usize) -> Vec<String> {
+    let mut model = parse_table_block(lines);
+    let rows = all_rows(&model);
+    let selected_set: std::collections::HashSet<_> = selected.iter().copied().collect();
+    let mut moving = selected
+        .iter()
+        .filter_map(|index| rows.get(*index).cloned())
+        .collect::<Vec<_>>();
+    let mut remaining = rows
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, row)| (!selected_set.contains(&index)).then_some(row))
+        .collect::<Vec<_>>();
+    let destination = to
+        .saturating_sub(selected.iter().filter(|index| **index < to).count())
+        .min(remaining.len());
+    remaining.splice(destination..destination, moving.drain(..));
+    set_all_rows(&mut model, remaining);
+    serialize_table(&model)
+}
+
+pub fn move_selected_columns(lines: &[String], selected: &[usize], to: usize) -> Vec<String> {
+    let mut model = parse_table_block(lines);
+    let selected_set: std::collections::HashSet<_> = selected.iter().copied().collect();
+    let selected = (0..model.col_count)
+        .filter(|index| selected_set.contains(index))
+        .collect::<Vec<_>>();
+    let mut order = (0..model.col_count)
+        .filter(|index| !selected_set.contains(index))
+        .collect::<Vec<_>>();
+    let destination = to
+        .saturating_sub(selected.iter().filter(|index| **index < to).count())
+        .min(order.len());
+    order.splice(destination..destination, selected);
+    model.header_cells = order
+        .iter()
+        .map(|index| model.header_cells[*index].clone())
+        .collect();
+    model.aligns = order.iter().map(|index| model.aligns[*index]).collect();
+    for row in &mut model.data_rows {
+        *row = order.iter().map(|index| row[*index].clone()).collect();
+    }
+    serialize_table(&model)
+}
+
+#[cfg(test)]
+pub fn move_columns(lines: &[String], start: usize, end: usize, to: usize) -> Vec<String> {
+    let mut model = parse_table_block(lines);
+    let count = model.col_count;
+    let start = start.min(count);
+    let end = end.min(count).max(start);
+    let to = to.min(count);
+    if start == end || (start <= to && to <= end) {
+        return serialize_table(&model);
+    }
+    let destination = if to > end { to - (end - start) } else { to };
+    let moved: Vec<_> = model.header_cells.drain(start..end).collect();
+    model.header_cells.splice(destination..destination, moved);
+    let moved: Vec<_> = model.aligns.drain(start..end).collect();
+    model.aligns.splice(destination..destination, moved);
+    for row in &mut model.data_rows {
+        let moved: Vec<_> = row.drain(start..end).collect();
+        row.splice(destination..destination, moved);
+    }
     serialize_table(&model)
 }
 
@@ -323,18 +783,31 @@ pub fn resize_table_from_picker(
     resize_table(lines, data_rows, columns)
 }
 
+#[cfg(test)]
 pub fn set_column_alignment(
     lines: &[String],
     col_idx: usize,
     alignment: TableAlign,
 ) -> Vec<String> {
+    set_columns_alignment(lines, &[col_idx], alignment)
+}
+
+pub fn set_columns_alignment(
+    lines: &[String],
+    columns: &[usize],
+    alignment: TableAlign,
+) -> Vec<String> {
     let mut model = parse_table_block(lines);
-    if col_idx < model.col_count {
-        model.aligns[col_idx] = alignment;
+    for &column in columns {
+        if column < model.col_count {
+            model.aligns[column] = alignment;
+        }
     }
     serialize_table(&model)
 }
 
+#[cfg(test)]
+#[cfg(test)]
 pub fn move_column(lines: &[String], from: usize, to: usize) -> Vec<String> {
     let mut model = parse_table_block(lines);
     if from >= model.col_count || to > model.col_count || from == to {
@@ -565,6 +1038,12 @@ mod tests {
 
         let unchanged = set_column_alignment(&right_aligned, 3, TableAlign::Left);
         assert_eq!(unchanged, right_aligned);
+
+        let selected = set_columns_alignment(&input, &[0, 2], TableAlign::Center);
+        assert_eq!(
+            parse_table_block(&selected).aligns,
+            vec![TableAlign::Center, TableAlign::Left, TableAlign::Center]
+        );
     }
 
     #[test]
@@ -660,6 +1139,201 @@ mod tests {
             vec![TableAlign::Center, TableAlign::Left, TableAlign::Right]
         );
         assert_eq!(model.data_rows[0], vec!["2", "1", "3"]);
+    }
+
+    #[test]
+    fn selected_rows_move_as_a_block_and_preserve_order() {
+        let input = lines(&["| H |", "| --- |", "| A |", "| B |", "| C |", "| D |"]);
+        let moved = move_rows(&input, 1, 3, 5);
+        let model = parse_table_block(&moved);
+        assert_eq!(
+            model.data_rows,
+            vec![
+                vec!["C".to_string()],
+                vec!["D".to_string()],
+                vec!["A".to_string()],
+                vec!["B".to_string()]
+            ]
+        );
+        let moved_up = move_rows(&input, 2, 4, 1);
+        let model = parse_table_block(&moved_up);
+        assert_eq!(
+            model.data_rows,
+            vec![
+                vec!["B".to_string()],
+                vec!["C".to_string()],
+                vec!["A".to_string()],
+                vec!["D".to_string()]
+            ]
+        );
+    }
+
+    #[test]
+    fn selected_columns_move_as_a_block_and_keep_alignment() {
+        let input = lines(&[
+            "| A | B | C | D |",
+            "| --- | :---: | ---: | --- |",
+            "| 1 | 2 | 3 | 4 |",
+        ]);
+        let moved = move_columns(&input, 1, 3, 4);
+        let model = parse_table_block(&moved);
+        assert_eq!(model.header_cells, vec!["A", "D", "B", "C"]);
+        assert_eq!(model.data_rows[0], vec!["1", "4", "2", "3"]);
+        assert_eq!(
+            model.aligns,
+            vec![
+                TableAlign::Left,
+                TableAlign::Left,
+                TableAlign::Center,
+                TableAlign::Right
+            ]
+        );
+    }
+
+    #[test]
+    fn selected_rows_and_columns_can_be_replaced_or_deleted() {
+        let input = lines(&[
+            "| A | B | C |",
+            "| --- | --- | --- |",
+            "| 1 | 2 | 3 |",
+            "| 4 | 5 | 6 |",
+        ]);
+        let replaced_rows =
+            replace_rows(&input, 1, &[vec!["x".into(), "y".into(), "z".into()]]).unwrap();
+        assert_eq!(
+            parse_table_block(&replaced_rows).data_rows[0],
+            vec!["x", "y", "z"]
+        );
+        let replaced_columns = replace_columns(
+            &input,
+            1,
+            &[vec!["Header".into(), "top".into(), "bottom".into()]],
+        )
+        .unwrap();
+        let model = parse_table_block(&replaced_columns);
+        assert_eq!(model.header_cells[1], "Header");
+        assert_eq!(model.data_rows[1][1], "bottom");
+        let deleted_rows = delete_rows(&input, 1, 2);
+        assert_eq!(
+            parse_table_block(&deleted_rows).data_rows,
+            vec![vec!["4", "5", "6"]]
+        );
+        let deleted_columns = delete_columns(&input, 1, 3);
+        assert_eq!(parse_table_block(&deleted_columns).header_cells, vec!["A"]);
+        assert!(replace_rows(&input, 2, &[vec!["too".into()]]).is_none());
+    }
+
+    #[test]
+    fn selected_row_and_column_matrix_copies_as_tsv() {
+        let input = lines(&[
+            "| A | B | C |",
+            "| --- | --- | --- |",
+            "| 1 | 2 | 3 |",
+            "| 4 | 5 | 6 |",
+        ]);
+        assert_eq!(
+            selected_table_matrix_to_tsv(&input, false, &[1, 2]),
+            "1\t2\t3\n4\t5\t6"
+        );
+        assert_eq!(
+            selected_table_matrix_to_tsv(&input, true, &[1, 2]),
+            "B\tC\n2\t3\n5\t6"
+        );
+    }
+
+    #[test]
+    fn noncontiguous_row_column_selection_copies_deletes_and_moves_only_selected_items() {
+        let input = lines(&[
+            "| A | B | C | D |",
+            "| --- | --- | --- | --- |",
+            "| a1 | b1 | c1 | d1 |",
+            "| a2 | b2 | c2 | d2 |",
+            "| a3 | b3 | c3 | d3 |",
+        ]);
+        assert_eq!(
+            selected_table_matrix_to_tsv(&input, false, &[1, 3]),
+            "a1\tb1\tc1\td1\na3\tb3\tc3\td3"
+        );
+        assert_eq!(
+            selected_table_matrix_to_tsv(&input, true, &[1, 3]),
+            "B\tD\nb1\td1\nb2\td2\nb3\td3"
+        );
+        let deleted_rows = parse_table_block(&delete_rows_at(&input, &[1, 3]));
+        assert_eq!(
+            deleted_rows
+                .data_rows
+                .iter()
+                .map(|row| row[0].as_str())
+                .collect::<Vec<_>>(),
+            vec!["a2"]
+        );
+        let deleted_columns = parse_table_block(&delete_columns_at(&input, &[1, 3]));
+        assert_eq!(deleted_columns.header_cells, vec!["A", "C"]);
+        assert_eq!(deleted_columns.data_rows[1], vec!["a2", "c2"]);
+        let moved_rows = parse_table_block(&move_selected_rows(&input, &[1, 3], 5));
+        assert_eq!(
+            moved_rows
+                .data_rows
+                .iter()
+                .map(|row| row[0].as_str())
+                .collect::<Vec<_>>(),
+            vec!["a2", "a1", "a3"]
+        );
+        let moved_columns = parse_table_block(&move_selected_columns(&input, &[1, 3], 4));
+        assert_eq!(moved_columns.header_cells, vec!["A", "C", "B", "D"]);
+        assert_eq!(moved_columns.data_rows[0], vec!["a1", "c1", "b1", "d1"]);
+    }
+
+    #[test]
+    fn inserting_clipboard_matrix_keeps_unselected_rows_and_columns() {
+        let input = lines(&[
+            "| A | B | C |",
+            "| --- | --- | --- |",
+            "| a1 | b1 | c1 |",
+            "| a2 | b2 | c2 |",
+        ]);
+        let inserted_rows =
+            parse_table_block(&insert_rows_at(&input, 2, &[vec!["new".into()]]).unwrap());
+        assert_eq!(
+            inserted_rows.data_rows,
+            vec![
+                vec!["a1", "b1", "c1"],
+                vec!["new", "", ""],
+                vec!["a2", "b2", "c2"],
+            ]
+        );
+        let inserted_columns = parse_table_block(
+            &insert_columns_at(
+                &input,
+                1,
+                &[vec!["X".into(), "Y".into()], vec!["x1".into(), "y1".into()]],
+            )
+            .unwrap(),
+        );
+        assert_eq!(inserted_columns.header_cells, vec!["A", "X", "Y", "B", "C"]);
+        assert_eq!(
+            inserted_columns.data_rows[0],
+            vec!["a1", "x1", "y1", "b1", "c1"]
+        );
+        assert_eq!(
+            inserted_columns.data_rows[1],
+            vec!["a2", "", "", "b2", "c2"]
+        );
+        let overwritten = parse_table_block(
+            &replace_rows_at(
+                &input,
+                &[1, 2],
+                &[
+                    vec!["x".into(), "y".into(), "z".into()],
+                    vec!["p".into(), "q".into(), "r".into()],
+                ],
+            )
+            .unwrap(),
+        );
+        assert_eq!(overwritten.header_cells, vec!["A", "B", "C"]);
+        assert_eq!(overwritten.data_rows[0], vec!["x", "y", "z"]);
+        assert_eq!(overwritten.data_rows[1], vec!["p", "q", "r"]);
+        assert!(replace_rows_at(&input, &[1, 2], &[vec!["x".into()]]).is_none());
     }
 
     #[test]

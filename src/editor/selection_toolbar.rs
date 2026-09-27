@@ -20,6 +20,26 @@ use super::{EditorView, PaneId};
 const POINTER_OFFSET_PX: f32 = 15.0;
 pub(super) const FORMAT_TRIGGER_HOVER_OPACITY: f32 = 0.9;
 
+fn selection_intersects_code_block(
+    buffer: &crate::buffer::Buffer,
+    decorations: &[crate::markdown::LineDecoration],
+    range: Range<usize>,
+) -> bool {
+    if range.is_empty() {
+        return false;
+    }
+    let first = buffer.offset_to_line_col(range.start).0;
+    let last = buffer.offset_to_line_col(range.end.saturating_sub(1)).0;
+    (first..=last).any(|line| {
+        decorations.get(line).is_some_and(|decoration| {
+            matches!(
+                decoration.block_type,
+                crate::markdown::BlockType::CodeBlock | crate::markdown::BlockType::CodeBlockFence
+            )
+        })
+    })
+}
+
 pub(crate) struct SelectionToolbarAnimation {
     pane_id: PaneId,
     geometry: SelectionToolbarGeometry,
@@ -712,7 +732,14 @@ impl EditorView {
     }
 
     fn selection_toolbar_visible(&self, pane_id: PaneId, window: &Window, cx: &App) -> bool {
-        if self.line_format_toolbar_line.is_some() || self.line_drag.is_some() {
+        if self.line_format_toolbar_line.is_some()
+            || self.line_drag.is_some()
+            || selection_intersects_code_block(
+                &self.buffer,
+                &self.decorations,
+                self.cursor.selection_range(),
+            )
+        {
             return false;
         }
         let search_focus = self.workspace_search_input_focused
@@ -751,6 +778,8 @@ impl EditorView {
                                     super::ContextMenuKind::Format
                                         | super::ContextMenuKind::FormatHeading
                                         | super::ContextMenuKind::FormatMore
+                                        | super::ContextMenuKind::Table { .. }
+                                        | super::ContextMenuKind::TableResize { .. }
                                         | super::ContextMenuKind::WikiLink
                                 )
                             })
@@ -1224,6 +1253,45 @@ impl Element for LineFormatToolbarElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_selections_do_not_offer_markdown_formatting() {
+        let text = "plain\n\n```rust\nlet value = 1;\n```\n\nafter";
+        let buffer = crate::buffer::Buffer::from_text(text);
+        let decorations = crate::markdown::parse_decorations(text);
+        assert!(!selection_intersects_code_block(
+            &buffer,
+            &decorations,
+            0..5
+        ));
+        assert!(!selection_intersects_code_block(
+            &buffer,
+            &decorations,
+            0..buffer.line_start(2)
+        ));
+        assert!(selection_intersects_code_block(
+            &buffer,
+            &decorations,
+            buffer.line_start(3)..buffer.line_end(3)
+        ));
+        assert!(selection_intersects_code_block(
+            &buffer,
+            &decorations,
+            buffer.line_start(2)..buffer.line_end(2)
+        ));
+        assert!(selection_intersects_code_block(
+            &buffer,
+            &decorations,
+            0..buffer.line_end(3)
+        ));
+        let buffer = crate::buffer::Buffer::from_text("    indented code\n");
+        let decorations = crate::markdown::parse_decorations(buffer.text());
+        assert!(selection_intersects_code_block(
+            &buffer,
+            &decorations,
+            4..10
+        ));
+    }
 
     fn rect(x: f32, y: f32, width: f32, height: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(x), px(y)), size(px(width), px(height)))

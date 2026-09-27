@@ -50,7 +50,7 @@ pub enum BlockContext {
     ListItem,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InlineSpan {
     pub kind: InlineKind,
     pub range: Range<usize>,
@@ -79,13 +79,13 @@ pub enum CalloutKind {
 
 /// A byte range to hide when syntax is folded, plus a trigger range that
 /// controls when to show it (cursor column in trigger_range → range is shown).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SyntaxRange {
     pub range: Range<usize>,
     pub trigger_range: Range<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WikiLinkSpan {
     pub full_range: Range<usize>,
     pub collapsed_range: Range<usize>,
@@ -108,7 +108,7 @@ pub(crate) struct LocalLinkTarget {
     pub is_embed: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FootnoteReferenceSpan {
     #[allow(dead_code)]
     pub full_range: Range<usize>,
@@ -117,7 +117,7 @@ pub struct FootnoteReferenceSpan {
     pub label: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DisplayReplacement {
     pub source_range: Range<usize>,
     pub display_text: String,
@@ -130,7 +130,7 @@ pub enum BlockPreviewKind {
     Mermaid,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BlockPreview {
     pub kind: BlockPreviewKind,
     pub cache_key: String,
@@ -178,16 +178,25 @@ fn inline_span_source_range(
 }
 
 pub(crate) fn link_target_at_column(decoration: &LineDecoration, column: usize) -> Option<&str> {
-    decoration.inline_spans.iter().find_map(|span| {
-        if span.kind != InlineKind::Link {
-            return None;
-        }
-        let source_range =
-            inline_span_source_range(decoration, span).unwrap_or_else(|| span.range.clone());
-        (column >= source_range.start && column <= source_range.end)
-            .then(|| span.target.as_deref())
-            .flatten()
-    })
+    decoration
+        .inline_spans
+        .iter()
+        .find_map(|span| {
+            if span.kind != InlineKind::Link {
+                return None;
+            }
+            let source_range =
+                inline_span_source_range(decoration, span).unwrap_or_else(|| span.range.clone());
+            (column >= source_range.start && column <= source_range.end)
+                .then(|| span.target.as_deref())
+                .flatten()
+        })
+        .or_else(|| {
+            decoration.wiki_links.iter().find_map(|link| {
+                (column >= link.full_range.start && column <= link.full_range.end)
+                    .then_some(link.target_path.as_str())
+            })
+        })
 }
 
 fn structural_excluded_ranges(decoration: &LineDecoration) -> Vec<Range<usize>> {
@@ -557,13 +566,13 @@ pub(crate) fn raw_wiki_link_ranges(
     non_overlapping
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LineDecoration {
     pub block_type: BlockType,
     payload: Option<Box<LineDecorationPayload>>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LineDecorationPayload {
     pub block_contexts: Vec<BlockContext>,
     pub callout_kind: Option<CalloutKind>,
@@ -642,7 +651,7 @@ pub enum TableAlign {
     Right,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TableLineInfo {
     pub cells: Vec<String>,
     pub cell_ranges: Vec<Range<usize>>,
@@ -665,16 +674,21 @@ impl Default for LineDecoration {
 }
 
 pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
-    parse_decorations_with_options(text, true)
+    parse_decorations_with_options(text, true, None)
 }
 
 pub(crate) fn parse_decorations_fragment(text: &str) -> Vec<LineDecoration> {
-    parse_decorations_with_options(text, false)
+    parse_decorations_with_options(text, false, None)
+}
+
+pub(crate) fn parse_decorations_with_pending_fence(text: &str, line: usize) -> Vec<LineDecoration> {
+    parse_decorations_with_options(text, true, Some(line))
 }
 
 fn parse_decorations_with_options(
     text: &str,
     detect_document_front_matter: bool,
+    pending_fence_line: Option<usize>,
 ) -> Vec<LineDecoration> {
     let line_count = text.lines().count().max(1);
     let line_count = if text.ends_with('\n') {
@@ -713,6 +727,15 @@ fn parse_decorations_with_options(
         | Options::ENABLE_TABLES;
 
     let mut parser_source = text.to_string();
+    if let Some(line) = pending_fence_line
+        && let Some(start) = line_starts.get(line).copied()
+    {
+        let content = get_line_content(text, &line_starts, line, decorations.len());
+        if let Some((_, run)) = code_fence_opener(content) {
+            let leading = content.len() - content.trim_start_matches(' ').len();
+            parser_source.replace_range(start + leading..start + leading + run, &"x".repeat(run));
+        }
+    }
     let mut open_tilde_fence: Option<std::ops::Range<usize>> = None;
     for (line, start) in line_starts.iter().copied().enumerate() {
         let content = get_line_content(text, &line_starts, line, decorations.len());
@@ -728,10 +751,9 @@ fn parse_decorations_with_options(
     if let Some(unpaired) = open_tilde_fence {
         parser_source.replace_range(unpaired, "text");
     }
-    // While a fence is still being typed it has no closer yet; neutralizing the
-    // marker (same byte length, so offsets stay valid) keeps the rest of the
-    // document from turning into code until the closing fence exists.
-    if let Some(span) = unclosed_code_fence_marker_span(text) {
+    if let Some(span) = unclosed_code_fence_marker_span(&parser_source)
+        && !parser_source[span.end..].contains('\n')
+    {
         parser_source.replace_range(span.clone(), &"x".repeat(span.len()));
     }
     let parser = Parser::new_ext(&parser_source, opts);
@@ -2569,6 +2591,48 @@ fn code_fence_opener(content: &str) -> Option<(char, usize)> {
     Some((marker, run))
 }
 
+pub(crate) fn newly_typed_fence_is_pending(
+    text: &str,
+    line: usize,
+    previous: &[LineDecoration],
+) -> bool {
+    if previous.get(line).is_some_and(|decoration| {
+        matches!(
+            decoration.block_type,
+            BlockType::CodeBlock | BlockType::CodeBlockFence
+        )
+    }) {
+        return false;
+    }
+    let Some(content) = text.lines().nth(line) else {
+        return false;
+    };
+    let Some((marker, run)) = code_fence_opener(content) else {
+        return false;
+    };
+    if fenced_code_block_line_ranges(text).iter().any(|range| {
+        range.start < line
+            && range.end == line + 1
+            && previous
+                .get(range.start)
+                .is_some_and(|decoration| decoration.block_type == BlockType::CodeBlockFence)
+    }) {
+        return false;
+    }
+    !text
+        .lines()
+        .enumerate()
+        .skip(line + 1)
+        .any(|(index, content)| {
+            !previous.get(index).is_some_and(|decoration| {
+                matches!(
+                    decoration.block_type,
+                    BlockType::CodeBlock | BlockType::CodeBlockFence
+                )
+            }) && is_code_fence_closer(content, marker, run)
+        })
+}
+
 fn is_code_fence_closer(content: &str, marker: char, open_run: usize) -> bool {
     let leading = content.len() - content.trim_start_matches(' ').len();
     if leading > 3 {
@@ -2659,7 +2723,7 @@ pub fn unclosed_code_fence_marker(text: &str, line: usize) -> Option<String> {
     }
 }
 
-fn table_pipe_offsets(content: &str) -> Vec<usize> {
+pub(crate) fn table_pipe_offsets(content: &str) -> Vec<usize> {
     let mut offsets = Vec::new();
     let mut code_delimiter = None;
     let mut index = 0usize;
@@ -2685,6 +2749,13 @@ fn table_pipe_offsets(content: &str) -> Vec<usize> {
                 _ => {}
             }
             index += run_len;
+            continue;
+        }
+        if code_delimiter.is_none()
+            && content[index..].starts_with("[[")
+            && let Some(close) = content[index + 2..].find("]]")
+        {
+            index += close + 4;
             continue;
         }
         if ch == '|' && code_delimiter.is_none() {
@@ -2915,7 +2986,16 @@ fn parse_wiki_link_parts(source: &str) -> Option<(String, Range<usize>)> {
             .rfind(|ch| ch == '/' || ch == '\\')
             .map(|index| index + 1)
             .unwrap_or(0);
-    Some((target.to_string(), collapsed_start..inner_end))
+    let basename = &inner[collapsed_start - inner_start..];
+    let filename = basename.split(['#', '?']).next().unwrap_or(basename);
+    let visible = filename
+        .strip_suffix(".md")
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or(filename);
+    Some((
+        target.to_string(),
+        collapsed_start..collapsed_start + visible.len(),
+    ))
 }
 
 fn is_wiki_image_target(target: &str) -> bool {
@@ -3929,7 +4009,7 @@ mod tests {
 
         assert_eq!(decorations[0].wiki_links.len(), 1);
         assert_eq!(decorations[0].wiki_links[0].target_path, "notes/file.md");
-        assert_eq!(decorations[0].wiki_links[0].collapsed_range, 15..22);
+        assert_eq!(decorations[0].wiki_links[0].collapsed_range, 15..19);
     }
 
     #[test]
@@ -3943,6 +4023,19 @@ mod tests {
             "notes/file.md#intro"
         );
         assert_eq!(decorations[0].wiki_links[0].collapsed_range, 29..37);
+    }
+
+    #[test]
+    fn wiki_link_displays_filename_without_markdown_suffix_or_fragment() {
+        let text = "[[notes/方案.md#标题]] and [[assets/photo.png]] and [[notes/a.md|自定义]]";
+        let decoration = &parse_decorations(text)[0];
+        let labels: Vec<_> = decoration
+            .wiki_links
+            .iter()
+            .map(|link| &text[link.collapsed_range.clone()])
+            .collect();
+        assert_eq!(labels, ["方案", "photo.png", "自定义"]);
+        assert_eq!(decoration.wiki_links[0].target_path, "notes/方案.md#标题");
     }
 
     #[test]
@@ -4906,19 +4999,61 @@ mod tests {
     }
 
     #[test]
-    fn a_fence_only_becomes_a_code_block_once_it_is_closed() {
-        // Typing ``` should not immediately restyle the line (or swallow the
-        // rest of the document) before the closing fence exists.
-        assert_eq!(parse_decorations("```\n")[0].block_type, BlockType::Normal);
+    fn a_fence_becomes_code_after_newline_or_a_matching_closer() {
+        assert_eq!(parse_decorations("```")[0].block_type, BlockType::Normal);
         assert_eq!(
-            parse_decorations("```rust\n")[0].block_type,
+            parse_decorations("```rust")[0].block_type,
             BlockType::Normal
         );
+        for source in ["```\n", "```rust\n", "~~~\n"] {
+            assert_eq!(
+                parse_decorations(source)[0].block_type,
+                BlockType::CodeBlockFence,
+                "{source}"
+            );
+        }
 
         let closed = parse_decorations("```\ncode\n```\n");
         assert_eq!(closed[0].block_type, BlockType::CodeBlockFence);
         assert_eq!(closed[1].block_type, BlockType::CodeBlock);
         assert_eq!(closed[2].block_type, BlockType::CodeBlockFence);
+    }
+
+    #[test]
+    fn typing_a_new_fence_does_not_break_previously_matched_fences() {
+        let prefix = "```rust\nlet value = 1;\n```\n\n";
+        let pending = parse_decorations(&format!("{prefix}```"));
+        assert_eq!(pending[0].block_type, BlockType::CodeBlockFence);
+        assert_eq!(pending[1].block_type, BlockType::CodeBlock);
+        assert_eq!(pending[2].block_type, BlockType::CodeBlockFence);
+        assert_eq!(pending[4].block_type, BlockType::Normal);
+        let entered = parse_decorations(&format!("{prefix}```\n/"));
+        assert_eq!(entered[4].block_type, BlockType::CodeBlockFence);
+        assert_eq!(entered[5].block_type, BlockType::CodeBlock);
+        let paired = parse_decorations(&format!("{prefix}```\n/\n```"));
+        assert_eq!(paired[6].block_type, BlockType::CodeBlockFence);
+    }
+
+    #[test]
+    fn pending_fence_in_the_middle_cannot_steal_an_existing_pair() {
+        let before = parse_decorations("``\n\n```rust\nlet value = 1;\n```\n");
+        let text = "```\n\n```rust\nlet value = 1;\n```\n";
+        assert!(super::newly_typed_fence_is_pending(text, 0, &before));
+        let pending = super::parse_decorations_with_pending_fence(text, 0);
+        assert_eq!(pending[0].block_type, BlockType::Normal);
+        assert_eq!(pending[2].block_type, BlockType::CodeBlockFence);
+        assert_eq!(pending[3].block_type, BlockType::CodeBlock);
+        assert_eq!(pending[4].block_type, BlockType::CodeBlockFence);
+        assert!(!super::newly_typed_fence_is_pending(
+            "```\nbody\n```",
+            0,
+            &parse_decorations("``\nbody\n```")
+        ));
+        assert!(!super::newly_typed_fence_is_pending(
+            "```\nbody\n```",
+            2,
+            &parse_decorations("```\nbody\n")
+        ));
     }
 
     #[test]
@@ -4976,11 +5111,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unclosed_fence_leaves_the_following_lines_alone() {
+    fn an_entered_fence_renders_the_following_lines_as_code() {
         let decorations = parse_decorations("```rust\n# not swallowed\n");
 
-        assert_eq!(decorations[0].block_type, BlockType::Normal);
-        assert_eq!(decorations[1].block_type, BlockType::Heading(1));
+        assert_eq!(decorations[0].block_type, BlockType::CodeBlockFence);
+        assert_eq!(decorations[1].block_type, BlockType::CodeBlock);
     }
 
     #[test]

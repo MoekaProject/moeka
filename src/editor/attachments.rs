@@ -127,7 +127,11 @@ impl AttachmentPolicy {
             } else {
                 folder.to_string()
             },
-            link_syntax: AttachmentLinkSyntax::from_setting(link_syntax),
+            link_syntax: if location == AttachmentLocation::ExternalFolder {
+                AttachmentLinkSyntax::Markdown
+            } else {
+                AttachmentLinkSyntax::from_setting(link_syntax)
+            },
             path_style: if location == AttachmentLocation::ExternalFolder {
                 AttachmentPathStyle::FileUrl
             } else {
@@ -229,7 +233,7 @@ impl AttachmentPolicy {
         })
     }
 
-    fn target_for(
+    pub(crate) fn target_for(
         &self,
         workspace_root: &Path,
         source_file: &Path,
@@ -719,6 +723,24 @@ mod tests {
                 crate::platform::paths::path_to_file_url(&image).unwrap()
             )
         );
+        let wiki_setting = AttachmentPolicy::from_settings(
+            "external_folder",
+            "",
+            external.path().to_str().unwrap(),
+            "wikilink",
+            "shortest",
+            false,
+        );
+        assert_eq!(wiki_setting.link_syntax, AttachmentLinkSyntax::Markdown);
+        assert_eq!(
+            wiki_setting
+                .reference_for(workspace.path(), &note, &image, true, None)
+                .unwrap(),
+            format!(
+                "![]({})",
+                crate::platform::paths::path_to_file_url(&image).unwrap()
+            )
+        );
     }
 
     #[test]
@@ -793,6 +815,34 @@ mod tests {
         assert_eq!(
             index.shortest_unique_path(&image),
             Some(PathBuf::from("示例 image.png"))
+        );
+    }
+
+    #[test]
+    fn shortest_link_uses_filename_until_a_duplicate_needs_a_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let assets = temp.path().join("assets");
+        let other = temp.path().join("other");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let image = assets.join("image.png");
+        std::fs::write(&image, b"image").unwrap();
+        let source = temp.path().join("note.md");
+        let link_policy = policy("workspace_folder", "wikilink", "shortest");
+        let index = WorkspaceLinkIndex::build(temp.path());
+        assert_eq!(
+            link_policy
+                .reference_for(temp.path(), &source, &image, true, Some(&index))
+                .unwrap(),
+            "![[image.png]]"
+        );
+        std::fs::write(other.join("image.png"), b"other").unwrap();
+        let index = WorkspaceLinkIndex::build(temp.path());
+        assert_eq!(
+            link_policy
+                .reference_for(temp.path(), &source, &image, true, Some(&index))
+                .unwrap(),
+            "![[assets/image.png]]"
         );
     }
 

@@ -9,6 +9,28 @@ pub(crate) struct BufferEdit {
     pub(crate) inserted_text: String,
 }
 
+pub(crate) fn range_after_edit(
+    range: &std::ops::Range<usize>,
+    replaced: &std::ops::Range<usize>,
+    inserted_len: usize,
+) -> std::ops::Range<usize> {
+    let start = if range.start < replaced.start {
+        range.start
+    } else if range.start <= replaced.end {
+        replaced.start
+    } else {
+        range.start - (replaced.end - replaced.start) + inserted_len
+    };
+    let end = if range.end < replaced.start {
+        range.end
+    } else if range.end <= replaced.end {
+        replaced.start + inserted_len
+    } else {
+        range.end - (replaced.end - replaced.start) + inserted_len
+    };
+    start..end
+}
+
 const OFFSET_CHUNK_TARGET: usize = 1024;
 const OFFSET_CHUNK_MAX: usize = OFFSET_CHUNK_TARGET * 2;
 
@@ -199,6 +221,7 @@ pub struct Buffer {
     line_char_starts: ChunkedOffsetIndex,
     record_edits: bool,
     recorded_edits: Vec<BufferEdit>,
+    tracked_range: Option<(std::ops::Range<usize>, bool)>,
 }
 
 impl Buffer {
@@ -210,6 +233,7 @@ impl Buffer {
             line_char_starts: ChunkedOffsetIndex::default(),
             record_edits: false,
             recorded_edits: Vec::new(),
+            tracked_range: None,
         };
         buf.rebuild_line_starts();
         buf
@@ -230,6 +254,7 @@ impl Buffer {
             line_char_starts: ChunkedOffsetIndex::default(),
             record_edits: false,
             recorded_edits: Vec::new(),
+            tracked_range: None,
         };
         buf.rebuild_line_starts();
         buf
@@ -255,6 +280,10 @@ impl Buffer {
         let start = snap_char_start(&self.text, range.start.min(self.text.len()));
         let end = snap_char_start(&self.text, range.end.min(self.text.len()));
         if start <= end {
+            if let Some((range, changed)) = &mut self.tracked_range {
+                *range = range_after_edit(range, &(start..end), text.len());
+                *changed = true;
+            }
             let deleted_text = self.record_edits.then(|| self.text[start..end].to_string());
             let start_utf16 = self.utf16_offset_for_offset(start);
             let end_utf16 = self.utf16_offset_for_offset(end);
@@ -278,6 +307,16 @@ impl Buffer {
                 });
             }
         }
+    }
+
+    pub(crate) fn track_range(&mut self, range: Option<std::ops::Range<usize>>) {
+        self.tracked_range = range.map(|range| (range, false));
+    }
+
+    pub(crate) fn tracked_range_update(&mut self) -> Option<(std::ops::Range<usize>, bool)> {
+        self.tracked_range
+            .as_mut()
+            .map(|(range, changed)| (range.clone(), std::mem::take(changed)))
     }
 
     pub(crate) fn begin_edit_recording(&mut self) {

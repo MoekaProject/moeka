@@ -429,6 +429,62 @@ pub(crate) fn translate(language: UiLanguage, key: TextKey) -> &'static str {
     }
 }
 
+pub(crate) fn table_paste_label(language: UiLanguage, overwrite: bool) -> &'static str {
+    match (language, overwrite) {
+        (UiLanguage::ChineseSimplified, false) => "粘贴插入",
+        (UiLanguage::ChineseSimplified, true) => "粘贴覆盖",
+        (UiLanguage::ChineseTraditional, false) => "貼上插入",
+        (UiLanguage::ChineseTraditional, true) => "貼上覆蓋",
+        (UiLanguage::Japanese, false) => "挿入して貼り付け",
+        (UiLanguage::Japanese, true) => "上書き貼り付け",
+        (UiLanguage::Korean, false) => "삽입하여 붙여넣기",
+        (UiLanguage::Korean, true) => "덮어쓰기 붙여넣기",
+        (UiLanguage::French, false) => "Coller et insérer",
+        (UiLanguage::French, true) => "Coller et remplacer",
+        (UiLanguage::German, false) => "Einfügen (neu)",
+        (UiLanguage::German, true) => "Einfügen (ersetzen)",
+        (UiLanguage::Spanish, false) => "Pegar e insertar",
+        (UiLanguage::Spanish, true) => "Pegar y reemplazar",
+        (UiLanguage::Portuguese, false) => "Colar e inserir",
+        (UiLanguage::Portuguese, true) => "Colar e substituir",
+        (UiLanguage::Russian, false) => "Вставить с добавлением",
+        (UiLanguage::Russian, true) => "Вставить с заменой",
+        (UiLanguage::Arabic, false) => "لصق وإدراج",
+        (UiLanguage::Arabic, true) => "لصق واستبدال",
+        (UiLanguage::Hindi, false) => "चिपकाएँ और डालें",
+        (UiLanguage::Hindi, true) => "चिपकाएँ और बदलें",
+        (UiLanguage::English, false) => "Paste Insert",
+        (UiLanguage::English, true) => "Paste Overwrite",
+    }
+}
+
+pub(crate) fn table_clear_cells_label(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "清空单元格内容",
+        UiLanguage::ChineseTraditional => "清空儲存格內容",
+        _ => "Clear Cell Contents",
+    }
+}
+
+pub(crate) fn table_paste_dimension_error(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "剪贴板尺寸与选中区段不匹配",
+        UiLanguage::ChineseTraditional => "剪貼簿尺寸與選取區段不符",
+        UiLanguage::Japanese => "クリップボードのサイズが選択範囲と一致しません",
+        UiLanguage::Korean => "클립보드 크기가 선택 영역과 일치하지 않습니다",
+        UiLanguage::French => {
+            "Les dimensions du presse-papiers ne correspondent pas à la sélection"
+        }
+        UiLanguage::German => "Zwischenablage und Auswahl haben unterschiedliche Größen",
+        UiLanguage::Spanish => "El tamaño del portapapeles no coincide con la selección",
+        UiLanguage::Portuguese => "O tamanho da área de transferência não corresponde à seleção",
+        UiLanguage::Russian => "Размер буфера обмена не соответствует выделению",
+        UiLanguage::Arabic => "أبعاد الحافظة لا تطابق التحديد",
+        UiLanguage::Hindi => "क्लिपबोर्ड का आकार चयन से मेल नहीं खाता",
+        UiLanguage::English => "Clipboard dimensions do not match the selection",
+    }
+}
+
 pub(crate) fn sidebar_visibility_action_label(language: UiLanguage, visible: bool) -> &'static str {
     match (language, visible) {
         (UiLanguage::ChineseSimplified, false) => "显示边栏",
@@ -2176,10 +2232,10 @@ pub(crate) fn attachment_settings_label(language: UiLanguage, key: &str) -> &'st
             "syntax" => "链接语法",
             "markdown" => "Markdown",
             "wikilink" => "WikiLink",
-            "path_style" => "路径格式",
+            "path_style" => "链接路径格式",
             "relative" => "文档相对",
             "workspace_absolute" => "工作区根相对",
-            "shortest" => "最短唯一路径",
+            "shortest" => "仅文件名（重名时补路径）",
             "update_links" => "移动后自动更新链接",
             "search" => "搜索...",
             _ => "",
@@ -2200,10 +2256,10 @@ pub(crate) fn attachment_settings_label(language: UiLanguage, key: &str) -> &'st
             "syntax" => "連結語法",
             "markdown" => "Markdown",
             "wikilink" => "WikiLink",
-            "path_style" => "路徑格式",
+            "path_style" => "連結路徑格式",
             "relative" => "文件相對",
             "workspace_absolute" => "工作區根相對",
-            "shortest" => "最短唯一路徑",
+            "shortest" => "僅檔名（重名時補路徑）",
             "update_links" => "移動後自動更新連結",
             "search" => "搜尋...",
             _ => "",
@@ -2224,10 +2280,10 @@ pub(crate) fn attachment_settings_label(language: UiLanguage, key: &str) -> &'st
             "syntax" => "Link Syntax",
             "markdown" => "Markdown",
             "wikilink" => "WikiLink",
-            "path_style" => "Path Format",
+            "path_style" => "Link Path Format",
             "relative" => "Document Relative",
             "workspace_absolute" => "Workspace Relative",
-            "shortest" => "Shortest Unique",
+            "shortest" => "Filename (unique path if needed)",
             "update_links" => "Update Links After Move",
             "search" => "Search...",
             _ => "",
@@ -2725,6 +2781,52 @@ pub(crate) fn preview_action_label(language: UiLanguage, key: &str) -> &'static 
         (_, "zoom_out") => "Zoom Out",
         (_, "edit_code") => "Edit Code",
         _ => "",
+    }
+}
+
+pub(crate) fn table_adjustment_label(language: UiLanguage, cells: bool) -> &'static str {
+    match (language, cells) {
+        (UiLanguage::ChineseSimplified, false) => "表格调整",
+        (UiLanguage::ChineseSimplified, true) => "单元格调整",
+        (UiLanguage::ChineseTraditional, false) => "表格調整",
+        (UiLanguage::ChineseTraditional, true) => "儲存格調整",
+        (UiLanguage::Japanese, false) => "表の調整",
+        (UiLanguage::Japanese, true) => "セルの調整",
+        (UiLanguage::Korean, false) => "표 조정",
+        (UiLanguage::Korean, true) => "셀 조정",
+        (UiLanguage::French, false) => "Ajuster le tableau",
+        (UiLanguage::French, true) => "Ajuster les cellules",
+        (UiLanguage::German, false) => "Tabelle anpassen",
+        (UiLanguage::German, true) => "Zellen anpassen",
+        (UiLanguage::Spanish, false) => "Ajustar tabla",
+        (UiLanguage::Spanish, true) => "Ajustar celdas",
+        (UiLanguage::Portuguese, false) => "Ajustar tabela",
+        (UiLanguage::Portuguese, true) => "Ajustar células",
+        (UiLanguage::Russian, false) => "Настройка таблицы",
+        (UiLanguage::Russian, true) => "Настройка ячеек",
+        (UiLanguage::Arabic, false) => "ضبط الجدول",
+        (UiLanguage::Arabic, true) => "ضبط الخلايا",
+        (UiLanguage::Hindi, false) => "तालिका समायोजन",
+        (UiLanguage::Hindi, true) => "सेल समायोजन",
+        (UiLanguage::English, false) => "Adjust Table",
+        (UiLanguage::English, true) => "Adjust Cells",
+    }
+}
+
+pub(crate) fn table_source_view_label(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ChineseSimplified => "表格源码视图",
+        UiLanguage::ChineseTraditional => "表格原始碼檢視",
+        UiLanguage::Japanese => "表のソース表示",
+        UiLanguage::Korean => "표 소스 보기",
+        UiLanguage::French => "Source du tableau",
+        UiLanguage::German => "Tabellenquelltext",
+        UiLanguage::Spanish => "Código fuente de tabla",
+        UiLanguage::Portuguese => "Código-fonte da tabela",
+        UiLanguage::Russian => "Исходный код таблицы",
+        UiLanguage::Arabic => "عرض مصدر الجدول",
+        UiLanguage::Hindi => "तालिका स्रोत दृश्य",
+        UiLanguage::English => "Table Source View",
     }
 }
 

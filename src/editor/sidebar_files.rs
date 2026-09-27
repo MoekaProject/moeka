@@ -5,6 +5,65 @@ use gpui::{AppContext, Context, Window};
 
 use super::*;
 
+fn trash_is_unavailable(error: &anyhow::Error) -> bool {
+    if error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<trash::Error>())
+        .any(|trash_error| {
+            matches!(
+                trash_error,
+                trash::Error::Os {
+                    code: 18 | 45 | 95,
+                    ..
+                }
+            )
+        })
+    {
+        return true;
+    }
+    if error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|io| {
+            io.kind() == std::io::ErrorKind::Unsupported
+                || matches!(io.raw_os_error(), Some(18 | 45 | 95))
+        })
+    {
+        return true;
+    }
+    let message = error.to_string().to_ascii_lowercase();
+    [
+        "trash not supported",
+        "trash unavailable",
+        "no trash",
+        "recycle bin unavailable",
+    ]
+    .iter()
+    .any(|phrase| message.contains(phrase))
+        || (message.contains(".trash")
+            && (message.contains("no such file") || message.contains("not supported")))
+}
+
+#[cfg(test)]
+#[test]
+fn only_unsupported_trash_errors_allow_direct_delete() {
+    assert!(trash_is_unavailable(&anyhow::Error::from(
+        std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported",)
+    )));
+    assert!(!trash_is_unavailable(&anyhow::Error::from(
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied",)
+    )));
+    assert!(trash_is_unavailable(&anyhow::anyhow!(
+        "/mnt/sshfs/.Trash: No such file or directory"
+    )));
+    assert!(trash_is_unavailable(&anyhow::Error::from(
+        trash::Error::Os {
+            code: 45,
+            description: "operation not supported".into(),
+        }
+    )));
+}
+
 impl EditorView {
     fn reveal_sidebar_create_row(&mut self, parent: PathBuf, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
@@ -157,10 +216,25 @@ impl EditorView {
     }
 
     pub(crate) fn delete_paths_to_trash(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let mut deleted_any = false;
+        let mut deleted = Vec::new();
         for path in paths {
-            match crate::platform::trash::move_to_trash(path) {
-                Ok(()) => deleted_any = true,
+            let result = crate::platform::trash::move_to_trash(path).or_else(|trash_error| {
+                if !trash_is_unavailable(&trash_error) {
+                    return Err(trash_error);
+                }
+                let direct = if path.is_dir() {
+                    std::fs::remove_dir_all(path)
+                } else {
+                    std::fs::remove_file(path)
+                };
+                direct.map_err(|error| {
+                    anyhow::anyhow!(
+                        "trash unavailable ({trash_error}); direct delete failed: {error}"
+                    )
+                })
+            });
+            match result {
+                Ok(()) => deleted.push(path.clone()),
                 Err(error) => {
                     let message = format!(
                         "{}: {error}",
@@ -171,14 +245,14 @@ impl EditorView {
             }
         }
 
-        if !deleted_any {
+        if deleted.is_empty() {
             self.context_menu = None;
             cx.notify();
             return;
         }
 
         let mut starred_changed = false;
-        for path in paths {
+        for path in &deleted {
             starred_changed |= self.app_settings.remove_starred_prefix(path);
         }
         if starred_changed {
@@ -190,7 +264,7 @@ impl EditorView {
             self.with_pane(pane_id, |this| {
                 this.tabs.retain(|tab| {
                     tab.path.as_ref().is_none_or(|candidate| {
-                        !paths.iter().any(|path| candidate.starts_with(path))
+                        !deleted.iter().any(|path| candidate.starts_with(path))
                     })
                 });
                 this.active_tab_index_cache.set(None);
@@ -209,19 +283,19 @@ impl EditorView {
             self.remove_pane_if_empty(pane_id, cx);
         }
         self.selected_sidebar_paths
-            .retain(|selected| !paths.iter().any(|path| selected.starts_with(path)));
+            .retain(|selected| !deleted.iter().any(|path| selected.starts_with(path)));
 
         if self
             .focused_sidebar_path
             .as_ref()
-            .is_some_and(|focused| paths.iter().any(|path| focused.starts_with(path)))
+            .is_some_and(|focused| deleted.iter().any(|path| focused.starts_with(path)))
         {
             self.focused_sidebar_path = None;
         }
         if self
             .sidebar_selection_anchor
             .as_ref()
-            .is_some_and(|anchor| paths.iter().any(|path| anchor.starts_with(path)))
+            .is_some_and(|anchor| deleted.iter().any(|path| anchor.starts_with(path)))
         {
             self.sidebar_selection_anchor = None;
         }

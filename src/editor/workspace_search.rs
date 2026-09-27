@@ -1243,6 +1243,14 @@ impl EditorView {
             }
         }
 
+        let scrollbar = self.render_scrollbar_for_handle(
+            PanelScrollbarKind::WorkspaceSearch,
+            &self.workspace_search_scroll_handle,
+            f32::from(self.workspace_search_scroll_handle.bounds().size.height),
+            0.0,
+            self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
+            cx,
+        );
         div()
             .key_context("SearchBar")
             .id("workspace-search-panel")
@@ -1254,16 +1262,27 @@ impl EditorView {
             .child(status)
             .child(
                 div()
-                    .id("workspace-search-results")
+                    .id("workspace-search-results-container")
+                    .relative()
                     .flex_1()
                     .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                        this.reveal_panel_scrollbar(PanelScrollbarKind::Sidebar, cx);
-                        this.maybe_extend_workspace_search_results(cx);
-                    }))
-                    .track_scroll(&self.workspace_search_scroll_handle)
-                    .children(result_children),
+                    .child(
+                        div()
+                            .id("workspace-search-results")
+                            .h_full()
+                            .min_h(px(0.0))
+                            .overflow_y_scroll()
+                            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                                this.reveal_panel_scrollbar(
+                                    PanelScrollbarKind::WorkspaceSearch,
+                                    cx,
+                                );
+                                this.maybe_extend_workspace_search_results(cx);
+                            }))
+                            .track_scroll(&self.workspace_search_scroll_handle)
+                            .children(result_children),
+                    )
+                    .when_some(scrollbar, |this, scrollbar| this.child(scrollbar)),
             )
             .into_any_element()
     }

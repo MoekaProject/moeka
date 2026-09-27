@@ -10,6 +10,8 @@ impl EditorView {
     // ── Action handlers ─────────────────────────────────────────────
 
     fn finish_horizontal_cursor_move(&mut self, cx: &mut Context<Self>) {
+        self.table_handles.selection = None;
+        self.table_cell_selection = None;
         self.pending_scroll_to_cursor = false;
         self.pending_center_cursor_in_view = false;
         self.pause_blinking(cx);
@@ -33,6 +35,7 @@ impl EditorView {
         };
 
         self.restore_snapshot(snapshot);
+        self.finish_table_source_history();
         if self.search_visible {
             self.run_search(cx);
         }
@@ -85,6 +88,7 @@ impl EditorView {
         self.ime_composition_snapshot = None;
         self.dedup_cursors();
         self.reparse();
+        self.finish_table_source_history();
         if self.search_visible {
             self.run_search(cx);
         }
@@ -108,6 +112,15 @@ impl EditorView {
     }
 
     pub(crate) fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cancel_table_handle_press(cx) {
+            return;
+        }
+        let cleared_border = self.table_handles.selection.take().is_some();
+        let cleared_cells = self.table_cell_selection.take().is_some();
+        if cleared_border || cleared_cells {
+            cx.notify();
+            return;
+        }
         if self.cancel_line_drag(cx) {
             return;
         }
@@ -403,6 +416,12 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if self.delete_table_cell_selection(cx) {
+            return;
+        }
+        if self.delete_table_border_selection(cx) {
+            return;
+        }
         if let Some(boundary) = self.table_boundary_caret {
             if boundary.side == TableBoundarySide::Below {
                 self.table_boundary_caret = None;
@@ -478,20 +497,6 @@ impl EditorView {
             self.multi_cursor_backspace();
             self.reparse();
             self.scroll_to_cursor();
-            self.pause_blinking(cx);
-            return;
-        }
-
-        if let Some((table_start_line, is_column, index)) = self.selected_handle.take() {
-            if is_column && self.block_is_front_matter(table_start_line) {
-                self.pause_blinking(cx);
-                return;
-            }
-            if is_column {
-                self.table_delete_column(table_start_line, index, cx);
-            } else {
-                self.table_delete_row(table_start_line, index, cx);
-            }
             self.pause_blinking(cx);
             return;
         }
@@ -623,6 +628,12 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if self.delete_table_cell_selection(cx) {
+            return;
+        }
+        if self.delete_table_border_selection(cx) {
+            return;
+        }
         if let Some(boundary) = self.table_boundary_caret {
             if boundary.side == TableBoundarySide::Below {
                 self.table_boundary_caret = None;
@@ -646,19 +657,6 @@ impl EditorView {
             return;
         }
         if self.delete_adjacent_table_cell_break(false, cx) {
-            return;
-        }
-        if let Some((table_start_line, is_column, index)) = self.selected_handle.take() {
-            if is_column && self.block_is_front_matter(table_start_line) {
-                self.pause_blinking(cx);
-                return;
-            }
-            if is_column {
-                self.table_delete_column(table_start_line, index, cx);
-            } else {
-                self.table_delete_row(table_start_line, index, cx);
-            }
-            self.pause_blinking(cx);
             return;
         }
         self.checkpoint();
@@ -872,6 +870,8 @@ impl EditorView {
             self.whiteboard_nudge(0.0, -whiteboard_geometry::GRID, cx);
             return;
         }
+        self.table_handles.selection = None;
+        self.table_cell_selection = None;
         self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_up(cx);
@@ -942,6 +942,8 @@ impl EditorView {
             self.whiteboard_nudge(0.0, whiteboard_geometry::GRID, cx);
             return;
         }
+        self.table_handles.selection = None;
+        self.table_cell_selection = None;
         self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_down(cx);
@@ -1277,6 +1279,10 @@ impl EditorView {
         if self.insert_table_cell_break(cx) {
             return;
         }
+        let pending_fence = self
+            .pending_code_fence
+            .take()
+            .is_some_and(|(line, _)| line == self.cursor_line());
         self.checkpoint();
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
@@ -1464,11 +1470,14 @@ impl EditorView {
             _ => {}
         }
 
-        // Typing ``` only opens the fence; Enter is what completes it, so the
-        // caret lands on an empty body line between the two markers.
-        if self.cursor.offset == line_end
-            && let Some(closer) =
-                markdown::unclosed_code_fence_marker(self.buffer.text(), cursor_line)
+        if self.active_tab_is_markdown()
+            && self.table_source.is_none()
+            && self.cursor.offset == line_end
+            && let Some(closer) = super::input_ime::code_fence_enter_closer(
+                self.buffer.text(),
+                cursor_line,
+                pending_fence,
+            )
         {
             let continuation = format!("\n\n{closer}");
             let insert_range = self.cursor.selection_range();
@@ -1508,6 +1517,7 @@ impl EditorView {
         if self.insert_table_cell_break(cx) {
             return;
         }
+        self.pending_code_fence = None;
         self.checkpoint();
         self.multi_cursor_enter();
         self.reparse();
@@ -1584,6 +1594,14 @@ impl EditorView {
             self.whiteboard_copy(cx);
             return;
         }
+        if let Some(text) = self.copy_table_cell_selection() {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            return;
+        }
+        if let Some(text) = self.copy_table_border_selection() {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            return;
+        }
         if let Some(range) = self.table_boundary_block_range() {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                 self.buffer.text_for_range(range).to_string(),
@@ -1596,6 +1614,14 @@ impl EditorView {
     pub(crate) fn on_cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
         if self.active_tab_is_whiteboard() {
             self.whiteboard_cut(cx);
+            return;
+        }
+        if self.table_cell_selection.is_some() {
+            self.cut_table_cell_selection(cx);
+            return;
+        }
+        if self.table_handles.selection.is_some() {
+            self.cut_table_border_selection(cx);
             return;
         }
         if let Some(boundary) = self.table_boundary_caret
@@ -1632,6 +1658,14 @@ impl EditorView {
             return;
         }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            if self.table_cell_selection.is_some() {
+                self.paste_table_cell_selection(&text, true, cx);
+                return;
+            }
+            if self.table_handles.selection.is_some() {
+                self.paste_table_border_selection(&text, cx);
+                return;
+            }
             if self.table_boundary_caret.is_some() && !self.insert_line_at_table_boundary(cx) {
                 return;
             }
@@ -2159,9 +2193,7 @@ impl EditorView {
         if !self.begin_markdown_format_edit(cx) {
             return;
         }
-        self.checkpoint();
-        self.insert_link_or_image("[", "](https://)", "title");
-        self.pause_blinking(cx);
+        self.execute_format_menu_action(FormatMenuAction::Link, cx);
     }
 
     pub(crate) fn on_toggle_image(
@@ -2174,7 +2206,11 @@ impl EditorView {
             return;
         }
         self.checkpoint();
-        self.insert_link_or_image("![", "](image.png)", "alt");
+        if self.app_settings.link_syntax == "wikilink" {
+            self.insert_wiki_image();
+        } else {
+            self.insert_link_or_image("![", "](image.png)", "alt");
+        }
         self.pause_blinking(cx);
     }
 

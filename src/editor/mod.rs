@@ -35,6 +35,7 @@ mod menus;
 mod notifications;
 mod outline;
 mod pane;
+mod preview_overlay;
 mod profiler;
 mod quick_open;
 mod render;
@@ -56,6 +57,8 @@ mod sidebar_state;
 mod sidebar_tree;
 mod sidebar_ui;
 mod status_bar;
+mod table_handles;
+mod table_source;
 mod tabs;
 mod temp_store;
 mod text_layout;
@@ -115,8 +118,14 @@ use crate::theme::{EditorThemeMode, Theme, ThemeColorField, ThemeKind};
 const CODE_BLOCK_COPY_FEEDBACK_MS: u64 = 1000;
 const PANEL_ANIMATION_FRAME_MS: u64 = 8;
 /// Maximum gap between consecutive single-character edits for them to be merged
-/// into one undo step (time-interval undo grouping).
-const UNDO_GROUP_INTERVAL: Duration = Duration::from_millis(300);
+/// into one undo step (word and pause grouping).
+const UNDO_GROUP_INTERVAL: Duration = Duration::from_millis(1000);
+
+fn typing_starts_undo_group(text: &str) -> bool {
+    text.chars()
+        .next()
+        .is_some_and(|character| character.is_whitespace() || character.is_ascii_punctuation())
+}
 const SIDEBAR_GIT_STATUS_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 const GIT_HISTORY_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 const GENERATED_PREVIEW_RENDER_BUDGET: usize = 24;
@@ -138,6 +147,13 @@ pub(crate) struct GeneratedPreviewTabCache {
     views: HashMap<String, ImageViewState>,
     code_mode_preview_key: Option<String>,
     rerender_pending: bool,
+}
+
+impl GeneratedPreviewTabCache {
+    fn invalidate_render_resources(&mut self, retired: &mut Vec<Arc<RenderImage>>) {
+        self.svgs.clear();
+        retired.extend(self.overlays.drain().map(|(_, (_, image))| image));
+    }
 }
 const LINE_DISPLAY_CACHE_TRIM_MIN_LINES: usize = 20_000;
 const LINE_DISPLAY_CACHE_MAX_CACHED_LINES: usize = 2_000;
@@ -394,6 +410,11 @@ pub(crate) enum ContextMenuKind {
         row: usize,
         col: usize,
     },
+    TableBorder {
+        table_start_line: usize,
+        is_column: bool,
+        index: usize,
+    },
     Terminal {
         tab_id: String,
     },
@@ -404,12 +425,12 @@ pub(crate) enum ContextMenuKind {
 pub(crate) enum TableDragState {
     DraggingColumn {
         table_start_line: usize,
-        source_col: usize,
+        source_indices: Vec<usize>,
         current_x: f32,
     },
     DraggingRow {
         table_start_line: usize,
-        source_row: usize,
+        source_indices: Vec<usize>,
         current_y: f32,
     },
 }
@@ -1492,6 +1513,7 @@ pub(crate) struct PendingHistoryTransaction {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PendingTypingScrollGuard {
     pub(crate) line: usize,
+    pub(crate) visual_row: usize,
     pub(crate) visual_geometry_ready: bool,
     pub(crate) viewport_height: f32,
     pub(crate) scroll_offset: f32,
@@ -1521,6 +1543,27 @@ pub(crate) struct PendingLineDisplayTransfer {
     /// absolute byte offsets stored in suffix `block_preview` ranges when
     /// splicing decorations incrementally.
     byte_delta: isize,
+}
+
+fn stable_markdown_layout_context(
+    decorations: &[LineDecoration],
+    line: usize,
+) -> Option<[Option<LineDecoration>; 3]> {
+    let decoration = decorations.get(line)?;
+    if decoration.block_type != BlockType::Normal
+        || !decoration.block_contexts.is_empty()
+        || decoration.table_info.is_some()
+        || decoration.block_preview.is_some()
+    {
+        return None;
+    }
+    Some([
+        line.checked_sub(1)
+            .and_then(|previous| decorations.get(previous))
+            .cloned(),
+        Some(decoration.clone()),
+        decorations.get(line + 1).cloned(),
+    ])
 }
 
 impl PendingLineDisplayTransfer {
@@ -1597,6 +1640,17 @@ impl PendingLineDisplayTransfer {
         }
         if decorations.is_empty() {
             decorations.push(LineDecoration::default());
+        }
+    }
+}
+
+fn restore_stable_layout_lines<T>(
+    layout: &mut [Option<T>],
+    retained: impl IntoIterator<Item = (usize, T)>,
+) {
+    for (line, info) in retained {
+        if let Some(slot) = layout.get_mut(line) {
+            *slot = Some(info);
         }
     }
 }
@@ -1928,6 +1982,7 @@ pub struct EditorView {
     pub(crate) line_display_info: LineDisplayCache,
     pub(crate) visible_line_geometry: Vec<(usize, f32, f32)>,
     pending_line_display_transfer: Option<PendingLineDisplayTransfer>,
+    pub(crate) pending_code_fence: Option<(usize, String)>,
     line_display_trim_update_counter: Cell<usize>,
     line_geometry_cache_dirty: Cell<bool>,
     line_geometry_cache: RefCell<LineGeometryCacheState>,
@@ -2028,17 +2083,21 @@ pub struct EditorView {
     /// Table cell click areas: (bounds, table_start_line, visual_row, col)
     pub(crate) table_click_areas: Vec<(gpui::Bounds<Pixels>, usize, usize, usize)>,
     /// Table column handle areas: (bounds, table_start_line, col_index)
-    pub(crate) table_col_handle_areas: Vec<(gpui::Bounds<Pixels>, usize, usize)>,
+    pub(crate) table_column_border_segments: Vec<(gpui::Bounds<Pixels>, usize, usize)>,
     /// Table row handle areas: (bounds, table_start_line, visual_row)
-    pub(crate) table_row_handle_areas: Vec<(gpui::Bounds<Pixels>, usize, usize)>,
+    pub(crate) table_row_border_segments: Vec<(gpui::Bounds<Pixels>, usize, usize)>,
     /// Top-left table controls: (bounds, table_start_line).
-    pub(crate) table_corner_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
     /// Blank-space hit areas beside a table: (bounds, boundary caret).
     pub(crate) table_boundary_caret_areas: Vec<(gpui::Bounds<Pixels>, TableBoundaryCaret)>,
+    pub(crate) table_cursor_paint_bounds: Option<(usize, Bounds<Pixels>)>,
+    pub(crate) table_cell_selection: Option<table_handles::TableCellSelection>,
     pub(crate) table_boundary_caret: Option<TableBoundaryCaret>,
     pub(crate) table_boundary_drag_origin: Option<TableBoundaryCaret>,
     /// Active table drag operation
     pub(crate) table_drag: Option<TableDragState>,
+    pub(crate) table_handles: table_handles::TableHandles,
+    pub(crate) table_border_segment_areas: Vec<(gpui::Bounds<Pixels>, usize, bool, usize)>,
+    pub(crate) table_source: Option<table_source::TableSource>,
     /// Which table (by table_start_line) the mouse is hovering near (for handle visibility)
     pub(crate) hovering_table_start: Option<usize>,
     /// Which specific handle the mouse is over: (table_start_line, is_column, index)
@@ -2124,6 +2183,7 @@ pub struct EditorView {
     pub(crate) selection_toolbar_popup: Option<selection_toolbar::SelectionToolbarPopup>,
     pub(crate) selection_toolbar_animation: Option<selection_toolbar::SelectionToolbarAnimation>,
     pub(crate) selection_toolbar_menu_hover: menus::SelectionToolbarMenuHover,
+    pub(crate) table_adjustment_menu: menus::TableAdjustmentMenu,
     pub(crate) line_format_toolbar_geometries: Vec<selection_toolbar::LineFormatToolbarGeometry>,
     pub(crate) line_drag: Option<line_drag::LineDrag>,
     pub(crate) line_drag_scroll_task: Option<Task<()>>,
@@ -2230,6 +2290,7 @@ pub struct EditorView {
     pub(crate) notifications: Vec<notifications::Notification>,
     pub(crate) next_notification_id: usize,
     pub(crate) pending_close_tab_ids: Vec<String>,
+    pub(crate) close_tab_return_to: Option<String>,
     /// 多选：最后一个选中的 focus 路径
     pub(crate) focused_sidebar_path: Option<PathBuf>,
     pub(crate) suppress_next_sidebar_sync_path: Option<PathBuf>,
@@ -2743,6 +2804,7 @@ impl EditorView {
             line_display_info: Vec::new(),
             visible_line_geometry: Vec::new(),
             pending_line_display_transfer: None,
+            pending_code_fence: None,
             line_display_trim_update_counter: Cell::new(0),
             line_geometry_cache_dirty: Cell::new(true),
             line_geometry_cache: RefCell::new(LineGeometryCacheState::default()),
@@ -2818,15 +2880,19 @@ impl EditorView {
             copied_code_block_start: None,
             code_block_copy_feedback_epoch: 0,
             table_click_areas: Vec::new(),
-            table_col_handle_areas: Vec::new(),
-            table_row_handle_areas: Vec::new(),
-            table_corner_areas: Vec::new(),
+            table_column_border_segments: Vec::new(),
+            table_row_border_segments: Vec::new(),
             table_boundary_caret_areas: Vec::new(),
+            table_cursor_paint_bounds: None,
+            table_cell_selection: None,
             table_boundary_caret: None,
             table_boundary_drag_origin: None,
             table_drag: None,
             hovering_table_start: None,
             hovering_handle: None,
+            table_handles: table_handles::TableHandles::default(),
+            table_border_segment_areas: Vec::new(),
+            table_source: None,
             table_size_hover: None,
             selected_handle: None,
             image_cache: HashMap::new(),
@@ -2862,6 +2928,7 @@ impl EditorView {
             selection_toolbar_popup: None,
             selection_toolbar_animation: None,
             selection_toolbar_menu_hover: menus::SelectionToolbarMenuHover::default(),
+            table_adjustment_menu: menus::TableAdjustmentMenu::default(),
             line_format_toolbar_geometries: Vec::new(),
             line_drag: None,
             line_drag_scroll_task: None,
@@ -2996,6 +3063,7 @@ impl EditorView {
             notifications: Vec::new(),
             next_notification_id: 0,
             pending_close_tab_ids: Vec::new(),
+            close_tab_return_to: None,
             focused_sidebar_path: None,
             suppress_next_sidebar_sync_path: None,
             sidebar_selection_anchor: None,
@@ -5456,6 +5524,7 @@ impl EditorView {
     pub(crate) fn dismiss_dialog(&mut self, cx: &mut Context<Self>) {
         self.dialog = None;
         self.pending_close_tab_ids.clear();
+        self.restore_tab_after_close(cx);
         cx.notify();
     }
 
@@ -5497,6 +5566,7 @@ impl EditorView {
             }
             DialogAction::DismissOnly => {}
         }
+        self.restore_tab_after_close(cx);
         cx.notify();
     }
 
@@ -5513,23 +5583,26 @@ impl EditorView {
                 enum SaveAndClose {
                     Missing,
                     Saved,
+                    Failed,
                     NeedsDialog { text: String, default_name: String },
                 }
                 let outcome = match self.all_tabs_mut().find(|t| t.id == tab_id) {
                     None => SaveAndClose::Missing,
                     Some(tab) => {
                         if let Some(ref path) = tab.path {
-                            if std::fs::write(path, &tab.snapshot.text).is_ok() {
+                            if std::fs::write(path, &tab.snapshot.text).is_err() {
+                                SaveAndClose::Failed
+                            } else {
                                 tab.is_dirty = false;
+                                let snapshot = tab.snapshot.clone();
+                                let _ = history_store::persist_tab_history(
+                                    &tab_id,
+                                    tab.path.as_deref(),
+                                    &mut tab.history,
+                                    &snapshot,
+                                );
+                                SaveAndClose::Saved
                             }
-                            let snapshot = tab.snapshot.clone();
-                            let _ = history_store::persist_tab_history(
-                                &tab_id,
-                                tab.path.as_deref(),
-                                &mut tab.history,
-                                &snapshot,
-                            );
-                            SaveAndClose::Saved
                         } else {
                             SaveAndClose::NeedsDialog {
                                 text: tab.snapshot.text.clone(),
@@ -5539,6 +5612,7 @@ impl EditorView {
                     }
                 };
                 match outcome {
+                    SaveAndClose::Failed => self.restore_tab_after_close(cx),
                     SaveAndClose::Saved => {
                         self.clear_temp_file_for_tab(&tab_id);
                         session_store::persist_session(self);
@@ -5576,7 +5650,15 @@ impl EditorView {
                                         editor.close_tab(&tab_id_clone, cx);
                                     })
                                     .ok();
+                                } else {
+                                    this.update(cx, |editor, cx| {
+                                        editor.restore_tab_after_close(cx)
+                                    })
+                                    .ok();
                                 }
+                            } else {
+                                this.update(cx, |editor, cx| editor.restore_tab_after_close(cx))
+                                    .ok();
                             }
                         })
                         .detach();
@@ -5628,7 +5710,10 @@ impl EditorView {
             .flatten()
             .filter(|cell| selection.start >= cell.start && selection.end <= cell.end)
             .map(|_| markdown_table_cell_from_paste(&normalized));
-        let markdown_table = if pasted_cell_text.is_none() && self.active_tab_is_markdown() {
+        let markdown_table = if pasted_cell_text.is_none()
+            && self.active_tab_is_markdown()
+            && self.table_source.is_none()
+        {
             markdown_table_from_tsv(&normalized)
         } else {
             None
@@ -5642,6 +5727,9 @@ impl EditorView {
         if self.has_extra_cursors() {
             self.multi_cursor_insert(text);
         } else {
+            if self.table_source.is_some() {
+                self.queue_non_markdown_line_display_transfer(&selection, text);
+            }
             self.cursor.insert(&mut self.buffer, text);
         }
         self.reparse();
@@ -6491,6 +6579,7 @@ impl EditorView {
     }
 
     pub(crate) fn pause_blinking(&mut self, cx: &mut Context<Self>) {
+        self.format_table_source_after_edit();
         self.commit_history_transaction();
         self.schedule_temp_save_for_active_tab(cx);
         self.schedule_auto_save_for_active_tab(cx);
@@ -6500,6 +6589,27 @@ impl EditorView {
     // ── Shared utilities ────────────────────────────────────────────
 
     pub(crate) fn reparse(&mut self) {
+        self.reconcile_table_source_edits();
+        self.reset_table_handles();
+        self.table_cursor_paint_bounds = None;
+        if self
+            .table_source
+            .as_ref()
+            .is_some_and(|source| !source.valid_for(&self.buffer))
+        {
+            self.table_source = None;
+            self.pending_line_display_transfer = None;
+            self.clear_active_tab_layout_cache();
+        }
+        if self
+            .pending_code_fence
+            .as_ref()
+            .is_some_and(|(line, text)| {
+                *line >= self.buffer.line_count() || self.buffer.line_content(*line) != text
+            })
+        {
+            self.pending_code_fence = None;
+        }
         self.line_drag = None;
         self.line_drag_scroll_task = None;
         self.line_drop_flash = None;
@@ -6510,6 +6620,33 @@ impl EditorView {
             .cloned()
             .unwrap_or(FileKind::Markdown);
         let pending_line_display_transfer = self.pending_line_display_transfer.take();
+        let stable_layout_candidates = pending_line_display_transfer
+            .as_ref()
+            .filter(|_| file_kind.is_markdown())
+            .map(|transfer| {
+                transfer
+                    .cached_lines
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(line, info)| {
+                        if info.is_none()
+                            || (transfer.start_line..transfer.old_end_line_exclusive)
+                                .contains(&line)
+                        {
+                            return None;
+                        }
+                        let context = stable_markdown_layout_context(&self.decorations, line)?;
+                        let new_line = shift_line_after_transfer(
+                            line,
+                            transfer.start_line,
+                            transfer.old_end_line_exclusive,
+                            transfer.new_end_line_exclusive,
+                        );
+                        Some((line, new_line, context))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let generated_preview_edit_range = pending_line_display_transfer.as_ref().map(|transfer| {
             transfer.start_line
                 ..transfer
@@ -6566,6 +6703,21 @@ impl EditorView {
             if self.decorations.is_empty() {
                 self.decorations.push(LineDecoration::default());
             }
+        } else if file_kind.is_markdown() && self.table_source.is_some() {
+            self.lazy_markdown_decorations = None;
+            let decorations = self
+                .table_source
+                .as_ref()
+                .unwrap()
+                .decorations(&self.buffer);
+            self.set_decorations(decorations);
+        } else if file_kind.is_markdown()
+            && let Some((line, _)) = &self.pending_code_fence
+        {
+            self.set_decorations(markdown::parse_decorations_with_pending_fence(
+                self.buffer.text(),
+                *line,
+            ));
         } else {
             // Unified decoration pipeline for markdown / text / code tabs:
             // apply the cheapest sound incremental strategy for the queued
@@ -6664,6 +6816,7 @@ impl EditorView {
             && let Some(transfer) = pending_line_display_transfer.as_ref()
         {
             self.markdown_outline_epoch = self.markdown_outline_epoch.wrapping_add(1);
+            self.outline_headings_cache_dirty.set(true);
             if let Some(index) = self.markdown_outline_index.borrow_mut().as_mut() {
                 index.update_after_edit(
                     &self.buffer,
@@ -6683,8 +6836,25 @@ impl EditorView {
         // keystroke. Edits with non-local effects (reference/footnote definitions,
         // fence toggles) do not queue a transfer and still fall back to a full
         // re-layout.
-        if let Some(transfer) = pending_line_display_transfer {
-            self.set_line_display_info(transfer.apply(self.buffer.line_count()));
+        if let Some(mut transfer) = pending_line_display_transfer {
+            let retained = stable_layout_candidates
+                .into_iter()
+                .filter_map(|(old_line, new_line, context)| {
+                    if stable_markdown_layout_context(&self.decorations, new_line).as_ref()
+                        != Some(&context)
+                    {
+                        return None;
+                    }
+                    transfer
+                        .cached_lines
+                        .get_mut(old_line)?
+                        .take()
+                        .map(|info| (new_line, info))
+                })
+                .collect::<Vec<_>>();
+            let mut layout = transfer.apply(self.buffer.line_count());
+            restore_stable_layout_lines(&mut layout, retained);
+            self.set_line_display_info(layout);
         } else if preserved_line_display_info.len() == self.buffer.line_count()
             && !preserved_line_display_info.is_empty()
         {
@@ -6847,7 +7017,12 @@ impl EditorView {
     pub(crate) fn code_block_word_wrap_enabled(&self, start_line: usize) -> bool {
         self.code_block_display_override(start_line)
             .word_wrap
-            .unwrap_or(true)
+            .unwrap_or_else(|| {
+                !self
+                    .table_source
+                    .as_ref()
+                    .is_some_and(|source| source.contains_line(&self.buffer, start_line))
+            })
     }
 
     pub(crate) fn apply_code_block_horizontal_extents(
@@ -6958,35 +7133,51 @@ impl EditorView {
     }
 
     pub(crate) fn rerender_generated_block_previews(&mut self) {
+        self.preserve_scroll_for_preview_refresh();
+        self.refresh_generated_block_previews_with_mode(true);
+    }
+
+    fn preserve_scroll_for_preview_refresh(&mut self) {
+        self.scroll_anim_epoch = self.scroll_anim_epoch.wrapping_add(1);
+        self.pending_click_anchor = None;
+        self.pending_scroll_to_cursor = false;
+        self.pending_center_cursor_in_view = false;
+        self.pending_center_cursor_in_view_immediately = false;
+        self.center_cursor_confirm_frames = 0;
         self.pending_preview_reveal = Some(PendingPreviewReveal {
             scroll_offset: self.scroll_offset,
         });
-        self.refresh_generated_block_previews_with_mode(true);
     }
 
     pub(crate) fn invalidate_generated_block_preview_render_caches(&mut self) {
         for cache_key in self.generated_preview_keys.clone() {
-            self.retire_generated_preview_cache_entry(&cache_key);
+            if let Some((_, image)) = self.generated_preview_overlay_cache.remove(&cache_key) {
+                self.retired_images.push(image);
+            }
             self.generated_preview_svg_cache.remove(&cache_key);
         }
-        for (_, cache) in self.tab_generated_preview_cache.drain() {
-            self.retired_images
-                .extend(cache.images.into_values().flatten());
-            self.retired_images
-                .extend(cache.overlays.into_values().map(|(_, image)| image));
+        for cache in self.tab_generated_preview_cache.values_mut() {
+            cache.invalidate_render_resources(&mut self.retired_images);
         }
         let mut pane_generated_keys = Vec::new();
         for pane in &mut self.panes {
-            for (_, cache) in pane.state.tab_generated_preview_cache.drain() {
-                self.retired_images
-                    .extend(cache.images.into_values().flatten());
-                self.retired_images
-                    .extend(cache.overlays.into_values().map(|(_, image)| image));
+            for cache in pane.state.tab_generated_preview_cache.values_mut() {
+                cache.invalidate_render_resources(&mut self.retired_images);
             }
             pane_generated_keys.extend(pane.state.generated_preview_keys.iter().cloned());
+            pane.state.pending_click_anchor = None;
+            pane.state.pending_scroll_to_cursor = false;
+            pane.state.pending_center_cursor_in_view = false;
+            pane.state.pending_center_cursor_in_view_immediately = false;
+            pane.state.center_cursor_confirm_frames = 0;
+            pane.state.pending_preview_reveal = Some(PendingPreviewReveal {
+                scroll_offset: pane.state.scroll_offset,
+            });
         }
         for cache_key in pane_generated_keys {
-            self.retire_generated_preview_cache_entry(&cache_key);
+            if let Some((_, image)) = self.generated_preview_overlay_cache.remove(&cache_key) {
+                self.retired_images.push(image);
+            }
             self.generated_preview_svg_cache.remove(&cache_key);
         }
     }
@@ -7002,7 +7193,6 @@ impl EditorView {
         if let Some((_, image)) = self.generated_preview_overlay_cache.remove(cache_key) {
             self.retired_images.push(image);
         }
-        self.generated_preview_views.remove(cache_key);
     }
 
     pub(crate) fn release_retired_images(&mut self, cx: &mut Context<Self>) {
@@ -7023,20 +7213,25 @@ impl EditorView {
             .enumerate()
             .any(|(relative_line, decoration)| {
                 let block_missing = decoration.block_preview.as_ref().is_some_and(|preview| {
-                    preview.is_anchor && !self.image_cache.contains_key(&preview.cache_key)
+                    preview.is_anchor
+                        && (!self.image_cache.contains_key(&preview.cache_key)
+                            || !self
+                                .generated_preview_svg_cache
+                                .contains_key(&preview.cache_key))
                 });
                 let line = visible_start + relative_line;
                 let line_content = self.buffer.line_content(line);
                 let inline_missing = decoration.inline_math_spans.iter().any(|range| {
                     line_content.get(range.clone()).is_some_and(|source| {
-                        !self
-                            .image_cache
-                            .contains_key(&helpers::inline_math_cache_key(source))
+                        let key = helpers::inline_math_cache_key(source);
+                        !self.image_cache.contains_key(&key)
+                            || !self.generated_preview_svg_cache.contains_key(&key)
                     })
                 });
                 block_missing || inline_missing
             });
         if needs_visible_preview {
+            self.preserve_scroll_for_preview_refresh();
             self.refresh_generated_block_previews();
             cx.notify();
         }
@@ -7302,6 +7497,15 @@ impl EditorView {
         let line_count = self.buffer.line_count();
         if line_count == 0 {
             return (0, 0);
+        }
+
+        if self.pending_preview_reveal.is_some()
+            && let (Some(first), Some(last)) = (
+                self.visible_line_geometry.first(),
+                self.visible_line_geometry.last(),
+            )
+        {
+            return (first.0.min(line_count - 1), last.0.min(line_count - 1));
         }
 
         let viewport_start = self
@@ -7783,11 +7987,7 @@ impl EditorView {
     }
 
     pub(crate) fn close_preview_overlay(&mut self) {
-        // Exiting fullscreen resets the inline rendered view (zoom/pan) so it
-        // returns to its default fitted state rather than keeping the overlay's.
-        if let Some(overlay) = self.preview_overlay.take() {
-            self.reset_generated_preview_view(&overlay.cache_key);
-        }
+        self.preview_overlay = None;
         self.preview_overlay_bounds = None;
         self.preview_overlay_image_bounds = None;
         self.preview_overlay_action_areas.clear();
@@ -7944,38 +8144,19 @@ impl EditorView {
         } else {
             (image_width, image_height)
         };
-        let fit_scale = if preview_kind.is_some() {
-            viewport_width / intrinsic_width.max(1.0)
-        } else {
-            (viewport_width / intrinsic_width.max(1.0))
-                .min(viewport_height / intrinsic_height.max(1.0))
-                .min(1.0)
-        };
+        let fit_scale = preview_overlay::fit_scale(
+            intrinsic_width,
+            intrinsic_height,
+            viewport_width,
+            viewport_height,
+            preview_kind.is_some(),
+        );
         let display_width = intrinsic_width * fit_scale * view.zoom_factor;
         let display_height = intrinsic_height * fit_scale * view.zoom_factor;
-        let limit_x = ((display_width - viewport_width) / 2.0).max(0.0);
-        let limit_y = if preview_kind.is_some() {
-            if display_height > viewport_height {
-                (display_height - viewport_height).max(0.0)
-            } else {
-                ((viewport_height - display_height) / 2.0).max(0.0)
-            }
-        } else if display_height > viewport_height {
-            ((display_height - viewport_height) / 2.0).max(0.0)
-        } else {
-            ((viewport_height - display_height) / 2.0).max(0.0)
-        };
-
+        let limit_x = (display_width - viewport_width).abs() / 2.0;
+        let limit_y = (display_height - viewport_height).abs() / 2.0;
         view.pan_x = view.pan_x.clamp(-limit_x, limit_x);
-        view.pan_y = if preview_kind.is_some() {
-            if display_height > viewport_height {
-                view.pan_y.clamp(-limit_y, 0.0)
-            } else {
-                view.pan_y.clamp(-limit_y, limit_y)
-            }
-        } else {
-            view.pan_y.clamp(-limit_y, limit_y)
-        };
+        view.pan_y = view.pan_y.clamp(-limit_y, limit_y);
     }
 
     pub(crate) fn active_image_dimensions(&self) -> Option<(f32, f32)> {
@@ -8762,7 +8943,9 @@ impl EditorView {
     }
 
     pub(crate) fn restore_snapshot(&mut self, snapshot: EditorSnapshot) {
-        self.buffer = Buffer::from_text(&snapshot.text);
+        if !self.restore_table_source_snapshot(&snapshot.text) {
+            self.buffer = Buffer::from_text(&snapshot.text);
+        }
         self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
         self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());
         self.extra_cursors = snapshot
@@ -8783,6 +8966,7 @@ impl EditorView {
     }
 
     pub(crate) fn restore_tab_snapshot_state(&mut self, snapshot: &EditorSnapshot) {
+        self.table_source = None;
         self.buffer = Buffer::from_text(&snapshot.text);
         self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
         self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());
@@ -8839,11 +9023,12 @@ impl EditorView {
             .last_typing_checkpoint_time
             .is_some_and(|previous| now.duration_since(previous) < UNDO_GROUP_INTERVAL);
         let contiguous = self.last_typing_checkpoint_offset == Some(start);
-        let coalesce = is_groupable && within_interval && contiguous;
+        let word_boundary = typing_starts_undo_group(new_text);
+        let coalesce = is_groupable && within_interval && contiguous && !word_boundary;
 
         self.begin_history_transaction(coalesce);
 
-        if is_groupable {
+        if is_groupable && !word_boundary {
             self.last_typing_checkpoint_time = Some(now);
             self.last_typing_checkpoint_offset = Some(start + new_text.len());
         } else {
@@ -9259,6 +9444,18 @@ impl EditorView {
         let Some(item) = cx.read_from_clipboard() else {
             return;
         };
+        if self.table_cell_selection.is_some() {
+            if let Some(text) = item.text() {
+                self.paste_table_cell_selection(&text, true, cx);
+            }
+            return;
+        }
+        if self.table_handles.selection.is_some() {
+            if let Some(text) = item.text() {
+                self.paste_table_border_selection(&text, cx);
+            }
+            return;
+        }
 
         match self.import_clipboard_resources(&item, cx) {
             Ok(ClipboardPasteOutcome::Insert(text)) => {
@@ -9358,6 +9555,64 @@ impl EditorView {
 
     fn toggle_current_line_prefix_single(&mut self, prefix: &str) {
         let selection = self.cursor.selection_range();
+        if matches!(prefix, "- [ ] " | "- " | "1. ")
+            && self.table_cursor_cell_range().is_some()
+            && (self.table_cell_for_offset(selection.start)
+                != self.table_cell_for_offset(selection.end))
+        {
+            return;
+        }
+        if matches!(prefix, "- [ ] " | "- " | "1. ")
+            && let Some(cell_range) = self.table_cursor_cell_range()
+            && cell_range.start <= selection.start
+            && selection.end <= cell_range.end
+        {
+            let cell = self.buffer.text_for_range(cell_range.clone()).to_string();
+            let fragment = table_cell_fragment_range(&cell, selection.start - cell_range.start);
+            if selection.end - cell_range.start > fragment.end {
+                return;
+            }
+            let segment = &cell[fragment.clone()];
+            let leading = segment.len() - segment.trim_start_matches([' ', '\t']).len();
+            let trimmed = &segment[leading..];
+            let old_prefix = Self::detect_block_prefix_len(trimmed);
+            let content = &trimmed[old_prefix..];
+            let new_prefix = if trimmed.starts_with(prefix) {
+                ""
+            } else {
+                prefix
+            };
+            let new_cell = format!("{}{new_prefix}{content}", &segment[..leading]);
+            let segment_start = cell_range.start + fragment.start;
+            let segment_end = cell_range.start + fragment.end;
+            let old_content_start = segment_start + leading + old_prefix;
+            let adjust = |offset| {
+                Self::adjust_offset_for_replaced_line(
+                    offset,
+                    segment_start,
+                    segment_end,
+                    leading,
+                    old_prefix,
+                    new_prefix.len(),
+                    new_cell.len(),
+                )
+            };
+            let cursor_offset = adjust(self.cursor.offset);
+            let anchor_offset = adjust(self.cursor.anchor);
+            self.buffer.replace(segment_start..segment_end, &new_cell);
+            self.cursor.offset = cursor_offset.min(self.buffer.len());
+            self.cursor.anchor = anchor_offset.min(self.buffer.len());
+            if selection.is_empty()
+                && selection.start <= old_content_start
+                && !new_prefix.is_empty()
+            {
+                self.cursor
+                    .move_to(segment_start + new_cell.len(), &self.buffer);
+            }
+            self.reparse();
+            self.scroll_to_cursor();
+            return;
+        }
         let selection_start = selection.start.min(selection.end);
         let selection_end = selection.start.max(selection.end);
         let (start_line, _) = self.buffer.offset_to_line_col(selection_start);
@@ -9709,6 +9964,35 @@ impl EditorView {
         );
     }
 
+    pub(crate) fn insert_wiki_image(&mut self) {
+        if self.extra_cursors.is_empty() {
+            self.insert_wiki_image_single();
+        } else {
+            self.apply_single_cursor_edit_to_all_cursors(
+                |_this, offset, anchor| offset.min(anchor),
+                |this| this.insert_wiki_image_single(),
+            );
+        }
+    }
+
+    fn insert_wiki_image_single(&mut self) {
+        let range = self.cursor.selection_range();
+        let selected = self.buffer.text_for_range(range.clone());
+        let target = if selected.is_empty() {
+            "image.png"
+        } else {
+            selected
+        };
+        let insertion = format!("![[{target}]]");
+        let target_start = range.start + 3;
+        let target_end = target_start + target.len();
+        self.buffer.replace(range, &insertion);
+        self.cursor.anchor = target_start;
+        self.cursor.offset = target_end;
+        self.reparse();
+        self.scroll_to_cursor();
+    }
+
     fn insert_link_or_image_single(&mut self, prefix: &str, suffix: &str, placeholder: &str) {
         let range = self.cursor.selection_range();
         let selected = self.buffer.text_for_range(range.clone()).to_string();
@@ -9744,6 +10028,37 @@ impl EditorView {
             self.buffer
                 .replace(line_start + pos..line_start + pos + 3, "[ ]");
         }
+    }
+
+    pub(crate) fn toggle_table_cell_checkbox(
+        &mut self,
+        table: usize,
+        visual_row: usize,
+        col: usize,
+        cell_offset: usize,
+    ) -> bool {
+        let Some(line) = self.table_source_line_for_visual_row(table, visual_row) else {
+            return false;
+        };
+        let Some(info) = self
+            .decorations
+            .get(line)
+            .and_then(|dec| dec.table_info.as_ref())
+        else {
+            return false;
+        };
+        let Some(cell) = info.cells.get(col) else {
+            return false;
+        };
+        let Some(range) = info.cell_ranges.get(col) else {
+            return false;
+        };
+        let Some((relative, replacement)) = table_task_checkbox_edit_at(cell, cell_offset) else {
+            return false;
+        };
+        let offset = self.buffer.line_start(line) + range.start + relative;
+        self.buffer.replace(offset..offset + 1, replacement);
+        true
     }
 
     pub(crate) fn wrap_current_lines_as_code_block(&mut self) {
@@ -10140,7 +10455,7 @@ impl EditorView {
             return;
         }
 
-        let policy = self.app_settings.attachment_policy();
+        let policy = self.app_settings.workspace_link_policy();
         let index = attachments::WorkspaceLinkIndex::build(&self.sidebar_root);
         let unsaved_source = self.sidebar_root.join(".untitled.md");
         let current_file = self.current_file_path.as_deref().unwrap_or(&unsaved_source);
@@ -10241,10 +10556,10 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn table_delete_row(
+    pub(crate) fn table_delete_rows(
         &mut self,
         table_start_line: usize,
-        visual_row: usize,
+        visual_rows: &[usize],
         cx: &mut Context<Self>,
     ) {
         self.context_menu = None;
@@ -10253,9 +10568,13 @@ impl EditorView {
             return;
         };
         let new_lines = if self.block_is_front_matter(table_start_line) {
-            crate::table_ops::delete_front_matter_row(&lines, visual_row)
+            let mut rows = lines;
+            for &visual_row in visual_rows.iter().rev() {
+                rows = crate::table_ops::delete_front_matter_row(&rows, visual_row);
+            }
+            rows
         } else {
-            crate::table_ops::delete_row(&lines, visual_row)
+            crate::table_ops::delete_rows_at(&lines, visual_rows)
         };
         self.replace_table_block(start, end, &new_lines, cx);
         cx.notify();
@@ -10283,10 +10602,10 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn table_delete_column(
+    pub(crate) fn table_delete_columns(
         &mut self,
         table_start_line: usize,
-        col: usize,
+        columns: &[usize],
         cx: &mut Context<Self>,
     ) {
         self.context_menu = None;
@@ -10298,7 +10617,7 @@ impl EditorView {
             cx.notify();
             return;
         };
-        let new_lines = crate::table_ops::delete_column(&lines, col);
+        let new_lines = crate::table_ops::delete_columns_at(&lines, columns);
         self.replace_table_block(start, end, &new_lines, cx);
         cx.notify();
     }
@@ -10325,10 +10644,10 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn table_set_column_alignment(
+    pub(crate) fn table_set_columns_alignment(
         &mut self,
         table_start_line: usize,
-        col: usize,
+        columns: &[usize],
         alignment: crate::markdown::TableAlign,
         cx: &mut Context<Self>,
     ) {
@@ -10341,7 +10660,7 @@ impl EditorView {
             cx.notify();
             return;
         };
-        let new_lines = crate::table_ops::set_column_alignment(&lines, col, alignment);
+        let new_lines = crate::table_ops::set_columns_alignment(&lines, columns, alignment);
         self.replace_table_block(start, end, &new_lines, cx);
         cx.notify();
     }
@@ -10624,7 +10943,7 @@ impl EditorView {
         let starting_number = self
             .previous_ordered_list_number_before(target_line, indent)
             .map(|prev_number| prev_number + 1)
-            .unwrap_or(current_number);
+            .unwrap_or(1);
 
         self.renumber_ordered_list_block_from(target_line, starting_number, indent)
     }
@@ -11033,6 +11352,8 @@ impl EditorView {
     /// allocation, which is what leaves a multi-hundred-megabyte document
     /// resident even though nothing is open.
     pub(crate) fn release_document_state(&mut self) {
+        self.table_source = None;
+        self.reset_table_handles();
         self.buffer = Buffer::from_text("");
         self.cursor.offset = 0;
         self.cursor.anchor = 0;
@@ -12266,8 +12587,128 @@ fn escape_markdown_table_cell(text: &str) -> String {
     escaped
 }
 
+fn table_cell_fragment_range(cell: &str, offset: usize) -> std::ops::Range<usize> {
+    let breaks = helpers::table_cell_break_ranges(cell);
+    let segment_start = breaks
+        .iter()
+        .take_while(|range| range.end <= offset)
+        .last()
+        .map_or(0, |range| range.end);
+    let segment_end = breaks
+        .iter()
+        .find(|range| range.start >= segment_start)
+        .map_or(cell.len(), |range| range.start);
+    segment_start..segment_end
+}
+
+fn table_task_checkbox_edit_at(cell: &str, offset: usize) -> Option<(usize, &'static str)> {
+    let fragment = table_cell_fragment_range(cell, offset);
+    let segment_start = fragment.start;
+    let segment = &cell[fragment];
+    let leading = segment.len() - segment.trim_start_matches([' ', '\t']).len();
+    let prefix = &segment[leading..];
+    let checked = ["- [x]", "* [x]", "+ [x]"]
+        .iter()
+        .any(|item| prefix.starts_with(item));
+    let unchecked = ["- [ ]", "* [ ]", "+ [ ]"]
+        .iter()
+        .any(|item| prefix.starts_with(item));
+    (checked || unchecked).then_some((segment_start + leading + 3, if checked { " " } else { "x" }))
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::markdown;
+
+    #[test]
+    fn table_task_click_targets_only_the_clicked_cell() {
+        let row = "| - [ ] first | - [ ] second |";
+        let cells = markdown::parse_table_cells_with_ranges(row);
+        assert_eq!(cells.len(), 2);
+        let (relative, replacement) = super::table_task_checkbox_edit_at(&cells[1].0, 0).unwrap();
+        let absolute = cells[1].1.start + relative;
+        assert_eq!(&row[absolute..absolute + 1], " ");
+        let mut updated = row.to_string();
+        updated.replace_range(absolute..absolute + 1, replacement);
+        assert_eq!(updated, "| - [ ] first | - [x] second |");
+    }
+
+    #[test]
+    fn table_task_click_targets_nested_item_after_break() {
+        let cell = "- [ ] parent<br>  - [ ] child";
+        let at = cell.find("child").unwrap();
+        assert_eq!(
+            &cell[super::table_cell_fragment_range(cell, at)],
+            "  - [ ] child"
+        );
+        let (offset, replacement) = super::table_task_checkbox_edit_at(cell, at).unwrap();
+        let mut updated = cell.to_string();
+        updated.replace_range(offset..offset + 1, replacement);
+        assert_eq!(updated, "- [ ] parent<br>  - [x] child");
+    }
+
+    #[test]
+    fn syntax_reparse_keeps_unchanged_wrapped_paragraph_context() {
+        let before = "a long paragraph that wraps over multiple visual rows\n\nsecond paragraph\n\n``\n\nafter\n";
+        let previous = markdown::parse_decorations(before);
+        let after = before.replacen("``", "```", 1);
+        let current = markdown::parse_decorations_with_pending_fence(&after, 4);
+        for line in [0, 1, 2, 6] {
+            let old = super::stable_markdown_layout_context(&previous, line);
+            assert!(old.is_some());
+            assert_eq!(old, super::stable_markdown_layout_context(&current, line));
+        }
+    }
+
+    #[test]
+    fn syntax_reparse_invalidates_changed_references_and_neighbor_geometry() {
+        let before = "[reference][target]\n\nplain text\n\n[target]: first.png\n";
+        let after = before.replace("first.png", "second.png");
+        let previous = markdown::parse_decorations(before);
+        let current = markdown::parse_decorations(&after);
+        assert_ne!(
+            super::stable_markdown_layout_context(&previous, 0),
+            super::stable_markdown_layout_context(&current, 0)
+        );
+        let previous = markdown::parse_decorations("plain\nneighbor\n");
+        let current = markdown::parse_decorations("# heading\nneighbor\n");
+        assert_ne!(
+            super::stable_markdown_layout_context(&previous, 1),
+            super::stable_markdown_layout_context(&current, 1)
+        );
+        let table = markdown::parse_decorations("| A | B |\n| --- | --- |\n| C | D |\n");
+        assert!(super::stable_markdown_layout_context(&table, 0).is_none());
+        let code = markdown::parse_decorations("```\ncode\n```\n");
+        assert!(super::stable_markdown_layout_context(&code, 1).is_none());
+    }
+
+    #[test]
+    fn syntax_reparse_reuses_context_after_line_insertion_without_reusing_edited_text() {
+        let before = markdown::parse_decorations("start\n\nparagraph\n\nend\n");
+        let after = markdown::parse_decorations("new\nstart\n\nparagraph\n\nend\n");
+        let new_line = super::shift_line_after_transfer(2, 0, 1, 2);
+        assert_eq!(new_line, 3);
+        assert_eq!(
+            super::stable_markdown_layout_context(&before, 2),
+            super::stable_markdown_layout_context(&after, new_line)
+        );
+    }
+
+    #[test]
+    fn stable_layout_restore_ignores_candidate_at_new_line_count() {
+        let mut layout = vec![None, None];
+        super::restore_stable_layout_lines(&mut layout, [(1, "kept"), (2, "stale")]);
+        assert_eq!(layout, vec![None, Some("kept")]);
+    }
+
+    #[test]
+    fn undo_group_breaks_at_space_or_punctuation_not_each_letter() {
+        assert!(!super::typing_starts_undo_group("a"));
+        assert!(!super::typing_starts_undo_group("中"));
+        assert!(super::typing_starts_undo_group(" "));
+        assert!(super::typing_starts_undo_group("."));
+    }
+
     use std::path::{Path, PathBuf};
 
     use super::{
@@ -12285,6 +12726,45 @@ mod tests {
     };
     use crate::buffer::Buffer;
     use crate::markdown::{BlockType, parse_decorations};
+
+    #[test]
+    fn generated_preview_theme_refresh_keeps_tab_views_and_layout_images() {
+        let mut cache = super::GeneratedPreviewTabCache::default();
+        let key = "preview".to_string();
+        let image = std::sync::Arc::new(gpui::RenderImage::new([image::Frame::new(
+            image::RgbaImage::new(8, 4),
+        )]));
+        cache.keys.insert(key.clone());
+        cache.images.insert(key.clone(), Some(image.clone()));
+        cache
+            .svgs
+            .insert(key.clone(), std::sync::Arc::from("old svg"));
+        cache.overlays.insert(key.clone(), (100, image.clone()));
+        cache.views.insert(
+            key.clone(),
+            super::ImageViewState {
+                zoom_factor: 2.5,
+                pan_x: -30.0,
+                pan_y: 44.0,
+            },
+        );
+        cache.code_mode_preview_key = Some(key.clone());
+        let mut retired = Vec::new();
+        cache.invalidate_render_resources(&mut retired);
+        assert!(cache.svgs.is_empty());
+        assert!(cache.overlays.is_empty());
+        assert_eq!(retired.len(), 1);
+        assert!(std::sync::Arc::ptr_eq(
+            cache.images[&key].as_ref().unwrap(),
+            &image
+        ));
+        let view = cache.views[&key];
+        assert_eq!(
+            (view.zoom_factor, view.pan_x, view.pan_y),
+            (2.5, -30.0, 44.0)
+        );
+        assert_eq!(cache.code_mode_preview_key, Some(key));
+    }
 
     #[test]
     fn pasted_text_normalizes_all_newline_conventions() {

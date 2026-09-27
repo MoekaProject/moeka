@@ -143,12 +143,15 @@ impl EntityInputHandler for EditorView {
         marked
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.active_tab_supports_text_buffer() {
             return;
         }
         self.clear_marked_ranges();
         self.finish_ime_composition();
+        if self.table_source.is_some() {
+            self.pause_blinking(cx);
+        }
     }
 
     fn replace_text_in_range(
@@ -339,6 +342,22 @@ impl EntityInputHandler for EditorView {
         self.buffer.replace(range.clone(), new_text);
         let new_offset = range.start + new_text.len();
         self.cursor.move_to(new_offset, &self.buffer);
+        if self.active_tab_is_markdown()
+            && !range_spans_multiple_lines
+            && !new_text.contains('\n')
+            && markdown::newly_typed_fence_is_pending(
+                self.buffer.text(),
+                range_start_line,
+                &self.decorations,
+            )
+        {
+            self.pending_code_fence = Some((
+                range_start_line,
+                self.buffer.line_content(range_start_line).to_string(),
+            ));
+        } else {
+            self.pending_code_fence = None;
+        }
         self.clear_marked_ranges();
         if markdown_syntax_edit {
             self.invalidate_line_display_info_for_line(range_start_line);
@@ -360,6 +379,7 @@ impl EntityInputHandler for EditorView {
             self.update_slash_filter(cx);
         } else if self.wiki_link_start.is_some() {
             self.sync_wiki_link_menu(cx);
+        } else if self.table_source.is_some() {
         } else if new_text == "[" && new_offset >= 2 {
             let text = self.buffer.text();
             if text.get(new_offset - 2..new_offset) == Some("[[") {
@@ -375,8 +395,11 @@ impl EntityInputHandler for EditorView {
         } else if new_text == "/" && self.active_tab_is_markdown() && !self.embedded_editor {
             let (line, col) = self.buffer.offset_to_line_col(new_offset);
             let line_content = self.buffer.line_content(line);
-            let trimmed = line_content.trim();
-            if trimmed == "/" && col == line_content.len() {
+            if input_ime::slash_menu_trigger(
+                line_content,
+                col,
+                self.offset_in_code_context(new_offset),
+            ) {
                 self.open_slash_menu(cx);
             }
         }

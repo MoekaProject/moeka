@@ -235,6 +235,10 @@ pub(crate) struct AppSettings {
     pub attachment_location: String,
     #[serde(default = "default_attachment_folder")]
     pub attachment_folder: String,
+    #[serde(default = "default_link_syntax")]
+    pub link_syntax: String,
+    #[serde(default = "default_link_path_style")]
+    pub link_path_style: String,
     #[serde(default)]
     pub attachment_external_folder: String,
     #[serde(default)]
@@ -382,6 +386,14 @@ fn default_attachment_folder() -> String {
     "attachments".to_string()
 }
 
+fn default_link_syntax() -> String {
+    "markdown".to_string()
+}
+
+fn default_link_path_style() -> String {
+    "relative".to_string()
+}
+
 fn default_terminal_cursor_shape() -> String {
     TerminalCursorShape::default().as_str().to_string()
 }
@@ -442,6 +454,8 @@ impl Default for AppSettings {
             auto_save: false,
             attachment_location: default_attachment_location(),
             attachment_folder: default_attachment_folder(),
+            link_syntax: default_link_syntax(),
+            link_path_style: default_link_path_style(),
             attachment_external_folder: String::new(),
             attachment_external_folder_bookmark: String::new(),
             terminal_cursor_shape: default_terminal_cursor_shape(),
@@ -487,8 +501,19 @@ impl AppSettings {
             &self.attachment_location,
             &self.attachment_folder,
             &self.attachment_external_folder,
-            "markdown",
-            "relative",
+            &self.link_syntax,
+            &self.link_path_style,
+            false,
+        )
+    }
+
+    pub(crate) fn workspace_link_policy(&self) -> super::AttachmentPolicy {
+        super::AttachmentPolicy::from_settings(
+            "workspace_folder",
+            &self.attachment_folder,
+            "",
+            &self.link_syntax,
+            &self.link_path_style,
             false,
         )
     }
@@ -774,6 +799,8 @@ mod tests {
         assert!(missing_fields.simple_mode);
         assert_eq!(missing_fields.attachment_location, "workspace_folder");
         assert_eq!(missing_fields.attachment_folder, "attachments");
+        assert_eq!(missing_fields.link_syntax, "markdown");
+        assert_eq!(missing_fields.link_path_style, "relative");
     }
 
     #[test]
@@ -866,12 +893,39 @@ mod tests {
     }
 
     #[test]
-    fn attachment_policy_uses_fixed_markdown_relative_behavior() {
+    fn attachment_policy_respects_link_settings_and_preserves_defaults() {
         let policy = AppSettings::default().attachment_policy();
 
         assert_eq!(policy.link_syntax, AttachmentLinkSyntax::Markdown);
         assert_eq!(policy.path_style, AttachmentPathStyle::Relative);
         assert!(!policy.automatically_update_links);
+        let wiki = AppSettings {
+            link_syntax: "wikilink".into(),
+            link_path_style: "shortest".into(),
+            ..AppSettings::default()
+        }
+        .attachment_policy();
+        assert_eq!(wiki.link_syntax, AttachmentLinkSyntax::WikiLink);
+        assert_eq!(wiki.path_style, AttachmentPathStyle::Shortest);
+
+        let external = AppSettings {
+            attachment_location: "external_folder".into(),
+            link_syntax: "wikilink".into(),
+            link_path_style: "shortest".into(),
+            ..AppSettings::default()
+        };
+        assert_eq!(
+            external.attachment_policy().link_syntax,
+            AttachmentLinkSyntax::Markdown
+        );
+        assert_eq!(
+            external.workspace_link_policy().link_syntax,
+            AttachmentLinkSyntax::WikiLink
+        );
+        assert_eq!(
+            external.workspace_link_policy().path_style,
+            AttachmentPathStyle::Shortest
+        );
     }
 
     #[test]

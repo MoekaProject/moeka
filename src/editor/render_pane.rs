@@ -2,12 +2,9 @@
 //! (tab bar + content), divider resize handles, and the per-pane editor pane
 //! body extracted from `render.rs`.
 
-use std::sync::Arc;
-
 use gpui::{
-    AnyElement, Bounds, ContentMask, Corners, CursorStyle, ExternalPaths, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollWheelEvent, SharedString, Window,
-    canvas, deferred, div, fill, prelude::*, px, relative,
+    AnyElement, Bounds, CursorStyle, ExternalPaths, MouseButton, MouseDownEvent, MouseMoveEvent,
+    Point, ScrollWheelEvent, SharedString, Window, canvas, deferred, div, prelude::*, px, relative,
 };
 
 use super::tooltip::toolbar_anchor_bounds;
@@ -92,14 +89,17 @@ impl EditorView {
         // A selection toolbar must consume this frame's final text quads, not
         // a replayed content view's geometry. Keep ordinary caret-only frames
         // cached, but prepaint selected Markdown content before its overlay.
-        let content = if self.app_settings.format_toolbar_visible
-            && pane_id == self.focused_pane_id
-            && self.active_tab_is_markdown()
-            && (self.cursor.has_selection()
-                || self.hovering_format_line.is_some()
-                || self.line_drag.is_some()
-                || self.line_drop_flash.is_some()
-                || self.line_format_toolbar_line.is_some())
+        let content = if self.table_handles.needs_render()
+            || self.hovering_handle.is_some()
+            || !self.table_border_segment_areas.is_empty()
+            || self.app_settings.format_toolbar_visible
+                && pane_id == self.focused_pane_id
+                && self.active_tab_is_markdown()
+                && (self.cursor.has_selection()
+                    || self.hovering_format_line.is_some()
+                    || self.line_drag.is_some()
+                    || self.line_drop_flash.is_some()
+                    || self.line_format_toolbar_line.is_some())
         {
             content
         } else {
@@ -377,6 +377,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.with_pane(pane_id, |this| {
+            this.sync_table_source_view();
             let has_tabs = !this.tabs.is_empty();
             let is_settings = has_tabs && this.active_tab_is_settings();
             let editor_entity = cx.entity().clone();
@@ -589,6 +590,7 @@ impl EditorView {
                         let hovering = *hovering;
                         this.with_pane(pane_id, |this| {
                             if !hovering {
+                                this.clear_table_handle_hover(cx);
                                 let had_hover = this.hovered_editor_position.take().is_some();
                                 if this.editor_scrollbar_drag.is_none() {
                                     this.set_editor_scrollbar_hovered(false, cx);
@@ -984,253 +986,6 @@ impl EditorView {
                     .when(is_focused_pane, |this| {
                         this.when_some(self.render_outline_rail(cx), |this, rail| this.child(rail))
                     })
-                    .when(
-                        is_focused_pane && self.preview_overlay_state().is_some(),
-                        |this| {
-                            let editor_handle = cx.entity().clone();
-                            this.child(deferred(
-                                canvas(
-                                    move |bounds, window, cx| {
-                                        editor_handle.update(cx, |editor, _| {
-                                            let Some(overlay) =
-                                                editor.preview_overlay_state().cloned()
-                                            else {
-                                                editor.preview_overlay_bounds = None;
-                                                editor.preview_overlay_image_bounds = None;
-                                                return None;
-                                            };
-                                            let Some(base_image) = editor
-                                                .image_cache
-                                                .get(&overlay.cache_key)
-                                                .and_then(|image| image.as_ref())
-                                                .cloned()
-                                            else {
-                                                editor.preview_overlay_bounds = None;
-                                                editor.preview_overlay_image_bounds = None;
-                                                return None;
-                                            };
-
-                                            let base_size = base_image.size(0);
-                                            let base_width = base_size.width.0 as f32;
-                                            let base_height = base_size.height.0 as f32;
-                                            let preview_kind = editor
-                                                .decorations
-                                                .get(overlay.line_idx)
-                                                .and_then(|decoration| {
-                                                    decoration.block_preview.as_ref()
-                                                })
-                                                .map(|preview| preview.kind);
-                                            let (intrinsic_width, intrinsic_height) =
-                                                if let Some(preview_kind) = preview_kind {
-                                                    helpers::intrinsic_generated_preview_size_for_kind(
-                                                        base_width,
-                                                        base_height,
-                                                        preview_kind,
-                                                    )
-                                                } else {
-                                                    (base_width, base_height)
-                                                };
-                                            if intrinsic_width <= 0.0 || intrinsic_height <= 0.0 {
-                                                editor.preview_overlay_bounds = None;
-                                                editor.preview_overlay_image_bounds = None;
-                                                return None;
-                                            }
-
-                                            let overlay_bounds = bounds;
-                                            let overlay_width =
-                                                f32::from(bounds.size.width).max(1.0);
-                                            let overlay_height =
-                                                f32::from(bounds.size.height).max(1.0);
-                                            let fit_scale = if preview_kind.is_some() {
-                                                1.0
-                                            } else {
-                                                (overlay_width / intrinsic_width.max(1.0))
-                                                    .min(overlay_height / intrinsic_height.max(1.0))
-                                                    .min(1.0)
-                                            };
-                                            let base_display_width = intrinsic_width * fit_scale;
-                                            let base_display_height = intrinsic_height * fit_scale;
-                                            let display_width =
-                                                base_display_width * overlay.view.zoom_factor;
-                                            let display_height =
-                                                base_display_height * overlay.view.zoom_factor;
-                                            let image_left = f32::from(bounds.origin.x)
-                                                + (overlay_width - display_width) * 0.5
-                                                + overlay.view.pan_x;
-                                            let image_top = f32::from(bounds.origin.y)
-                                                + (overlay_height - display_height) * 0.5
-                                                + overlay.view.pan_y;
-                                            let overlay_image_bounds = Bounds::new(
-                                                gpui::point(px(image_left), px(image_top)),
-                                                gpui::size(px(display_width), px(display_height)),
-                                            );
-
-                                            let image = if let Some(preview_kind) = preview_kind {
-                                                let minimum_raster_scale =
-                                                    helpers::generated_preview_raster_scale(
-                                                        preview_kind,
-                                                    );
-                                                // Keep overlay zoom responsive by scaling an already-rasterized
-                                                // image instead of regenerating Mermaid/Math SVG on every wheel tick.
-                                                let overlay_raster_scale = window
-                                                    .scale_factor()
-                                                    .max(minimum_raster_scale);
-                                                let scale_key = ((overlay_raster_scale * 100.0)
-                                                    .round()
-                                                    .clamp(minimum_raster_scale * 100.0, 1600.0))
-                                                    as u16;
-
-                                                let cached_overlay_image = editor
-                                                    .generated_preview_overlay_cache
-                                                    .get(&overlay.cache_key)
-                                                    .and_then(|(cached_scale_key, cached_image)| {
-                                                        (*cached_scale_key == scale_key)
-                                                            .then(|| cached_image.clone())
-                                                    });
-                                                let svg = editor
-                                                    .generated_preview_svg_cache
-                                                    .get(&overlay.cache_key)
-                                                    .cloned();
-                                                if let Some(cached_overlay_image) =
-                                                    cached_overlay_image
-                                                {
-                                                    cached_overlay_image
-                                                } else if let Some(svg) = svg {
-                                                    match helpers::load_render_image_from_svg_with_scale(
-                                                        svg.as_ref(),
-                                                        scale_key as f32 / 100.0,
-                                                    )
-                                                    .map(Arc::new)
-                                                    {
-                                                        Ok(image) => {
-                                                            editor
-                                                                .generated_preview_overlay_cache
-                                                                .insert(
-                                                                    overlay.cache_key.clone(),
-                                                                    (scale_key, image.clone()),
-                                                                );
-                                                            image
-                                                        }
-                                                        Err(_) => base_image.clone(),
-                                                    }
-                                                } else {
-                                                    base_image.clone()
-                                                }
-                                            } else {
-                                                base_image.clone()
-                                            };
-
-                                            editor.preview_overlay_bounds = Some(overlay_bounds);
-                                            editor.preview_overlay_image_bounds =
-                                                Some(overlay_image_bounds);
-
-                                            Some((
-                                                overlay_bounds,
-                                                overlay_image_bounds,
-                                                image,
-                                                editor.styles.editor.editor_bg,
-                                                // Generated math/Mermaid previews are cropped tightly
-                                                // to glyph ink, so a rounded-corner clip cuts into real
-                                                // glyphs (e.g. E=mc²). Keep square corners for them.
-                                                px(0.0),
-                                            ))
-                                        })
-                                    },
-                                    move |_bounds, overlay_paint, window, _cx| {
-                                        if let Some((
-                                            overlay_bounds,
-                                            overlay_image_bounds,
-                                            img_data,
-                                            background,
-                                            corner_radius,
-                                        )) = overlay_paint
-                                        {
-                                            window.paint_quad(fill(overlay_bounds, background));
-                                            window.with_content_mask(
-                                                Some(ContentMask {
-                                                    bounds: overlay_bounds,
-                                                }),
-                                                |window| {
-                                                    window
-                                                        .paint_image(
-                                                            overlay_image_bounds,
-                                                            Corners::all(corner_radius),
-                                                            img_data,
-                                                            0,
-                                                            false,
-                                                        )
-                                                        .ok();
-                                                },
-                                            );
-                                        }
-                                    },
-                                )
-                                .absolute()
-                                .left(px(0.0))
-                                .top(px(0.0))
-                                .right(px(0.0))
-                                .bottom(px(0.0)),
-                            ))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left(px(0.0))
-                                    .top(px(0.0))
-                                    .right(px(0.0))
-                                    .bottom(px(0.0))
-                                    .bg(gpui::transparent_black())
-                                    .cursor(CursorStyle::OpenHand)
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                                            let should_capture = this
-                                                .preview_overlay_bounds
-                                                .is_some_and(|bounds| {
-                                                    bounds.contains(&event.position)
-                                                });
-                                            if should_capture {
-                                                cx.stop_propagation();
-                                                this.on_mouse_down(event, window, cx);
-                                            }
-                                        }),
-                                    )
-                                    .on_mouse_up(
-                                        MouseButton::Left,
-                                        cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                                            let should_capture = this.image_drag_state.is_some()
-                                                || this.preview_overlay_bounds.is_some_and(
-                                                    |bounds| bounds.contains(&event.position),
-                                                );
-                                            if should_capture {
-                                                cx.stop_propagation();
-                                                this.on_mouse_up(event, window, cx);
-                                            }
-                                        }),
-                                    )
-                                    .on_mouse_up_out(
-                                        MouseButton::Left,
-                                        cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                                            if this.image_drag_state.is_some() {
-                                                cx.stop_propagation();
-                                                this.on_mouse_up(event, window, cx);
-                                            }
-                                        }),
-                                    )
-                                    .on_mouse_move(cx.listener(
-                                        |this, event: &MouseMoveEvent, window, cx| {
-                                            let should_capture = this.image_drag_state.is_some()
-                                                || this.preview_overlay_bounds.is_some_and(
-                                                    |bounds| bounds.contains(&event.position),
-                                                );
-                                            if should_capture {
-                                                this.on_mouse_move(event, window, cx);
-                                            }
-                                        },
-                                    )),
-                            )
-                            .child(self.render_preview_overlay_actions(cx))
-                        },
-                    )
                     .when(
                         matches!(
                             self.tab_drag_split_target.or(self.context_menu_pane_target),

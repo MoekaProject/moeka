@@ -651,7 +651,12 @@ pub(crate) fn build_display_text(
         }
         BlockType::OrderedList => {
             let prefix_len = markdown::ordered_list_prefix_len(trimmed);
-            (prefix_len > 0 && prefix_is_folded(leading_ws, prefix_len, active_ranges)).then_some((
+            (prefix_len > 0
+                && !decoration.display_replacements.iter().any(|replacement| {
+                    replacement.source_range == (leading_ws..leading_ws + prefix_len)
+                })
+                && prefix_is_folded(leading_ws, prefix_len, active_ranges))
+            .then_some((
                 leading_ws..leading_ws + prefix_len,
                 trimmed[..prefix_len].to_string(),
             ))
@@ -916,6 +921,20 @@ pub(crate) fn table_cell_decoration(
         .into_iter()
         .next()
         .unwrap_or_default();
+    if cell_decoration.block_type == BlockType::OrderedList {
+        let leading = list_marker_indent(cell_content);
+        let prefix_len = markdown::ordered_list_prefix_len(&cell_content[leading..]);
+        if prefix_len > 0 {
+            let range = leading..leading + prefix_len;
+            cell_decoration
+                .display_replacements
+                .push(markdown::DisplayReplacement {
+                    source_range: range.clone(),
+                    display_text: " ".repeat(prefix_len),
+                    trigger_range: range,
+                });
+        }
+    }
     let project = |range: &Range<usize>| {
         (range.start >= cell_range.start && range.end <= cell_range.end)
             .then(|| range.start - cell_range.start..range.end - cell_range.start)
@@ -961,7 +980,48 @@ pub(crate) fn table_cell_decoration(
         }
     }
 
-    for source_range in table_cell_break_ranges(cell_content) {
+    let breaks = table_cell_break_ranges(cell_content);
+    for (index, line_break) in breaks.iter().enumerate() {
+        let start = line_break.end;
+        let end = breaks
+            .get(index + 1)
+            .map_or(cell_content.len(), |next| next.start);
+        let fragment = &cell_content[start..end];
+        let leading = fragment.len() - fragment.trim_start_matches([' ', '\t']).len();
+        let trimmed = &fragment[leading..];
+        let task = ["- [ ] ", "- [x] ", "* [ ] ", "* [x] ", "+ [ ] ", "+ [x] "]
+            .iter()
+            .any(|prefix| trimmed.starts_with(prefix));
+        let prefix_len = if task {
+            6
+        } else if ["- ", "* ", "+ "]
+            .iter()
+            .any(|prefix| trimmed.starts_with(prefix))
+        {
+            2
+        } else {
+            markdown::ordered_list_prefix_len(trimmed)
+        };
+        if prefix_len > 0 {
+            let source_range = start..start + leading + prefix_len;
+            let display_text = if task {
+                " ".repeat(leading / 2 * 3 + 3)
+            } else if trimmed.starts_with(|ch: char| ch.is_ascii_digit()) {
+                " ".repeat(leading + prefix_len)
+            } else {
+                " ".repeat(leading + 2)
+            };
+            cell_decoration
+                .display_replacements
+                .push(markdown::DisplayReplacement {
+                    source_range: source_range.clone(),
+                    display_text,
+                    trigger_range: source_range,
+                });
+        }
+    }
+
+    for source_range in breaks {
         if cell_decoration.protected_ranges.iter().any(|protected| {
             protected.start < source_range.end && protected.end > source_range.start
         }) || cell_decoration.inline_spans.iter().any(|span| {
@@ -983,7 +1043,7 @@ pub(crate) fn table_cell_decoration(
     cell_decoration
 }
 
-fn table_cell_break_ranges(text: &str) -> Vec<Range<usize>> {
+pub(crate) fn table_cell_break_ranges(text: &str) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
     let mut offset = 0usize;
     while let Some(relative_start) = text[offset..].find('<') {
@@ -1095,6 +1155,7 @@ pub(crate) struct TableCellLayout {
     pub alignment: crate::markdown::TableAlign,
     /// The display text for this cell (with inline markdown folded).
     pub display_text: String,
+    pub prefix_collapsed: bool,
     /// Mapping from display offset → buffer offset within the cell.
     pub display_to_buffer: Vec<usize>,
     /// Mapping from buffer offset → display offset within the cell.
@@ -1296,15 +1357,15 @@ pub(crate) fn compute_table_layout(
             // Build display text for cell with inline markdown folding
             let cell_decoration =
                 table_cell_decoration(&decorations[*line_idx], &cell_content, &cell_range);
-            let (folded_raw, d2b_raw, b2d_raw, _) = build_display_text(
+            let (folded_raw, d2b_raw, b2d_raw, prefix_collapsed) = build_display_text(
                 &cell_content,
                 &cell_decoration,
                 &[],
                 false,
                 None,
-                0,
-                0,
-                0,
+                3,
+                3,
+                2,
                 0,
                 0,
                 1.0,
@@ -1330,6 +1391,7 @@ pub(crate) fn compute_table_layout(
                 col: ci,
                 alignment,
                 display_text,
+                prefix_collapsed,
                 display_to_buffer: d2b,
                 buffer_to_display: b2d,
                 cell_range,
@@ -3337,6 +3399,69 @@ mod tests {
     }
 
     #[test]
+    fn generated_mermaid_dark_host_theme_wins_over_embedded_light_theme() {
+        for source in [
+            "%%{init: {'theme': 'default'}}%%\nflowchart LR\nA[Start] --> B[End]",
+            "sequenceDiagram\nAlice->>Bob: Hello\nNote right of Bob: Reply",
+            "classDiagram\nAnimal <|-- Duck\nAnimal: +name",
+        ] {
+            let svg = build_generated_block_preview_svg(
+                markdown::BlockPreviewKind::Mermaid,
+                source,
+                &Theme::one_dark(),
+                generated_preview_fonts(),
+            );
+            assert!(!svg.contains("Mermaid preview failed"), "{svg}");
+            assert!(svg.contains("#e5e7eb"), "{svg}");
+            load_generated_preview_image_from_svg(&svg, markdown::BlockPreviewKind::Mermaid)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn generated_mermaid_dark_surfaces_are_darker_in_raster_output() {
+        let average = |theme: &Theme, source: &str| {
+            let svg = build_generated_block_preview_svg(
+                markdown::BlockPreviewKind::Mermaid,
+                source,
+                theme,
+                generated_preview_fonts(),
+            );
+            let mut options = usvg::Options::default();
+            options.fontdb = super::generated_preview_fontdb().clone();
+            let tree = usvg::Tree::from_str(&svg, &options).unwrap();
+            let size = tree.size().to_int_size();
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height()).unwrap();
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut pixmap.as_mut(),
+            );
+            let solid = pixmap
+                .pixels()
+                .iter()
+                .filter(|pixel| pixel.alpha() > 240)
+                .collect::<Vec<_>>();
+            assert!(!solid.is_empty());
+            solid
+                .iter()
+                .map(|pixel| {
+                    (pixel.red() as f32 + pixel.green() as f32 + pixel.blue() as f32) / 3.0
+                })
+                .sum::<f32>()
+                / solid.len() as f32
+        };
+        for source in [
+            "flowchart LR\nA[Start] --> B[Finish]",
+            "%%{init: {'theme': 'default'}}%%\nflowchart LR\nA[Start] --> B[Finish]",
+        ] {
+            let dark = average(&Theme::one_dark(), source);
+            let light = average(&Theme::one_light(), source);
+            assert!(dark < 100.0 && light > 150.0, "dark={dark}, light={light}");
+        }
+    }
+
+    #[test]
     fn generated_mermaid_all_theme_options_rasterize() {
         let editor_theme = Theme::one_dark();
         for mermaid_theme in MermaidTheme::ALL {
@@ -4454,6 +4579,223 @@ mod tests {
     }
 
     #[test]
+    fn table_cells_project_wiki_footnote_and_extended_inline_syntax() {
+        let source = "| text |\n| --- |\n| [[notes/page.md]] ==mark== ^super^ ~sub~ [^note] ++under++ |\n\n[^note]: Footnote";
+        let decorations = markdown::parse_decorations(source);
+        let row = &decorations[2];
+        let info = row.table_info.as_ref().unwrap();
+        let cell = table_cell_decoration(row, &info.cells[0], &info.cell_ranges[0]);
+        assert_eq!(cell.wiki_links.len(), 1);
+        assert_eq!(cell.wiki_links[0].target_path, "notes/page.md");
+        assert_eq!(cell.footnote_references.len(), 1);
+        assert!(!cell.highlight_spans.is_empty());
+        assert!(
+            cell.inline_spans
+                .iter()
+                .any(|span| span.kind == markdown::InlineKind::Underline)
+        );
+        assert!(!cell.superscript_spans.is_empty());
+        assert!(!cell.subscript_spans.is_empty());
+        let (folded, display_to_buffer, _, _) = build_display_text(
+            &info.cells[0],
+            &cell,
+            &[],
+            false,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        assert!(folded.contains("page"));
+        assert!(!folded.contains("notes/page.md"));
+        assert_eq!(display_to_buffer.len(), folded.len());
+    }
+
+    #[test]
+    fn table_cells_keep_wiki_alias_pipe_inside_one_cell() {
+        let text = "| Link |\n| --- |\n| [[notes/page.md|Page]] |";
+        let decorations = markdown::parse_decorations(text);
+        let row = &decorations[2];
+        let info = row
+            .table_info
+            .as_ref()
+            .expect("wiki alias row remains in table");
+        assert_eq!(info.cells.len(), 1);
+        let decoration = table_cell_decoration(row, &info.cells[0], &info.cell_ranges[0]);
+        assert_eq!(decoration.wiki_links[0].target_path, "notes/page.md");
+        assert_eq!(
+            markdown::link_target_at_column(row, info.cell_ranges[0].start + 3),
+            Some("notes/page.md")
+        );
+    }
+
+    #[test]
+    fn table_cells_fold_list_and_task_prefixes() {
+        for (cell, expected_type) in [
+            ("- item", markdown::BlockType::UnorderedList),
+            ("1. item", markdown::BlockType::OrderedList),
+            ("- [ ] item", markdown::BlockType::TaskList(false)),
+        ] {
+            let decoration =
+                table_cell_decoration(&markdown::LineDecoration::default(), cell, &(0..cell.len()));
+            assert_eq!(decoration.block_type, expected_type);
+            let (folded, d2b, _, _) = build_display_text(
+                cell,
+                &decoration,
+                &[],
+                false,
+                None,
+                0,
+                3,
+                3,
+                2,
+                0,
+                1.0,
+                1.0,
+                1.0,
+            );
+            assert!(folded.ends_with("item"));
+            assert_eq!(d2b.len(), folded.len());
+        }
+    }
+
+    #[test]
+    fn table_cell_br_separated_nested_tasks_keep_source_mapping() {
+        let content = "- [ ] parent<br>  - [x] child";
+        let decoration = table_cell_decoration(
+            &markdown::LineDecoration::default(),
+            content,
+            &(0..content.len()),
+        );
+        let (folded, display_to_buffer, buffer_to_display, _) = build_display_text(
+            content,
+            &decoration,
+            &[],
+            false,
+            None,
+            0,
+            3,
+            3,
+            2,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        assert!(folded.contains("parent\n"));
+        assert!(folded.ends_with("child"));
+        assert!(!folded.contains("[x]"));
+        assert_eq!(display_to_buffer.len(), folded.len());
+        let child = content.find("child").unwrap();
+        assert_eq!(
+            &folded[buffer_to_display[child]..buffer_to_display[child] + 5],
+            "child"
+        );
+        let prefix = content.find("- [x]").unwrap() + 3;
+        let (expanded, _, _, _) = build_display_text(
+            content,
+            &decoration,
+            &[prefix..prefix],
+            false,
+            None,
+            0,
+            3,
+            3,
+            2,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        assert!(expanded.contains("- [x] child"));
+    }
+
+    #[test]
+    fn table_cell_br_nested_lists_and_inline_styles_keep_offsets() {
+        let content = "- parent<br>  - **child**<br>  1. `code` [[notes/page.md|Page]]";
+        let decoration = table_cell_decoration(
+            &markdown::LineDecoration::default(),
+            content,
+            &(0..content.len()),
+        );
+        let (folded, display_to_buffer, buffer_to_display, _) = build_display_text(
+            content,
+            &decoration,
+            &[],
+            false,
+            None,
+            0,
+            3,
+            3,
+            2,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        assert!(folded.contains("parent\n"));
+        assert!(folded.contains("child\n"));
+        assert!(!folded.contains("**"));
+        assert!(folded.contains("code Page"));
+        assert!(!folded.contains("1. code"));
+        assert_eq!(display_to_buffer.len(), folded.len());
+        for word in ["child", "code", "Page"] {
+            let source = content.find(word).unwrap();
+            assert_eq!(
+                &folded[buffer_to_display[source]..buffer_to_display[source] + word.len()],
+                word
+            );
+        }
+    }
+
+    #[test]
+    fn table_ordered_list_number_expands_at_caret() {
+        let content = "12. long ordered item that wraps";
+        let decoration = table_cell_decoration(
+            &markdown::LineDecoration::default(),
+            content,
+            &(0..content.len()),
+        );
+        let (collapsed, _, _, _) = build_display_text(
+            content,
+            &decoration,
+            &[],
+            false,
+            None,
+            0,
+            3,
+            3,
+            2,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        assert!(collapsed.starts_with("    long"));
+        let (expanded, _, _, _) = build_display_text(
+            content,
+            &decoration,
+            &[1..1],
+            false,
+            None,
+            0,
+            3,
+            3,
+            2,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        assert_eq!(expanded, content);
+    }
+
+    #[test]
     fn table_cell_break_tags_become_editable_display_newlines() {
         let content = "one<br>two<BR/>three<br />four";
         let decoration = table_cell_decoration(
@@ -5155,6 +5497,85 @@ pub(crate) fn apply_code_block_highlighting(
     weights: &mut [FontWeight],
     styles: &mut [FontStyle],
 ) {
+    apply_language_highlighting(line_content, language, theme, colors, weights, styles);
+    if matches!(
+        language.trim().to_ascii_lowercase().as_str(),
+        "markdown" | "md"
+    ) {
+        let cells = markdown::parse_table_cells_with_ranges(line_content);
+        let pipe_color: Hsla = gpui::rgb(theme.code_palette.operator).into();
+        let separator_color: Hsla = gpui::rgb(theme.code_palette.keyword).into();
+        for (offset, byte) in line_content.bytes().enumerate() {
+            if byte == b'|' && !cells.iter().any(|(_, range)| range.contains(&offset)) {
+                if let Some(color) = colors.get_mut(offset) {
+                    *color = pipe_color;
+                }
+            }
+        }
+        if !cells.is_empty()
+            && markdown::is_separator_row(
+                &cells
+                    .iter()
+                    .map(|(cell, _)| cell.clone())
+                    .collect::<Vec<_>>(),
+            )
+        {
+            for (_, range) in cells {
+                for offset in range {
+                    if let Some(color) = colors.get_mut(offset) {
+                        *color = separator_color;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn markdown_table_highlighting_preserves_escaped_and_code_pipes() {
+    let content = "| \u{4e2d}\u{6587} \\| value | `a|b` |";
+    let theme = Theme::moeka_print_light();
+    let mut baseline = vec![theme.text_primary; content.len()];
+    let mut colors = baseline.clone();
+    let mut weights = vec![FontWeight::NORMAL; content.len()];
+    let mut styles = vec![FontStyle::Normal; content.len()];
+    apply_language_highlighting(
+        content,
+        "markdown",
+        &theme,
+        &mut baseline,
+        &mut weights,
+        &mut styles,
+    );
+    apply_code_block_highlighting(
+        content,
+        "markdown",
+        &theme,
+        &mut colors,
+        &mut weights,
+        &mut styles,
+    );
+    for offset in [
+        content.find("\\|").unwrap() + 1,
+        content.find("a|b").unwrap() + 1,
+    ] {
+        assert_eq!(colors[offset], baseline[offset]);
+    }
+    let pipe_color: Hsla = gpui::rgb(theme.code_palette.operator).into();
+    assert_eq!(colors[0], pipe_color);
+    assert_eq!(colors[content.len() - 1], pipe_color);
+    assert_eq!(colors.len(), content.len());
+}
+
+fn apply_language_highlighting(
+    line_content: &str,
+    language: &str,
+    theme: &Theme,
+    colors: &mut [Hsla],
+    weights: &mut [FontWeight],
+    styles: &mut [FontStyle],
+) {
     if line_content.is_empty() {
         return;
     }
@@ -5597,8 +6018,8 @@ fn render_mermaid_block_preview_svg(
         host_theme.font_family = Some(font_family);
         host_theme.font_size = Some("14px".to_string());
         host_theme.output = merman::render::HostThemeOutput {
-            pipeline: merman::render::HostThemePipelinePreset::ResvgSafe,
-            ..merman::render::HostThemeOutput::default()
+            root_background: merman::render::HostThemeRootBackground::None,
+            ..merman::render::HostThemeOutput::resvg_safe_editor()
         };
         renderer.with_host_theme(&host_theme)
     } else {

@@ -270,6 +270,8 @@ mod tests {
             auto_save: false,
             attachment_location: "current_file".to_string(),
             attachment_folder: "attachments".to_string(),
+            link_syntax: "wikilink".to_string(),
+            link_path_style: "shortest".to_string(),
             attachment_external_folder: String::new(),
             attachment_external_folder_bookmark: String::new(),
             terminal_cursor_shape: "bar".to_string(),
@@ -309,6 +311,8 @@ mod tests {
         let loaded = load_yaml_file::<SettingsFile>(&path).unwrap();
 
         assert_eq!(loaded, config);
+        assert_eq!(loaded.settings.link_syntax, "wikilink");
+        assert_eq!(loaded.settings.link_path_style, "shortest");
     }
 
     #[test]

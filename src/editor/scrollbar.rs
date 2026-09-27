@@ -8,6 +8,7 @@ use super::EditorView;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum PanelScrollbarKind {
     Sidebar,
+    WorkspaceSearch,
     FileList,
     Info,
     Outline,
@@ -17,8 +18,9 @@ pub(crate) enum PanelScrollbarKind {
 }
 
 impl PanelScrollbarKind {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Sidebar,
+        Self::WorkspaceSearch,
         Self::FileList,
         Self::Info,
         Self::Outline,
@@ -30,6 +32,7 @@ impl PanelScrollbarKind {
     fn id(self) -> &'static str {
         match self {
             Self::Sidebar => "sidebar-scrollbar",
+            Self::WorkspaceSearch => "workspace-search-scrollbar",
             Self::FileList => "file-list-scrollbar",
             Self::Info => "info-scrollbar",
             Self::Outline => "outline-panel-scrollbar",
@@ -184,12 +187,24 @@ impl EditorView {
         // Sidebar-side panels sit on the dark chrome palette even in light
         // mode, so their thumb must not use the (dark) editor text color.
         let mut thumb_color = match kind {
-            PanelScrollbarKind::Sidebar | PanelScrollbarKind::FileList => {
-                self.styles.sidebar.sidebar_scrollbar_thumb_color
-            }
+            PanelScrollbarKind::Sidebar
+            | PanelScrollbarKind::WorkspaceSearch
+            | PanelScrollbarKind::FileList => self.styles.sidebar.sidebar_scrollbar_thumb_color,
             _ => self.styles.editor.editor_scrollbar_thumb_color,
         };
-        thumb_color.a *= state.opacity.clamp(0.0, 1.0);
+        let opacity = if matches!(
+            kind,
+            PanelScrollbarKind::WorkspaceSearch
+                | PanelScrollbarKind::Info
+                | PanelScrollbarKind::Outline
+        ) {
+            state
+                .opacity
+                .max(self.styles.editor.editor_scrollbar_opacity * 0.55)
+        } else {
+            state.opacity
+        };
+        thumb_color.a *= opacity.clamp(0.0, 1.0);
 
         Some(
             div()
@@ -235,6 +250,16 @@ impl EditorView {
                     self.active_sidebar_scrollbar_handle(),
                 )?;
                 (metrics, self.sidebar_scrollbar_track_height(), 0.0)
+            }
+            PanelScrollbarKind::WorkspaceSearch => {
+                let metrics = VerticalScrollbarMetrics::from_scroll_handle(
+                    &self.workspace_search_scroll_handle,
+                )?;
+                (
+                    metrics,
+                    f32::from(self.workspace_search_scroll_handle.bounds().size.height),
+                    0.0,
+                )
             }
             PanelScrollbarKind::FileList => {
                 let metrics =
@@ -333,6 +358,7 @@ impl EditorView {
     fn panel_scrollbar_handle(&self, kind: PanelScrollbarKind) -> Option<&ScrollHandle> {
         match kind {
             PanelScrollbarKind::Sidebar => Some(self.active_sidebar_scrollbar_handle()),
+            PanelScrollbarKind::WorkspaceSearch => Some(&self.workspace_search_scroll_handle),
             PanelScrollbarKind::FileList => Some(&self.file_list_scroll_handle),
             PanelScrollbarKind::Info => Some(&self.info_panel_scroll_handle),
             PanelScrollbarKind::Outline => Some(&self.outline_panel_scroll_handle),
@@ -717,6 +743,7 @@ impl EditorView {
                 self.set_active_chat_terminal_scrollbar_top(scroll_top, cx);
             }
             PanelScrollbarKind::Sidebar
+            | PanelScrollbarKind::WorkspaceSearch
             | PanelScrollbarKind::FileList
             | PanelScrollbarKind::Info
             | PanelScrollbarKind::Outline

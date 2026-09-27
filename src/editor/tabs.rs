@@ -87,7 +87,7 @@ impl EditorView {
             return;
         };
 
-        if self.line_display_info.is_empty() {
+        if self.table_source.is_some() || self.line_display_info.is_empty() {
             self.tab_layout_cache.remove(&active_tab_id);
             return;
         }
@@ -748,6 +748,9 @@ impl EditorView {
         let tab_reading_mode = self.tabs[index].reading_mode;
         let switching_tabs = self.active_tab_id.as_deref() != Some(tab_id.as_str());
         if switching_tabs {
+            self.pending_code_fence = None;
+            self.table_source = None;
+            self.reset_table_handles();
             self.cancel_line_drag(cx);
             self.stash_active_tab_generated_preview_cache();
             self.table_boundary_caret = None;
@@ -891,6 +894,7 @@ impl EditorView {
             // Closing the last tab of a split pane collapses the pane.
             let pane_id = self.current_pane_id();
             self.remove_pane_if_empty(pane_id, cx);
+            self.restore_tab_after_close(cx);
             cx.notify();
             session_store::persist_session(self);
             return;
@@ -903,6 +907,7 @@ impl EditorView {
         self.retire_tab_generated_preview_cache(tab_id);
         self.release_retired_images(cx);
         self.tab_layout_cache.remove(tab_id);
+        self.restore_tab_after_close(cx);
         self.process_pending_close_queue(cx);
         session_store::persist_session(self);
     }
@@ -924,11 +929,17 @@ impl EditorView {
     }
 
     pub(crate) fn request_close_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
-        if let Some(owner) = self.pane_id_for_tab(tab_id)
-            && owner != self.focused_pane_id
-        {
+        let Some(owner) = self.pane_id_for_tab(tab_id) else {
+            self.process_pending_close_queue(cx);
+            return;
+        };
+        if self.active_tab_id.as_deref() != Some(tab_id) && self.close_tab_return_to.is_none() {
+            self.close_tab_return_to = self.active_tab_id.clone();
+        }
+        if owner != self.focused_pane_id {
             self.focus_pane(owner, cx);
         }
+        self.switch_to_tab(tab_id, cx);
         if let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) {
             if tab.kind.is_terminal() && self.terminal_tab_has_running_command(tab_id) {
                 self.show_dialog(
@@ -980,6 +991,17 @@ impl EditorView {
         }
 
         self.close_tab(tab_id, cx);
+    }
+
+    pub(crate) fn restore_tab_after_close(&mut self, cx: &mut Context<Self>) {
+        if let Some(previous) = self.close_tab_return_to.take()
+            && let Some(owner) = self.pane_id_for_tab(&previous)
+        {
+            if owner != self.focused_pane_id {
+                self.focus_pane(owner, cx);
+            }
+            self.switch_to_tab(&previous, cx);
+        }
     }
 
     pub(crate) fn reopen_closed_tab(&mut self, cx: &mut Context<Self>) {

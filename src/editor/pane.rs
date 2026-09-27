@@ -339,6 +339,7 @@ pane_state! {
     (line_display_info, LineDisplayCache, Vec::new()),
     (visible_line_geometry, Vec<(usize, f32, f32)>, Vec::new()),
     (pending_line_display_transfer, Option<PendingLineDisplayTransfer>, None),
+    (pending_code_fence, Option<(usize, String)>, None),
     (line_display_trim_update_counter, Cell<usize>, Cell::new(0)),
     (line_geometry_cache_dirty, Cell<bool>, Cell::new(true)),
     (line_geometry_cache, RefCell<LineGeometryCacheState>, RefCell::new(LineGeometryCacheState::default())),
@@ -412,12 +413,17 @@ pane_state! {
     (copied_code_block_start, Option<usize>, None),
     (code_block_copy_feedback_epoch, usize, 0),
     (table_click_areas, Vec<(gpui::Bounds<Pixels>, usize, usize, usize)>, Vec::new()),
-    (table_col_handle_areas, Vec<(gpui::Bounds<Pixels>, usize, usize)>, Vec::new()),
-    (table_row_handle_areas, Vec<(gpui::Bounds<Pixels>, usize, usize)>, Vec::new()),
+    (table_column_border_segments, Vec<(gpui::Bounds<Pixels>, usize, usize)>, Vec::new()),
+    (table_row_border_segments, Vec<(gpui::Bounds<Pixels>, usize, usize)>, Vec::new()),
     (table_boundary_caret_areas, Vec<(gpui::Bounds<Pixels>, TableBoundaryCaret)>, Vec::new()),
+    (table_cursor_paint_bounds, Option<(usize, Bounds<Pixels>)>, None),
+    (table_cell_selection, Option<super::table_handles::TableCellSelection>, None),
     (table_boundary_caret, Option<TableBoundaryCaret>, None),
     (table_boundary_drag_origin, Option<TableBoundaryCaret>, None),
     (table_drag, Option<TableDragState>, None),
+    (table_handles, super::table_handles::TableHandles, super::table_handles::TableHandles::default()),
+    (table_border_segment_areas, Vec<(gpui::Bounds<Pixels>, usize, bool, usize)>, Vec::new()),
+    (table_source, Option<super::table_source::TableSource>, None),
     (hovering_table_start, Option<usize>, None),
     (hovering_handle, Option<(usize, bool, usize)>, None),
     (selected_handle, Option<(usize, bool, usize)>, None),
@@ -709,6 +715,7 @@ impl EditorView {
         };
 
         self.cancel_line_drag(cx);
+        self.reset_table_handles();
 
         // Park the current root state into the old focused pane's slot.
         if let Some(old_index) = self.pane_index(self.focused_pane_id) {

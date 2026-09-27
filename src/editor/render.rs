@@ -337,121 +337,115 @@ impl EditorView {
             (PREVIEW_ZOOM_IN_SVG_PATH, GeneratedPreviewAction::ZoomIn),
             (PREVIEW_ZOOM_OUT_SVG_PATH, GeneratedPreviewAction::ZoomOut),
         ];
-        deferred(
-            canvas(
-                move |bounds, window, cx| {
-                    let paints = editor_handle.update(cx, |editor, _| {
-                        if editor.preview_overlay_state().is_none() {
-                            editor.preview_overlay_action_areas.clear();
-                            return Vec::new();
-                        }
-                        let hovered_action = editor.hovering_preview_overlay_action;
-                        let total_width = actions.len() as f32 * action_size
-                            + actions.len().saturating_sub(1) as f32 * gap;
-                        let start_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width)
-                            - right
-                            - total_width;
-                        let y = f32::from(bounds.origin.y) + top;
-                        let mut paints = Vec::with_capacity(actions.len());
-                        let mut areas = Vec::with_capacity(actions.len());
-                        for (index, (icon_path, action)) in actions.iter().copied().enumerate() {
-                            let x = start_x + index as f32 * (action_size + gap);
-                            let button_bounds = Bounds::new(
-                                gpui::point(px(x), px(y)),
-                                gpui::size(px(action_size), px(action_size)),
-                            );
-                            areas.push((button_bounds, action));
-                            let hovered = hovered_action == Some(action);
-                            paints.push((button_bounds, icon_path, hovered, action));
-                        }
-                        editor.preview_overlay_action_areas = areas;
-                        paints
-                    });
-                    paints
-                        .into_iter()
-                        .map(|(button_bounds, icon_path, hovered, action)| {
-                            let hitbox =
-                                window.insert_hitbox(button_bounds, HitboxBehavior::Normal);
-                            let tooltip_title = SharedString::from({
-                                let editor = editor_handle.read(cx);
-                                match action {
-                                    GeneratedPreviewAction::Fullscreen => {
-                                        crate::i18n::preview_action_label(
-                                            editor.ui_language,
-                                            "fullscreen",
-                                        )
-                                    }
-                                    GeneratedPreviewAction::Restore => {
-                                        editor.t(crate::i18n::TextKey::Reset)
-                                    }
-                                    GeneratedPreviewAction::ZoomIn => {
-                                        crate::i18n::preview_action_label(
-                                            editor.ui_language,
-                                            "zoom_in",
-                                        )
-                                    }
-                                    GeneratedPreviewAction::ZoomOut => {
-                                        crate::i18n::preview_action_label(
-                                            editor.ui_language,
-                                            "zoom_out",
-                                        )
-                                    }
-                                    _ => "",
-                                }
-                            });
-                            // Tooltips must be requested during prepaint.
-                            tooltip::request_tooltip_for_hitbox(
-                                window,
-                                cx,
-                                editor_handle.clone(),
-                                button_bounds,
-                                tooltip_title,
-                                None::<&'static str>,
-                            );
-                            (button_bounds, icon_path, hovered, hitbox)
-                        })
-                        .collect::<Vec<_>>()
-                },
-                move |_bounds, paints, window, cx| {
-                    for (button_bounds, icon_path, hovered, hitbox) in paints {
-                        window.set_cursor_style(CursorStyle::Arrow, &hitbox);
-                        tooltip::register_tooltip_hover_refresh(window, &hitbox, button_bounds);
-                        let bg = if hovered { button_hover_bg } else { button_bg };
-                        window.paint_quad(quad(
-                            button_bounds,
-                            Corners::all(button_radius),
-                            bg,
-                            button_border_width,
-                            button_border,
-                            gpui::BorderStyle::default(),
-                        ));
-                        let icon_left = f32::from(button_bounds.origin.x)
-                            + (f32::from(button_bounds.size.width) - icon_size) * 0.5;
-                        let icon_top = f32::from(button_bounds.origin.y)
-                            + (f32::from(button_bounds.size.height) - icon_size) * 0.5;
-                        let mut color = icon_color;
-                        color.a *= if hovered { 1.0 } else { icon_opacity };
-                        window
-                            .paint_svg(
-                                Bounds::new(
-                                    gpui::point(px(icon_left), px(icon_top)),
-                                    gpui::size(px(icon_size), px(icon_size)),
-                                ),
-                                icon_path.into(),
-                                gpui::TransformationMatrix::default(),
-                                color,
-                                cx,
-                            )
-                            .ok();
+        canvas(
+            move |bounds, window, cx| {
+                let paints = editor_handle.update(cx, |editor, _| {
+                    if editor.preview_overlay_state().is_none() {
+                        editor.preview_overlay_action_areas.clear();
+                        return Vec::new();
                     }
-                },
-            )
-            .absolute()
-            .left(px(0.0))
-            .top(px(0.0))
-            .right(px(0.0))
-            .bottom(px(0.0)),
+                    let hovered_action = editor.hovering_preview_overlay_action;
+                    let total_width = actions.len() as f32 * action_size
+                        + actions.len().saturating_sub(1) as f32 * gap;
+                    let start_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width)
+                        - right
+                        - total_width;
+                    let y = f32::from(bounds.origin.y) + top;
+                    let mut paints = Vec::with_capacity(actions.len());
+                    let mut areas = Vec::with_capacity(actions.len());
+                    for (index, (icon_path, action)) in actions.iter().copied().enumerate() {
+                        let x = start_x + index as f32 * (action_size + gap);
+                        let button_bounds = Bounds::new(
+                            gpui::point(px(x), px(y)),
+                            gpui::size(px(action_size), px(action_size)),
+                        );
+                        areas.push((button_bounds, action));
+                        let hovered = hovered_action == Some(action);
+                        paints.push((button_bounds, icon_path, hovered, action));
+                    }
+                    editor.preview_overlay_action_areas = areas;
+                    paints
+                });
+                paints
+                    .into_iter()
+                    .map(|(button_bounds, icon_path, hovered, action)| {
+                        let hitbox = window.insert_hitbox(button_bounds, HitboxBehavior::Normal);
+                        let tooltip_title = SharedString::from({
+                            let editor = editor_handle.read(cx);
+                            match action {
+                                GeneratedPreviewAction::Fullscreen => {
+                                    crate::i18n::preview_action_label(
+                                        editor.ui_language,
+                                        "fullscreen",
+                                    )
+                                }
+                                GeneratedPreviewAction::Restore => {
+                                    editor.t(crate::i18n::TextKey::Reset)
+                                }
+                                GeneratedPreviewAction::ZoomIn => {
+                                    crate::i18n::preview_action_label(editor.ui_language, "zoom_in")
+                                }
+                                GeneratedPreviewAction::ZoomOut => {
+                                    crate::i18n::preview_action_label(
+                                        editor.ui_language,
+                                        "zoom_out",
+                                    )
+                                }
+                                _ => "",
+                            }
+                        });
+                        // Tooltips must be requested during prepaint.
+                        tooltip::request_tooltip_for_hitbox(
+                            window,
+                            cx,
+                            editor_handle.clone(),
+                            button_bounds,
+                            tooltip_title,
+                            None::<&'static str>,
+                        );
+                        (button_bounds, icon_path, hovered, hitbox)
+                    })
+                    .collect::<Vec<_>>()
+            },
+            move |_bounds, paints, window, cx| {
+                for (button_bounds, icon_path, hovered, hitbox) in paints {
+                    window.set_cursor_style(CursorStyle::Arrow, &hitbox);
+                    tooltip::register_tooltip_hover_refresh(window, &hitbox, button_bounds);
+                    let bg = if hovered { button_hover_bg } else { button_bg };
+                    window.paint_quad(quad(
+                        button_bounds,
+                        Corners::all(button_radius),
+                        bg,
+                        button_border_width,
+                        button_border,
+                        gpui::BorderStyle::default(),
+                    ));
+                    let icon_left = f32::from(button_bounds.origin.x)
+                        + (f32::from(button_bounds.size.width) - icon_size) * 0.5;
+                    let icon_top = f32::from(button_bounds.origin.y)
+                        + (f32::from(button_bounds.size.height) - icon_size) * 0.5;
+                    let mut color = icon_color;
+                    color.a *= if hovered { 1.0 } else { icon_opacity };
+                    window
+                        .paint_svg(
+                            Bounds::new(
+                                gpui::point(px(icon_left), px(icon_top)),
+                                gpui::size(px(icon_size), px(icon_size)),
+                            ),
+                            icon_path.into(),
+                            gpui::TransformationMatrix::default(),
+                            color,
+                            cx,
+                        )
+                        .ok();
+                }
+            },
         )
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .right(px(0.0))
+        .bottom(px(0.0))
         .into_any_element()
     }
 }
@@ -519,6 +513,8 @@ impl Render for EditorView {
         self.execute_pending_command(window, cx);
         if !window.is_window_active() {
             self.cancel_line_drag(cx);
+            self.cancel_table_handle_press(cx);
+            self.clear_table_handle_hover(cx);
         }
         self.refresh_chat_terminal_metrics(window, cx);
         self.process_pending_inline_diff(cx);
@@ -586,6 +582,32 @@ impl Render for EditorView {
             canvas(
                 |_, _, _| (),
                 move |_, _, window, _cx| {
+                    window.on_mouse_event({
+                        let editor = editor.clone();
+                        move |event: &MouseMoveEvent, phase, _, cx| {
+                            if phase.capture()
+                                && editor.update(cx, |this, cx| {
+                                    this.update_table_handle_press(event, cx)
+                                })
+                            {
+                                cx.stop_propagation();
+                            }
+                        }
+                    });
+                    window.on_mouse_event({
+                        let editor = editor.clone();
+                        move |event: &MouseUpEvent, phase, window, cx| {
+                            if phase.capture()
+                                && event.button == MouseButton::Left
+                                && editor.update(cx, |this, cx| {
+                                    this.finish_table_handle_press(event, window, cx)
+                                })
+                            {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                            }
+                        }
+                    });
                     window.on_mouse_event({
                         let editor = editor.clone();
                         move |event: &MouseMoveEvent, phase, _, cx| {
@@ -693,7 +715,10 @@ impl Render for EditorView {
                                 return;
                             }
                             editor.update(cx, |this, cx| {
-                                if this.modal_overlay_is_open() || this.panes.len() < 2 {
+                                if this.modal_overlay_is_open()
+                                    || this.preview_overlay.is_some()
+                                    || this.panes.len() < 2
+                                {
                                     return;
                                 }
                                 let target =
@@ -1545,6 +1570,9 @@ impl Render for EditorView {
             })
             .when(self.line_drag_active(), |this| {
                 this.child(deferred(super::line_drag::render_line_drag_overlay(cx.entity().clone())).with_priority(2))
+            })
+            .when(self.preview_overlay.is_some(), |this| {
+                this.child(deferred(self.render_preview_overlay(cx)).with_priority(2))
             })
             .when(self.settings_font_picker.is_some(), |this| {
                 if let Some(picker) = &self.settings_font_picker {

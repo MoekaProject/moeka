@@ -105,6 +105,105 @@ The [CI configuration](../.github/workflows/ci.yml) defines lint/test jobs for m
 
 For changes involving shared state or interactions, manually check the affected paths: edit/undo/redo, save/reopen, pane switching and closing, search, selection, Unicode/IME input, and relevant platform behavior. Include the platforms tested and any known gaps in the pull request. Documentation-only changes normally need only content and link review.
 
+## Generated previews and input
+
+Bare backtick/tilde fences remain literal while typing. Enter at the end of an
+unclosed opener inserts an empty body line and a matching closer, with or without
+a language/info string, and places the caret on the body line. A newly typed
+pending opener gets its own closer rather than consuming a later existing block.
+All text/IME input cancels stale scroll animations and centering confirmations;
+multiple edits before layout keep the first input's scroll baseline. Explicit
+wheel scrolling cancels pending input-scroll restoration. Markdown reparses retain
+measured ordinary-line layouts outside the edited source range when the line and
+its neighbors have unchanged decorations. Complex blocks and changed references
+still invalidate normally, so full syntax parsing does not erase unaffected wrap
+heights. Caret visibility uses the same text-top geometry as normal scrolling.
+Typing a pending fence on the same visual row preserves scroll; real line/soft-wrap
+changes retain normal caret scrolling.
+An unclosed backtick fence starts rendering after a newline; a matching closing
+fence renders immediately. A newly typed pending opener in the middle of a document
+is masked only for parsing, without modifying source or stealing existing pairs.
+The pending input state is pane-local. The four-tilde empty-strikethrough exception
+remains unchanged. Slash commands are disabled inside fenced/indented code and
+inline code. Selections intersecting fenced/indented code or fence lines do not
+open the selection formatting toolbar.
+
+For a table, hovering the formatting toolbar's full-width Adjust Table row opens
+the size grid directly. Table Source View sits below it: clicking aligns the source
+columns, switches that table to editable monospace source with Markdown syntax
+highlighting, and focuses its first line. Table pipes and alignment separators
+use the theme's code palette; escaped and inline-code pipes remain cell content.
+The buffer tracks the source range through all replacements, including paste,
+cut, multi-cursor edits and undo/redo. Clearing or replacing the whole range keeps
+source mode active; only navigating the caret outside exits it (switching documents
+also ends the temporary mode). Complete pipe rows align after each edit by trimming
+surplus spaces at cell edges and adding only the padding needed for column alignment;
+new whitespace in the active cell remains literal until its caret leaves. Escaped pipes,
+incomplete rows, and caret/selection positions relative to cell content are preserved.
+Formatting joins the edit's undo transaction;
+rectangular cell selections apply alignment and row/column deletion across every selected
+column or row, while insertion is positioned relative to the last selected cell.
+source rows default to horizontal scrolling instead of soft wrapping as columns grow.
+IME composition waits until commit, and undo/redo restore their exact text without
+immediately reformatting it. Formatting does not add code fences. Invalid table
+syntax remains ordinary Markdown on exit.
+The Attachments & Links settings persist link syntax (Markdown by default or
+WikiLink) and target path (relative to the document by default or shortest
+unique workspace suffix). The latter uses only the filename when unique and
+adds directories on collisions. Clipboard image/file imports, external file
+drop, sidebar links and wiki completion share this path policy. Link/image
+format actions and keyboard shortcuts follow the chosen syntax; explicitly
+typed `[[` still completes a wiki link, while web URLs remain Markdown links.
+External attachment folders use Markdown `file://` targets even in WikiLink
+mode. Existing links are not rewritten when settings change. In reading mode,
+unaliased wiki notes display only the filename without `.md`; explicit aliases
+and attachment extensions remain visible.
+The main right-click format menu no longer includes the Table submenu.
+Hovering a table reveals a 5px translucent track above and to its left; the
+table has four rounded corners at rest and only its bottom-right corner rounded
+while the track is visible. Hovering a row/column segment highlights it.
+Click selects the whole row/column with a faint cell fill; Shift-click extends
+a contiguous range and Cmd/Ctrl-click toggles noncontiguous segments. Copy/cut
+uses TSV, and Delete/Backspace removes selected rows/columns (the whole table
+when every row or column is selected). Paste inserts rows or columns after the
+last selected segment; Paste Overwrite replaces only a dimension-matched
+selection. Holding a border for 240ms and then moving reorders selected rows
+or columns as one block. Ordinary cell clicks return to text editing. Right-clicking
+any cell opens the complete table menu (size, alignment, row/column insertion and
+deletion, table deletion, and cell clipboard operations). Content operations use
+the rectangular selection when clicked inside it, or just the clicked cell otherwise.
+Tab/Shift-Tab traverse cells, and Enter inserts an in-cell line break. Other useful
+table operations for future work include keyboard navigation at table boundaries,
+row/column insert shortcuts, sort, duplicate row, and distributing column widths;
+these should be added only with matching undo and accessibility behavior.
+Use `cargo test --release table` and exercise matrix copy/paste, undo/redo, reverse
+Shift ranges, and block reordering with disposable tables in split panes.
+Table cells reuse inline Markdown folding and source-to-display mappings. Multiple
+list or task items inside one cell use `<br>` between items; list formatting and
+task-checkbox clicks target the current fragment rather than rewriting the table row.
+Dragging across cells selects a rectangular range with one blue outer border;
+internal cell separators keep their normal color. TSV
+copy/cut, dimension-matched paste and Delete/Backspace operate on its contents.
+Ranges covering every column or every row use structural row/column operations
+and the corresponding context menu instead of clearing individual cells.
+
+Mermaid Auto follows the editor's light/dark appearance through merman's host
+profiles. Keep the resvg-safe editor CSS override policy; only the root background
+is transparent. Explicit Mermaid theme selections remain user-controlled.
+Theme invalidation replaces SVG/raster resources but retains the old inline image
+as a layout placeholder and preserves per-tab zoom/pan. Preview refresh guards keep
+the current scroll offset instead of scrolling to the caret or clamping against
+temporary layout estimates.
+
+Image/generated preview overlays live at the window root, above pane chrome and
+toolbars. Mermaid and math initially fit inside 80% of the window in both axes,
+preserving aspect ratio and allowing enlargement. Rendering and pan constraints
+share the same fit calculation; closing fullscreen leaves inline zoom/pan intact.
+Use `cargo test --release generated_mermaid`, `cargo test --release generated_preview`,
+and `cargo test --release editor::preview_overlay::tests` for targeted checks.
+GUI verification should cover theme changes after panning/zooming, scroll stability,
+split panes and fullscreen controls over the sidebar/tab strip.
+
 ## External file updates
 
 The file watcher runs even without an open workspace. It reconciles the current

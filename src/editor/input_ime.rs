@@ -13,6 +13,18 @@ struct MultiCursorImeEdit {
     delta: isize,
 }
 
+pub(super) fn code_fence_enter_closer(text: &str, line: usize, pending: bool) -> Option<String> {
+    if pending {
+        markdown::unclosed_code_fence_marker(text.lines().nth(line)?, 0)
+    } else {
+        markdown::unclosed_code_fence_marker(text, line)
+    }
+}
+
+pub(super) fn slash_menu_trigger(content: &str, column: usize, in_code: bool) -> bool {
+    !in_code && content.trim() == "/" && column == content.len()
+}
+
 pub(crate) fn paired_delimiter(input: &str) -> Option<(&'static str, &'static str)> {
     match input {
         "[" => Some(("[", "]")),
@@ -335,6 +347,7 @@ impl EditorView {
             return;
         };
 
+        self.format_table_source_before_ime_commit();
         let changed = snapshot.text != self.buffer.text()
             || snapshot.cursor_offset != self.cursor.offset
             || snapshot.cursor_anchor != self.cursor.anchor
@@ -352,6 +365,63 @@ impl EditorView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bare_fences_autocomplete_on_enter_without_duplicating_a_closer() {
+        for (text, closer) in [
+            ("```", "```"),
+            ("  ```  ", "```"),
+            ("````", "````"),
+            ("~~~", "~~~"),
+        ] {
+            assert_eq!(
+                super::code_fence_enter_closer(text, 0, false).as_deref(),
+                Some(closer)
+            );
+        }
+        assert_eq!(
+            super::code_fence_enter_closer("```rust", 0, false),
+            Some("```".into())
+        );
+        assert_eq!(
+            super::code_fence_enter_closer("```rust\ncode\n```", 0, false),
+            None
+        );
+        assert_eq!(
+            super::code_fence_enter_closer("```\ncode\n```", 2, false),
+            None
+        );
+        assert_eq!(super::code_fence_enter_closer("```\nbody", 1, false), None);
+    }
+
+    #[test]
+    fn pending_fence_gets_its_own_closer_before_existing_blocks() {
+        let text = "before\n\n```\n\n```rust\nlet value = 1;\n```\n";
+        let closer = super::code_fence_enter_closer(text, 2, true).unwrap();
+        let mut buffer = Buffer::from_text(text);
+        let mut cursor = crate::cursor::Cursor::new();
+        cursor.move_to(buffer.line_end(2), &buffer);
+        let body_offset = cursor.offset + 1;
+        cursor.insert(&mut buffer, &format!("\n\n{closer}"));
+        cursor.move_to(body_offset, &buffer);
+        assert_eq!(buffer.line_content(3), "");
+        assert_eq!(buffer.offset_to_line_col(cursor.offset), (3, 0));
+        let decorations = crate::markdown::parse_decorations(buffer.text());
+        assert_eq!(
+            decorations[4].block_type,
+            crate::markdown::BlockType::CodeBlockFence
+        );
+        assert_eq!(decorations[6].code_language.as_deref(), Some("rust"));
+    }
+
+    #[test]
+    fn slash_in_code_is_literal_text() {
+        for content in ["/", "    /", "\t/"] {
+            assert!(!super::slash_menu_trigger(content, content.len(), true));
+        }
+        assert!(super::slash_menu_trigger("/", 1, false));
+        assert!(super::slash_menu_trigger("  /", 3, false));
+        assert!(!super::slash_menu_trigger("text/", 5, false));
+    }
     use crate::buffer::Buffer;
 
     use super::{clamp_ime_offset, missing_wiki_link_closer, paired_delimiter_at};

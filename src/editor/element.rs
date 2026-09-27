@@ -16,8 +16,42 @@ use super::helpers;
 use super::*;
 
 const LINE_FORMAT_ICON_SIZE_PX: f32 = 18.0;
-const LINE_FORMAT_ICON_GAP_PX: f32 = 4.0;
+const LINE_FORMAT_ICON_GAP_PX: f32 = 0.0;
 const LINE_FORMAT_CONTENT_GAP_PX: f32 = 6.0;
+
+fn table_border_track_path(
+    table_left: f32,
+    table_top: f32,
+    table_right: f32,
+    table_bottom: f32,
+    track_width: f32,
+    corner_radius: f32,
+) -> Option<Path<Pixels>> {
+    let radius = corner_radius.max(0.0);
+    let outer_left = table_left - track_width;
+    let outer_top = table_top - track_width;
+    let control_factor = 0.552_284_8;
+    let mut path = gpui::PathBuilder::fill();
+    path.move_to(point(px(table_left), px(table_bottom)));
+    path.line_to(point(px(outer_left), px(table_bottom)));
+    path.line_to(point(px(outer_left), px(outer_top + radius)));
+    path.cubic_bezier_to(
+        point(px(outer_left + radius), px(outer_top)),
+        point(
+            px(outer_left),
+            px(outer_top + radius * (1.0 - control_factor)),
+        ),
+        point(
+            px(outer_left + radius * (1.0 - control_factor)),
+            px(outer_top),
+        ),
+    );
+    path.line_to(point(px(table_right), px(outer_top)));
+    path.line_to(point(px(table_right), px(table_top)));
+    path.line_to(point(px(table_left), px(table_top)));
+    path.close();
+    path.build().ok()
+}
 
 fn gutter_fold_row_hovered(gutter_hovered: bool, pointer_y: Pixels, top: f32, height: f32) -> bool {
     gutter_hovered && (top..top + height).contains(&f32::from(pointer_y))
@@ -232,6 +266,22 @@ fn markdown_tables_use_only_cell_selection_rendering() {
         &front_matter[1],
         false,
     ));
+
+    let decorations = crate::markdown::parse_decorations(
+        "| 功能 | 快捷键 |\n| --- | --- |\n| 加粗 | `Command / Ctrl + B` |",
+    );
+    assert!(uses_table_cell_selection(
+        &BlockType::Table,
+        &decorations[2],
+        false
+    ));
+    let row = decorations[2].table_info.as_ref().unwrap();
+    let cell = helpers::table_cell_decoration(&decorations[2], &row.cells[1], &row.cell_ranges[1]);
+    assert!(
+        cell.inline_spans
+            .iter()
+            .any(|span| span.kind == crate::markdown::InlineKind::InlineCode)
+    );
 }
 
 fn snap_to_device_pixel(value: f32, window: &Window) -> f32 {
@@ -297,8 +347,11 @@ pub(crate) struct EditorPrepaintState {
     lines: Vec<PrepaintLine>,
     indent_guide_quads: Vec<PaintQuad>,
     clipped_code_block_decorations: Vec<(Bounds<Pixels>, Vec<PaintQuad>)>,
+    clipped_table_decorations: Vec<(Bounds<Pixels>, Vec<PaintQuad>)>,
     clipped_code_block_search_highlights: Vec<(Bounds<Pixels>, Vec<PaintQuad>)>,
     clipped_code_block_selections: Vec<(Bounds<Pixels>, Vec<PaintQuad>)>,
+    clipped_table_search_highlights: Vec<(Bounds<Pixels>, Vec<PaintQuad>)>,
+    clipped_table_selections: Vec<(Bounds<Pixels>, Vec<PaintQuad>)>,
     whitespace_dots: Vec<PaintQuad>,
     selection_quads: Vec<PaintQuad>,
     search_match_quads: Vec<PaintQuad>,
@@ -330,6 +383,7 @@ pub(crate) struct EditorPrepaintState {
     image_borders: Vec<PaintQuad>,
     /// Table cell borders and backgrounds
     table_borders: Vec<PaintQuad>,
+    table_border_paths: Vec<(Path<Pixels>, Hsla)>,
     table_bgs: Vec<PaintQuad>,
     table_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
     /// Image URL-edit icons: (bounds, line_idx, alpha)
@@ -1475,15 +1529,15 @@ fn build_precise_table_layout(
                     inline_math_height_factor,
                     base_char_width,
                 );
-                let (folded_raw, d2b_raw, b2d_raw, _) = helpers::build_display_text(
+                let (folded_raw, d2b_raw, b2d_raw, prefix_collapsed) = helpers::build_display_text(
                     &cell_content,
                     &cell_decoration,
                     &cell_active_ranges,
                     false,
                     None,
-                    0,
-                    0,
-                    0,
+                    3,
+                    3,
+                    2,
                     0,
                     0,
                     1.0,
@@ -1492,6 +1546,7 @@ fn build_precise_table_layout(
                 );
                 let trimmed_range = table_cell_trimmed_display_range(&folded_raw);
                 cell_layout.display_text = folded_raw[trimmed_range.clone()].to_string();
+                cell_layout.prefix_collapsed = prefix_collapsed;
                 cell_layout.display_to_buffer = d2b_raw[trimmed_range.clone()].to_vec();
                 let trim_start = trimmed_range.start;
                 let trimmed_len = trimmed_range.len();
@@ -1507,7 +1562,7 @@ fn build_precise_table_layout(
                     &cell_decoration,
                     &cell_active_ranges,
                     false,
-                    false,
+                    cell_layout.prefix_collapsed,
                     body_font,
                     body_cjk_font,
                     monospace_font,
@@ -1938,6 +1993,7 @@ fn inline_overlay_runs(
         .collect()
 }
 
+#[derive(Clone, Copy)]
 enum InlineOverlayVerticalAlign {
     Top(f32),
     Bottom(f32),
@@ -2489,8 +2545,11 @@ impl Element for EditorElement {
         let mut lines = Vec::new();
         let mut indent_guide_quads = Vec::new();
         let mut clipped_code_block_decorations = Vec::new();
+        let mut clipped_table_decorations = Vec::new();
         let mut clipped_code_block_search_highlights = Vec::new();
         let mut clipped_code_block_selections = Vec::new();
+        let mut clipped_table_search_highlights = Vec::new();
+        let mut clipped_table_selections = Vec::new();
         let mut selection_quads = Vec::new();
         let mut search_match_quads: Vec<PaintQuad> = Vec::new();
         let mut line_highlight = None;
@@ -2498,6 +2557,7 @@ impl Element for EditorElement {
         let mut code_block_bgs = Vec::new();
         let mut whitespace_dots: Vec<PaintQuad> = Vec::new();
         let mut cursor_paints: Vec<super::caret::CaretPaint> = Vec::new();
+        let mut table_cursor_paint_bounds = None;
         let mut marked_underlines = Vec::new();
         let mut link_underlines: Vec<PaintQuad> = Vec::new();
         let mut link_hitboxes: Vec<Hitbox> = Vec::new();
@@ -2698,8 +2758,9 @@ impl Element for EditorElement {
         )> = Vec::new();
         let mut image_borders: Vec<PaintQuad> = Vec::new();
         let mut table_borders: Vec<PaintQuad> = Vec::new();
+        let mut table_border_paths: Vec<(Path<Pixels>, Hsla)> = Vec::new();
         let mut table_bgs: Vec<PaintQuad> = Vec::new();
-        let mut table_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
+        let table_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
         let mut diff_line_bgs: Vec<PaintQuad> = Vec::new();
         let mut diff_inline_quads: Vec<PaintQuad> = Vec::new();
         // In-place (working-tree) diff: left-edge indicator bars plus the
@@ -2723,7 +2784,6 @@ impl Element for EditorElement {
         let mut table_click_areas_local: Vec<(Bounds<Pixels>, usize, usize, usize)> = Vec::new();
         let mut table_col_handle_areas_local: Vec<(Bounds<Pixels>, usize, usize)> = Vec::new();
         let mut table_row_handle_areas_local: Vec<(Bounds<Pixels>, usize, usize)> = Vec::new();
-        let mut table_corner_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut table_boundary_caret_areas_local: Vec<(Bounds<Pixels>, TableBoundaryCaret)> =
             Vec::new();
         let mut table_layout_cache: HashMap<usize, helpers::TableLayout> = HashMap::new();
@@ -2753,8 +2813,6 @@ impl Element for EditorElement {
         let mut editor_icon_tooltips: Vec<(Bounds<Pixels>, SharedString)> = Vec::new();
         let mut unordered_list_markers: Vec<(WrappedLine, Point<Pixels>, Pixels)> = Vec::new();
         let mut inline_overlays: Vec<(ShapedLine, Point<Pixels>, Pixels)> = Vec::new();
-        let mut preview_overlay_bounds_local: Option<Bounds<Pixels>> = None;
-        let mut preview_overlay_image_bounds_local: Option<Bounds<Pixels>> = None;
 
         let hidden_lines: HashSet<usize> = {
             let mut set = HashSet::new();
@@ -4662,7 +4720,7 @@ impl Element for EditorElement {
                                     base_char_width,
                                     line_height,
                                     editor.styles.editor.editor_inline_math_height_factor,
-                                    editor.scaled(table_styles.table_handle_size_px),
+                                    editor.scaled(table_styles.table_border_track_width_px),
                                     &body_font,
                                     &body_cjk_font,
                                     &monospace_font,
@@ -4774,11 +4832,7 @@ impl Element for EditorElement {
             {
                 let viewport = bounds.intersect(&window.content_mask().bounds);
                 let icon_size = editor.scaled(LINE_FORMAT_ICON_SIZE_PX);
-                let icon_gap = if matches!(block_type, BlockType::Heading(_)) {
-                    editor.scaled(editor.styles.format_toolbar.line_format_heading_icon_gap_px)
-                } else {
-                    editor.scaled(LINE_FORMAT_ICON_GAP_PX)
-                };
+                let icon_gap = editor.scaled(LINE_FORMAT_ICON_GAP_PX);
                 let content_gap = editor.scaled(LINE_FORMAT_CONTENT_GAP_PX);
                 let trigger_padding = editor.scaled(4.0);
                 let fold_icon_size = editor.scaled(editor.styles.gutter.gutter_fold_icon_size_px);
@@ -5214,7 +5268,7 @@ impl Element for EditorElement {
                                     base_char_width,
                                     line_height,
                                     editor.styles.editor.editor_inline_math_height_factor,
-                                    editor.scaled(table_styles.table_handle_size_px),
+                                    editor.scaled(table_styles.table_border_track_width_px),
                                     &body_font,
                                     &body_cjk_font,
                                     &monospace_font,
@@ -5329,6 +5383,21 @@ impl Element for EditorElement {
                                 && sr.start < table_block_end_offset
                                 && sr.end > table_block_start_offset
                         });
+                        let show_table_border =
+                            editor.hovering_table_start == Some(ti.table_start_line)
+                                || editor.table_handles.selection.as_ref().is_some_and(
+                                    |selection| selection.table_start_line == ti.table_start_line,
+                                );
+                        let table_corners = if show_table_border {
+                            Corners {
+                                top_left: px(0.0),
+                                top_right: px(0.0),
+                                bottom_left: px(0.0),
+                                bottom_right: outer_radius,
+                            }
+                        } else {
+                            Corners::all(outer_radius)
+                        };
                         if selection_overlaps_table {
                             let sel_border_w = table_styles.table_selection_border_width_px;
                             table_borders.push(quad(
@@ -5342,7 +5411,7 @@ impl Element for EditorElement {
                                         px(layout.total_height + sel_border_w * 2.0),
                                     ),
                                 ),
-                                Corners::all(outer_radius),
+                                table_corners,
                                 gpui::transparent_black(),
                                 px(sel_border_w),
                                 theme.cursor,
@@ -5356,7 +5425,7 @@ impl Element for EditorElement {
                                 point(px(table_left), px(table_top)),
                                 size(px(table_width), px(layout.total_height)),
                             ),
-                            Corners::all(outer_radius),
+                            table_corners,
                             gpui::transparent_black(),
                             px(border_w),
                             border_color,
@@ -5410,6 +5479,11 @@ impl Element for EditorElement {
                                 ));
                             }
 
+                            let border_selection =
+                                editor.table_handles.selection.as_ref().filter(|selection| {
+                                    selection.table_start_line == ti.table_start_line
+                                });
+
                             // Get the source line info for this visual row
                             let source_line = layout
                                 .visual_row_to_line
@@ -5422,6 +5496,40 @@ impl Element for EditorElement {
                             // Per-cell text shaping
                             if let Some(row_cells) = layout.cells.get(vi) {
                                 for cell_layout in row_cells {
+                                    let decoration_start = diff_inline_quads.len();
+                                    let selection_start = selection_quads.len();
+                                    let search_highlight_start = search_match_quads.len();
+                                    if border_selection.as_ref().is_some_and(|selection| {
+                                        (selection.is_column && selection.contains(cell_layout.col))
+                                            || (!selection.is_column && selection.contains(vi))
+                                    }) {
+                                        let selection_bg =
+                                            crate::theme::with_alpha(theme.cursor, 0.18);
+                                        table_bgs.push(fill(
+                                            Bounds::new(
+                                                point(px(table_left + cell_layout.x), px(row_y)),
+                                                size(px(cell_layout.width), px(row_h)),
+                                            ),
+                                            selection_bg,
+                                        ));
+                                    }
+                                    if editor.table_cell_selection.as_ref().is_some_and(
+                                        |selection| {
+                                            selection.contains(
+                                                ti.table_start_line,
+                                                vi,
+                                                cell_layout.col,
+                                            )
+                                        },
+                                    ) {
+                                        table_bgs.push(fill(
+                                            Bounds::new(
+                                                point(px(table_left + cell_layout.x), px(row_y)),
+                                                size(px(cell_layout.width), px(row_h)),
+                                            ),
+                                            crate::theme::with_alpha(theme.cursor, 0.12),
+                                        ));
+                                    }
                                     let cell_content = row_ti
                                         .and_then(|t| t.cells.get(cell_layout.col))
                                         .cloned()
@@ -5465,7 +5573,7 @@ impl Element for EditorElement {
                                         &cell_decoration,
                                         &cell_active_ranges,
                                         false,
-                                        false,
+                                        cell_layout.prefix_collapsed,
                                         &body_font,
                                         &body_cjk_font,
                                         &monospace_font,
@@ -5594,6 +5702,352 @@ impl Element for EditorElement {
                                                     wrap_width,
                                                     f32::from(shaped.unwrapped_layout.width),
                                                 );
+                                            let fragment_source = cell_layout
+                                                .display_to_buffer
+                                                .get(hard_line_range.start)
+                                                .copied()
+                                                .unwrap_or(0);
+                                            let breaks =
+                                                helpers::table_cell_break_ranges(&cell_content);
+                                            let fragment_start = breaks
+                                                .iter()
+                                                .take_while(|range| range.end <= fragment_source)
+                                                .last()
+                                                .map_or(0, |range| range.end);
+                                            let fragment_end = breaks
+                                                .iter()
+                                                .find(|range| range.start >= fragment_start)
+                                                .map_or(cell_content.len(), |range| range.start);
+                                            let fragment =
+                                                &cell_content[fragment_start..fragment_end];
+                                            let fragment_decoration = if fragment_start == 0 {
+                                                cell_decoration.clone()
+                                            } else {
+                                                helpers::table_cell_decoration(
+                                                    &decorations[source_line],
+                                                    fragment,
+                                                    &(cell_layout.cell_range.start + fragment_start
+                                                        ..cell_layout.cell_range.start
+                                                            + fragment_end),
+                                                )
+                                            };
+                                            let fragment_buffer_to_display = cell_layout
+                                                .buffer_to_display
+                                                [fragment_start..=fragment_end]
+                                                .iter()
+                                                .map(|display_index| {
+                                                    display_index
+                                                        .saturating_sub(hard_line_range.start)
+                                                        .min(hard_line_range.len())
+                                                })
+                                                .collect::<Vec<_>>();
+                                            let fragment_prefix_collapsed = if fragment_start == 0 {
+                                                cell_layout.prefix_collapsed
+                                            } else {
+                                                let prefix_end = fragment_start + fragment.len()
+                                                    - fragment
+                                                        .trim_start_matches([' ', '\t'])
+                                                        .len()
+                                                    + if matches!(
+                                                        fragment_decoration.block_type,
+                                                        BlockType::TaskList(_)
+                                                    ) {
+                                                        6
+                                                    } else {
+                                                        2
+                                                    };
+                                                !helpers::active_ranges_intersect(
+                                                    &cell_active_ranges,
+                                                    &(fragment_start
+                                                        ..prefix_end.min(cell_content.len())),
+                                                )
+                                            };
+                                            if hard_line_range.start == 0 || fragment_start > 0 {
+                                                if fragment_decoration.block_type
+                                                    == BlockType::OrderedList
+                                                {
+                                                    let leading = fragment.len()
+                                                        - fragment
+                                                            .trim_start_matches([' ', '\t'])
+                                                            .len();
+                                                    let prefix_len =
+                                                        crate::markdown::ordered_list_prefix_len(
+                                                            &fragment[leading..],
+                                                        );
+                                                    let prefix_start = fragment_start + leading;
+                                                    let prefix_end = prefix_start + prefix_len;
+                                                    let folded = prefix_len > 0
+                                                        && !helpers::active_ranges_intersect(
+                                                            &cell_active_ranges,
+                                                            &(prefix_start..prefix_end),
+                                                        );
+                                                    if folded {
+                                                        let display_start =
+                                                            helpers::buffer_to_display_offset(
+                                                                &cell_layout.buffer_to_display,
+                                                                prefix_start,
+                                                            )
+                                                            .saturating_sub(hard_line_range.start);
+                                                        push_inline_text_overlay(
+                                                            &mut inline_overlays,
+                                                            window,
+                                                            &shaped,
+                                                            &cell_content[prefix_start..prefix_end],
+                                                            display_start
+                                                                ..display_start + prefix_len,
+                                                            &monospace_font,
+                                                            &body_cjk_font,
+                                                            editor
+                                                                .styles
+                                                                .editor
+                                                                .editor_list_marker_text_color,
+                                                            font_size,
+                                                            1.0,
+                                                            InlineOverlayVerticalAlign::Offset(0.0),
+                                                            false,
+                                                            cell_x,
+                                                            hard_line_y,
+                                                            0.0,
+                                                            line_height,
+                                                        );
+                                                    }
+                                                }
+                                                push_unordered_list_marker_paint(
+                                                    editor,
+                                                    fragment,
+                                                    &fragment_decoration.block_type,
+                                                    fragment_prefix_collapsed,
+                                                    &shaped,
+                                                    &fragment_buffer_to_display,
+                                                    font_size,
+                                                    line_height,
+                                                    cell_x,
+                                                    cell_x,
+                                                    hard_line_y,
+                                                    &monospace_font,
+                                                    window,
+                                                    &mut unordered_list_markers,
+                                                );
+                                                push_task_checkbox_paint(
+                                                    editor,
+                                                    &fragment_decoration.block_type,
+                                                    fragment_prefix_collapsed,
+                                                    hard_display_text,
+                                                    &shaped,
+                                                    font_size,
+                                                    line_height,
+                                                    cell_x,
+                                                    hard_line_y,
+                                                    hard_line_y,
+                                                    line_height,
+                                                    3,
+                                                    checkbox_text_gap_px,
+                                                    Some(source_line),
+                                                    &mut gutter_quads,
+                                                    &mut gutter_svgs,
+                                                    &mut checkbox_hit_areas,
+                                                );
+                                            }
+                                            for (ranges, scale, align, color) in [
+                                                (
+                                                    &cell_decoration.superscript_spans,
+                                                    editor
+                                                        .styles
+                                                        .editor
+                                                        .editor_superscript_scale_factor,
+                                                    InlineOverlayVerticalAlign::Top(
+                                                        editor.scaled(
+                                                            editor
+                                                                .styles
+                                                                .editor
+                                                                .editor_superscript_offset_px,
+                                                        ),
+                                                    ),
+                                                    theme.syntax_marker,
+                                                ),
+                                                (
+                                                    &cell_decoration.subscript_spans,
+                                                    editor
+                                                        .styles
+                                                        .editor
+                                                        .editor_subscript_scale_factor,
+                                                    InlineOverlayVerticalAlign::Bottom(
+                                                        editor.scaled(
+                                                            editor
+                                                                .styles
+                                                                .editor
+                                                                .editor_subscript_offset_px,
+                                                        ),
+                                                    ),
+                                                    theme.syntax_marker,
+                                                ),
+                                            ] {
+                                                for range in ranges {
+                                                    if !helpers::inline_range_is_collapsed(
+                                                        &cell_decoration,
+                                                        range,
+                                                        &cell_active_ranges,
+                                                    ) {
+                                                        continue;
+                                                    }
+                                                    let start = helpers::buffer_to_display_offset(
+                                                        &cell_layout.buffer_to_display,
+                                                        range.start,
+                                                    );
+                                                    let end = helpers::buffer_to_display_offset(
+                                                        &cell_layout.buffer_to_display,
+                                                        range.end,
+                                                    );
+                                                    if start < hard_line_range.start
+                                                        || end > hard_line_range.end
+                                                    {
+                                                        continue;
+                                                    }
+                                                    push_inline_text_overlay(
+                                                        &mut inline_overlays,
+                                                        window,
+                                                        &shaped,
+                                                        cell_content
+                                                            .get(range.clone())
+                                                            .unwrap_or_default(),
+                                                        start - hard_line_range.start
+                                                            ..end - hard_line_range.start,
+                                                        &body_font,
+                                                        &body_cjk_font,
+                                                        color,
+                                                        font_size,
+                                                        scale,
+                                                        align,
+                                                        false,
+                                                        cell_x,
+                                                        hard_line_y,
+                                                        0.0,
+                                                        line_height,
+                                                    );
+                                                }
+                                            }
+                                            for reference in &cell_decoration.footnote_references {
+                                                if !helpers::inline_range_is_collapsed(
+                                                    &cell_decoration,
+                                                    &reference.collapsed_range,
+                                                    &cell_active_ranges,
+                                                ) {
+                                                    continue;
+                                                }
+                                                let start = helpers::buffer_to_display_offset(
+                                                    &cell_layout.buffer_to_display,
+                                                    reference.collapsed_range.start,
+                                                );
+                                                let end = helpers::buffer_to_display_offset(
+                                                    &cell_layout.buffer_to_display,
+                                                    reference.collapsed_range.end,
+                                                );
+                                                if start < hard_line_range.start
+                                                    || end > hard_line_range.end
+                                                {
+                                                    continue;
+                                                }
+                                                push_inline_text_overlay(
+                                                    &mut inline_overlays,
+                                                    window,
+                                                    &shaped,
+                                                    cell_content
+                                                        .get(reference.collapsed_range.clone())
+                                                        .unwrap_or_default(),
+                                                    start - hard_line_range.start
+                                                        ..end - hard_line_range.start,
+                                                    &body_font,
+                                                    &body_cjk_font,
+                                                    theme.link,
+                                                    font_size,
+                                                    editor
+                                                        .styles
+                                                        .editor
+                                                        .editor_superscript_scale_factor,
+                                                    InlineOverlayVerticalAlign::Offset(
+                                                        -line_height * 0.14,
+                                                    ),
+                                                    false,
+                                                    cell_x,
+                                                    hard_line_y,
+                                                    0.0,
+                                                    line_height,
+                                                );
+                                            }
+                                            push_inline_code_background_quads(
+                                                &mut diff_inline_quads,
+                                                &fragment_decoration,
+                                                hard_display_text,
+                                                fragment.len(),
+                                                &fragment_buffer_to_display,
+                                                &hard_cell_runs,
+                                                &shaped,
+                                                cell_x,
+                                                hard_line_y,
+                                                line_height,
+                                                font_size,
+                                                0.0,
+                                                editor.styles.editor.editor_inline_code_bg,
+                                                px(editor.scaled(
+                                                    editor
+                                                        .styles
+                                                        .editor
+                                                        .editor_inline_code_bg_x_padding_px,
+                                                )),
+                                                px(editor.scaled(
+                                                    editor
+                                                        .styles
+                                                        .editor
+                                                        .editor_inline_code_bg_radius_px,
+                                                )),
+                                                px(editor.scaled(
+                                                    editor
+                                                        .styles
+                                                        .editor
+                                                        .editor_inline_code_bg_y_inset_px,
+                                                )),
+                                                letter_spacing,
+                                                window,
+                                            );
+                                            if !fragment_decoration.highlight_spans.is_empty() {
+                                                push_diff_inline_highlight_quads(
+                                                    &mut diff_inline_quads,
+                                                    &fragment_decoration.highlight_spans,
+                                                    hard_display_text,
+                                                    fragment.len(),
+                                                    &fragment_buffer_to_display,
+                                                    &hard_cell_runs,
+                                                    &shaped,
+                                                    cell_x,
+                                                    hard_line_y,
+                                                    line_height,
+                                                    font_size,
+                                                    0.0,
+                                                    editor.styles.editor.editor_inline_highlight_bg,
+                                                    gpui::transparent_black(),
+                                                    0.0,
+                                                    px(editor.scaled(
+                                                        editor
+                                                            .styles
+                                                            .editor
+                                                            .editor_inline_code_bg_x_padding_px,
+                                                    )),
+                                                    px(editor.scaled(
+                                                        editor
+                                                            .styles
+                                                            .editor
+                                                            .editor_inline_code_bg_radius_px,
+                                                    )),
+                                                    px(editor.scaled(
+                                                        editor
+                                                            .styles
+                                                            .editor
+                                                            .editor_inline_code_bg_y_inset_px,
+                                                    )),
+                                                    letter_spacing,
+                                                    window,
+                                                );
+                                            }
                                             if editor.command_held {
                                                 for span in cell_decoration
                                                     .inline_spans
@@ -5911,6 +6365,14 @@ impl Element for EditorElement {
                                                                         + (line_height
                                                                             - cursor_height)
                                                                             / 2.0;
+                                                                    if cur_off
+                                                                        == editor.cursor.offset
+                                                                    {
+                                                                        table_cursor_paint_bounds = Some((cur_off, Bounds::new(
+                                                                            point(px(cell_x) + pos.x, px(cursor_top)),
+                                                                            size(px(editor.styles.cursor.cursor_width_px), px(cursor_height)),
+                                                                        )));
+                                                                    }
                                                                     cursor_paints.push(
                                                                         super::caret::CaretPaint {
                                                                             bounds: Bounds::new(
@@ -6016,6 +6478,29 @@ impl Element for EditorElement {
                                         }
                                     }
 
+                                    let cell_bounds = Bounds::new(
+                                        point(px(table_left + cell_layout.x), px(row_y)),
+                                        size(px(cell_layout.width), px(row_h)),
+                                    );
+                                    if diff_inline_quads.len() > decoration_start {
+                                        clipped_table_decorations.push((
+                                            cell_bounds,
+                                            diff_inline_quads.split_off(decoration_start),
+                                        ));
+                                    }
+                                    if selection_quads.len() > selection_start {
+                                        clipped_table_selections.push((
+                                            cell_bounds,
+                                            selection_quads.split_off(selection_start),
+                                        ));
+                                    }
+                                    if search_match_quads.len() > search_highlight_start {
+                                        clipped_table_search_highlights.push((
+                                            cell_bounds,
+                                            search_match_quads.split_off(search_highlight_start),
+                                        ));
+                                    }
+
                                     // Register cell click area
                                     let click_bounds = Bounds::new(
                                         point(px(table_left + cell_layout.x), px(row_y)),
@@ -6030,7 +6515,6 @@ impl Element for EditorElement {
                                 }
                             }
 
-                            // Row handle areas (left of each row, hover-only)
                             let handle_w = layout.handle_size;
                             let handle_bounds = Bounds::new(
                                 point(px(table_left - handle_w), px(row_y)),
@@ -6045,34 +6529,8 @@ impl Element for EditorElement {
                             }
                         }
 
-                        // Column handle areas (above header, hover-only)
                         {
                             let handle_h = layout.handle_size;
-                            if !editor.active_tab_is_read_only() {
-                                let icon_size = (handle_h * 2.0).max(1.0);
-                                let corner_bounds = Bounds::new(
-                                    point(px(table_left - icon_size), px(table_top - icon_size)),
-                                    size(px(icon_size), px(icon_size)),
-                                );
-                                table_corner_areas_local.push((corner_bounds, ti.table_start_line));
-                                let picker_open =
-                                    editor.context_menu.as_ref().is_some_and(|menu| {
-                                        matches!(
-                                            menu.kind,
-                                            ContextMenuKind::TableResize { table_start_line }
-                                                if table_start_line == ti.table_start_line
-                                        )
-                                    });
-                                if editor.hovering_table_start == Some(ti.table_start_line)
-                                    || picker_open
-                                {
-                                    table_icons.push((
-                                        corner_bounds,
-                                        "assets/icons/format/table.svg",
-                                        table_styles.table_handle_color,
-                                    ));
-                                }
-                            }
                             let mut hx = 0.0_f32;
                             for ci in 0..layout.col_count {
                                 let cell_w = layout
@@ -6096,131 +6554,133 @@ impl Element for EditorElement {
                             }
                         }
 
-                        let selected_handle = editor.selected_handle;
-                        let highlight_width = table_styles.table_handle_highlight_width_px;
-                        let dot_size = table_styles.table_handle_dot_size_px;
-                        let dot_gap = table_styles.table_handle_gap_px;
-
-                        // Draw handle grips only for the specific handle being hovered
-                        let hovering_handle = editor.hovering_handle;
-                        // Column handle grips
-                        {
+                        let hovering_table_border_segment = editor.hovering_handle;
+                        let border_selection =
+                            editor.table_handles.selection.as_ref().filter(|selection| {
+                                selection.table_start_line == ti.table_start_line
+                            });
+                        let border_width_px =
+                            editor.scaled(table_styles.table_border_track_width_px);
+                        let outer_radius_px = table_styles.table_outer_radius_px;
+                        if show_table_border {
+                            let neutral = gpui::Hsla {
+                                a: 0.25,
+                                ..table_styles.table_border_color
+                            };
+                            let active_color = gpui::Hsla {
+                                a: 0.3,
+                                ..theme.cursor
+                            };
+                            if let Some(path) = table_border_track_path(
+                                table_left,
+                                table_top,
+                                table_left + table_width,
+                                table_top + layout.total_height,
+                                border_width_px,
+                                outer_radius_px,
+                            ) {
+                                table_border_paths.push((path, neutral));
+                            }
                             let mut hx = 0.0_f32;
-                            let handle_h = layout.handle_size;
                             for ci in 0..layout.col_count {
                                 let cell_w = layout
                                     .cells
                                     .first()
                                     .and_then(|row| row.get(ci))
-                                    .map(|c| c.width)
+                                    .map(|cell| cell.width)
                                     .unwrap_or(0.0);
-                                let is_hovered =
-                                    hovering_handle == Some((ti.table_start_line, true, ci));
-                                let is_selected =
-                                    selected_handle == Some((ti.table_start_line, true, ci));
-                                let is_drag_source = matches!(
-                                    &editor.table_drag,
-                                    Some(TableDragState::DraggingColumn {
-                                        table_start_line,
-                                        source_col,
-                                        ..
-                                    }) if *table_start_line == ti.table_start_line && *source_col == ci
-                                );
-                                if is_hovered || is_selected || is_drag_source {
+                                let active = hovering_table_border_segment
+                                    == Some((ti.table_start_line, true, ci))
+                                    || border_selection.as_ref().is_some_and(|selection| {
+                                        selection.is_column && selection.contains(ci)
+                                    });
+                                if active {
                                     table_borders.push(quad(
                                         Bounds::new(
-                                            point(px(table_left + hx), px(table_top)),
-                                            size(px(cell_w), px(layout.total_height)),
+                                            point(
+                                                px(table_left + hx),
+                                                px(table_top - border_width_px),
+                                            ),
+                                            size(px(cell_w), px(border_width_px)),
                                         ),
-                                        Corners::all(px(4.0)),
+                                        Corners::all(px(0.0)),
+                                        active_color,
+                                        px(0.0),
                                         gpui::transparent_black(),
-                                        px(highlight_width),
-                                        theme.cursor,
                                         BorderStyle::default(),
                                     ));
                                 }
-                                if is_hovered {
-                                    let grip_w = dot_size * 3.0 + dot_gap * 2.0;
-                                    let grip_h = dot_size * 2.0 + dot_gap;
-                                    let grip_x = table_left + hx + cell_w / 2.0 - grip_w / 2.0;
-                                    let grip_y = table_top - handle_h / 2.0 - grip_h / 2.0;
-                                    let handle_color = table_styles.table_handle_color;
-                                    for dr in 0..2 {
-                                        for dc in 0..3 {
-                                            let dx = grip_x + dc as f32 * (dot_size + dot_gap);
-                                            let dy = grip_y + dr as f32 * (dot_size + dot_gap);
-                                            table_bgs.push(fill(
-                                                Bounds::new(
-                                                    point(px(dx), px(dy)),
-                                                    size(px(dot_size), px(dot_size)),
-                                                ),
-                                                handle_color,
-                                            ));
-                                        }
-                                    }
-                                }
                                 hx += cell_w;
                             }
-                        }
-
-                        // Row handle grips
-                        for vi in 0..layout.visual_row_count {
-                            let row_y = table_top + layout.row_heights.iter().take(vi).sum::<f32>();
-                            let row_h = layout.row_heights.get(vi).copied().unwrap_or(line_height);
-                            let is_hovered =
-                                hovering_handle == Some((ti.table_start_line, false, vi));
-                            let is_selected =
-                                selected_handle == Some((ti.table_start_line, false, vi));
-                            let is_drag_source = matches!(
-                                &editor.table_drag,
-                                Some(TableDragState::DraggingRow {
-                                    table_start_line,
-                                    source_row,
-                                    ..
-                                }) if *table_start_line == ti.table_start_line && *source_row == vi
-                            );
-                            if is_hovered || is_selected || is_drag_source {
-                                table_borders.push(quad(
-                                    Bounds::new(
-                                        point(px(table_left), px(row_y)),
-                                        size(px(table_width), px(row_h)),
-                                    ),
-                                    Corners::all(px(4.0)),
-                                    gpui::transparent_black(),
-                                    px(highlight_width),
-                                    theme.cursor,
-                                    BorderStyle::default(),
-                                ));
-                            }
-                            if is_hovered {
-                                let handle_w = layout.handle_size;
-                                let grip_w = dot_size * 2.0 + dot_gap;
-                                let grip_h = dot_size * 3.0 + dot_gap * 2.0;
-                                let grip_x = table_left - handle_w / 2.0 - grip_w / 2.0;
-                                let grip_y = row_y + row_h / 2.0 - grip_h / 2.0;
-                                let handle_color = table_styles.table_handle_color;
-                                for dr in 0..3 {
-                                    for dc in 0..2 {
-                                        let dx = grip_x + dc as f32 * (dot_size + dot_gap);
-                                        let dy = grip_y + dr as f32 * (dot_size + dot_gap);
-                                        table_bgs.push(fill(
-                                            Bounds::new(
-                                                point(px(dx), px(dy)),
-                                                size(px(dot_size), px(dot_size)),
-                                            ),
-                                            handle_color,
-                                        ));
-                                    }
+                            for vi in 0..layout.visual_row_count {
+                                let row_y =
+                                    table_top + layout.row_heights.iter().take(vi).sum::<f32>();
+                                let row_h =
+                                    layout.row_heights.get(vi).copied().unwrap_or(line_height);
+                                let active = hovering_table_border_segment
+                                    == Some((ti.table_start_line, false, vi))
+                                    || border_selection.as_ref().is_some_and(|selection| {
+                                        !selection.is_column && selection.contains(vi)
+                                    });
+                                if active {
+                                    table_borders.push(quad(
+                                        Bounds::new(
+                                            point(px(table_left - border_width_px), px(row_y)),
+                                            size(px(border_width_px), px(row_h)),
+                                        ),
+                                        Corners::all(px(0.0)),
+                                        active_color,
+                                        px(0.0),
+                                        gpui::transparent_black(),
+                                        BorderStyle::default(),
+                                    ));
                                 }
                             }
                         }
-
+                        if let Some(selection) = editor.table_cell_selection.as_ref()
+                            && selection.table_start_line == ti.table_start_line
+                            && let (Some(first), Some(last)) = (
+                                layout
+                                    .cells
+                                    .first()
+                                    .and_then(|cells| cells.get(*selection.columns.start())),
+                                layout
+                                    .cells
+                                    .first()
+                                    .and_then(|cells| cells.get(*selection.columns.end())),
+                            )
+                            && *selection.rows.end() < layout.visual_row_count
+                        {
+                            let top = table_top
+                                + layout
+                                    .row_heights
+                                    .iter()
+                                    .take(*selection.rows.start())
+                                    .sum::<f32>();
+                            let bottom = table_top
+                                + layout
+                                    .row_heights
+                                    .iter()
+                                    .take(*selection.rows.end() + 1)
+                                    .sum::<f32>();
+                            table_borders.push(quad(
+                                Bounds::new(
+                                    point(px(table_left + first.x), px(top)),
+                                    size(px(last.x + last.width - first.x), px(bottom - top)),
+                                ),
+                                Corners::all(px(0.0)),
+                                gpui::transparent_black(),
+                                px(editor.scaled(2.0)),
+                                theme.cursor,
+                                BorderStyle::default(),
+                            ));
+                        }
                         if let Some(drag) = &editor.table_drag {
                             let indicator_color = theme.cursor;
                             let indicator_width = table_styles.table_drag_indicator_width_px;
                             match drag {
                                 TableDragState::DraggingColumn {
-                                    source_col,
+                                    source_indices,
                                     table_start_line,
                                     current_x,
                                     ..
@@ -6244,8 +6704,11 @@ impl Element for EditorElement {
                                                 (*boundary - indicator_x).abs() < 0.5
                                             })
                                             .unwrap_or(0);
-                                        if insert_at != *source_col && insert_at != *source_col + 1
-                                        {
+                                        let source_start =
+                                            source_indices.iter().min().copied().unwrap_or(0);
+                                        let source_end =
+                                            source_indices.iter().max().copied().unwrap_or(0);
+                                        if insert_at < source_start || insert_at > source_end + 1 {
                                             table_borders.push(fill(
                                                 Bounds::new(
                                                     point(
@@ -6263,7 +6726,7 @@ impl Element for EditorElement {
                                     }
                                 }
                                 TableDragState::DraggingRow {
-                                    source_row,
+                                    source_indices,
                                     table_start_line,
                                     current_y,
                                     ..
@@ -6288,8 +6751,11 @@ impl Element for EditorElement {
                                                 (*boundary - indicator_y).abs() < 0.5
                                             })
                                             .unwrap_or(0);
-                                        if insert_at != *source_row && insert_at != *source_row + 1
-                                        {
+                                        let source_start =
+                                            source_indices.iter().min().copied().unwrap_or(0);
+                                        let source_end =
+                                            source_indices.iter().max().copied().unwrap_or(0);
+                                        if insert_at < source_start || insert_at > source_end + 1 {
                                             table_borders.push(fill(
                                                 Bounds::new(
                                                     point(
@@ -6796,50 +7262,52 @@ impl Element for EditorElement {
                 ));
             }
             let selection_styles = &editor.styles.selection;
-            push_diff_inline_highlight_quads(
-                &mut diff_inline_quads,
-                &decoration.diff_removed_spans,
-                &display_text,
-                line_content.len(),
-                &buffer_to_display,
-                &runs,
-                wrapped,
-                content_x,
-                text_line_top,
-                line_height,
-                font_size,
-                indent_px,
-                selection_styles.selection_diff_removed_inline_bg,
-                selection_styles.selection_diff_removed_inline_border_color,
-                editor.scaled(selection_styles.selection_diff_inline_border_width_px),
-                px(0.0),
-                px(0.0),
-                px(0.0),
-                letter_spacing,
-                window,
-            );
-            push_diff_inline_highlight_quads(
-                &mut diff_inline_quads,
-                &decoration.diff_added_spans,
-                &display_text,
-                line_content.len(),
-                &buffer_to_display,
-                &runs,
-                wrapped,
-                content_x,
-                text_line_top,
-                line_height,
-                font_size,
-                indent_px,
-                selection_styles.selection_diff_added_inline_bg,
-                selection_styles.selection_diff_added_inline_border_color,
-                editor.scaled(selection_styles.selection_diff_inline_border_width_px),
-                px(0.0),
-                px(0.0),
-                px(0.0),
-                letter_spacing,
-                window,
-            );
+            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff) {
+                push_diff_inline_highlight_quads(
+                    &mut diff_inline_quads,
+                    &decoration.diff_removed_spans,
+                    &display_text,
+                    line_content.len(),
+                    &buffer_to_display,
+                    &runs,
+                    wrapped,
+                    content_x,
+                    text_line_top,
+                    line_height,
+                    font_size,
+                    indent_px,
+                    selection_styles.selection_diff_removed_inline_bg,
+                    selection_styles.selection_diff_removed_inline_border_color,
+                    editor.scaled(selection_styles.selection_diff_inline_border_width_px),
+                    px(0.0),
+                    px(0.0),
+                    px(0.0),
+                    letter_spacing,
+                    window,
+                );
+                push_diff_inline_highlight_quads(
+                    &mut diff_inline_quads,
+                    &decoration.diff_added_spans,
+                    &display_text,
+                    line_content.len(),
+                    &buffer_to_display,
+                    &runs,
+                    wrapped,
+                    content_x,
+                    text_line_top,
+                    line_height,
+                    font_size,
+                    indent_px,
+                    selection_styles.selection_diff_added_inline_bg,
+                    selection_styles.selection_diff_added_inline_border_color,
+                    editor.scaled(selection_styles.selection_diff_inline_border_width_px),
+                    px(0.0),
+                    px(0.0),
+                    px(0.0),
+                    letter_spacing,
+                    window,
+                );
+            }
             // Read-only phantom rows: an expanded inline-diff hunk's removed
             // lines render in the padding band reserved by `block_padding_for_line`
             // (above the anchor line, or below the last line for a trailing
@@ -7332,27 +7800,31 @@ impl Element for EditorElement {
                 }
             }
             let inline_decoration_start = diff_inline_quads.len();
-            push_inline_code_background_quads(
-                &mut diff_inline_quads,
-                &decoration,
-                &display_text,
-                line_content.len(),
-                &buffer_to_display,
-                &runs,
-                wrapped,
-                content_x,
-                text_line_top,
-                line_height,
-                font_size,
-                indent_px,
-                editor.styles.editor.editor_inline_code_bg,
-                px(editor.scaled(editor.styles.editor.editor_inline_code_bg_x_padding_px)),
-                px(editor.scaled(editor.styles.editor.editor_inline_code_bg_radius_px)),
-                px(editor.scaled(editor.styles.editor.editor_inline_code_bg_y_inset_px)),
-                letter_spacing,
-                window,
-            );
-            if !decoration.highlight_spans.is_empty() {
+            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff) {
+                push_inline_code_background_quads(
+                    &mut diff_inline_quads,
+                    &decoration,
+                    &display_text,
+                    line_content.len(),
+                    &buffer_to_display,
+                    &runs,
+                    wrapped,
+                    content_x,
+                    text_line_top,
+                    line_height,
+                    font_size,
+                    indent_px,
+                    editor.styles.editor.editor_inline_code_bg,
+                    px(editor.scaled(editor.styles.editor.editor_inline_code_bg_x_padding_px)),
+                    px(editor.scaled(editor.styles.editor.editor_inline_code_bg_radius_px)),
+                    px(editor.scaled(editor.styles.editor.editor_inline_code_bg_y_inset_px)),
+                    letter_spacing,
+                    window,
+                );
+            }
+            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff)
+                && !decoration.highlight_spans.is_empty()
+            {
                 push_diff_inline_highlight_quads(
                     &mut diff_inline_quads,
                     &decoration.highlight_spans,
@@ -7376,7 +7848,9 @@ impl Element for EditorElement {
                     window,
                 );
             }
-            if !selection_match_ranges.is_empty() {
+            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff)
+                && !selection_match_ranges.is_empty()
+            {
                 let mut line_spans: Vec<std::ops::Range<usize>> = Vec::new();
                 for range in &selection_match_ranges {
                     if range.end > line_start_offset && range.start < line_end_offset {
@@ -7412,7 +7886,9 @@ impl Element for EditorElement {
                     );
                 }
             }
-            if !bracket_match_ranges.is_empty() {
+            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff)
+                && !bracket_match_ranges.is_empty()
+            {
                 let mut line_spans: Vec<std::ops::Range<usize>> = Vec::new();
                 for range in &bracket_match_ranges {
                     if range.end > line_start_offset && range.start < line_end_offset {
@@ -7592,7 +8068,9 @@ impl Element for EditorElement {
 
             // Search match quads
             let search_highlight_start = search_match_quads.len();
-            if !editor.search_matches.is_empty() {
+            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff)
+                && !editor.search_matches.is_empty()
+            {
                 let match_bg = editor.styles.search.search_match_bg;
                 let active_bg = editor.styles.search.search_match_active_bg;
                 let border_color = editor.styles.search.search_match_border_color;
@@ -7631,7 +8109,9 @@ impl Element for EditorElement {
                 }
             }
 
-            if editor.current_file_path == editor.workspace_search_highlight_path {
+            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff)
+                && editor.current_file_path == editor.workspace_search_highlight_path
+            {
                 let match_bg = editor.styles.search.search_match_bg;
                 let active_bg = editor.styles.search.search_match_active_bg;
                 for (match_idx, sr) in editor.workspace_search_highlight_ranges.iter().enumerate() {
@@ -7667,7 +8147,9 @@ impl Element for EditorElement {
                     }
                 }
             }
-            if editor.current_file_path == editor.outline_flash_highlight_path {
+            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff)
+                && editor.current_file_path == editor.outline_flash_highlight_path
+            {
                 let match_bg = editor.styles.search.search_match_bg;
                 let active_bg = editor.styles.search.search_match_active_bg;
                 for (match_idx, sr) in editor.outline_flash_highlight_ranges.iter().enumerate() {
@@ -8117,10 +8599,6 @@ impl Element for EditorElement {
 
             y += total_line_height;
             _last_line_height = total_line_height;
-        }
-        if editor.preview_overlay_state().is_none() {
-            preview_overlay_bounds_local = None;
-            preview_overlay_image_bounds_local = None;
         }
 
         let mut code_block_copy_hitboxes = Vec::new();
@@ -9398,9 +9876,18 @@ impl Element for EditorElement {
             editor.code_block_copy_areas = code_block_copy_areas_local.clone();
             editor.code_block_display_action_areas = code_block_display_action_areas_local.clone();
             editor.table_click_areas = table_click_areas_local.clone();
-            editor.table_col_handle_areas = table_col_handle_areas_local.clone();
-            editor.table_row_handle_areas = table_row_handle_areas_local.clone();
-            editor.table_corner_areas = table_corner_areas_local.clone();
+            editor.table_cursor_paint_bounds = table_cursor_paint_bounds;
+            editor.table_border_segment_areas = table_col_handle_areas_local
+                .iter()
+                .map(|(bounds, table, col)| (*bounds, *table, true, *col))
+                .chain(
+                    table_row_handle_areas_local
+                        .iter()
+                        .map(|(bounds, table, row)| (*bounds, *table, false, *row)),
+                )
+                .collect();
+            editor.table_column_border_segments = table_col_handle_areas_local.clone();
+            editor.table_row_border_segments = table_row_handle_areas_local.clone();
             editor.table_boundary_caret_areas = table_boundary_caret_areas_local.clone();
             editor.gutter_fold_areas = gutter_fold_hit_areas_local.clone();
             editor.format_line_areas = format_line_areas_local.clone();
@@ -9411,8 +9898,6 @@ impl Element for EditorElement {
             editor.inline_diff_revert_areas = inline_diff_revert_areas_local.clone();
             editor.phantom_row_hits = phantom_row_hits_local;
             editor.image_edit_areas = image_edit_hit_areas_local.clone();
-            editor.preview_overlay_bounds = preview_overlay_bounds_local;
-            editor.preview_overlay_image_bounds = preview_overlay_image_bounds_local;
             editor.last_editor_left = editor_left;
             editor.last_editor_width = editor_width;
             editor.last_content_left = editor_left + editor.padding_left();
@@ -9489,8 +9974,7 @@ impl Element for EditorElement {
             if let Some(pending) = editor.pending_preview_reveal.take() {
                 editor.pending_scroll_to_cursor = false;
                 editor.pending_center_cursor_in_view = false;
-                editor.scroll_offset = pending.scroll_offset;
-                editor.clamp_scroll();
+                editor.scroll_offset = pending.scroll_offset.max(0.0);
                 did_adjust_preview_reveal = true;
             }
             if editor.pending_center_cursor_in_view {
@@ -9621,8 +10105,11 @@ impl Element for EditorElement {
             lines,
             indent_guide_quads,
             clipped_code_block_decorations,
+            clipped_table_decorations,
             clipped_code_block_search_highlights,
             clipped_code_block_selections,
+            clipped_table_search_highlights,
+            clipped_table_selections,
             whitespace_dots,
             selection_quads,
             search_match_quads,
@@ -9645,6 +10132,7 @@ impl Element for EditorElement {
             image_previews,
             image_borders,
             table_borders,
+            table_border_paths,
             table_bgs,
             table_icons,
             table_cell_texts,
@@ -9773,8 +10261,8 @@ impl Element for EditorElement {
         let editor = self.editor.read(cx);
         let focus_handle = editor.focus_handle.clone();
         let cursor_style = match editor.hovering_handle {
-            Some((_, true, _)) => CursorStyle::ResizeColumn,
-            Some((_, false, _)) => CursorStyle::ResizeRow,
+            _ if editor.table_drag.is_some() => CursorStyle::ClosedHand,
+            Some(_) => CursorStyle::OpenHand,
             None if editor.hovering_checkbox_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_fold_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_image_edit_line.is_some() => CursorStyle::Arrow,
@@ -9913,6 +10401,18 @@ impl Element for EditorElement {
                 },
             );
         }
+        for (clip_bounds, decorations) in prepaint.clipped_table_decorations.drain(..) {
+            window.with_content_mask(
+                Some(ContentMask {
+                    bounds: clip_bounds,
+                }),
+                |window| {
+                    for decoration in decorations {
+                        window.paint_quad(decoration);
+                    }
+                },
+            );
+        }
 
         if let Some(highlight) = prepaint.line_highlight.take() {
             window.paint_quad(highlight);
@@ -9936,6 +10436,18 @@ impl Element for EditorElement {
                 },
             );
         }
+        for (clip_bounds, highlights) in prepaint.clipped_table_search_highlights.drain(..) {
+            window.with_content_mask(
+                Some(ContentMask {
+                    bounds: clip_bounds,
+                }),
+                |window| {
+                    for highlight in highlights {
+                        window.paint_quad(highlight);
+                    }
+                },
+            );
+        }
 
         paint_quads_with_optional_mask(
             &mut prepaint.selection_quads,
@@ -9943,6 +10455,18 @@ impl Element for EditorElement {
             window,
         );
         for (clip_bounds, selections) in prepaint.clipped_code_block_selections.drain(..) {
+            window.with_content_mask(
+                Some(ContentMask {
+                    bounds: clip_bounds,
+                }),
+                |window| {
+                    for selection in selections {
+                        window.paint_quad(selection);
+                    }
+                },
+            );
+        }
+        for (clip_bounds, selections) in prepaint.clipped_table_selections.drain(..) {
             window.with_content_mask(
                 Some(ContentMask {
                     bounds: clip_bounds,
@@ -10026,6 +10550,9 @@ impl Element for EditorElement {
             shaped.paint(*origin, *line_height, window, cx).ok();
         }
 
+        for (path, color) in prepaint.table_border_paths.drain(..) {
+            window.paint_path(path, color);
+        }
         for quad in prepaint.table_borders.drain(..) {
             window.paint_quad(quad);
         }
@@ -10258,9 +10785,10 @@ impl Element for EditorElement {
             window.paint_quad(quad);
         }
 
+        let feedback_viewport = bounds.intersect(&window.content_mask().bounds);
         self.editor
             .read(cx)
-            .paint_line_drag_feedback(bounds.intersect(&window.content_mask().bounds), window);
+            .paint_line_drag_feedback(feedback_viewport, window);
 
         if pane_swapped {
             self.editor

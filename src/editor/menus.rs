@@ -68,6 +68,12 @@ pub(crate) struct SelectionToolbarMenuHover {
     close_task: Option<Task<()>>,
 }
 
+#[derive(Default)]
+pub(crate) struct TableAdjustmentMenu {
+    popup_table: Option<usize>,
+    bounds: Cell<Option<Bounds<Pixels>>>,
+}
+
 struct SelectionToolbarHoverRegion {
     child: AnyElement,
     editor: gpui::Entity<EditorView>,
@@ -115,6 +121,13 @@ impl gpui::Element for SelectionToolbarHoverRegion {
         cx: &mut gpui::App,
     ) -> gpui::Hitbox {
         self.child.prepaint(window, cx);
+        if self.region == "table-adjustment-menu" {
+            self.editor
+                .read(cx)
+                .table_adjustment_menu
+                .bounds
+                .set(Some(bounds));
+        }
         window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
     }
 
@@ -140,7 +153,15 @@ impl gpui::Element for SelectionToolbarHoverRegion {
             let hovered = hitbox.is_hovered(window) && !cx.has_active_drag();
             editor.update(cx, |this, cx| {
                 if hovered && let Some(kind) = &menu_kind {
-                    if matches!(kind, ContextMenuKind::FormatHeading) {
+                    if let ContextMenuKind::TableResize { table_start_line } = kind
+                        && region == "table-cells-trigger"
+                    {
+                        if this.table_adjustment_menu.popup_table != Some(*table_start_line) {
+                            this.table_adjustment_menu.popup_table = Some(*table_start_line);
+                            this.table_size_hover = None;
+                            cx.notify();
+                        }
+                    } else if matches!(kind, ContextMenuKind::FormatHeading) {
                         this.schedule_selection_toolbar_menu(region, kind.clone(), bounds, cx);
                     } else {
                         this.cancel_selection_toolbar_menu_open(region);
@@ -406,6 +427,34 @@ fn image_markdown_ranges(line_content: &str) -> Option<(Range<usize>, Range<usiz
     ))
 }
 
+fn table_cells_popup_layout(
+    parent: Bounds<Pixels>,
+    overlay: ContextMenuPanelLayout,
+    width: f32,
+    gap: f32,
+) -> ContextMenuPanelLayout {
+    let (left, top) = toolbar_side_menu_position(
+        parent.left().into(),
+        parent.top().into(),
+        parent.size.width.into(),
+        parent.size.height.into(),
+        width,
+        0.0,
+        overlay.overlay_width,
+        overlay.overlay_height,
+        gap,
+        overlay.margin,
+        false,
+    );
+    ContextMenuPanelLayout {
+        left,
+        estimated_top: top,
+        bottom_anchor: None,
+        max_height: (overlay.overlay_height - top - overlay.margin).max(1.0),
+        ..overlay
+    }
+}
+
 /// Innermost `[desc](url)` containing `col`, skipping image syntax (`![`).
 fn markdown_link_ranges(
     line_content: &str,
@@ -449,6 +498,201 @@ pub(super) struct ImageMenuTarget {
 }
 
 impl EditorView {
+    fn render_table_cells_context_menu(
+        &self,
+        table: usize,
+        row: usize,
+        col: usize,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut items = Vec::new();
+        items.push(self.render_context_menu_item_with_icon(
+            self.t(crate::i18n::TextKey::Copy),
+            MENU_COPY_SVG_PATH,
+            false,
+            cx,
+            move |this, _, cx| {
+                this.ensure_table_cell_context_selection(table, row, col);
+                if let Some(text) = this.copy_table_cell_selection() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            },
+        ));
+        items.push(self.render_context_menu_item_with_icon(
+            self.t(crate::i18n::TextKey::Cut),
+            MENU_CLIP_SVG_PATH,
+            true,
+            cx,
+            move |this, _, cx| {
+                this.ensure_table_cell_context_selection(table, row, col);
+                this.cut_table_cell_selection(cx);
+            },
+        ));
+        items.push(self.render_context_menu_item_with_icon(
+            crate::i18n::table_paste_label(self.ui_language, true),
+            MENU_PASTE_SVG_PATH,
+            false,
+            cx,
+            move |this, _, cx| {
+                this.ensure_table_cell_context_selection(table, row, col);
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    this.paste_table_cell_selection(&text, true, cx);
+                }
+            },
+        ));
+        items.push(self.render_context_menu_separator());
+        items.push(self.render_context_menu_item_with_icon(
+            crate::i18n::table_clear_cells_label(self.ui_language),
+            TABLE_DELETE_SVG,
+            true,
+            cx,
+            move |this, _, cx| {
+                this.ensure_table_cell_context_selection(table, row, col);
+                this.delete_table_cell_selection(cx);
+            },
+        ));
+        items
+    }
+
+    fn render_table_border_context_menu(
+        &self,
+        table: usize,
+        is_column: bool,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        use crate::i18n::TextKey;
+        let mut items = Vec::new();
+        if is_column {
+            let selected_columns = self
+                .table_handles
+                .selection
+                .as_ref()
+                .filter(|selection| {
+                    selection.table_start_line == table
+                        && selection.is_column
+                        && selection.contains(index)
+                })
+                .map(|selection| selection.indices.clone())
+                .unwrap_or_else(|| vec![index]);
+            for (label, align, icon) in [
+                (
+                    TextKey::AlignLeft,
+                    crate::markdown::TableAlign::Left,
+                    TABLE_ALIGN_LEFT_SVG,
+                ),
+                (
+                    TextKey::AlignCenter,
+                    crate::markdown::TableAlign::Center,
+                    TABLE_ALIGN_CENTER_SVG,
+                ),
+                (
+                    TextKey::AlignRight,
+                    crate::markdown::TableAlign::Right,
+                    TABLE_ALIGN_RIGHT_SVG,
+                ),
+            ] {
+                let columns = selected_columns.clone();
+                items.push(self.render_context_menu_item_with_icon(
+                    self.t(label),
+                    icon,
+                    false,
+                    cx,
+                    move |this, _, cx| this.table_set_columns_alignment(table, &columns, align, cx),
+                ));
+            }
+            items.push(self.render_context_menu_separator());
+            for (label, before) in [
+                (TextKey::AddColumnLeft, true),
+                (TextKey::AddColumnRight, false),
+            ] {
+                items.push(self.render_context_menu_item_with_icon(
+                    self.t(label),
+                    TABLE_COLUMNS_SVG,
+                    false,
+                    cx,
+                    move |this, _, cx| this.table_insert_column(table, index, before, cx),
+                ));
+            }
+        } else {
+            for (label, above) in [(TextKey::AddRowAbove, true), (TextKey::AddRowBelow, false)] {
+                items.push(self.render_context_menu_item_with_icon(
+                    self.t(label),
+                    TABLE_ROWS_SVG,
+                    false,
+                    cx,
+                    move |this, _, cx| this.table_insert_row(table, index, above, cx),
+                ));
+            }
+        }
+        items.push(self.render_context_menu_separator());
+        items.push(self.render_context_menu_item_with_icon(
+            self.t(crate::i18n::TextKey::Copy),
+            MENU_COPY_SVG_PATH,
+            false,
+            cx,
+            move |this, _, cx| {
+                if let Some(text) = this.copy_table_border_selection() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            },
+        ));
+        items.push(self.render_context_menu_item_with_icon(
+            crate::i18n::table_paste_label(self.ui_language, false),
+            MENU_PASTE_SVG_PATH,
+            false,
+            cx,
+            move |this, _, cx| {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    this.paste_table_border_selection(&text, cx);
+                }
+            },
+        ));
+        items.push(self.render_context_menu_item_with_icon(
+            crate::i18n::table_paste_label(self.ui_language, true),
+            MENU_PASTE_SVG_PATH,
+            false,
+            cx,
+            move |this, _, cx| {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    this.paste_table_border_selection_overwrite(&text, cx);
+                }
+            },
+        ));
+        items.push(self.render_context_menu_item_with_icon(
+            self.t(crate::i18n::TextKey::Cut),
+            MENU_CLIP_SVG_PATH,
+            true,
+            cx,
+            move |this, _, cx| {
+                this.cut_table_border_selection(cx);
+            },
+        ));
+        items.push(self.render_context_menu_item_with_icon(
+            self.t(if is_column {
+                TextKey::DeleteColumn
+            } else {
+                TextKey::DeleteRow
+            }),
+            TABLE_DELETE_SVG,
+            true,
+            cx,
+            move |this, _, cx| {
+                if this.table_handles.selection.is_none() {
+                    this.table_handles.selection =
+                        Some(super::table_handles::TableBorderSelection {
+                            table_start_line: table,
+                            is_column,
+                            anchor: index,
+                            indices: vec![index],
+                        });
+                }
+                this.delete_table_border_selection(cx);
+            },
+        ));
+        items
+    }
+
     fn suppress_editor_mouse_up_for_current_menu_event(&mut self, cx: &mut Context<Self>) {
         self.suppress_next_editor_mouse_up = true;
         let editor = cx.entity().clone();
@@ -466,6 +710,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.selection_toolbar_menu_hover = SelectionToolbarMenuHover::default();
+        self.table_adjustment_menu = TableAdjustmentMenu::default();
         self.clear_selection_toolbar_menu_owner();
         self.context_menu = Some(menu);
         self.context_submenu = None;
@@ -540,6 +785,7 @@ impl EditorView {
 
     fn finish_close_context_menu(&mut self, cx: &mut Context<Self>) {
         self.selection_toolbar_menu_hover = SelectionToolbarMenuHover::default();
+        self.table_adjustment_menu = TableAdjustmentMenu::default();
         self.clear_selection_toolbar_menu_owner();
         let had_menu = self.context_menu.take().is_some();
         let had_submenu = self.context_submenu.take().is_some();
@@ -1048,7 +1294,7 @@ impl EditorView {
         }
     }
 
-    fn selected_wiki_link_relative_path(&self) -> Option<String> {
+    fn selected_wiki_link_target(&self) -> Option<String> {
         let path = if self.wiki_link_query.trim().is_empty() {
             self.wiki_link_recent_results
                 .get(self.menu_selected_index)
@@ -1058,13 +1304,16 @@ impl EditorView {
                 .get(self.menu_selected_index)
                 .map(|result| result.path.clone())
         }?;
-
-        Some(
-            path.strip_prefix(&self.sidebar_root)
-                .unwrap_or(path.as_path())
-                .to_string_lossy()
-                .replace('\\', "/"),
-        )
+        let index = super::attachments::WorkspaceLinkIndex::build(&self.sidebar_root);
+        let source = self
+            .current_file_path
+            .clone()
+            .unwrap_or_else(|| self.sidebar_root.join(".untitled.md"));
+        let mut policy = self.app_settings.workspace_link_policy();
+        policy.link_syntax = super::attachments::AttachmentLinkSyntax::WikiLink;
+        policy
+            .target_for(&self.sidebar_root, &source, &path, Some(&index))
+            .ok()
     }
 
     /// Detect which format action is "active" at the cursor position.
@@ -1648,15 +1897,14 @@ impl EditorView {
             self.close_context_menu(cx);
             return;
         };
-        let Some(relative_path) = self.selected_wiki_link_relative_path() else {
+        let Some(target) = self.selected_wiki_link_target() else {
             return;
         };
 
         let replace_start = start + 2;
-        self.buffer
-            .replace(replace_start..query_end, &relative_path);
+        self.buffer.replace(replace_start..query_end, &target);
         self.cursor
-            .move_to(replace_start + relative_path.len(), &self.buffer);
+            .move_to(replace_start + target.len(), &self.buffer);
         self.reparse();
         self.close_context_menu(cx);
         self.scroll_to_cursor();
@@ -1694,11 +1942,19 @@ impl EditorView {
                     | FormatMenuAction::Image
                     | FormatMenuAction::CalloutTip
             );
-            if block_action {
-                self.cursor.move_to(line_end, &self.buffer);
-            } else {
-                self.cursor.anchor = line_start;
-                self.cursor.offset = line_end;
+            let cell_list_action = matches!(
+                action,
+                FormatMenuAction::Todo
+                    | FormatMenuAction::UnorderedList
+                    | FormatMenuAction::OrderedList
+            ) && self.table_cursor_cell_range().is_some();
+            if !cell_list_action {
+                if block_action {
+                    self.cursor.move_to(line_end, &self.buffer);
+                } else {
+                    self.cursor.anchor = line_start;
+                    self.cursor.offset = line_end;
+                }
             }
             self.reset_cursor_visual_targeting();
         }
@@ -1733,6 +1989,19 @@ impl EditorView {
             self.close_context_menu_immediately(cx);
         }
         self.close_context_menu(cx);
+        let action = if action == FormatMenuAction::Link
+            && self.app_settings.link_syntax == "wikilink"
+            && self.link_syntax_at_cursor().is_none()
+            && !["https://", "http://", "mailto:"].iter().any(|prefix| {
+                self.buffer
+                    .text_for_range(self.cursor.selection_range())
+                    .trim()
+                    .starts_with(prefix)
+            }) {
+            FormatMenuAction::WikiLink
+        } else {
+            action
+        };
         match action {
             FormatMenuAction::Cut => self.cut_selection_to_clipboard(cx),
             FormatMenuAction::Copy => self.copy_selection_to_clipboard(cx),
@@ -1853,7 +2122,24 @@ impl EditorView {
                 if let Some((full, keep)) = self.link_syntax_at_cursor() {
                     self.unwrap_syntax_range(full, keep);
                 } else {
-                    self.insert_link_or_image("[", "](https://)", "title");
+                    let selected = self
+                        .buffer
+                        .text_for_range(self.cursor.selection_range())
+                        .to_string();
+                    if ["https://", "http://", "mailto:"]
+                        .iter()
+                        .any(|prefix| selected.trim().starts_with(prefix))
+                    {
+                        let range = self.cursor.selection_range();
+                        let replacement = format!("[{selected}]({selected})");
+                        self.buffer.replace(range.clone(), &replacement);
+                        self.cursor
+                            .move_to(range.start + replacement.len(), &self.buffer);
+                        self.reparse();
+                        self.scroll_to_cursor();
+                    } else {
+                        self.insert_link_or_image("[", "](https://)", "title");
+                    }
                 }
                 self.pause_blinking(cx);
             }
@@ -1879,14 +2165,24 @@ impl EditorView {
             }
             FormatMenuAction::Image => {
                 self.checkpoint();
-                if let Some(target) = self.current_image_menu_target() {
+                if self.app_settings.link_syntax == "wikilink"
+                    && let Some((full, keep)) = self.wiki_link_syntax_at_cursor()
+                    && full.start > 0
+                    && self.buffer.text().as_bytes()[full.start - 1] == b'!'
+                {
+                    self.unwrap_syntax_range(full.start - 1..full.end, keep);
+                } else if let Some(target) = self.current_image_menu_target() {
                     let line_start = self.buffer.line_start(target.line);
                     self.unwrap_syntax_range(
                         line_start + target.full_range.start..line_start + target.full_range.end,
                         line_start + target.desc_range.start..line_start + target.desc_range.end,
                     );
                 } else {
-                    self.insert_link_or_image("![", "](image.png)", "alt");
+                    if self.app_settings.link_syntax == "wikilink" {
+                        self.insert_wiki_image();
+                    } else {
+                        self.insert_link_or_image("![", "](image.png)", "alt");
+                    }
                 }
                 self.pause_blinking(cx);
             }
@@ -2326,6 +2622,10 @@ impl EditorView {
             .when(dismiss_export_submenu, |this| {
                 this.on_mouse_move(cx.listener(|this, _, _, cx| {
                     this.dismiss_export_submenu(cx);
+                    if this.table_adjustment_menu.popup_table.take().is_some() {
+                        this.table_size_hover = None;
+                        cx.notify();
+                    }
                 }))
             })
             .on_mouse_down(
@@ -2635,6 +2935,7 @@ impl EditorView {
                     });
                     this.context_submenu_hovered = false;
                     if this.context_submenu.as_ref() != Some(&submenu_kind) {
+                        this.table_adjustment_menu = TableAdjustmentMenu::default();
                         this.context_submenu = Some(submenu_kind.clone());
                         cx.notify();
                     }
@@ -2648,20 +2949,32 @@ impl EditorView {
                         origin: event.position,
                     });
                     this.context_submenu_hovered = false;
+                    this.table_adjustment_menu = TableAdjustmentMenu::default();
                     this.context_submenu = Some(submenu_kind.clone());
                     cx.notify();
                 })
             })
             .into_any_element();
 
-        div()
+        let trigger = div()
             .w_full()
             .h(px(self.scaled(ms.menu_item_height_px)))
             .on_children_prepainted(move |bounds: Vec<Bounds<Pixels>>, _, _| {
                 trigger_bounds.set(bounds.first().copied());
             })
             .child(row)
+            .into_any_element();
+        if matches!(submenu_kind, ContextMenuKind::Table { .. }) {
+            SelectionToolbarHoverRegion {
+                child: trigger,
+                editor: cx.entity().clone(),
+                region: "table-parent-trigger",
+                menu_kind: None,
+            }
             .into_any_element()
+        } else {
+            trigger
+        }
     }
 
     fn render_context_menu_separator(&self) -> AnyElement {
@@ -3552,7 +3865,124 @@ impl EditorView {
             bar = bar.child(row);
         }
 
+        if let Some(ContextMenuKind::TableResize { table_start_line }) =
+            self.format_toolbar_table_target(active_line)
+        {
+            let kind = ContextMenuKind::TableResize { table_start_line };
+            let hover_kind = kind.clone();
+            let trigger_bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+            let click_bounds = trigger_bounds.clone();
+            let hover_bg = self.styles.context_menu.menu_item_hover_bg;
+            let label = crate::i18n::table_adjustment_label(self.ui_language, false);
+            let row = div()
+                .id("format-toolbar-table-adjustment")
+                .w_full()
+                .min_h(px(self.scaled(self.styles.context_menu.menu_item_height_px)))
+                .px(px(metrics.padding))
+                .flex()
+                .items_center()
+                .gap(px(metrics.gap))
+                .text_size(px(
+                    self.scaled(self.styles.context_menu.menu_item_font_size_px)
+                ))
+                .text_color(fts.format_toolbar_icon_color)
+                .hover(move |style| style.bg(hover_bg))
+                .child(
+                    div()
+                        .size(px(metrics.button))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            svg()
+                                .path(FMT_TABLE_SVG)
+                                .size(px(self.scaled(fts.format_toolbar_icon_size_px)))
+                                .text_color(fts.format_toolbar_icon_color),
+                        ),
+                )
+                .child(div().flex_1().min_w_0().child(label))
+                .child(
+                    svg()
+                        .path("assets/icons/navigation/right.svg")
+                        .size(px(self.scaled(12.0)))
+                        .text_color(fts.format_toolbar_icon_color),
+                )
+                .when(interactive, |this| {
+                    this.on_click(cx.listener(move |this, _, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.open_selection_toolbar_menu(kind.clone(), click_bounds.get(), cx);
+                    }))
+                });
+            bar = bar.child(SelectionToolbarHoverRegion {
+                child: div()
+                    .w_full()
+                    .on_children_prepainted(move |bounds: Vec<Bounds<Pixels>>, _, _| {
+                        trigger_bounds.set(bounds.first().copied());
+                    })
+                    .child(row)
+                    .into_any_element(),
+                editor: cx.entity().clone(),
+                region: "table-adjustment-trigger",
+                menu_kind: interactive.then_some(hover_kind),
+            });
+            bar = bar.child(
+                div()
+                    .id("format-toolbar-table-source")
+                    .w_full()
+                    .min_h(px(self.scaled(self.styles.context_menu.menu_item_height_px)))
+                    .px(px(metrics.padding))
+                    .flex()
+                    .items_center()
+                    .gap(px(metrics.gap))
+                    .text_size(px(
+                        self.scaled(self.styles.context_menu.menu_item_font_size_px)
+                    ))
+                    .text_color(fts.format_toolbar_icon_color)
+                    .hover(move |style| style.bg(hover_bg))
+                    .child(
+                        div()
+                            .size(px(metrics.button))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                svg()
+                                    .path(FMT_CODE_SVG)
+                                    .size(px(self.scaled(fts.format_toolbar_icon_size_px)))
+                                    .text_color(fts.format_toolbar_icon_color),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(crate::i18n::table_source_view_label(self.ui_language)),
+                    )
+                    .when(interactive, |this| {
+                        this.on_click(cx.listener(move |this, _, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.show_table_source(table_start_line, window, cx);
+                        }))
+                    }),
+            );
+        }
+
         bar.into_any_element()
+    }
+
+    fn format_toolbar_table_target(&self, active_line: Option<usize>) -> Option<ContextMenuKind> {
+        let line = active_line.unwrap_or_else(|| self.cursor_line());
+        let info = self.decorations.get(line)?.table_info.as_ref()?;
+        if info.is_front_matter {
+            return None;
+        }
+        Some(ContextMenuKind::TableResize {
+            table_start_line: info.table_start_line,
+        })
     }
 
     fn render_format_toolbar_button(
@@ -3632,7 +4062,10 @@ impl EditorView {
             && self.context_menu.as_ref().is_some_and(|menu| {
                 matches!(
                     menu.kind,
-                    ContextMenuKind::FormatHeading | ContextMenuKind::FormatMore
+                    ContextMenuKind::FormatHeading
+                        | ContextMenuKind::FormatMore
+                        | ContextMenuKind::Table { .. }
+                        | ContextMenuKind::TableResize { .. }
                 )
             })
     }
@@ -3715,7 +4148,10 @@ impl EditorView {
         window: &gpui::Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.format_toolbar_owns_hover_menu() {
+        if !self.format_toolbar_owns_hover_menu()
+            && !matches!(self.context_submenu, Some(ContextMenuKind::Table { .. }))
+            && self.table_adjustment_menu.popup_table.is_none()
+        {
             return;
         }
         let state = &mut self.selection_toolbar_menu_hover;
@@ -3735,10 +4171,20 @@ impl EditorView {
                     .timer(std::time::Duration::from_millis(200))
                     .await;
                 let _ = this.update(cx, |this, cx| {
-                    if this.format_toolbar_owns_hover_menu()
-                        && this.selection_toolbar_menu_hover.regions.is_empty()
-                    {
-                        this.close_context_menu_immediately(cx);
+                    this.selection_toolbar_menu_hover.close_task = None;
+                    if this.selection_toolbar_menu_hover.regions.is_empty() {
+                        if this.format_toolbar_owns_hover_menu() {
+                            this.close_context_menu_immediately(cx);
+                        } else if matches!(
+                            this.context_submenu,
+                            Some(ContextMenuKind::Table { .. })
+                        ) {
+                            this.table_adjustment_menu = TableAdjustmentMenu::default();
+                            this.context_submenu = None;
+                            this.context_submenu_hovered = false;
+                            this.table_size_hover = None;
+                            cx.notify();
+                        }
                     }
                 });
             }));
@@ -3909,14 +4355,6 @@ impl EditorView {
                 ContextMenuKind::FormatHeading,
                 cx,
             ));
-            if let Some(table_submenu_kind) = table_submenu_kind {
-                items.push(self.render_format_submenu_trigger_item(
-                    &self.t(crate::i18n::TextKey::Table).to_string(),
-                    Some(FMT_TABLE_SVG),
-                    table_submenu_kind,
-                    cx,
-                ));
-            }
 
             for (label, icon, shortcut, action) in [
                 (
@@ -4661,10 +5099,11 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ms = &self.styles.context_menu;
-        let table_resize_panel = self
-            .context_menu
-            .as_ref()
-            .is_some_and(|menu| matches!(menu.kind, ContextMenuKind::TableResize { .. }));
+        let table_resize_panel = panel_id == "table-cells-popup"
+            || self
+                .context_menu
+                .as_ref()
+                .is_some_and(|menu| matches!(menu.kind, ContextMenuKind::TableResize { .. }));
 
         let mut menu_div = div()
             .id(panel_id)
@@ -4676,7 +5115,13 @@ impl EditorView {
             // Occlude so hovering a menu item does not also hover the sidebar /
             // file-tree item painted underneath the menu.
             .occlude()
-            .when(table_resize_panel, |this| this.overflow_hidden())
+            .when(table_resize_panel, |this| {
+                if panel_id == "table-cells-popup" {
+                    this.overflow_y_scroll()
+                } else {
+                    this.overflow_hidden()
+                }
+            })
             .when(!table_resize_panel, |this| {
                 this.overflow_y_scroll()
                     .py(px(self.scaled(ms.menu_padding_y_px)))
@@ -4720,10 +5165,11 @@ impl EditorView {
                 cx.stop_propagation();
             }));
 
-        let menu_div = if self
-            .context_menu
-            .as_ref()
-            .is_some_and(|menu| matches!(menu.kind, ContextMenuKind::TableResize { .. }))
+        let menu_div = if !self.format_toolbar_owns_hover_menu()
+            && self
+                .context_menu
+                .as_ref()
+                .is_some_and(|menu| matches!(menu.kind, ContextMenuKind::TableResize { .. }))
         {
             menu_div.on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
                 if !*hovered {
@@ -4734,11 +5180,26 @@ impl EditorView {
             menu_div
         };
 
-        if self.format_toolbar_owns_hover_menu() {
+        let is_table_panel = (panel_id == "context-submenu"
+            && matches!(self.context_submenu, Some(ContextMenuKind::Table { .. })))
+            || (panel_id == "context-menu"
+                && self.format_toolbar_owns_hover_menu()
+                && matches!(
+                    self.context_menu.as_ref().map(|menu| &menu.kind),
+                    Some(ContextMenuKind::Table { .. })
+                ));
+        if self.format_toolbar_owns_hover_menu()
+            || is_table_panel
+            || panel_id == "table-cells-popup"
+        {
             return SelectionToolbarHoverRegion {
                 child: menu_div.into_any_element(),
                 editor: cx.entity().clone(),
-                region: panel_id,
+                region: if is_table_panel {
+                    "table-adjustment-menu"
+                } else {
+                    panel_id
+                },
                 menu_kind: None,
             }
             .into_any_element();
@@ -4806,13 +5267,8 @@ impl EditorView {
         } else {
             3.0
         };
-        let table_rows = self
-            .context_menu
-            .as_ref()
-            .is_some_and(|menu| matches!(menu.kind, ContextMenuKind::Table { .. }))
-            as u8 as f32;
         padding
-            + item_height * (3.0 + chat_rows + 5.0 + 2.0 + 1.0 + table_rows)
+            + item_height * (3.0 + chat_rows + 5.0 + 2.0 + 1.0)
             + separator_height * separator_count
     }
 
@@ -4839,6 +5295,12 @@ impl EditorView {
             }
             ContextMenuKind::FormatHeading => self.format_heading_menu_height(),
             ContextMenuKind::FormatMore => self.format_more_menu_height(),
+            ContextMenuKind::TableBorder { is_column, .. } => {
+                let item_count = if *is_column { 10.0 } else { 7.0 };
+                self.scaled(self.styles.context_menu.menu_item_height_px) * item_count
+                    + self.scaled(self.styles.context_menu.menu_padding_y_px) * 2.0
+                    + self.context_menu_separator_block_height()
+            }
             ContextMenuKind::Table {
                 table_start_line, ..
             } => {
@@ -4847,10 +5309,11 @@ impl EditorView {
                     .get(*table_start_line)
                     .and_then(|dec| dec.table_info.as_ref())
                     .is_some_and(|info| info.is_front_matter);
-                let item_count = if is_front_matter { 4.0 } else { 7.0 };
+                let item_count = if is_front_matter { 4.0 } else { 11.0 };
                 self.scaled(self.styles.context_menu.menu_padding_y_px) * 2.0
                     + self.scaled(self.styles.context_menu.menu_item_height_px) * item_count
-                    + self.context_menu_separator_block_height() * 2.0
+                    + self.context_menu_separator_block_height()
+                        * if is_front_matter { 2.0 } else { 3.0 }
             }
             _ => self.format_more_menu_height(),
         }
@@ -4960,49 +5423,63 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut items = Vec::new();
+        let selection = self
+            .table_cell_selection
+            .as_ref()
+            .filter(|selection| selection.contains(table_start_line, row, col));
+        let (action_row, action_col) = selection.map_or((row, col), |selection| selection.focus);
+        let selected_rows = selection
+            .map(|selection| selection.rows.clone().collect::<Vec<_>>())
+            .unwrap_or_else(|| vec![row]);
+        let selected_columns = selection
+            .map(|selection| selection.columns.clone().collect::<Vec<_>>())
+            .unwrap_or_else(|| vec![col]);
         let is_front_matter = self
             .decorations
             .get(table_start_line)
             .and_then(|dec| dec.table_info.as_ref())
             .is_some_and(|info| info.is_front_matter);
         if !is_front_matter {
+            let columns = selected_columns.clone();
             items.push(self.render_context_menu_item_with_icon(
                 self.t(crate::i18n::TextKey::AlignLeft),
                 TABLE_ALIGN_LEFT_SVG,
                 false,
                 cx,
                 move |this, _, cx| {
-                    this.table_set_column_alignment(
+                    this.table_set_columns_alignment(
                         table_start_line,
-                        col,
+                        &columns,
                         crate::markdown::TableAlign::Left,
                         cx,
                     )
                 },
             ));
+            let columns = selected_columns.clone();
             items.push(self.render_context_menu_item_with_icon(
                 self.t(crate::i18n::TextKey::AlignCenter),
                 TABLE_ALIGN_CENTER_SVG,
                 false,
                 cx,
                 move |this, _, cx| {
-                    this.table_set_column_alignment(
+                    this.table_set_columns_alignment(
                         table_start_line,
-                        col,
+                        &columns,
                         crate::markdown::TableAlign::Center,
                         cx,
                     )
                 },
             ));
+            let columns = selected_columns.clone();
             items.push(self.render_context_menu_item_with_icon(
                 self.t(crate::i18n::TextKey::AlignRight),
                 TABLE_ALIGN_RIGHT_SVG,
                 false,
                 cx,
                 move |this, _, cx| {
-                    this.table_set_column_alignment(
+                    this.table_set_columns_alignment(
                         table_start_line,
-                        col,
+                        &columns,
                         crate::markdown::TableAlign::Right,
                         cx,
                     )
@@ -5015,14 +5492,14 @@ impl EditorView {
             TABLE_ROWS_SVG,
             false,
             cx,
-            move |this, _, cx| this.table_insert_row(table_start_line, row, true, cx),
+            move |this, _, cx| this.table_insert_row(table_start_line, action_row, true, cx),
         ));
         items.push(self.render_context_menu_item_with_icon(
             self.t(crate::i18n::TextKey::AddRowBelow),
             TABLE_ROWS_SVG,
             false,
             cx,
-            move |this, _, cx| this.table_insert_row(table_start_line, row, false, cx),
+            move |this, _, cx| this.table_insert_row(table_start_line, action_row, false, cx),
         ));
         if !is_front_matter {
             items.push(self.render_context_menu_item_with_icon(
@@ -5030,14 +5507,16 @@ impl EditorView {
                 TABLE_COLUMNS_SVG,
                 false,
                 cx,
-                move |this, _, cx| this.table_insert_column(table_start_line, col, true, cx),
+                move |this, _, cx| this.table_insert_column(table_start_line, action_col, true, cx),
             ));
             items.push(self.render_context_menu_item_with_icon(
                 self.t(crate::i18n::TextKey::AddColumnRight),
                 TABLE_COLUMNS_SVG,
                 false,
                 cx,
-                move |this, _, cx| this.table_insert_column(table_start_line, col, false, cx),
+                move |this, _, cx| {
+                    this.table_insert_column(table_start_line, action_col, false, cx)
+                },
             ));
         }
         items.push(self.render_context_menu_separator());
@@ -5046,15 +5525,16 @@ impl EditorView {
             TABLE_DELETE_SVG,
             false,
             cx,
-            move |this, _, cx| this.table_delete_row(table_start_line, row, cx),
+            move |this, _, cx| this.table_delete_rows(table_start_line, &selected_rows, cx),
         ));
         if !is_front_matter {
+            let columns = selected_columns.clone();
             items.push(self.render_context_menu_item_with_icon(
                 self.t(crate::i18n::TextKey::DeleteColumn),
                 TABLE_DELETE_SVG,
                 false,
                 cx,
-                move |this, _, cx| this.table_delete_column(table_start_line, col, cx),
+                move |this, _, cx| this.table_delete_columns(table_start_line, &columns, cx),
             ));
         }
         items.push(self.render_context_menu_separator());
@@ -5069,6 +5549,8 @@ impl EditorView {
             cx,
             move |this, _, cx| this.table_delete_table(table_start_line, cx),
         ));
+        items.push(self.render_context_menu_separator());
+        items.extend(self.render_table_cells_context_menu(table_start_line, row, col, cx));
         items
     }
 
@@ -5864,12 +6346,20 @@ impl EditorView {
                 ));
                 (items, self.scaled(wss.ws_menu_width_px))
             }
-            ContextMenuKind::Table {
-                table_start_line: _,
-                row: _,
-                col: _,
+            ContextMenuKind::TableBorder {
+                table_start_line,
+                is_column,
+                index,
             } => (
-                self.render_format_context_menu(cx),
+                self.render_table_border_context_menu(*table_start_line, *is_column, *index, cx),
+                self.scaled(164.0),
+            ),
+            ContextMenuKind::Table {
+                table_start_line,
+                row,
+                col,
+            } => (
+                self.render_table_context_submenu(*table_start_line, *row, *col, cx),
                 self.scaled(self.styles.context_menu.menu_format_width_px),
             ),
             ContextMenuKind::TableResize { table_start_line } => (
@@ -5878,7 +6368,11 @@ impl EditorView {
             ),
         };
 
-        let estimated_menu_height = self.estimated_context_menu_height(items.len());
+        let estimated_menu_height = if matches!(menu.kind, ContextMenuKind::TableResize { .. }) {
+            self.scaled(105.0 + self.styles.context_menu.menu_item_height_px)
+        } else {
+            self.estimated_context_menu_height(items.len())
+        };
         let anchor_height = self.context_menu_anchor_height(&menu.kind);
         let toolbar_bounds = self
             .format_toolbar_owns_hover_menu()
@@ -5901,7 +6395,10 @@ impl EditorView {
         let mut layout = if let Some(bounds) = toolbar_bounds.filter(|_| {
             matches!(
                 menu.kind,
-                ContextMenuKind::FormatHeading | ContextMenuKind::FormatMore
+                ContextMenuKind::FormatHeading
+                    | ContextMenuKind::FormatMore
+                    | ContextMenuKind::Table { .. }
+                    | ContextMenuKind::TableResize { .. }
             )
         }) {
             let border_w = self.styles.window.window_border_width_px;
@@ -5923,9 +6420,15 @@ impl EditorView {
                 overlay_height,
                 gap,
                 margin,
-                matches!(menu.kind, ContextMenuKind::FormatMore),
+                matches!(
+                    menu.kind,
+                    ContextMenuKind::FormatMore | ContextMenuKind::Table { .. }
+                ),
             );
-            let align_bottom = matches!(menu.kind, ContextMenuKind::FormatMore);
+            let align_bottom = matches!(
+                menu.kind,
+                ContextMenuKind::FormatMore | ContextMenuKind::Table { .. }
+            );
             ContextMenuPanelLayout {
                 left,
                 estimated_top: if align_bottom { 0.0 } else { top },
@@ -5959,7 +6462,7 @@ impl EditorView {
                 anchor_height,
             )
         };
-        if matches!(menu.kind, ContextMenuKind::TableResize { .. }) {
+        if matches!(menu.kind, ContextMenuKind::TableResize { .. }) && toolbar_bounds.is_none() {
             let (anchor_x, anchor_y) = self.context_menu_overlay_coordinates(anchor_position);
             layout.left = anchor_x;
             layout.estimated_top = anchor_y;
@@ -5974,6 +6477,7 @@ impl EditorView {
             menu.kind,
             ContextMenuKind::Format | ContextMenuKind::Table { .. }
         ) && self.context_submenu.is_some()
+            && !self.format_toolbar_owns_hover_menu()
             && self.can_render_format_submenu();
         let submenu = if export_submenu_open || format_submenu_open {
             let submenu_kind = self.context_submenu.as_ref().cloned();
@@ -6028,6 +6532,42 @@ impl EditorView {
         } else {
             None
         };
+
+        let active_table = match menu.kind {
+            ContextMenuKind::Table {
+                table_start_line, ..
+            } => Some(table_start_line),
+            _ => match self.context_submenu {
+                Some(ContextMenuKind::Table {
+                    table_start_line, ..
+                }) => Some(table_start_line),
+                _ => None,
+            },
+        };
+        let cells_popup = self
+            .table_adjustment_menu
+            .popup_table
+            .filter(|table| Some(*table) == active_table)
+            .zip(self.table_adjustment_menu.bounds.get())
+            .map(|(table_start_line, bounds)| {
+                let (left, top) = self.context_menu_overlay_coordinates(bounds.origin);
+                let popup_width = self.scaled(105.0);
+                let gap = self.scaled(self.styles.context_menu.menu_submenu_gap_px);
+                let popup_layout = table_cells_popup_layout(
+                    Bounds::new(Point::new(px(left), px(top)), bounds.size),
+                    layout,
+                    popup_width,
+                    gap,
+                );
+                let picker = self.render_table_size_picker(table_start_line, cx);
+                self.render_context_menu_panel(
+                    "table-cells-popup",
+                    popup_layout,
+                    popup_width,
+                    picker,
+                    cx,
+                )
+            });
 
         let mut backdrop = Vec::new();
         if let Some(bounds) = toolbar_bounds {
@@ -6117,6 +6657,7 @@ impl EditorView {
             .children(backdrop)
             .child(main_menu)
             .when_some(submenu, |this, submenu| this.child(submenu))
+            .when_some(cells_popup, |this, popup| this.child(popup))
             .into_any_element()
     }
 }
@@ -6233,6 +6774,32 @@ mod format_toolbar_layout_tests {
 #[cfg(test)]
 mod submenu_layout_tests {
     use super::{aligned_submenu_top, toolbar_side_menu_position};
+
+    #[test]
+    fn cell_picker_stays_top_aligned_and_switches_sides_near_window_edges() {
+        let overlay = super::ContextMenuPanelLayout {
+            left: 0.0,
+            estimated_top: 0.0,
+            max_height: 600.0,
+            bottom_anchor: None,
+            overlay_width: 800.0,
+            overlay_height: 600.0,
+            margin: 8.0,
+        };
+        for (left, top, expected_left, expected_height) in
+            [(200.0, 120.0, 424.0, 472.0), (550.0, 510.0, 441.0, 82.0)]
+        {
+            let parent = gpui::Bounds::new(
+                gpui::point(gpui::px(left), gpui::px(top)),
+                gpui::size(gpui::px(220.0), gpui::px(200.0)),
+            );
+            let layout = super::table_cells_popup_layout(parent, overlay, 105.0, 4.0);
+            assert_eq!(layout.left, expected_left);
+            assert_eq!(layout.estimated_top, top);
+            assert_eq!(layout.max_height, expected_height);
+            assert!(layout.bottom_anchor.is_none());
+        }
+    }
 
     #[test]
     fn submenu_top_aligns_with_trigger_when_space_below_is_available() {

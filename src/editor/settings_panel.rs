@@ -39,6 +39,8 @@ pub(crate) enum FontRole {
     InterfaceLanguage,
     DateTimeFormat,
     AttachmentLocation,
+    LinkSyntax,
+    LinkPathStyle,
     TerminalCursorShape,
     TerminalLaunchCommand,
     TerminalFont,
@@ -581,6 +583,12 @@ impl EditorView {
         let location = self.app_settings.attachment_location.clone();
         let location_controls =
             self.render_picker_control(label(&location), FontRole::AttachmentLocation, 0, cx);
+        let syntax = self.app_settings.link_syntax.clone();
+        let syntax_controls =
+            self.render_picker_control(label(&syntax), FontRole::LinkSyntax, 0, cx);
+        let path_style = self.app_settings.link_path_style.clone();
+        let path_controls =
+            self.render_picker_control(label(&path_style), FontRole::LinkPathStyle, 0, cx);
 
         div()
             .flex()
@@ -598,6 +606,8 @@ impl EditorView {
             .when(location == "external_folder", |this| {
                 this.child(self.render_external_attachment_folder_row(cx))
             })
+            .child(self.render_attachment_settings_row(label("syntax"), syntax_controls))
+            .child(self.render_attachment_settings_row(label("path_style"), path_controls))
             .into_any_element()
     }
 
@@ -2541,6 +2551,31 @@ impl EditorView {
                 .collect(),
                 attachment_settings_label(self.ui_language, "search").to_string(),
             ),
+            FontRole::LinkSyntax | FontRole::LinkPathStyle => {
+                let values: &[&str] = if role == FontRole::LinkSyntax {
+                    &["markdown", "wikilink"]
+                } else {
+                    &["relative", "shortest"]
+                };
+                (
+                    values
+                        .iter()
+                        .map(|value| {
+                            let label =
+                                attachment_settings_label(self.ui_language, value).to_string();
+                            PickerOption {
+                                value: (*value).to_string(),
+                                search_text: label.to_lowercase(),
+                                label,
+                                group: None,
+                                preview_font: None,
+                                icon_path: None,
+                            }
+                        })
+                        .collect(),
+                    attachment_settings_label(self.ui_language, "search").to_string(),
+                )
+            }
             FontRole::InterfaceLanguage => (
                 language_picker_options(self.ui_language)
                     .into_iter()
@@ -2598,6 +2633,8 @@ impl EditorView {
             (FontRole::InterfaceLanguage, _) => self.ui_language.code().to_string(),
             (FontRole::DateTimeFormat, _) => self.app_settings.date_time_format().to_string(),
             (FontRole::AttachmentLocation, _) => self.app_settings.attachment_location.clone(),
+            (FontRole::LinkSyntax, _) => self.app_settings.link_syntax.clone(),
+            (FontRole::LinkPathStyle, _) => self.app_settings.link_path_style.clone(),
             (FontRole::TerminalCursorShape, _) => self
                 .app_settings
                 .terminal_cursor_shape()
@@ -2882,6 +2919,12 @@ impl EditorView {
                 }
                 (FontRole::AttachmentLocation, _) => {
                     self.app_settings.attachment_location = font_name;
+                }
+                (FontRole::LinkSyntax, _) => {
+                    self.app_settings.link_syntax = font_name;
+                }
+                (FontRole::LinkPathStyle, _) => {
+                    self.app_settings.link_path_style = font_name;
                 }
                 (FontRole::TerminalCursorShape, _) => {
                     if let Some(shape) = TerminalCursorShape::from_str(&font_name) {

@@ -22,6 +22,31 @@ pub(super) struct TableCellDisplayInfo {
     pub(super) cell_content_len: usize,
 }
 
+fn nearest_table_cell_in_row(
+    areas: &[(Bounds<Pixels>, usize, usize, usize)],
+    table: usize,
+    row: usize,
+    position: Point<Pixels>,
+) -> Option<(Bounds<Pixels>, usize, usize, usize)> {
+    areas
+        .iter()
+        .filter(|(bounds, start, visual_row, _)| {
+            *start == table
+                && *visual_row == row
+                && position.y >= bounds.origin.y
+                && position.y < bounds.origin.y + bounds.size.height
+        })
+        .min_by(|(left, ..), (right, ..)| {
+            let distance = |bounds: &Bounds<Pixels>| {
+                let x = f32::from(position.x);
+                let start = f32::from(bounds.origin.x);
+                (x - x.clamp(start, start + f32::from(bounds.size.width))).abs()
+            };
+            distance(left).total_cmp(&distance(right))
+        })
+        .copied()
+}
+
 fn table_cell_visual_line_count(info: &TableCellDisplayInfo) -> usize {
     info.wrapped_lines
         .iter()
@@ -282,7 +307,9 @@ impl EditorView {
                         if (editor.scroll_offset - previous_scroll).abs() < f32::EPSILON {
                             return None;
                         }
-                        if !editor.update_table_boundary_drag_selection(position) {
+                        if editor.table_cell_selection.is_none()
+                            && !editor.update_table_boundary_drag_selection(position)
+                        {
                             let offset = editor.offset_for_position(position);
                             editor.update_wrap_boundary_affinity_for_position(offset, position);
                             editor.cursor.select_to(offset, &editor.buffer);
@@ -671,41 +698,37 @@ impl EditorView {
 
         if !self.active_tab_is_read_only()
             && let Some(&(_, table_start, col)) = self
-                .table_col_handle_areas
+                .table_column_border_segments
                 .iter()
                 .find(|(bounds, _, _)| bounds.contains(&event.position))
         {
-            self.selected_handle = Some((table_start, true, col));
-            self.marked_range = None;
-            self.clear_extra_cursors();
-            self.is_selecting = false;
-            if !self.block_is_front_matter(table_start) {
-                self.table_drag = Some(TableDragState::DraggingColumn {
-                    table_start_line: table_start,
-                    source_col: col,
-                    current_x: f32::from(event.position.x),
-                });
-            }
-            cx.notify();
+            self.begin_table_handle_press(
+                (table_start, true, col),
+                event.position,
+                event.modifiers.shift,
+                event.modifiers.secondary(),
+                cx,
+            );
+            window.prevent_default();
+            cx.stop_propagation();
             return;
         }
 
         if !self.active_tab_is_read_only()
             && let Some(&(_, table_start, visual_row)) = self
-                .table_row_handle_areas
+                .table_row_border_segments
                 .iter()
                 .find(|(bounds, _, _)| bounds.contains(&event.position))
         {
-            self.selected_handle = Some((table_start, false, visual_row));
-            self.marked_range = None;
-            self.clear_extra_cursors();
-            self.is_selecting = false;
-            self.table_drag = Some(TableDragState::DraggingRow {
-                table_start_line: table_start,
-                source_row: visual_row,
-                current_y: f32::from(event.position.y),
-            });
-            cx.notify();
+            self.begin_table_handle_press(
+                (table_start, false, visual_row),
+                event.position,
+                event.modifiers.shift,
+                event.modifiers.secondary(),
+                cx,
+            );
+            window.prevent_default();
+            cx.stop_propagation();
             return;
         }
 
@@ -728,7 +751,52 @@ impl EditorView {
             .map(|(_, line)| *line)
         {
             self.checkpoint();
-            self.toggle_checkbox(line);
+            if let Some((bounds, table, row, col)) = self
+                .table_click_areas
+                .iter()
+                .find(|(bounds, _, _, _)| bounds.contains(&event.position))
+                .copied()
+                .or_else(|| {
+                    let table = self
+                        .decorations
+                        .get(line)?
+                        .table_info
+                        .as_ref()?
+                        .table_start_line;
+                    let row = self.table_visual_row_for_source_line(table, line)?;
+                    nearest_table_cell_in_row(&self.table_click_areas, table, row, event.position)
+                })
+            {
+                let cell_offset = self
+                    .table_cell_offset_for_position(
+                        window,
+                        table,
+                        row,
+                        col,
+                        &bounds,
+                        event.position,
+                    )
+                    .and_then(|offset| {
+                        self.table_source_line_for_visual_row(table, row)
+                            .and_then(|line| {
+                                self.decorations
+                                    .get(line)?
+                                    .table_info
+                                    .as_ref()
+                                    .and_then(|info| {
+                                        info.cell_ranges.get(col).map(|range| {
+                                            offset.saturating_sub(
+                                                self.buffer.line_start(line) + range.start,
+                                            )
+                                        })
+                                    })
+                            })
+                    })
+                    .unwrap_or(0);
+                self.toggle_table_cell_checkbox(table, row, col, cell_offset);
+            } else {
+                self.toggle_checkbox(line);
+            }
             self.reparse();
             self.hovering_checkbox = true;
             self.hovering_checkbox_line = Some(line);
@@ -768,6 +836,8 @@ impl EditorView {
                 .iter()
                 .find(|(bounds, _, _, _)| bounds.contains(&event.position))
             {
+                self.table_cell_selection = None;
+                self.table_handles.selection = None;
                 if let Some(offset) = self.table_cell_offset_for_position(
                     window,
                     table_start,
@@ -848,6 +918,7 @@ impl EditorView {
         if event.button == MouseButton::Left && event.click_count >= 2 {
             self.clear_phantom_selection();
             self.clear_extra_cursors();
+            self.table_handles.selection = None;
             self.clear_wrap_boundary_affinity();
             let offset = self.offset_for_position(event.position);
             self.last_mouse_down_target = Some((event.position, offset));
@@ -866,6 +937,8 @@ impl EditorView {
         self.clear_phantom_selection();
         self.is_selecting = true;
         let prev_offset = self.cursor.offset;
+        self.table_cell_selection = None;
+        self.table_handles.selection = None;
         let offset = self.offset_for_position(event.position);
         self.selection_drag_position = Some(event.position);
         self.sync_selection_drag_scroll_task(cx);
@@ -1054,6 +1127,10 @@ impl EditorView {
             return false;
         }
 
+        self.selection_toolbar_popup = None;
+        self.selection_toolbar_animation = None;
+        self.line_format_toolbar_line = None;
+        self.line_format_toolbar_bounds = None;
         self.preview_overlay = Some(PreviewOverlayState {
             cache_key,
             line_idx,
@@ -1086,6 +1163,10 @@ impl EditorView {
         {
             return false;
         }
+        self.selection_toolbar_popup = None;
+        self.selection_toolbar_animation = None;
+        self.line_format_toolbar_line = None;
+        self.line_format_toolbar_bounds = None;
         self.preview_overlay = Some(PreviewOverlayState {
             cache_key: preview.cache_key.clone(),
             line_idx,
@@ -1417,9 +1498,31 @@ impl EditorView {
     ) {
         window.prevent_default();
         cx.stop_propagation();
+        if self
+            .table_border_segment_areas
+            .iter()
+            .any(|(bounds, _, _, _)| bounds.contains(&event.position))
+        {
+            if let Some((_, table, is_column, index)) = self
+                .table_border_segment_areas
+                .iter()
+                .find(|(bounds, _, _, _)| bounds.contains(&event.position))
+                .copied()
+            {
+                self.open_table_border_context_menu((table, is_column, index), event.position, cx);
+            }
+            return;
+        }
         self.is_selecting = false;
         self.cancel_line_drag(cx);
         self.dismiss_line_format_toolbar(cx);
+        if !self
+            .table_click_areas
+            .iter()
+            .any(|(bounds, _, _, _)| bounds.contains(&event.position))
+        {
+            self.table_cell_selection = None;
+        }
 
         if self.active_tab_is_whiteboard() {
             self.whiteboard_select_at(event.position);
@@ -1446,51 +1549,30 @@ impl EditorView {
             return;
         }
 
-        if let Some(&(_, table_start, col)) = self
-            .table_col_handle_areas
-            .iter()
-            .find(|(bounds, _, _)| bounds.contains(&event.position))
-        {
-            self.open_context_menu(
-                ContextMenu {
-                    position: event.position,
-                    kind: ContextMenuKind::Table {
-                        table_start_line: table_start,
-                        row: 0,
-                        col,
-                    },
-                },
-                true,
-                cx,
-            );
-            return;
-        }
-
-        if let Some(&(_, table_start, row)) = self
-            .table_row_handle_areas
-            .iter()
-            .find(|(bounds, _, _)| bounds.contains(&event.position))
-        {
-            self.open_context_menu(
-                ContextMenu {
-                    position: event.position,
-                    kind: ContextMenuKind::Table {
-                        table_start_line: table_start,
-                        row,
-                        col: 0,
-                    },
-                },
-                true,
-                cx,
-            );
-            return;
-        }
-
         if let Some(&(bounds, table_start, visual_row, col)) = self
             .table_click_areas
             .iter()
             .find(|(bounds, _, _, _)| bounds.contains(&event.position))
         {
+            if let Some(selection) = self.table_cell_selection.as_ref()
+                && selection.contains(table_start, visual_row, col)
+            {
+                self.open_context_menu(
+                    ContextMenu {
+                        position: event.position,
+                        kind: ContextMenuKind::Table {
+                            table_start_line: table_start,
+                            row: visual_row,
+                            col,
+                        },
+                    },
+                    true,
+                    cx,
+                );
+                return;
+            }
+            self.table_cell_selection = None;
+            self.table_handles.selection = None;
             if let Some(offset) = self.table_cell_offset_for_position(
                 window,
                 table_start,
@@ -1620,6 +1702,11 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.finish_table_handle_press(event, window, cx) {
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
         if self.suppress_next_editor_mouse_up || self.context_menu.is_some() {
             self.suppress_next_editor_mouse_up = false;
             window.prevent_default();
@@ -1657,62 +1744,84 @@ impl EditorView {
             match drag {
                 TableDragState::DraggingColumn {
                     table_start_line,
-                    source_col,
+                    source_indices,
                     current_x,
                 } => {
                     if let Some(insert_at) = self.table_col_insert_at_x(table_start_line, current_x)
                     {
-                        if insert_at != source_col && insert_at != source_col + 1 {
-                            if let Some((start, end, lines)) =
-                                self.table_lines_for_block(table_start_line)
-                            {
-                                let new_lines =
-                                    crate::table_ops::move_column(&lines, source_col, insert_at);
+                        if let Some((start, end, lines)) =
+                            self.table_lines_for_block(table_start_line)
+                        {
+                            let new_lines = crate::table_ops::move_selected_columns(
+                                &lines,
+                                &source_indices,
+                                insert_at,
+                            );
+                            if new_lines != lines {
                                 self.replace_table_block(start, end, &new_lines, cx);
-                                let selected_col = if insert_at > source_col {
-                                    insert_at.saturating_sub(1)
-                                } else {
-                                    insert_at
-                                };
-                                self.selected_handle = Some((table_start_line, true, selected_col));
+                                let count = source_indices.len();
+                                let selected_col = insert_at.saturating_sub(
+                                    source_indices
+                                        .iter()
+                                        .filter(|index| **index < insert_at)
+                                        .count(),
+                                );
+                                self.table_handles.selection =
+                                    Some(super::table_handles::TableBorderSelection {
+                                        table_start_line,
+                                        is_column: true,
+                                        anchor: selected_col,
+                                        indices: (selected_col..selected_col + count).collect(),
+                                    });
                             }
-                        } else {
-                            self.selected_handle = Some((table_start_line, true, source_col));
                         }
                     }
                 }
                 TableDragState::DraggingRow {
                     table_start_line,
-                    source_row,
+                    source_indices,
                     current_y,
                 } => {
                     if let Some(insert_visual) =
                         self.table_row_insert_at_y(table_start_line, current_y)
                     {
-                        if insert_visual != source_row && insert_visual != source_row + 1 {
-                            if let Some((start, end, lines)) =
-                                self.table_lines_for_block(table_start_line)
-                            {
-                                let new_lines = if self.block_is_front_matter(table_start_line) {
+                        if let Some((start, end, lines)) =
+                            self.table_lines_for_block(table_start_line)
+                        {
+                            let new_lines = if self.block_is_front_matter(table_start_line) {
+                                if source_indices.len() != 1 {
+                                    lines.clone()
+                                } else {
                                     crate::table_ops::move_front_matter_row(
                                         &lines,
-                                        source_row,
+                                        source_indices[0],
                                         insert_visual,
                                     )
-                                } else {
-                                    crate::table_ops::move_row(&lines, source_row, insert_visual)
-                                };
+                                }
+                            } else {
+                                crate::table_ops::move_selected_rows(
+                                    &lines,
+                                    &source_indices,
+                                    insert_visual,
+                                )
+                            };
+                            if new_lines != lines {
                                 self.replace_table_block(start, end, &new_lines, cx);
-                                let selected_row = if insert_visual > source_row {
-                                    insert_visual.saturating_sub(1)
-                                } else {
-                                    insert_visual
-                                };
-                                self.selected_handle =
-                                    Some((table_start_line, false, selected_row));
+                                let count = source_indices.len();
+                                let selected_row = insert_visual.saturating_sub(
+                                    source_indices
+                                        .iter()
+                                        .filter(|index| **index < insert_visual)
+                                        .count(),
+                                );
+                                self.table_handles.selection =
+                                    Some(super::table_handles::TableBorderSelection {
+                                        table_start_line,
+                                        is_column: false,
+                                        anchor: selected_row,
+                                        indices: (selected_row..selected_row + count).collect(),
+                                    });
                             }
-                        } else {
-                            self.selected_handle = Some((table_start_line, false, source_row));
                         }
                     }
                 }
@@ -1741,6 +1850,10 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.update_table_handle_press(event, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.runtime_profiler.is_some() {
             self.runtime_profile_mouse_move_events =
                 self.runtime_profile_mouse_move_events.wrapping_add(1);
@@ -1889,9 +2002,8 @@ impl EditorView {
             || !self.inline_diff_hunk_areas.is_empty()
             || !self.inline_diff_revert_areas.is_empty()
             || !self.table_click_areas.is_empty()
-            || !self.table_col_handle_areas.is_empty()
-            || !self.table_row_handle_areas.is_empty()
-            || !self.table_corner_areas.is_empty();
+            || !self.table_column_border_segments.is_empty()
+            || !self.table_row_border_segments.is_empty();
         if !has_interactive_hover_targets && !self.is_selecting && !self.command_held {
             if toolbar_hover_changed {
                 cx.notify();
@@ -2128,35 +2240,13 @@ impl EditorView {
             cx.notify();
         }
 
-        if let Some((icon_bounds, table_start_line)) = self
-            .table_corner_areas
-            .iter()
-            .find(|(bounds, _)| bounds.contains(&event.position))
-            .copied()
-        {
-            if let Some((_, _, lines)) = self.table_lines_for_block(table_start_line) {
-                let model = crate::table_ops::parse_table_block(&lines);
-                self.table_size_hover =
-                    Some((model.data_rows.len().max(1), model.col_count.max(1)));
-            }
-            self.open_context_menu(
-                ContextMenu {
-                    position: gpui::point(icon_bounds.right(), icon_bounds.bottom()),
-                    kind: ContextMenuKind::TableResize { table_start_line },
-                },
-                true,
-                cx,
-            );
-            return;
-        }
-
         let hovering_handle = self
-            .table_col_handle_areas
+            .table_column_border_segments
             .iter()
             .find(|(bounds, _, _)| bounds.contains(&event.position))
             .map(|(_, tsl, col)| (*tsl, true, *col))
             .or_else(|| {
-                self.table_row_handle_areas
+                self.table_row_border_segments
                     .iter()
                     .find(|(bounds, _, _)| bounds.contains(&event.position))
                     .map(|(_, tsl, row)| (*tsl, false, *row))
@@ -2165,7 +2255,6 @@ impl EditorView {
             self.hovering_handle = hovering_handle;
             cx.notify();
         }
-
         if self.is_selecting {
             let old_cursor_offset = self.cursor.offset;
             let old_scroll_offset = self.scroll_offset;
@@ -2203,7 +2292,42 @@ impl EditorView {
                 .table_click_areas
                 .iter()
                 .find(|(bounds, _, _, _)| bounds.contains(&event.position))
-                .copied();
+                .copied()
+                .or_else(|| {
+                    let (table, anchor_line, _) = self.table_cell_for_offset(self.cursor.anchor)?;
+                    let anchor_row = self.table_visual_row_for_source_line(table, anchor_line)?;
+                    nearest_table_cell_in_row(
+                        &self.table_click_areas,
+                        table,
+                        anchor_row,
+                        event.position,
+                    )
+                });
+            if let Some((start_position, _)) = self.last_mouse_down_target
+                && self.selection_drag_has_moved
+                && let Some((_, table, start_row, start_col)) = self
+                    .table_click_areas
+                    .iter()
+                    .find(|(bounds, _, _, _)| bounds.contains(&start_position))
+                    .copied()
+                && let Some((_, target_table, end_row, end_col)) = hovered_table_cell
+                && table == target_table
+                && (start_row != end_row || start_col != end_col)
+            {
+                self.table_cell_selection =
+                    Some(super::table_handles::TableCellSelection::between(
+                        table,
+                        (start_row, start_col),
+                        (end_row, end_col),
+                    ));
+                self.table_handles.selection = None;
+                self.cursor.anchor = self.cursor.offset;
+                cx.notify();
+                return;
+            }
+            if self.table_cell_selection.is_some() {
+                return;
+            }
             if self.update_table_boundary_drag_selection(event.position) {
                 cx.notify();
                 return;
@@ -2214,13 +2338,20 @@ impl EditorView {
             }
 
             let offset = if let Some((bounds, table_start, visual_row, col)) = hovered_table_cell {
+                let position = point(
+                    px(f32::from(event.position.x).clamp(
+                        f32::from(bounds.origin.x),
+                        f32::from(bounds.origin.x + bounds.size.width),
+                    )),
+                    event.position.y,
+                );
                 self.table_cell_offset_for_position(
                     window,
                     table_start,
                     visual_row,
                     col,
                     &bounds,
-                    event.position,
+                    position,
                 )
                 .unwrap_or_else(|| self.offset_for_position(event.position))
             } else {
@@ -2281,9 +2412,9 @@ impl EditorView {
             &cell_active_ranges,
             false,
             None,
-            0,
-            0,
-            0,
+            3,
+            3,
+            2,
             0,
             0,
             self.styles.editor.editor_superscript_scale_factor,
@@ -3226,6 +3357,11 @@ impl EditorView {
             .y
             .into();
         let scroll_offset_before_wheel = self.scroll_offset;
+        self.pending_typing_scroll_guard = None;
+        self.pending_scroll_to_cursor = false;
+        self.pending_center_cursor_in_view = false;
+        self.pending_center_cursor_in_view_immediately = false;
+        self.scroll_anim_epoch = self.scroll_anim_epoch.wrapping_add(1);
         self.scroll_offset -= delta_y;
         self.clamp_scroll();
         // User scrolling overrides any pending centered-cursor confirmation.
@@ -3423,7 +3559,48 @@ impl EditorView {
 
 #[cfg(test)]
 mod tests {
-    use super::{display_index_to_buffer_col, local_text_y_for_hit, visible_line_hit};
+    use super::{
+        display_index_to_buffer_col, local_text_y_for_hit, nearest_table_cell_in_row,
+        visible_line_hit,
+    };
+    use gpui::{Bounds, point, px, size};
+
+    #[test]
+    fn table_drag_stays_on_row_in_empty_space_but_not_across_rows() {
+        let cells = [
+            (
+                Bounds::new(point(px(10.), px(20.)), size(px(40.), px(25.))),
+                2,
+                0,
+                0,
+            ),
+            (
+                Bounds::new(point(px(50.), px(20.)), size(px(40.), px(25.))),
+                2,
+                0,
+                1,
+            ),
+            (
+                Bounds::new(point(px(10.), px(45.)), size(px(40.), px(25.))),
+                2,
+                1,
+                0,
+            ),
+        ];
+        assert_eq!(
+            nearest_table_cell_in_row(&cells, 2, 0, point(px(150.), px(30.)))
+                .unwrap()
+                .3,
+            1
+        );
+        assert_eq!(
+            nearest_table_cell_in_row(&cells, 2, 0, point(px(-20.), px(30.)))
+                .unwrap()
+                .3,
+            0
+        );
+        assert!(nearest_table_cell_in_row(&cells, 2, 0, point(px(150.), px(50.))).is_none());
+    }
 
     #[test]
     fn visible_line_hit_uses_real_screen_geometry_at_far_document_offsets() {

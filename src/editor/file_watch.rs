@@ -36,6 +36,16 @@ pub(super) struct FileWatch {
     events: Receiver<notify::Result<Event>>,
     watched: HashMap<PathBuf, RecursiveMode>,
     documents: HashSet<PathBuf>,
+    fingerprints: HashMap<PathBuf, Option<u64>>,
+    polls_since_scan: u8,
+}
+
+fn file_fingerprint(path: &Path) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let bytes = std::fs::read(path).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 fn resolved_path(path: &Path) -> PathBuf {
@@ -79,6 +89,8 @@ impl FileWatch {
             events,
             watched: HashMap::new(),
             documents: HashSet::new(),
+            fingerprints: HashMap::new(),
+            polls_since_scan: 0,
         })
     }
 
@@ -146,6 +158,22 @@ impl FileWatch {
                 }
             }
         }
+        self.polls_since_scan += 1;
+        if self.polls_since_scan >= 6 {
+            self.polls_since_scan = 0;
+            self.fingerprints
+                .retain(|path, _| request.documents.contains(path));
+            for path in &request.documents {
+                let fingerprint = file_fingerprint(path);
+                if self
+                    .fingerprints
+                    .insert(path.clone(), fingerprint)
+                    .is_some_and(|previous| previous != fingerprint)
+                {
+                    checks.insert(path.clone());
+                }
+            }
+        }
         self.documents = request.documents;
         WatchBatch {
             events,
@@ -204,6 +232,26 @@ mod tests {
         watcher.poll(request(Path::new(""), std::slice::from_ref(&first)));
         let batch = watcher.poll(request(Path::new(""), &[first, second.clone()]));
         assert!(batch.documents_to_check.contains(&second));
+    }
+
+    #[test]
+    fn polling_detects_remote_style_content_changes_without_events() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("note.md");
+        std::fs::write(&path, "old").unwrap();
+        let mut watcher = FileWatch::new().unwrap();
+        for _ in 0..6 {
+            watcher.poll(request(Path::new(""), std::slice::from_ref(&path)));
+        }
+        std::fs::write(&path, "new text").unwrap();
+        let mut changed = false;
+        for _ in 0..6 {
+            changed |= watcher
+                .poll(request(Path::new(""), std::slice::from_ref(&path)))
+                .documents_to_check
+                .contains(&path);
+        }
+        assert!(changed);
     }
 
     #[test]
