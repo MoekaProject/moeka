@@ -45,6 +45,7 @@ fn greet(name: &str) {
 ```
 ### LaTeX 数学公式
 使用 `$` 包装语法书写行内公式，例如 $E = mc^2$，或使用独占一行的 `$$` 块级公式语法：
+
 $$
 \operatorname*{arg\,min}_{\theta \in \mathbb{R}^n}
 \left[

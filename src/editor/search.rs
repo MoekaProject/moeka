@@ -592,14 +592,8 @@ impl EditorView {
         };
 
         self.search_current_index = Some(index);
-        let range = &self.search_matches[index];
-        self.cursor.offset = range.start;
-        self.cursor.anchor = range.start;
-        if self.embedded_editor && self.embedded_read_only {
-            self.center_cursor_in_view_immediately(cx);
-        } else {
-            self.center_cursor_in_view(cx);
-        }
+        self.reveal_current_search_match(cx);
+        cx.notify();
     }
 
     pub(crate) fn replace_current_match(&mut self, cx: &mut Context<Self>) {

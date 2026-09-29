@@ -66,8 +66,27 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(not(target_os = "macos"))]
         let title = self.t(crate::i18n::TextKey::OpenFile).to_string();
         cx.spawn(async move |this, cx| {
+            #[cfg(target_os = "macos")]
+            let maybe_path = match this.update(cx, |_, cx| {
+                cx.prompt_for_paths(gpui::PathPromptOptions {
+                    files: true,
+                    directories: false,
+                    multiple: false,
+                    prompt: None,
+                })
+            }) {
+                Ok(receiver) => receiver
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
+                    .and_then(|mut paths| paths.pop()),
+                Err(_) => None,
+            };
+            #[cfg(not(target_os = "macos"))]
             let maybe_path = cx
                 .background_executor()
                 .spawn(async move { helpers::pick_markdown_file_blocking(&title) })

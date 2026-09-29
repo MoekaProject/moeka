@@ -431,6 +431,7 @@ pane_state! {
     // ── Tabs owned by this pane ──
     (current_file_path, Option<PathBuf>, None),
     (tabs, Vec<OpenTab>, Vec::new()),
+    (preview_open_epoch, usize, 0),
     (tab_generated_preview_cache, HashMap<String, GeneratedPreviewTabCache>, HashMap::new()),
     (active_tab_id, Option<String>, None),
     (active_tab_index_cache, Cell<Option<usize>>, Cell::new(None)),

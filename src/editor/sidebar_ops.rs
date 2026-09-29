@@ -20,11 +20,6 @@ impl EditorView {
         let from = Self::normalize_sidebar_path(from);
         let to = Self::normalize_sidebar_path(to);
         for tab in self.all_tabs_mut() {
-            let previous_source = tab
-                .recovery
-                .source_path
-                .clone()
-                .or_else(|| tab.path.clone());
             if let Some(path) = tab.path.as_deref()
                 && let Some(new_path) = Self::rewrite_moved_path(path, &from, &to)
             {
@@ -36,34 +31,6 @@ impl EditorView {
                 && let Some(new_source) = Self::rewrite_moved_path(source_path, &from, &to)
             {
                 tab.recovery.source_path = Some(new_source);
-            }
-            if let Some(temp_path) = tab.recovery.temp_path.as_deref() {
-                if let Some(new_temp) = Self::rewrite_moved_path(temp_path, &from, &to) {
-                    // Directory moves carry the temp file physically; only its recorded path changes.
-                    tab.recovery.temp_path = Some(new_temp);
-                } else if previous_source
-                    .as_deref()
-                    .is_some_and(|source| Self::rewrite_moved_path(source, &from, &to).is_some())
-                {
-                    let new_source = tab.recovery.source_path.as_deref().or(tab.path.as_deref());
-                    if let Some(new_source) = new_source {
-                        let mut new_temp = super::config_paths::hidden_temp_file_path(new_source);
-                        if new_temp != temp_path && new_temp.exists() {
-                            new_temp =
-                                super::config_paths::hidden_temp_file_path_with_hash(new_source);
-                        }
-                        if temp_path.exists() {
-                            if let Some(parent) = new_temp.parent() {
-                                let _ = std::fs::create_dir_all(parent);
-                            }
-                            if Self::move_path_compat(temp_path, &new_temp).is_ok() {
-                                tab.recovery.temp_path = Some(new_temp);
-                            }
-                        } else {
-                            tab.recovery.temp_path = Some(new_temp);
-                        }
-                    }
-                }
             }
             if let Some(identity) = tab.history.source_identity.as_deref() {
                 let identity_path = Path::new(identity);
@@ -294,7 +261,7 @@ mod tests {
     use super::EditorView;
 
     #[test]
-    fn moved_directory_rewrites_nested_source_and_temp_paths() {
+    fn moved_directory_rewrites_nested_source_paths() {
         assert_eq!(
             EditorView::rewrite_moved_path(
                 Path::new("/workspace/note.md"),
@@ -302,14 +269,6 @@ mod tests {
                 Path::new("/workspace/archive/note.md"),
             ),
             Some("/workspace/archive/note.md".into())
-        );
-        assert_eq!(
-            EditorView::rewrite_moved_path(
-                Path::new("/workspace/docs/.note.md.temp"),
-                Path::new("/workspace/docs"),
-                Path::new("/workspace/archive/docs"),
-            ),
-            Some("/workspace/archive/docs/.note.md.temp".into())
         );
         assert_eq!(
             EditorView::rewrite_moved_path(

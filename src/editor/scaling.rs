@@ -25,27 +25,85 @@ fn cursor_scroll_viewport(scroll_offset: f32, viewport_height: f32) -> (f32, f32
     (scroll_offset, scroll_offset + viewport_height.max(0.0))
 }
 
+fn cursor_visibility_scroll_delta(
+    cursor_top: f32,
+    cursor_bottom: f32,
+    scroll_offset: f32,
+    viewport_height: f32,
+) -> f32 {
+    let viewport_bottom = scroll_offset + viewport_height;
+    match caret_vertical_overflow(cursor_top, cursor_bottom, scroll_offset, viewport_bottom) {
+        std::cmp::Ordering::Less => cursor_top - scroll_offset,
+        std::cmp::Ordering::Greater => cursor_bottom - viewport_bottom,
+        std::cmp::Ordering::Equal => 0.0,
+    }
+}
+
 fn typing_scroll_should_restore(
     same_logical_line: bool,
-    pending_fence_on_same_visual_row: bool,
-    visual_geometry_ready: bool,
+    _pending_fence_on_same_visual_row: bool,
+    _visual_geometry_ready: bool,
     scroll_before: f32,
     viewport_height: f32,
     cursor_top: f32,
     cursor_bottom: f32,
 ) -> bool {
     same_logical_line
-        && (pending_fence_on_same_visual_row
-            || !visual_geometry_ready
+        && (viewport_height <= 0.0
             || caret_vertical_overflow(
                 cursor_top,
                 cursor_bottom,
                 scroll_before,
-                scroll_before + viewport_height.max(0.0),
+                scroll_before + viewport_height,
             ) == std::cmp::Ordering::Equal)
 }
 
 impl EditorView {
+    pub(crate) fn cursor_vertical_bounds(&self) -> Option<(f32, f32)> {
+        if !self.active_tab_supports_text_buffer() || self.last_viewport_height <= 0.0 {
+            return None;
+        }
+        if let Some((offset, bounds)) = self.table_cursor_paint_bounds
+            && offset == self.cursor.offset
+        {
+            let top = f32::from(bounds.origin.y - self.content_origin.y) + self.scroll_offset;
+            return Some((top, top + f32::from(bounds.size.height)));
+        }
+        let line = self.cursor_line();
+        let info = self.line_display_info.get(line)?.as_ref()?;
+        let (row, _) = self.cursor_visual_position(self.cursor.offset)?;
+        let top = self.text_y_offset_for_line(line) + row as f32 * info.line_height;
+        Some((top, top + info.line_height))
+    }
+
+    pub(crate) fn cursor_visible_in_viewport(&self) -> bool {
+        let Some((top, bottom)) = self.cursor_vertical_bounds() else {
+            return false;
+        };
+        caret_vertical_overflow(
+            top,
+            bottom,
+            self.scroll_offset,
+            self.scroll_offset + self.editor_visible_height(),
+        ) == std::cmp::Ordering::Equal
+    }
+
+    pub(crate) fn keep_previously_visible_cursor_in_view(&mut self) -> bool {
+        let Some((top, bottom)) = self.cursor_vertical_bounds() else {
+            return false;
+        };
+        let correction = cursor_visibility_scroll_delta(
+            top,
+            bottom,
+            self.scroll_offset,
+            self.editor_visible_height(),
+        );
+        let before = self.scroll_offset;
+        self.scroll_offset = (self.scroll_offset + correction).max(0.0);
+        self.clamp_scroll();
+        (self.scroll_offset - before).abs() > 0.5
+    }
+
     fn actual_visual_line_count(info: &LineDisplayInfo) -> usize {
         info.wrapped_line.wrap_boundaries().len() + 1
     }
@@ -1349,7 +1407,26 @@ pub(crate) fn apply_macos_content_corner_radius(window: &mut Window, radius: f64
 mod tests {
     #[cfg(target_os = "macos")]
     use super::{EditorView, traffic_light_offsets_for_layout};
-    use super::{caret_vertical_overflow, cursor_scroll_viewport, typing_scroll_should_restore};
+    use super::{
+        caret_vertical_overflow, cursor_scroll_viewport, cursor_visibility_scroll_delta,
+        typing_scroll_should_restore,
+    };
+
+    #[test]
+    fn lazy_layout_only_corrects_caret_that_leaves_the_viewport() {
+        assert_eq!(
+            cursor_visibility_scroll_delta(130.0, 150.0, 100.0, 200.0),
+            0.0
+        );
+        assert_eq!(
+            cursor_visibility_scroll_delta(80.0, 100.0, 100.0, 200.0),
+            -20.0
+        );
+        assert_eq!(
+            cursor_visibility_scroll_delta(310.0, 330.0, 100.0, 200.0),
+            30.0
+        );
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -1407,11 +1484,14 @@ mod tests {
 
     #[test]
     fn pending_fence_typing_keeps_scroll_despite_reparse_height_changes() {
-        assert!(typing_scroll_should_restore(
+        assert!(!typing_scroll_should_restore(
             true, true, true, 120.0, 300.0, 110.0, 130.0
         ));
-        assert!(typing_scroll_should_restore(
+        assert!(!typing_scroll_should_restore(
             true, true, true, 120.0, 300.0, 430.0, 450.0
+        ));
+        assert!(!typing_scroll_should_restore(
+            true, false, false, 120.0, 300.0, 430.0, 450.0
         ));
         assert!(!typing_scroll_should_restore(
             true, false, true, 120.0, 300.0, 430.0, 450.0

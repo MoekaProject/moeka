@@ -443,6 +443,25 @@ impl EditorView {
             return;
         }
         cx.spawn(async move |this, cx| {
+            #[cfg(target_os = "macos")]
+            let maybe_path = match this.update(cx, |_, cx| {
+                cx.prompt_for_paths(gpui::PathPromptOptions {
+                    files: true,
+                    directories: false,
+                    multiple: false,
+                    prompt: None,
+                })
+            }) {
+                Ok(receiver) => receiver
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
+                    .and_then(|mut paths| paths.pop())
+                    .filter(|path| super::is_image_path(path)),
+                Err(_) => None,
+            };
+            #[cfg(not(target_os = "macos"))]
             let maybe_path = cx
                 .background_executor()
                 .spawn(async move { helpers::pick_image_file_blocking() })

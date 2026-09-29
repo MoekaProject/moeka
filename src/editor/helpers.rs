@@ -147,10 +147,8 @@ fn apply_code_highlight_segments(
 
 pub(crate) const GENERATED_PREVIEW_RASTER_SCALE: f32 = 2.0;
 pub(crate) const GENERATED_PREVIEW_MATH_RASTER_SCALE: f32 = 3.0;
-pub(crate) const GENERATED_PREVIEW_EDITOR_MERMAID_SCALE: f32 = 0.75;
 const GENERATED_PREVIEW_EDITOR_MAX_RASTER_EDGE: f32 = 2048.0;
 const GENERATED_PREVIEW_EDITOR_MAX_RASTER_PIXELS: f32 = 2_097_152.0;
-const GENERATED_PREVIEW_MATH_DISPLAY_SCALE: f32 = 1.5;
 const GENERATED_PREVIEW_DEFAULT_MONOSPACE_FONT_FAMILY: &str =
     "ui-monospace, Menlo, Monaco, Consolas, monospace";
 const GENERATED_PREVIEW_DEFAULT_CJK_FONT_FAMILY: &str =
@@ -1563,6 +1561,7 @@ pub(crate) fn compute_image_preview_size(
     (logical_width * scale, logical_height * scale)
 }
 
+#[cfg(test)]
 pub(crate) fn compute_generated_preview_size(
     image_width: f32,
     image_height: f32,
@@ -1578,26 +1577,6 @@ pub(crate) fn compute_generated_preview_size(
     (logical_width * scale, logical_height * scale)
 }
 
-pub(crate) fn compute_generated_preview_size_for_kind(
-    image_width: f32,
-    image_height: f32,
-    max_width: f32,
-    kind: BlockPreviewKind,
-) -> (f32, f32) {
-    match kind {
-        BlockPreviewKind::Math => compute_generated_preview_size_scaled(
-            image_width,
-            image_height,
-            max_width,
-            generated_preview_raster_scale(kind),
-            GENERATED_PREVIEW_MATH_DISPLAY_SCALE,
-        ),
-        BlockPreviewKind::Mermaid => {
-            compute_generated_preview_size(image_width, image_height, max_width)
-        }
-    }
-}
-
 pub(crate) fn intrinsic_generated_preview_size_for_kind(
     image_width: f32,
     image_height: f32,
@@ -1609,13 +1588,7 @@ pub(crate) fn intrinsic_generated_preview_size_for_kind(
 
     let logical_width = image_width / generated_preview_raster_scale(kind);
     let logical_height = image_height / generated_preview_raster_scale(kind);
-    match kind {
-        BlockPreviewKind::Math => (
-            logical_width * GENERATED_PREVIEW_MATH_DISPLAY_SCALE,
-            logical_height * GENERATED_PREVIEW_MATH_DISPLAY_SCALE,
-        ),
-        BlockPreviewKind::Mermaid => (logical_width, logical_height),
-    }
+    (logical_width, logical_height)
 }
 
 /// Computes the on-screen size of a generated preview and the background that
@@ -1624,17 +1597,15 @@ pub(crate) fn intrinsic_generated_preview_size_for_kind(
 /// (scaled) pixel space. Used by the layout (extra-height), the background, and
 /// the draw paths so they always agree.
 ///
-/// - Math is fit whole and never upscaled, so small formulas stay small with a
-///   snug padded background.
-/// - Mermaid fills available height or width, whichever constrains the chart
-///   first, so wide horizontal charts fit the editor width instead of clipping.
+/// Both kinds retain their rendered logical size unless the available width is narrower.
+/// Height and the snug background follow the same fitted aspect ratio.
 pub(crate) fn fit_generated_preview_size(
     image_width: f32,
     image_height: f32,
     kind: BlockPreviewKind,
     avail_width: f32,
     min_height: f32,
-    max_height: f32,
+    _max_height: f32,
     pad_x: f32,
     pad_y: f32,
 ) -> (f32, f32, f32, f32) {
@@ -1643,39 +1614,11 @@ pub(crate) fn fit_generated_preview_size(
         return (0.0, 0.0, (2.0 * pad_x).max(1.0), min_height.max(1.0));
     }
     let inner_w = (avail_width - 2.0 * pad_x).max(1.0);
-    let inner_max_h = (max_height - 2.0 * pad_y).max(1.0);
-    let (fitted_w, fitted_h) = match kind {
-        BlockPreviewKind::Math => {
-            let scale = (inner_w / w0).min(inner_max_h / h0).min(1.0).max(0.0);
-            (w0 * scale, h0 * scale)
-        }
-        BlockPreviewKind::Mermaid => {
-            let scale = (inner_w / w0).min(inner_max_h / h0).max(0.0);
-            (w0 * scale, h0 * scale)
-        }
-    };
+    let scale = (inner_w / w0).min(1.0).max(0.0);
+    let (fitted_w, fitted_h) = (w0 * scale, h0 * scale);
     let background_width = (fitted_w + 2.0 * pad_x).min(avail_width).max(1.0);
-    let background_height = (fitted_h + 2.0 * pad_y).clamp(min_height, max_height);
+    let background_height = (fitted_h + 2.0 * pad_y).max(1.0);
     (fitted_w, fitted_h, background_width, background_height)
-}
-
-fn compute_generated_preview_size_scaled(
-    image_width: f32,
-    image_height: f32,
-    max_width: f32,
-    raster_scale: f32,
-    display_scale: f32,
-) -> (f32, f32) {
-    if image_width <= 0.0 || image_height <= 0.0 || max_width <= 0.0 {
-        return (0.0, 0.0);
-    }
-
-    let logical_width = image_width / raster_scale.max(0.1);
-    let logical_height = image_height / raster_scale.max(0.1);
-    let scaled_width = logical_width * display_scale.max(0.1);
-    let scaled_height = logical_height * display_scale.max(0.1);
-    let scale = (max_width / scaled_width).min(1.0);
-    (scaled_width * scale, scaled_height * scale)
 }
 
 pub(crate) fn image_syntax_range(line_content: &str) -> Option<Range<usize>> {
@@ -2384,7 +2327,7 @@ mod tests {
         AnchoredPopupVertical, GeneratedPreviewFontFamilies, anchored_popup_placement,
         apply_search_match_text_styles, build_display_text, build_generated_block_preview_svg,
         build_table_display_text, build_text_runs_for_display, compute_display_prefix_bytes,
-        compute_generated_preview_size, compute_table_layout,
+        compute_generated_preview_size, compute_table_layout, fit_generated_preview_size,
         load_generated_preview_image_from_svg, load_generated_preview_image_from_svg_for_editor,
         prefix_is_folded, table_cell_content_offset, table_cell_decoration, task_prefix_is_folded,
         wrap_segment_byte_ranges,
@@ -3780,6 +3723,89 @@ mod tests {
             compute_generated_preview_size(1280.0, 640.0, 320.0),
             (320.0, 160.0)
         );
+    }
+
+    #[test]
+    fn mermaid_preview_height_follows_intrinsic_aspect_ratio() {
+        let (wide_w, wide_h, _, wide_background_h) = fit_generated_preview_size(
+            1200.0,
+            300.0,
+            markdown::BlockPreviewKind::Mermaid,
+            600.0,
+            50.0,
+            300.0,
+            0.0,
+            0.0,
+        );
+        let (tall_w, tall_h, _, tall_background_h) = fit_generated_preview_size(
+            300.0,
+            1200.0,
+            markdown::BlockPreviewKind::Mermaid,
+            600.0,
+            50.0,
+            300.0,
+            0.0,
+            0.0,
+        );
+        assert_eq!(wide_w / wide_h, 4.0);
+        assert_eq!(tall_h / tall_w, 4.0);
+        assert_eq!(wide_background_h, wide_h);
+        assert_eq!(tall_background_h, tall_h);
+        assert!(tall_background_h > 300.0);
+    }
+
+    #[test]
+    fn math_preview_height_follows_intrinsic_aspect_ratio() {
+        let (width, height, _, background_height) = fit_generated_preview_size(
+            300.0,
+            1200.0,
+            markdown::BlockPreviewKind::Math,
+            300.0,
+            50.0,
+            300.0,
+            0.0,
+            8.0,
+        );
+        assert_eq!(height / width, 4.0);
+        assert_eq!(background_height, height + 16.0);
+        assert!(background_height > 300.0);
+    }
+
+    #[test]
+    fn generated_previews_use_rendered_size_without_upscaling() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40" viewBox="0 0 120 40"><rect width="120" height="40" fill="black"/></svg>"#;
+        for kind in [
+            markdown::BlockPreviewKind::Mermaid,
+            markdown::BlockPreviewKind::Math,
+        ] {
+            let image = load_generated_preview_image_from_svg_for_editor(svg, kind).unwrap();
+            let raster = image.size(0);
+            let (width, height, background_width, background_height) = fit_generated_preview_size(
+                raster.width.0 as f32,
+                raster.height.0 as f32,
+                kind,
+                800.0,
+                50.0,
+                300.0,
+                12.0,
+                8.0,
+            );
+            assert_eq!((width, height), (120.0, 40.0));
+            assert_eq!((background_width, background_height), (144.0, 56.0));
+
+            let (width, height, background_width, background_height) = fit_generated_preview_size(
+                raster.width.0 as f32,
+                raster.height.0 as f32,
+                kind,
+                84.0,
+                50.0,
+                300.0,
+                12.0,
+                8.0,
+            );
+            assert_eq!((width, height), (60.0, 20.0));
+            assert_eq!((background_width, background_height), (84.0, 36.0));
+        }
     }
 
     #[test]
@@ -5822,7 +5848,6 @@ pub(crate) fn load_generated_preview_image_from_svg_for_editor(
     if kind == BlockPreviewKind::Math {
         return load_render_image_from_svg_with_scale(svg, raster_scale);
     }
-    let raster_scale = raster_scale * GENERATED_PREVIEW_EDITOR_MERMAID_SCALE;
     load_render_image_from_svg_with_limits(
         svg,
         raster_scale,
@@ -6279,6 +6304,7 @@ pub(crate) fn load_render_image_from_url(url: &str) -> anyhow::Result<RenderImag
     load_render_image_from_bytes(&bytes)
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn pick_image_file_blocking() -> Option<PathBuf> {
     crate::platform::dialog::run(|| {
         rfd::FileDialog::new()
@@ -6294,6 +6320,7 @@ pub(crate) fn pick_image_file_blocking() -> Option<PathBuf> {
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn pick_markdown_file_blocking(title: &str) -> Option<PathBuf> {
     let title = title.to_string();
     crate::platform::dialog::run(move || {
@@ -6304,11 +6331,13 @@ pub(crate) fn pick_markdown_file_blocking(title: &str) -> Option<PathBuf> {
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn pick_folder_blocking(title: &str) -> Option<PathBuf> {
     let title = title.to_string();
     crate::platform::dialog::run(move || rfd::FileDialog::new().set_title(title).pick_folder())
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn save_file_blocking(default_name: &str, title: &str) -> Option<PathBuf> {
     let default_name = default_name.to_string();
     let title = title.to_string();

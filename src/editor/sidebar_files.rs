@@ -6,6 +6,23 @@ use gpui::{AppContext, Context, Window};
 use super::*;
 
 fn trash_is_unavailable(error: &anyhow::Error) -> bool {
+    #[cfg(target_os = "macos")]
+    if error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<trash::Error>())
+        .any(|trash_error| {
+            let trash::Error::Unknown { description } = trash_error else {
+                return false;
+            };
+            let description = description.to_ascii_lowercase();
+            description.contains("trashitematurl")
+                && description.contains("volume")
+                && description.contains("have one")
+                && (description.contains("doesn't") || description.contains("doesn’t"))
+        })
+    {
+        return true;
+    }
     if error
         .chain()
         .filter_map(|cause| cause.downcast_ref::<trash::Error>())
@@ -60,6 +77,17 @@ fn only_unsupported_trash_errors_allow_direct_delete() {
         trash::Error::Os {
             code: 45,
             description: "operation not supported".into(),
+        }
+    )));
+    assert!(trash_is_unavailable(&anyhow::Error::from(
+        trash::Error::Unknown {
+            description: "While deleting '/Volumes/homes/imeoer/docs/abc/abc.md', `trashItemAtURL` failed: \"abc.md\" couldn’t be moved to the trash because the volume \"homes\" doesn’t have one.".into(),
+        }
+    )));
+    assert!(!trash_is_unavailable(&anyhow::Error::from(
+        trash::Error::Unknown {
+            description:
+                "While deleting '/tmp/note.md', `trashItemAtURL` failed: permission denied".into(),
         }
     )));
 }
@@ -193,7 +221,17 @@ impl EditorView {
             ));
         }
 
-        if let Err(trash_error) = trash(src) {
+        if let Err(trash_error) = trash(src).or_else(|trash_error| {
+            if trash_is_unavailable(&trash_error) {
+                Self::remove_copied_path(src).map_err(|error| {
+                    anyhow::anyhow!(
+                        "trash unavailable ({trash_error}); direct delete failed ({error})"
+                    )
+                })
+            } else {
+                Err(trash_error)
+            }
+        }) {
             let cleanup_error = Self::remove_copied_path(dst).err();
             return Err(anyhow::anyhow!(
                 "rename failed ({rename_error}); copied source but could not move it to Trash ({trash_error}){}",
@@ -216,25 +254,53 @@ impl EditorView {
     }
 
     pub(crate) fn delete_paths_to_trash(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let mut deleted = Vec::new();
-        for path in paths {
-            let result = crate::platform::trash::move_to_trash(path).or_else(|trash_error| {
-                if !trash_is_unavailable(&trash_error) {
-                    return Err(trash_error);
-                }
-                let direct = if path.is_dir() {
-                    std::fs::remove_dir_all(path)
-                } else {
-                    std::fs::remove_file(path)
-                };
-                direct.map_err(|error| {
-                    anyhow::anyhow!(
-                        "trash unavailable ({trash_error}); direct delete failed: {error}"
-                    )
+        let paths = paths.to_vec();
+        self.context_menu = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    paths
+                        .into_iter()
+                        .map(|path| {
+                            let result = crate::platform::trash::move_to_trash(&path).or_else(
+                                |trash_error| {
+                                    if !trash_is_unavailable(&trash_error) {
+                                        return Err(trash_error);
+                                    }
+                                    let direct = if path.is_dir() {
+                                        std::fs::remove_dir_all(&path)
+                                    } else {
+                                        std::fs::remove_file(&path)
+                                    };
+                                    direct.map_err(|error| {
+                                        anyhow::anyhow!(
+                                            "trash unavailable ({trash_error}); direct delete failed: {error}"
+                                        )
+                                    })
+                                },
+                            );
+                            (path, result)
+                        })
+                        .collect::<Vec<_>>()
                 })
-            });
+                .await;
+            this.update(cx, |editor, cx| editor.finish_delete_paths(results, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn finish_delete_paths(
+        &mut self,
+        results: Vec<(PathBuf, anyhow::Result<()>)>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut deleted = Vec::new();
+        for (path, result) in results {
             match result {
-                Ok(()) => deleted.push(path.clone()),
+                Ok(()) => deleted.push(path),
                 Err(error) => {
                     let message = format!(
                         "{}: {error}",
@@ -246,7 +312,6 @@ impl EditorView {
         }
 
         if deleted.is_empty() {
-            self.context_menu = None;
             cx.notify();
             return;
         }
@@ -305,7 +370,6 @@ impl EditorView {
             return;
         }
 
-        self.context_menu = None;
         cx.notify();
     }
 
@@ -336,19 +400,42 @@ impl EditorView {
             parent
         };
         let json = WhiteboardDocument::default().to_json_string();
-        let mut name = "Whiteboard.moeka".to_string();
-        let mut index = 1;
-        while parent.join(&name).exists() {
-            index += 1;
-            name = format!("Whiteboard {index}.moeka");
-        }
-        let path = parent.join(&name);
-        if std::fs::write(&path, json).is_ok() {
-            self.expanded_dirs.insert(parent);
-            self.invalidate_sidebar_items_cache();
-            self.open_path_in_permanent_tab(path, true, cx);
-            cx.notify();
-        }
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut name = "Whiteboard.moeka".to_string();
+                    let mut index = 1;
+                    while parent.join(&name).exists() {
+                        index += 1;
+                        name = format!("Whiteboard {index}.moeka");
+                    }
+                    let path = parent.join(name);
+                    file_ops::atomic_write(&path, json.as_bytes()).map(|()| path)
+                })
+                .await;
+            this.update(cx, |editor, cx| {
+                let path = match result {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let message = format!(
+                            "{}: {error}",
+                            editor.t(crate::i18n::TextKey::FileOperationFailed)
+                        );
+                        editor.notify_error(message, cx);
+                        return;
+                    }
+                };
+                if let Some(parent) = path.parent() {
+                    editor.expanded_dirs.insert(parent.to_path_buf());
+                }
+                editor.invalidate_sidebar_items_cache();
+                editor.open_path_in_permanent_tab(path, true, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn start_create_file(
@@ -464,38 +551,29 @@ impl EditorView {
                 {
                     let new_path = path.with_file_name(trimmed);
                     let rewrite_context = self.capture_workspace_rewrite_context();
-                    if let Err(error) = Self::move_path_compat(path, &new_path) {
-                        let message = format!(
-                            "{}: {error}",
-                            self.t(crate::i18n::TextKey::FileOperationFailed)
-                        );
-                        self.notify_error(message, cx);
-                    } else {
-                        let starred_changed =
-                            self.app_settings.rename_starred_prefix(path, &new_path);
-                        if starred_changed {
-                            self.app_settings.save();
-                        }
-                        self.invalidate_sidebar_items_cache();
-                        self.rewrite_open_tab_paths_after_move(path, &new_path);
-                        if self.selected_sidebar_paths.contains(path) {
-                            self.selected_sidebar_paths.remove(path);
-                            self.selected_sidebar_paths.insert(new_path.clone());
-                        }
-                        if let Some(current_path) = self.current_file_path.as_ref()
-                            && current_path.starts_with(path)
-                        {
-                            let relative = current_path
-                                .strip_prefix(path)
-                                .unwrap_or_else(|_| Path::new(""));
-                            self.current_file_path = Some(new_path.join(relative));
-                        }
-                        let mapping = attachments::PathMapping::new(path.clone(), new_path.clone());
-                        self.apply_workspace_link_rewrites(rewrite_context, &[mapping], cx);
-                        if reveal_in_file_tree {
-                            self.reveal_path_in_sidebar(new_path, cx);
-                        }
-                    }
+                    let old_path = path.clone();
+                    cx.spawn(async move |this, cx| {
+                        let move_old_path = old_path.clone();
+                        let move_new_path = new_path.clone();
+                        let result =
+                            cx.background_executor()
+                                .spawn(async move {
+                                    Self::move_path_compat(&move_old_path, &move_new_path)
+                                })
+                                .await;
+                        this.update(cx, |editor, cx| {
+                            editor.finish_sidebar_rename(
+                                old_path,
+                                new_path,
+                                reveal_in_file_tree,
+                                rewrite_context,
+                                result,
+                                cx,
+                            );
+                        })
+                        .ok();
+                    })
+                    .detach();
                 }
             }
             SidebarEditMode::CreateFile { parent, .. } => {
@@ -511,50 +589,128 @@ impl EditorView {
                         format!("{trimmed}.md")
                     };
                     let new_path = parent.join(file_name);
-                    if let Err(error) = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&new_path)
-                    {
-                        let message = format!(
-                            "{}: {error}",
-                            self.t(crate::i18n::TextKey::FileOperationFailed)
-                        );
-                        self.notify_error(message, cx);
-                    } else {
-                        self.schedule_sidebar_directory_refresh(parent.clone(), cx);
-                        self.quick_open_index_root = None;
-                        self.quick_open_file_index.clear();
-                        if self.file_list_effective_dir() == *parent {
-                            self.file_list_dirty = true;
-                        }
-                        self.set_file_list_dir_for_path(&new_path, cx);
-                        self.selected_sidebar_paths.clear();
-                        self.selected_sidebar_paths.insert(new_path.clone());
-                        self.sidebar_selection_anchor = Some(new_path.clone());
-                        self.reveal_path_in_sidebar(new_path.clone(), cx);
-                        self.open_sidebar_file(new_path, cx);
-                        return;
-                    }
+                    let parent = parent.clone();
+                    cx.spawn(async move |this, cx| {
+                        let create_path = new_path.clone();
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move {
+                                std::fs::OpenOptions::new()
+                                    .write(true)
+                                    .create_new(true)
+                                    .open(create_path)
+                                    .map(drop)
+                            })
+                            .await;
+                        this.update(cx, |editor, cx| {
+                            editor.finish_create_file(parent, new_path, result, cx)
+                        })
+                        .ok();
+                    })
+                    .detach();
                 }
             }
             SidebarEditMode::CreateDir { parent, .. } => {
                 let trimmed = value.trim();
                 if !trimmed.is_empty() {
                     let new_path = parent.join(trimmed);
-                    if let Err(error) = std::fs::create_dir(&new_path) {
-                        let message = format!(
-                            "{}: {error}",
-                            self.t(crate::i18n::TextKey::FileOperationFailed)
-                        );
-                        self.notify_error(message, cx);
-                    } else {
-                        self.expanded_dirs.insert(new_path.clone());
-                        self.invalidate_sidebar_items_cache();
-                        self.reveal_path_in_sidebar(new_path, cx);
-                    }
+                    cx.spawn(async move |this, cx| {
+                        let create_path = new_path.clone();
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move { std::fs::create_dir(create_path) })
+                            .await;
+                        this.update(cx, |editor, cx| {
+                            if let Err(error) = result {
+                                let message = format!(
+                                    "{}: {error}",
+                                    editor.t(crate::i18n::TextKey::FileOperationFailed)
+                                );
+                                editor.notify_error(message, cx);
+                                return;
+                            }
+                            editor.expanded_dirs.insert(new_path.clone());
+                            editor.invalidate_sidebar_items_cache();
+                            editor.reveal_path_in_sidebar(new_path, cx);
+                        })
+                        .ok();
+                    })
+                    .detach();
                 }
             }
+        }
+        cx.notify();
+    }
+
+    fn finish_create_file(
+        &mut self,
+        parent: PathBuf,
+        new_path: PathBuf,
+        result: std::io::Result<()>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = result {
+            let message = format!(
+                "{}: {error}",
+                self.t(crate::i18n::TextKey::FileOperationFailed)
+            );
+            self.notify_error(message, cx);
+            return;
+        }
+        self.schedule_sidebar_directory_refresh(parent.clone(), cx);
+        self.quick_open_index_root = None;
+        self.quick_open_file_index.clear();
+        if self.file_list_effective_dir() == parent {
+            self.file_list_dirty = true;
+        }
+        self.set_file_list_dir_for_path(&new_path, cx);
+        self.selected_sidebar_paths.clear();
+        self.selected_sidebar_paths.insert(new_path.clone());
+        self.sidebar_selection_anchor = Some(new_path.clone());
+        self.reveal_path_in_sidebar(new_path.clone(), cx);
+        self.open_sidebar_file(new_path, cx);
+    }
+
+    fn finish_sidebar_rename(
+        &mut self,
+        old_path: PathBuf,
+        new_path: PathBuf,
+        reveal_in_file_tree: bool,
+        rewrite_context: Option<attachments::WorkspaceRewriteContext>,
+        result: anyhow::Result<()>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = result {
+            let message = format!(
+                "{}: {error}",
+                self.t(crate::i18n::TextKey::FileOperationFailed)
+            );
+            self.notify_error(message, cx);
+            return;
+        }
+        let starred_changed = self
+            .app_settings
+            .rename_starred_prefix(&old_path, &new_path);
+        if starred_changed {
+            self.app_settings.save();
+        }
+        self.invalidate_sidebar_items_cache();
+        self.rewrite_open_tab_paths_after_move(&old_path, &new_path);
+        if self.selected_sidebar_paths.remove(&old_path) {
+            self.selected_sidebar_paths.insert(new_path.clone());
+        }
+        if let Some(current_path) = self.current_file_path.as_ref()
+            && current_path.starts_with(&old_path)
+        {
+            let relative = current_path
+                .strip_prefix(&old_path)
+                .unwrap_or_else(|_| Path::new(""));
+            self.current_file_path = Some(new_path.join(relative));
+        }
+        let mapping = attachments::PathMapping::new(old_path, new_path.clone());
+        self.apply_workspace_link_rewrites(rewrite_context, &[mapping], cx);
+        if reveal_in_file_tree {
+            self.reveal_path_in_sidebar(new_path, cx);
         }
         cx.notify();
     }
@@ -615,6 +771,9 @@ impl EditorView {
             std::fs::create_dir(dst)?;
             for entry in std::fs::read_dir(src)? {
                 let entry = entry?;
+                if entry.file_name().to_string_lossy().starts_with("._") {
+                    continue;
+                }
                 let child_src = entry.path();
                 let child_dst = dst.join(entry.file_name());
                 Self::copy_path_recursively(&child_src, &child_dst)?;
@@ -670,9 +829,41 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let target_dir = Self::normalize_sidebar_path(&target_dir);
+        let paths = paths.to_vec();
+        self.context_menu = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let operation_target = target_dir.clone();
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    paths
+                        .into_iter()
+                        .map(|source| {
+                            let result =
+                                Self::copy_external_path_into_dir(&source, &operation_target);
+                            (source, result)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update(cx, |editor, cx| {
+                editor.finish_copy_external_paths(target_dir, results, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_copy_external_paths(
+        &mut self,
+        target_dir: PathBuf,
+        results: Vec<(PathBuf, std::io::Result<Option<PathBuf>>)>,
+        cx: &mut Context<Self>,
+    ) {
         let mut copied_paths = Vec::new();
-        for source in paths {
-            match Self::copy_external_path_into_dir(source, &target_dir) {
+        for (_, result) in results {
+            match result {
                 Ok(Some(destination)) => copied_paths.push(destination),
                 Ok(None) => {}
                 Err(error) => {
@@ -686,7 +877,6 @@ impl EditorView {
         }
 
         self.invalidate_sidebar_items_cache();
-        self.context_menu = None;
         if let Some(reveal_path) = copied_paths.first().cloned() {
             self.reveal_path_in_sidebar(reveal_path.clone(), cx);
             if self.file_list_effective_dir() == target_dir {
@@ -705,24 +895,62 @@ impl EditorView {
             return;
         };
         let target_dir = Self::normalize_sidebar_path(&target_dir);
+        let rewrite_context = clipboard
+            .is_cut
+            .then(|| self.capture_workspace_rewrite_context())
+            .flatten();
+        self.context_menu = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let operation_target = target_dir.clone();
+            let is_cut = clipboard.is_cut;
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    clipboard
+                        .paths
+                        .into_iter()
+                        .filter_map(|source| {
+                            let source = Self::normalize_sidebar_path(&source);
+                            let destination =
+                                Self::next_available_paste_destination(&source, &operation_target)?;
+                            let result = if is_cut {
+                                Self::move_path_compat(&source, &destination)
+                            } else {
+                                Self::copy_path_recursively(&source, &destination)
+                                    .map_err(anyhow::Error::from)
+                            };
+                            Some((source, destination, result))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update(cx, |editor, cx| {
+                editor.finish_paste_into_dir(target_dir, is_cut, rewrite_context, results, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_paste_into_dir(
+        &mut self,
+        target_dir: PathBuf,
+        is_cut: bool,
+        rewrite_context: Option<attachments::WorkspaceRewriteContext>,
+        results: Vec<(PathBuf, PathBuf, anyhow::Result<()>)>,
+        cx: &mut Context<Self>,
+    ) {
         let mut pasted_paths = Vec::new();
         let mut starred_changed = false;
-        for src in &clipboard.paths {
-            let src = Self::normalize_sidebar_path(src);
-            let Some(dst) = Self::next_available_paste_destination(&src, &target_dir) else {
-                continue;
-            };
-            if clipboard.is_cut {
-                if let Err(error) = Self::move_path_compat(&src, &dst) {
-                    let message = format!(
-                        "{}: {error}",
-                        self.t(crate::i18n::TextKey::FileOperationFailed)
-                    );
-                    self.notify_error(message, cx);
-                } else {
+        let mut mappings = Vec::new();
+        for (src, dst, result) in results {
+            match result {
+                Ok(()) if is_cut => {
                     pasted_paths.push(dst.clone());
                     starred_changed |= self.app_settings.rename_starred_prefix(&src, &dst);
                     self.rewrite_open_tab_paths_after_move(&src, &dst);
+                    mappings.push(attachments::PathMapping::new(src.clone(), dst.clone()));
 
                     let old_selected: Vec<PathBuf> = self
                         .selected_sidebar_paths
@@ -765,24 +993,24 @@ impl EditorView {
                         self.sidebar_selection_anchor = Some(dst.join(relative));
                     }
                 }
-            } else if let Err(error) = Self::copy_path_recursively(&src, &dst) {
-                let message = format!(
-                    "{}: {error}",
-                    self.t(crate::i18n::TextKey::FileOperationFailed)
-                );
-                self.notify_error(message, cx);
-            } else {
-                pasted_paths.push(dst);
+                Ok(()) => pasted_paths.push(dst),
+                Err(error) => {
+                    let message = format!(
+                        "{}: {error}",
+                        self.t(crate::i18n::TextKey::FileOperationFailed)
+                    );
+                    self.notify_error(message, cx);
+                }
             }
         }
-        if clipboard.is_cut {
+        if is_cut {
             self.file_clipboard = None;
+            self.apply_workspace_link_rewrites(rewrite_context, &mappings, cx);
         }
         if starred_changed {
             self.app_settings.save();
         }
         self.invalidate_sidebar_items_cache();
-        self.context_menu = None;
         if let Some(reveal_path) = pasted_paths.first().cloned() {
             self.reveal_path_in_sidebar(reveal_path.clone(), cx);
             if self.file_list_effective_dir() == target_dir {
@@ -809,10 +1037,29 @@ impl EditorView {
     }
 
     pub(crate) fn pick_workspace_folder(&mut self, cx: &mut Context<Self>) {
+        #[cfg(not(target_os = "macos"))]
         let title = self
             .t(crate::i18n::TextKey::ChooseWorkspaceFolder)
             .to_string();
         cx.spawn(async move |this, cx| {
+            #[cfg(target_os = "macos")]
+            let maybe_path = match this.update(cx, |_, cx| {
+                cx.prompt_for_paths(gpui::PathPromptOptions {
+                    files: false,
+                    directories: true,
+                    multiple: false,
+                    prompt: None,
+                })
+            }) {
+                Ok(receiver) => receiver
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
+                    .and_then(|mut paths| paths.pop()),
+                Err(_) => None,
+            };
+            #[cfg(not(target_os = "macos"))]
             let maybe_path = cx
                 .background_executor()
                 .spawn(async move { helpers::pick_folder_blocking(&title) })
@@ -986,6 +1233,7 @@ mod tests {
 
         fs::create_dir_all(&nested_dir).unwrap();
         fs::write(source_dir.join("root.md"), "root").unwrap();
+        fs::write(source_dir.join("._root.md"), "AppleDouble").unwrap();
         fs::write(nested_dir.join("child.md"), "child").unwrap();
 
         EditorView::copy_path_recursively(&source_dir, &destination_dir).unwrap();
@@ -998,6 +1246,7 @@ mod tests {
             fs::read_to_string(destination_dir.join("nested").join("child.md")).unwrap(),
             "child"
         );
+        assert!(!destination_dir.join("._root.md").exists());
     }
 
     #[test]
@@ -1080,12 +1329,36 @@ mod tests {
             &source,
             &destination,
             |_, _| Err(std::io::Error::other("rename failed")),
-            |_| Err(anyhow::anyhow!("Trash unavailable")),
+            |_| Err(anyhow::anyhow!("Permission denied while moving to Trash")),
         );
 
         assert!(result.is_err());
         assert_eq!(fs::read_to_string(source).unwrap(), "network content");
         assert!(!destination.exists());
+    }
+
+    #[test]
+    fn move_fallback_directly_removes_source_when_volume_has_no_trash() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.md");
+        let destination = temp.path().join("destination.md");
+        fs::write(&source, "network content").unwrap();
+
+        EditorView::move_path_with_fallback(
+            &source,
+            &destination,
+            |_, _| Err(std::io::Error::other("rename unsupported")),
+            |_| {
+                Err(trash::Error::Unknown {
+                    description: "`trashItemAtURL` failed: file couldn’t be moved to the trash because the volume \"homes\" doesn’t have one.".into(),
+                }
+                .into())
+            },
+        )
+        .unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(destination).unwrap(), "network content");
     }
 
     #[test]

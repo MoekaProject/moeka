@@ -526,9 +526,8 @@ impl EditorView {
         true
     }
 
-    fn load_editor_tab_state_for_path(path: &Path) -> Option<(EditorSnapshot, FileKind)> {
-        let bytes = std::fs::read(path).ok()?;
-        let file_kind = classify_file_kind_for_bytes(path, &bytes);
+    fn load_editor_tab_state_for_bytes(path: &Path, bytes: &[u8]) -> (EditorSnapshot, FileKind) {
+        let file_kind = classify_file_kind_for_bytes(path, bytes);
         let text = if file_kind.supports_text_buffer() {
             String::from_utf8_lossy(&bytes).into_owned()
         } else {
@@ -540,7 +539,7 @@ impl EditorView {
         } else {
             text.find('\n').unwrap_or(text.len())
         };
-        Some((
+        (
             EditorSnapshot {
                 text,
                 cursor_offset,
@@ -549,25 +548,30 @@ impl EditorView {
                 extra_cursors: Vec::new(),
             },
             file_kind,
-        ))
+        )
     }
 
-    fn build_file_tab(&mut self, path: &Path, is_preview: bool) -> Option<OpenTab> {
-        let (snapshot, file_kind) = Self::load_editor_tab_state_for_path(path)?;
+    fn build_file_tab(&mut self, path: &Path, bytes: &[u8], is_preview: bool) -> OpenTab {
+        let (snapshot, file_kind) = Self::load_editor_tab_state_for_bytes(path, bytes);
         let whiteboard = if matches!(file_kind, FileKind::Whiteboard) {
-            Some(WhiteboardTabState::load_from_path(path))
+            Some(WhiteboardTabState::new(
+                WhiteboardDocument::from_json_bytes(bytes),
+            ))
         } else {
             None
         };
         let id = self.next_tab_identity();
-        let history = history_store::load_tab_history(&id, Some(path), &snapshot);
-        Some(OpenTab {
+        let mut history = history_store::load_tab_history(&id, Some(path), &snapshot);
+        history.saved_text = Some(snapshot.text.clone());
+        let initial_left_aligned =
+            matches!(file_kind, FileKind::Markdown) && self.app_settings.default_left_align;
+        OpenTab {
             id,
             title: Self::title_for_path(path),
             kind: TabKind::Editor,
             path: Some(path.to_path_buf()),
             file_kind: Some(file_kind),
-            editor_left_aligned: false,
+            editor_left_aligned: initial_left_aligned,
             reading_mode: false,
             snapshot,
             image_view: ImageViewState::default(),
@@ -580,7 +584,7 @@ impl EditorView {
             is_pinned: false,
             recovery: config_store::TabRecoveryState::default(),
             history,
-        })
+        }
     }
 
     /// When `path` is already open in another pane, moves focus there so the
@@ -600,6 +604,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.focus_pane_containing_editor_path(&path, cx);
+        self.preview_open_epoch = self.preview_open_epoch.wrapping_add(1);
         if let Some(index) = self.editor_tab_index_for_path(&path) {
             self.activate_tab_by_index(index, cx);
             if focus_editor {
@@ -607,33 +612,48 @@ impl EditorView {
             }
             return;
         }
-
-        if let Some(index) = self.preview_tab_index() {
-            if self.tabs[index].is_dirty {
-                self.tabs[index].is_preview = false;
-            }
-        }
-
-        let Some(mut tab) = self.build_file_tab(&path, true) else {
-            cx.notify();
-            return;
-        };
-
-        self.persist_active_tab_state();
-        if let Some(index) = self.preview_tab_index() {
-            tab.id = self.tabs[index].id.clone();
-            self.tabs[index] = tab;
-            self.activate_tab_by_index_without_persist(index, cx);
-        } else {
-            self.tabs.push(tab);
-            let index = self.tabs.len().saturating_sub(1);
-            self.activate_tab_by_index_without_persist(index, cx);
-        }
-
-        if focus_editor {
-            self.request_editor_focus(cx);
-        }
-        session_store::persist_session(self);
+        let epoch = self.preview_open_epoch;
+        let pane_id = self.current_pane_id();
+        cx.spawn(async move |this, cx| {
+            let read_path = path.clone();
+            let bytes = cx
+                .background_executor()
+                .spawn(async move { std::fs::read(read_path) })
+                .await;
+            this.update(cx, |editor, cx| {
+                editor.with_pane_if_alive(pane_id, |editor| {
+                    if editor.preview_open_epoch != epoch || editor.focused_pane_id != pane_id {
+                        return;
+                    }
+                    let Ok(bytes) = bytes else { return };
+                    if let Some(index) = editor.editor_tab_index_for_path(&path) {
+                        editor.activate_tab_by_index(index, cx);
+                    } else {
+                        if let Some(index) = editor.preview_tab_index()
+                            && editor.tabs[index].is_dirty
+                        {
+                            editor.tabs[index].is_preview = false;
+                        }
+                        let mut tab = editor.build_file_tab(&path, &bytes, true);
+                        editor.persist_active_tab_state();
+                        if let Some(index) = editor.preview_tab_index() {
+                            tab.id = editor.tabs[index].id.clone();
+                            editor.tabs[index] = tab;
+                            editor.activate_tab_by_index_without_persist(index, cx);
+                        } else {
+                            editor.tabs.push(tab);
+                            editor.activate_tab_by_index_without_persist(editor.tabs.len() - 1, cx);
+                        }
+                    }
+                    if focus_editor && editor.focused_pane_id == pane_id {
+                        editor.request_editor_focus(cx);
+                    }
+                    session_store::persist_session(editor);
+                });
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn open_path_in_permanent_tab(
@@ -643,6 +663,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.focus_pane_containing_editor_path(&path, cx);
+        self.preview_open_epoch = self.preview_open_epoch.wrapping_add(1);
         if let Some(index) = self.editor_tab_index_for_path(&path) {
             self.tabs[index].is_preview = false;
             self.activate_tab_by_index(index, cx);
@@ -651,20 +672,43 @@ impl EditorView {
             }
             return;
         }
-
-        let Some(tab) = self.build_file_tab(&path, false) else {
-            cx.notify();
-            return;
-        };
-
-        self.persist_active_tab_state();
-        self.tabs.push(tab);
-        let index = self.tabs.len().saturating_sub(1);
-        self.activate_tab_by_index_without_persist(index, cx);
-        if focus_editor {
-            self.request_editor_focus(cx);
-        }
-        session_store::persist_session(self);
+        let epoch = self.preview_open_epoch;
+        let pane_id = self.current_pane_id();
+        cx.spawn(async move |this, cx| {
+            let read_path = path.clone();
+            let bytes = cx
+                .background_executor()
+                .spawn(async move { std::fs::read(read_path) })
+                .await;
+            this.update(cx, |editor, cx| {
+                editor.with_pane_if_alive(pane_id, |editor| {
+                    let Ok(bytes) = bytes else { return };
+                    let latest =
+                        editor.preview_open_epoch == epoch && editor.focused_pane_id == pane_id;
+                    if let Some(index) = editor.editor_tab_index_for_path(&path) {
+                        editor.tabs[index].is_preview = false;
+                        if latest {
+                            editor.activate_tab_by_index(index, cx);
+                        }
+                    } else {
+                        let tab = editor.build_file_tab(&path, &bytes, false);
+                        if latest {
+                            editor.persist_active_tab_state();
+                        }
+                        editor.tabs.push(tab);
+                        if latest {
+                            editor.activate_tab_by_index_without_persist(editor.tabs.len() - 1, cx);
+                        }
+                    }
+                    if latest && focus_editor {
+                        editor.request_editor_focus(cx);
+                    }
+                    session_store::persist_session(editor);
+                });
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn open_external_paths_in_tabs(
@@ -722,7 +766,7 @@ impl EditorView {
         }
         self.persist_active_tab_state();
         if let Some(tab_id) = self.active_tab_id.clone() {
-            let _ = self.write_temp_file_for_tab(&tab_id);
+            self.persist_recovery_for_tab(&tab_id);
         }
         self.stash_active_tab_layout_cache();
         self.activate_tab_by_index_without_persist(index, cx);
@@ -1215,7 +1259,7 @@ impl EditorView {
             kind: TabKind::Editor,
             path: None,
             file_kind: Some(FileKind::Markdown),
-            editor_left_aligned: false,
+            editor_left_aligned: self.app_settings.default_left_align,
             reading_mode: false,
             snapshot: EditorSnapshot {
                 text: String::new(),

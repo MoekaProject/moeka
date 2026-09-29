@@ -122,15 +122,11 @@ pub(crate) struct TabViewState {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub(crate) struct TabRecoveryState {
     #[serde(default)]
-    pub temp_path: Option<PathBuf>,
+    pub text: Option<String>,
     #[serde(default)]
     pub source_path: Option<PathBuf>,
     #[serde(default)]
-    pub source_mtime: Option<u64>,
-    #[serde(default)]
     pub source_content_hash: Option<String>,
-    #[serde(default)]
-    pub recovered_from_temp: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
@@ -265,6 +261,7 @@ mod tests {
             outline_rail_visible: true,
             show_whitespace: false,
             highlight_line_background: true,
+            default_left_align: false,
             simple_mode: false,
             format_toolbar_visible: true,
             auto_save: false,
@@ -404,7 +401,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("sessions.yaml");
         let source_path = dir.path().join("note.md");
-        let temp_path = dir.path().join(".note.md.temp");
         let mut config = SessionsFile::default();
         config.sessions = SessionConfig {
             active_tab_id: Some("tab-7".to_string()),
@@ -429,11 +425,9 @@ mod tests {
                     extra_cursors: vec![(9, 3)],
                 },
                 recovery: TabRecoveryState {
-                    temp_path: Some(temp_path.clone()),
+                    text: Some("unsaved draft".to_string()),
                     source_path: Some(source_path),
-                    source_mtime: Some(123_456),
                     source_content_hash: Some("abc123".to_string()),
-                    recovered_from_temp: true,
                 },
                 history: TabHistoryIndex {
                     undo_log_path: Some(dir.path().join("history.json")),

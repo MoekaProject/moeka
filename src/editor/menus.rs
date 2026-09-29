@@ -933,43 +933,51 @@ impl EditorView {
     }
 
     fn copy_image_path_to_clipboard(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let ext = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase());
-        let format = match ext.as_deref() {
-            Some("png") => Some(ImageFormat::Png),
-            Some("jpg" | "jpeg") => Some(ImageFormat::Jpeg),
-            Some("webp") => Some(ImageFormat::Webp),
-            Some("gif") => Some(ImageFormat::Gif),
-            Some("svg") => Some(ImageFormat::Svg),
-            Some("bmp") => Some(ImageFormat::Bmp),
-            Some("tif" | "tiff") => Some(ImageFormat::Tiff),
-            _ => None,
-        };
-        if let Some(format) = format
-            && let Ok(bytes) = std::fs::read(&path)
-        {
-            self.context_menu = None;
-            cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(format, bytes)));
-            cx.notify();
-            return;
-        }
-        if let Ok(bytes) = std::fs::read(path)
-            && let Ok(decoded) = image::load_from_memory(&bytes)
-        {
-            let mut png = Cursor::new(Vec::new());
-            if decoded.write_to(&mut png, image::ImageFormat::Png).is_ok() {
-                self.context_menu = None;
-                cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
-                    ImageFormat::Png,
-                    png.into_inner(),
-                )));
+        let path = path.to_path_buf();
+        self.context_menu = None;
+        cx.spawn(async move |this, cx| {
+            let image = cx
+                .background_executor()
+                .spawn(async move {
+                    let ext = path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.to_ascii_lowercase());
+                    let format = match ext.as_deref() {
+                        Some("png") => Some(ImageFormat::Png),
+                        Some("jpg" | "jpeg") => Some(ImageFormat::Jpeg),
+                        Some("webp") => Some(ImageFormat::Webp),
+                        Some("gif") => Some(ImageFormat::Gif),
+                        Some("svg") => Some(ImageFormat::Svg),
+                        Some("bmp") => Some(ImageFormat::Bmp),
+                        Some("tif" | "tiff") => Some(ImageFormat::Tiff),
+                        _ => None,
+                    };
+                    let bytes = std::fs::read(&path).ok();
+                    let image = bytes.as_ref().and_then(|bytes| {
+                        if let Some(format) = format {
+                            return Some(Image::from_bytes(format, bytes.clone()));
+                        }
+                        let decoded = image::load_from_memory(bytes).ok()?;
+                        let mut png = Cursor::new(Vec::new());
+                        decoded.write_to(&mut png, image::ImageFormat::Png).ok()?;
+                        Some(Image::from_bytes(ImageFormat::Png, png.into_inner()))
+                    });
+                    (image, path)
+                })
+                .await;
+            this.update(cx, |editor, cx| {
+                match image {
+                    (Some(image), _) => cx.write_to_clipboard(ClipboardItem::new_image(&image)),
+                    (None, path) => {
+                        editor.copy_text_to_clipboard(path.to_string_lossy().into_owned(), cx)
+                    }
+                }
                 cx.notify();
-                return;
-            }
-        }
-        self.copy_text_to_clipboard(path.to_string_lossy().into_owned(), cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn current_markdown_image_path(&self) -> Option<PathBuf> {
@@ -1215,36 +1223,6 @@ impl EditorView {
         }
     }
 
-    fn replace_image_from_picker(
-        &mut self,
-        line: usize,
-        source_path: &Path,
-        document_path: &Path,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(document_dir) = document_path.parent() else {
-            return;
-        };
-        let Some(file_name) = source_path.file_name() else {
-            return;
-        };
-
-        let destination_path = document_dir.join(file_name);
-        if source_path != destination_path
-            && let Err(error) = std::fs::copy(source_path, &destination_path)
-        {
-            let message = format!(
-                "{}: {error}",
-                self.t(crate::i18n::TextKey::FileOperationFailed)
-            );
-            self.notify_error(message, cx);
-            return;
-        }
-
-        let relative_path = file_name.to_string_lossy().to_string();
-        self.replace_image_url_on_line_with_text(line, &relative_path, cx);
-    }
-
     fn pick_image_for_current_markdown_image(&mut self, cx: &mut Context<Self>) {
         let Some(target) = self.current_image_menu_target() else {
             return;
@@ -1255,13 +1233,61 @@ impl EditorView {
         };
 
         cx.spawn(async move |this, cx| {
+            #[cfg(target_os = "macos")]
+            let maybe_path = match this.update(cx, |_, cx| {
+                cx.prompt_for_paths(gpui::PathPromptOptions {
+                    files: true,
+                    directories: false,
+                    multiple: false,
+                    prompt: None,
+                })
+            }) {
+                Ok(receiver) => receiver
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
+                    .and_then(|mut paths| paths.pop())
+                    .filter(|path| super::is_image_path(path)),
+                Err(_) => None,
+            };
+            #[cfg(not(target_os = "macos"))]
             let maybe_path = cx
                 .background_executor()
                 .spawn(async move { helpers::pick_image_file_blocking() })
                 .await;
             if let Some(path) = maybe_path {
+                let Some(file_name) = path.file_name() else {
+                    return;
+                };
+                let relative_path = file_name.to_string_lossy().into_owned();
+                let Some(document_dir) = document_path.parent() else {
+                    return;
+                };
+                let destination_path = document_dir.join(file_name);
+                if path != destination_path {
+                    let result = cx
+                        .background_executor()
+                        .spawn(
+                            async move { file_ops::copy_file_data(&path, &destination_path, true) },
+                        )
+                        .await;
+                    if let Err(error) = result {
+                        this.update(cx, |editor, cx| {
+                            let message = format!(
+                                "{}: {error}",
+                                editor.t(crate::i18n::TextKey::FileOperationFailed)
+                            );
+                            editor.notify_error(message, cx);
+                        })
+                        .ok();
+                        return;
+                    }
+                }
                 this.update(cx, |editor, cx| {
-                    editor.replace_image_from_picker(target.line, &path, &document_path, cx);
+                    if editor.current_file_path.as_ref() == Some(&document_path) {
+                        editor.replace_image_url_on_line_with_text(target.line, &relative_path, cx);
+                    }
                 })
                 .ok();
             }
@@ -1294,8 +1320,8 @@ impl EditorView {
         }
     }
 
-    fn selected_wiki_link_target(&self) -> Option<String> {
-        let path = if self.wiki_link_query.trim().is_empty() {
+    fn selected_wiki_link_path(&self) -> Option<PathBuf> {
+        if self.wiki_link_query.trim().is_empty() {
             self.wiki_link_recent_results
                 .get(self.menu_selected_index)
                 .map(|candidate| candidate.path.clone())
@@ -1303,17 +1329,7 @@ impl EditorView {
             self.wiki_link_search_results
                 .get(self.menu_selected_index)
                 .map(|result| result.path.clone())
-        }?;
-        let index = super::attachments::WorkspaceLinkIndex::build(&self.sidebar_root);
-        let source = self
-            .current_file_path
-            .clone()
-            .unwrap_or_else(|| self.sidebar_root.join(".untitled.md"));
-        let mut policy = self.app_settings.workspace_link_policy();
-        policy.link_syntax = super::attachments::AttachmentLinkSyntax::WikiLink;
-        policy
-            .target_for(&self.sidebar_root, &source, &path, Some(&index))
-            .ok()
+        }
     }
 
     /// Detect which format action is "active" at the cursor position.
@@ -1897,18 +1913,56 @@ impl EditorView {
             self.close_context_menu(cx);
             return;
         };
-        let Some(target) = self.selected_wiki_link_target() else {
+        let Some(path) = self.selected_wiki_link_path() else {
             return;
         };
-
-        let replace_start = start + 2;
-        self.buffer.replace(replace_start..query_end, &target);
-        self.cursor
-            .move_to(replace_start + target.len(), &self.buffer);
-        self.reparse();
-        self.close_context_menu(cx);
-        self.scroll_to_cursor();
-        self.pause_blinking(cx);
+        let pane_id = self.current_pane_id();
+        let tab_id = self.active_tab_id.clone();
+        let query = self.buffer.text_for_range(start + 2..query_end).to_string();
+        let root = self.sidebar_root.clone();
+        let source = self
+            .current_file_path
+            .clone()
+            .unwrap_or_else(|| root.join(".untitled.md"));
+        let mut policy = self.app_settings.workspace_link_policy();
+        policy.link_syntax = super::attachments::AttachmentLinkSyntax::WikiLink;
+        cx.spawn(async move |this, cx| {
+            let target = cx
+                .background_executor()
+                .spawn(async move {
+                    let index =
+                        if policy.path_style == super::attachments::AttachmentPathStyle::Shortest {
+                            Some(super::attachments::WorkspaceLinkIndex::build(&root))
+                        } else {
+                            None
+                        };
+                    policy.target_for(&root, &source, &path, index.as_ref())
+                })
+                .await;
+            let Ok(target) = target else { return };
+            this.update(cx, |editor, cx| {
+                editor.with_pane_if_alive(pane_id, |editor| {
+                    if editor.active_tab_id != tab_id
+                        || editor.wiki_link_start != Some(start)
+                        || editor.wiki_link_query_end(start) != Some(query_end)
+                        || editor.buffer.text_for_range(start + 2..query_end) != query
+                    {
+                        return;
+                    }
+                    let replace_start = start + 2;
+                    editor.buffer.replace(replace_start..query_end, &target);
+                    editor
+                        .cursor
+                        .move_to(replace_start + target.len(), &editor.buffer);
+                    editor.reparse();
+                    editor.close_context_menu(cx);
+                    editor.scroll_to_cursor();
+                    editor.pause_blinking(cx);
+                });
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn execute_format_menu_action(

@@ -68,15 +68,20 @@ impl EditorView {
                 return;
             };
 
-            let write_path = path.clone();
+            let save = this.update(cx, |_, _| file_ops::DocumentSave::new(path.clone()));
+            let Ok(save) = save else { return };
+            let token = save.clone();
             let (result, snapshot) = cx
                 .background_executor()
                 .spawn(async move {
-                    let result = file_ops::atomic_write(&write_path, snapshot.text.as_bytes());
+                    let result = save.write(snapshot.text.as_bytes());
                     (result, snapshot)
                 })
                 .await;
 
+            if !token.is_latest() {
+                return;
+            }
             this.update(cx, |editor, cx| {
                 editor.finish_auto_save(&task_tab_id, epoch, path, snapshot, result, cx);
             })
@@ -126,7 +131,7 @@ impl EditorView {
         epoch: usize,
         path: PathBuf,
         snapshot: EditorSnapshot,
-        result: io::Result<()>,
+        result: io::Result<bool>,
         cx: &mut Context<Self>,
     ) {
         if !auto_save_epoch_is_current(self.auto_save_epochs.get(tab_id).copied(), epoch) {
@@ -135,6 +140,9 @@ impl EditorView {
         if let Err(error) = result {
             let message = format!("{}: {error}", self.t(crate::i18n::TextKey::SaveFailed));
             self.notify_error(message, cx);
+            return;
+        }
+        if matches!(result, Ok(false)) {
             return;
         }
 
@@ -149,6 +157,17 @@ impl EditorView {
                 || !editor.tabs[index].is_dirty
                 || editor.tabs[index].path.as_ref() != Some(&path)
             {
+                return false;
+            }
+            editor.tabs[index].history.saved_text = Some(snapshot.text.clone());
+            let current_text = if editor.active_tab_id.as_deref() == Some(tab_id) {
+                editor.buffer.text()
+            } else {
+                &editor.tabs[index].snapshot.text
+            };
+            if current_text != snapshot.text {
+                editor.tabs[index].recovery.source_content_hash =
+                    Some(file_ops::content_hash(snapshot.text.as_bytes()));
                 return false;
             }
             editor.tabs[index].is_dirty = false;

@@ -316,7 +316,18 @@ fn is_image_path(path: &Path) -> bool {
         .is_some_and(|extension| {
             matches!(
                 extension.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" | "bmp" | "tif" | "tiff"
+                "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "webp"
+                    | "gif"
+                    | "svg"
+                    | "bmp"
+                    | "tif"
+                    | "tiff"
+                    | "heic"
+                    | "heif"
+                    | "avif"
             )
         })
 }
@@ -800,7 +811,6 @@ pub(crate) struct Dialog {
 
 enum ClipboardPasteOutcome {
     NotHandled,
-    Insert(String),
     Consumed,
 }
 
@@ -2125,6 +2135,7 @@ pub struct EditorView {
     pub(crate) active_tab_index_cache: Cell<Option<usize>>,
     pub(crate) active_file_kind_cache: Option<FileKind>,
     pub(crate) next_tab_id: usize,
+    pub(crate) preview_open_epoch: usize,
     // ── Split panes ─────────────────────────────────────────────────
     // NOTE: every per-document field of this struct must be listed in
     // `pane_state!` (src/editor/pane.rs) or its value will leak between panes.
@@ -2654,6 +2665,7 @@ impl Drop for EditorView {
     fn drop(&mut self) {
         if !self.embedded_editor {
             self.flush_recovery_files();
+            session_store::flush_session_writes();
         }
         self.stop_all_terminal_sessions();
         let diagnostics = self.runtime_profile_diagnostics();
@@ -2699,6 +2711,7 @@ impl EditorView {
         }
         let ui_language = app_settings.ui_language();
         let mut welcome_tab = builtin_welcome_tab(ui_language);
+        welcome_tab.editor_left_aligned = app_settings.default_left_align;
         if let Some(text) = initial_text {
             welcome_tab.snapshot.text = text.to_string();
             welcome_tab.snapshot.cursor_offset = text.len();
@@ -2914,6 +2927,7 @@ impl EditorView {
             active_tab_index_cache: Cell::new(Some(0)),
             active_file_kind_cache: welcome_file_kind,
             next_tab_id: 1,
+            preview_open_epoch: 0,
             panes: vec![Pane::new(0)],
             pane_layout: PaneLayout::Leaf(0),
             focused_pane_id: 0,
@@ -3049,7 +3063,7 @@ impl EditorView {
             wiki_link_recent_task: None,
             wiki_link_search_task: None,
             sidebar_visible: false,
-            editor_left_aligned: false,
+            editor_left_aligned: app_settings.default_left_align,
             reading_mode: false,
             indent_settings: IndentSettings::default(),
             tab_drag_candidate_id: None,
@@ -5055,10 +5069,15 @@ impl EditorView {
                     && this
                         .update(cx, |editor, cx| {
                             if !batch.events.is_empty() {
-                                editor.handle_fs_notify_events(&batch.events, cx);
+                                editor.handle_fs_notify_events(&batch.events, &batch.contents, cx);
                             }
                             if !batch.documents_to_check.is_empty() {
-                                editor.handle_fs_events(&batch.documents_to_check, cx);
+                                editor.handle_fs_events_with_structure_hint(
+                                    &batch.documents_to_check,
+                                    false,
+                                    &batch.contents,
+                                    cx,
+                                );
                             }
                         })
                         .is_err()
@@ -5073,41 +5092,7 @@ impl EditorView {
     }
 
     fn is_internal_temp_change_path(&self, path: &Path) -> bool {
-        if file_ops::is_atomic_write_temp_path(path) {
-            return true;
-        }
-
-        if path
-            .components()
-            .any(|component| component.as_os_str().to_str() == Some(".moeka-cache"))
-        {
-            return true;
-        }
-
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                name.starts_with('.') && (name.ends_with(".temp") || name.ends_with(".temp.tmp"))
-            })
-        {
-            return true;
-        }
-
-        self.tabs
-            .iter()
-            .filter_map(|tab| tab.recovery.temp_path.as_deref())
-            .any(|temp_path| {
-                if path == temp_path {
-                    return true;
-                }
-
-                let Some(file_name) = temp_path.file_name().and_then(|name| name.to_str()) else {
-                    return false;
-                };
-                let writer_temp_path = temp_path.with_file_name(format!(".{file_name}.tmp"));
-                path == writer_temp_path.as_path()
-            })
+        file_ops::is_atomic_write_temp_path(path)
     }
 
     fn path_contains_ignored_workspace_component(&self, path: &Path) -> bool {
@@ -5215,7 +5200,12 @@ impl EditorView {
         mappings
     }
 
-    fn handle_fs_notify_events(&mut self, events: &[notify::Event], cx: &mut Context<Self>) {
+    fn handle_fs_notify_events(
+        &mut self,
+        events: &[notify::Event],
+        contents: &HashMap<PathBuf, Option<Vec<u8>>>,
+        cx: &mut Context<Self>,
+    ) {
         for (from, to) in Self::fs_rename_mappings(events) {
             if from.starts_with(&self.sidebar_root) {
                 self.rewrite_open_tab_paths_after_move(&from, &to);
@@ -5226,7 +5216,7 @@ impl EditorView {
             .iter()
             .flat_map(|event| event.paths.iter().cloned())
             .collect::<Vec<_>>();
-        self.handle_fs_events_with_structure_hint(&changed_paths, structure_changed, cx);
+        self.handle_fs_events_with_structure_hint(&changed_paths, structure_changed, contents, cx);
     }
 
     fn fs_events_require_structure_refresh(events: &[notify::Event]) -> bool {
@@ -5245,10 +5235,18 @@ impl EditorView {
     /// Re-point saved tabs at the new path (matching by content) so the tab
     /// keeps tracking the same document instead of showing up as deleted.
     /// Returns the changed paths with the followed old paths dropped.
-    fn follow_external_tab_renames(&mut self, changed_paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    fn follow_external_tab_renames(
+        &mut self,
+        changed_paths: Vec<PathBuf>,
+        contents: &HashMap<PathBuf, Option<Vec<u8>>>,
+    ) -> Vec<PathBuf> {
         let vanished = changed_paths
             .iter()
-            .filter(|path| !path.exists())
+            .filter(|path| {
+                contents
+                    .get(*path)
+                    .map_or_else(|| !path.exists(), Option::is_none)
+            })
             .cloned()
             .collect::<Vec<_>>();
         if vanished.is_empty() {
@@ -5257,7 +5255,9 @@ impl EditorView {
         let appeared = changed_paths
             .iter()
             .filter(|path| {
-                path.is_file()
+                contents
+                    .get(*path)
+                    .map_or_else(|| path.is_file(), Option::is_some)
                     && !self
                         .all_tabs()
                         .any(|tab| tab.path.as_deref() == Some(path.as_path()))
@@ -5281,8 +5281,11 @@ impl EditorView {
             };
             let Some(new_path) = appeared.iter().find(|candidate| {
                 !followed.iter().any(|(_, taken)| taken == *candidate)
-                    && std::fs::read(candidate)
-                        .is_ok_and(|bytes| String::from_utf8_lossy(&bytes) == expected)
+                    && contents
+                        .get(*candidate)
+                        .cloned()
+                        .unwrap_or_else(|| std::fs::read(candidate).ok())
+                        .is_some_and(|bytes| String::from_utf8_lossy(&bytes) == expected)
             }) else {
                 continue;
             };
@@ -5303,13 +5306,14 @@ impl EditorView {
     }
 
     pub(crate) fn handle_fs_events(&mut self, changed_paths: &[PathBuf], cx: &mut Context<Self>) {
-        self.handle_fs_events_with_structure_hint(changed_paths, false, cx);
+        self.handle_fs_events_with_structure_hint(changed_paths, false, &HashMap::new(), cx);
     }
 
     fn handle_fs_events_with_structure_hint(
         &mut self,
         changed_paths: &[PathBuf],
         structure_changed: bool,
+        contents: &HashMap<PathBuf, Option<Vec<u8>>>,
         cx: &mut Context<Self>,
     ) {
         let mut changed_paths_in_workspace = Vec::new();
@@ -5356,7 +5360,7 @@ impl EditorView {
             return;
         }
 
-        changed_paths_for_tabs = self.follow_external_tab_renames(changed_paths_for_tabs);
+        changed_paths_for_tabs = self.follow_external_tab_renames(changed_paths_for_tabs, contents);
 
         let current_file_hit = self.current_file_path.as_ref().is_some_and(|current_path| {
             changed_paths_in_workspace
@@ -5432,7 +5436,10 @@ impl EditorView {
                                 continue;
                             }
 
-                            if !tab_path.exists() {
+                            let exists = contents
+                                .get(tab_path)
+                                .map_or_else(|| tab_path.exists(), Option::is_some);
+                            if !exists {
                                 if !tab.is_deleted {
                                     tab.is_deleted = true;
                                     needs_notify = true;
@@ -5447,13 +5454,19 @@ impl EditorView {
                                         active_tab_id.as_deref() == Some(tab.id.as_str());
                                 }
                                 if !tab.is_dirty {
-                                    if let Ok(bytes) = std::fs::read(tab_path) {
+                                    let bytes = contents
+                                        .get(tab_path)
+                                        .cloned()
+                                        .unwrap_or_else(|| std::fs::read(tab_path).ok());
+                                    if let Some(bytes) = bytes {
                                         let new_text = String::from_utf8_lossy(&bytes).into_owned();
                                         if file_watch::refresh_clean_snapshot(
                                             &mut tab.snapshot,
                                             tab.is_dirty,
                                             new_text,
                                         ) {
+                                            tab.history.saved_text =
+                                                Some(tab.snapshot.text.clone());
                                             needs_notify = true;
                                             active_tab_needs_reload |=
                                                 active_tab_id.as_deref() == Some(tab.id.as_str());
@@ -5582,26 +5595,16 @@ impl EditorView {
                 // save dialog needs. Phase 2 acts with `self` free again.
                 enum SaveAndClose {
                     Missing,
-                    Saved,
-                    Failed,
+                    NeedsSave { path: PathBuf, text: String },
                     NeedsDialog { text: String, default_name: String },
                 }
                 let outcome = match self.all_tabs_mut().find(|t| t.id == tab_id) {
                     None => SaveAndClose::Missing,
                     Some(tab) => {
                         if let Some(ref path) = tab.path {
-                            if std::fs::write(path, &tab.snapshot.text).is_err() {
-                                SaveAndClose::Failed
-                            } else {
-                                tab.is_dirty = false;
-                                let snapshot = tab.snapshot.clone();
-                                let _ = history_store::persist_tab_history(
-                                    &tab_id,
-                                    tab.path.as_deref(),
-                                    &mut tab.history,
-                                    &snapshot,
-                                );
-                                SaveAndClose::Saved
+                            SaveAndClose::NeedsSave {
+                                path: path.clone(),
+                                text: tab.snapshot.text.clone(),
                             }
                         } else {
                             SaveAndClose::NeedsDialog {
@@ -5612,16 +5615,77 @@ impl EditorView {
                     }
                 };
                 match outcome {
-                    SaveAndClose::Failed => self.restore_tab_after_close(cx),
-                    SaveAndClose::Saved => {
-                        self.clear_temp_file_for_tab(&tab_id);
-                        session_store::persist_session(self);
-                        self.close_tab(&tab_id, cx);
+                    SaveAndClose::NeedsSave { path, text } => {
+                        let save = file_ops::DocumentSave::new(path.clone());
+                        cx.spawn(async move |this, cx| {
+                            let saved_text = text.clone();
+                            let result = cx
+                                .background_executor()
+                                .spawn(async move { save.write(text.as_bytes()) })
+                                .await;
+                            this.update(cx, |editor, cx| {
+                                if !matches!(result, Ok(true)) {
+                                    editor.restore_tab_after_close(cx);
+                                    return;
+                                }
+                                let Some(owner) = editor.pane_id_for_tab(&tab_id) else {
+                                    return;
+                                };
+                                let unchanged = editor.with_pane(owner, |editor| {
+                                    let Some(index) =
+                                        editor.tabs.iter().position(|tab| tab.id == tab_id)
+                                    else {
+                                        return false;
+                                    };
+                                    let current_text =
+                                        if editor.active_tab_id.as_deref() == Some(&tab_id) {
+                                            editor.buffer.text()
+                                        } else {
+                                            &editor.tabs[index].snapshot.text
+                                        };
+                                    if editor.tabs[index].path.as_ref() != Some(&path)
+                                        || current_text != saved_text
+                                    {
+                                        return false;
+                                    }
+                                    editor.tabs[index].is_dirty = false;
+                                    let snapshot = editor.tabs[index].snapshot.clone();
+                                    let _ = history_store::persist_tab_history(
+                                        &tab_id,
+                                        Some(path.as_path()),
+                                        &mut editor.tabs[index].history,
+                                        &snapshot,
+                                    );
+                                    true
+                                });
+                                if !unchanged {
+                                    editor.restore_tab_after_close(cx);
+                                    return;
+                                }
+                                editor.clear_temp_file_for_tab(&tab_id);
+                                session_store::persist_session(editor);
+                                editor.close_tab(&tab_id, cx);
+                            })
+                            .ok();
+                        })
+                        .detach();
                     }
                     SaveAndClose::NeedsDialog { text, default_name } => {
                         let tab_id_clone = tab_id.clone();
+                        #[cfg(not(target_os = "macos"))]
                         let title = self.t(crate::i18n::TextKey::SaveFileDialog).to_string();
                         cx.spawn(async move |this, cx| {
+                            #[cfg(target_os = "macos")]
+                            let maybe_path = match this.update(cx, |_, cx| {
+                                cx.prompt_for_new_path(
+                                    &std::env::home_dir().unwrap_or_default(),
+                                    Some(&default_name),
+                                )
+                            }) {
+                                Ok(receiver) => receiver.await.ok().and_then(Result::ok).flatten(),
+                                Err(_) => None,
+                            };
+                            #[cfg(not(target_os = "macos"))]
                             let maybe_path =
                                 cx.background_executor()
                                     .spawn(async move {
@@ -5629,21 +5693,56 @@ impl EditorView {
                                     })
                                     .await;
                             if let Some(path) = maybe_path {
-                                if std::fs::write(&path, &text).is_ok() {
+                                let saved_text = text.clone();
+                                let save = this
+                                    .update(cx, |_, _| file_ops::DocumentSave::new(path.clone()));
+                                let result = if let Ok(save) = save {
+                                    cx.background_executor()
+                                        .spawn(async move { save.write(text.as_bytes()) })
+                                        .await
+                                } else {
+                                    Ok(false)
+                                };
+                                if matches!(result, Ok(true)) {
                                     this.update(cx, |editor, cx| {
-                                        if let Some(tab) =
-                                            editor.all_tabs_mut().find(|t| t.id == tab_id_clone)
-                                        {
-                                            tab.path = Some(path.clone());
-                                            tab.title = Self::title_for_path(&path);
-                                            tab.is_dirty = false;
-                                            let snapshot = tab.snapshot.clone();
-                                            let _ = history_store::persist_tab_history(
-                                                &tab_id_clone,
-                                                tab.path.as_deref(),
-                                                &mut tab.history,
-                                                &snapshot,
-                                            );
+                                        let Some(owner) = editor.pane_id_for_tab(&tab_id_clone)
+                                        else {
+                                            return;
+                                        };
+                                        let unchanged = editor.with_pane(owner, |editor| {
+                                            let Some(index) = editor
+                                                .tabs
+                                                .iter()
+                                                .position(|tab| tab.id == tab_id_clone)
+                                            else {
+                                                return false;
+                                            };
+                                            let current_text = if editor.active_tab_id.as_deref()
+                                                == Some(&tab_id_clone)
+                                            {
+                                                editor.buffer.text()
+                                            } else {
+                                                &editor.tabs[index].snapshot.text
+                                            };
+                                            let unchanged = current_text == saved_text;
+                                            editor.tabs[index].path = Some(path.clone());
+                                            editor.tabs[index].title = Self::title_for_path(&path);
+                                            if unchanged {
+                                                editor.tabs[index].is_dirty = false;
+                                                let snapshot = editor.tabs[index].snapshot.clone();
+                                                let _ = history_store::persist_tab_history(
+                                                    &tab_id_clone,
+                                                    Some(path.as_path()),
+                                                    &mut editor.tabs[index].history,
+                                                    &snapshot,
+                                                );
+                                            }
+                                            unchanged
+                                        });
+                                        if !unchanged {
+                                            session_store::persist_session(editor);
+                                            editor.restore_tab_after_close(cx);
+                                            return;
                                         }
                                         editor.clear_temp_file_for_tab(&tab_id_clone);
                                         session_store::persist_session(editor);
@@ -5810,81 +5909,109 @@ impl EditorView {
             .map(|text| parse_file_urls_from_text(&text))
             .unwrap_or_default();
         file_paths.extend(crate::platform::clipboard::file_paths());
-        file_paths.retain(|path| path.is_file());
-        if !images.is_empty() {
-            file_paths.retain(|path| !is_image_path(path));
-        }
-        file_paths.dedup();
-
         if images.is_empty() && file_paths.is_empty() {
             return Ok(ClipboardPasteOutcome::NotHandled);
         }
 
-        let Some(current_file) = self.current_file_path.as_deref() else {
+        let Some(current_file) = self.current_file_path.clone() else {
             self.show_save_before_import_dialog(cx);
             return Ok(ClipboardPasteOutcome::Consumed);
         };
         let policy_access = self.app_settings.attachment_policy_access();
-        let policy = policy_access.policy();
-        let target_dir = policy.target_directory(&self.sidebar_root, current_file)?;
-        std::fs::create_dir_all(&target_dir)?;
-
-        let mut imported = Vec::new();
-        for image in images {
-            let target_path = unique_import_path(
-                &target_dir,
-                &timestamp_file_stem(),
-                Some(image_extension(image.format)),
-            );
-            std::fs::write(&target_path, &image.bytes)?;
-            imported.push((target_path, true));
-        }
-
-        for source_path in file_paths {
-            let extension = source_path
-                .extension()
-                .and_then(|extension| extension.to_str());
-            let stem = source_path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|stem| !stem.is_empty())
-                .unwrap_or("attachment");
-            let target_path = unique_import_path(&target_dir, stem, extension);
-            std::fs::copy(&source_path, &target_path)?;
-            imported.push((target_path, is_image_path(&source_path)));
-        }
-
-        if imported.is_empty() {
-            Ok(ClipboardPasteOutcome::Consumed)
-        } else {
-            Ok(ClipboardPasteOutcome::Insert(
-                self.references_for_imported_paths(&imported, policy)?
-                    .join("\n"),
-            ))
-        }
-    }
-
-    fn references_for_imported_paths(
-        &self,
-        imported: &[(PathBuf, bool)],
-        policy: &AttachmentPolicy,
-    ) -> anyhow::Result<Vec<String>> {
-        let current_file = self.current_file_path.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("save the current document before importing attachments")
-        })?;
-        let index = attachments::WorkspaceLinkIndex::build(&self.sidebar_root);
-        imported
-            .iter()
-            .map(|(path, is_image)| {
-                policy.reference_for(
-                    &self.sidebar_root,
-                    current_file,
-                    path,
-                    *is_image,
-                    Some(&index),
-                )
+        let fallback_text = item.text();
+        let workspace_root = self.sidebar_root.clone();
+        let pane_id = self.current_pane_id();
+        let tab_id = self.active_tab_id.clone();
+        let cursor_offset = self.cursor.offset;
+        let images = images
+            .into_iter()
+            .map(|image| (image.bytes.to_vec(), image_extension(image.format)))
+            .collect::<Vec<_>>();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let policy = policy_access.policy();
+                    let target_dir = policy.target_directory(&workspace_root, &current_file)?;
+                    std::fs::create_dir_all(&target_dir)?;
+                    let mut imported = Vec::new();
+                    for (bytes, extension) in &images {
+                        let target_path = unique_import_path(
+                            &target_dir,
+                            &timestamp_file_stem(),
+                            Some(extension),
+                        );
+                        std::fs::write(&target_path, bytes)?;
+                        imported.push((target_path, true));
+                    }
+                    file_paths.retain(|path| path.is_file());
+                    if !images.is_empty() {
+                        file_paths.retain(|path| !is_image_path(path));
+                    }
+                    file_paths.dedup();
+                    for source_path in file_paths {
+                        let extension = source_path
+                            .extension()
+                            .and_then(|extension| extension.to_str());
+                        let stem = source_path
+                            .file_stem()
+                            .and_then(|stem| stem.to_str())
+                            .filter(|stem| !stem.is_empty())
+                            .unwrap_or("attachment");
+                        let target_path = unique_import_path(&target_dir, stem, extension);
+                        file_ops::copy_file_data(&source_path, &target_path, false)?;
+                        imported.push((target_path, is_image_path(&source_path)));
+                    }
+                    if imported.is_empty() {
+                        return Ok(None);
+                    }
+                    let index = attachments::WorkspaceLinkIndex::build(&workspace_root);
+                    imported
+                        .iter()
+                        .map(|(path, is_image)| {
+                            policy.reference_for(
+                                &workspace_root,
+                                &current_file,
+                                path,
+                                *is_image,
+                                Some(&index),
+                            )
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()
+                        .map(|links| Some(links.join("\n")))
+                })
+                .await;
+            this.update(cx, |editor, cx| {
+                editor.with_pane_if_alive(pane_id, |editor| match result {
+                    Ok(Some(insertion)) if !insertion.is_empty() => {
+                        if editor.active_tab_id == tab_id && editor.cursor.offset == cursor_offset {
+                            if editor.table_boundary_caret.is_some()
+                                && !editor.insert_line_at_table_boundary(cx)
+                            {
+                                return;
+                            }
+                            editor.insert_pasted_text(&insertion, cx);
+                        }
+                    }
+                    Ok(None) => {
+                        if editor.active_tab_id == tab_id
+                            && editor.cursor.offset == cursor_offset
+                            && let Some(text) = fallback_text.as_deref()
+                        {
+                            editor.insert_pasted_text(text, cx);
+                        }
+                    }
+                    Ok(Some(_)) => {}
+                    Err(error) => {
+                        let message = format!("{}: {error}", editor.t(TextKey::OperationFailed));
+                        editor.notify_error(message, cx);
+                    }
+                });
             })
-            .collect()
+            .ok();
+        })
+        .detach();
+        Ok(ClipboardPasteOutcome::Consumed)
     }
 
     pub(crate) fn import_external_paths_as_attachments(
@@ -5909,38 +6036,69 @@ impl EditorView {
             self.show_save_before_import_dialog(cx);
             return;
         };
-        let result = (|| -> anyhow::Result<String> {
-            let policy_access = self.app_settings.attachment_policy_access();
-            let policy = policy_access.policy();
-            let target_dir = policy.target_directory(&self.sidebar_root, current_file)?;
-            std::fs::create_dir_all(&target_dir)?;
-            let mut imported = Vec::new();
-            for source_path in attachment_paths.iter().filter(|path| path.is_file()) {
-                let extension = source_path
-                    .extension()
-                    .and_then(|extension| extension.to_str());
-                let stem = source_path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .filter(|stem| !stem.is_empty())
-                    .unwrap_or("attachment");
-                let target_path = unique_import_path(&target_dir, stem, extension);
-                std::fs::copy(source_path, &target_path)?;
-                imported.push((target_path, is_image_path(source_path)));
-            }
-            Ok(self
-                .references_for_imported_paths(&imported, policy)?
-                .join("\n"))
-        })();
-        match result {
-            Ok(insertion) if !insertion.is_empty() => self.insert_pasted_text(&insertion, cx),
-            Ok(_) => {}
-            Err(error) => {
-                let message = format!("{}: {error}", self.t(TextKey::OperationFailed));
-                self.notify_error(message, cx);
-            }
-        }
-        self.open_external_paths_in_tabs(&markdown_paths, cx);
+        let current_file = current_file.to_path_buf();
+        let workspace_root = self.sidebar_root.clone();
+        let policy_access = self.app_settings.attachment_policy_access();
+        let tab_id = self.active_tab_id.clone();
+        let pane_id = self.current_pane_id();
+        let cursor_offset = self.cursor.offset;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let policy = policy_access.policy();
+                    let target_dir = policy.target_directory(&workspace_root, &current_file)?;
+                    std::fs::create_dir_all(&target_dir)?;
+                    let mut imported = Vec::new();
+                    for source_path in attachment_paths.iter().filter(|path| path.is_file()) {
+                        let extension = source_path
+                            .extension()
+                            .and_then(|extension| extension.to_str());
+                        let stem = source_path
+                            .file_stem()
+                            .and_then(|stem| stem.to_str())
+                            .filter(|stem| !stem.is_empty())
+                            .unwrap_or("attachment");
+                        let target_path = unique_import_path(&target_dir, stem, extension);
+                        file_ops::copy_file_data(source_path, &target_path, false)?;
+                        imported.push((target_path, is_image_path(source_path)));
+                    }
+                    let index = attachments::WorkspaceLinkIndex::build(&workspace_root);
+                    imported
+                        .iter()
+                        .map(|(path, image)| {
+                            policy.reference_for(
+                                &workspace_root,
+                                &current_file,
+                                path,
+                                *image,
+                                Some(&index),
+                            )
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()
+                        .map(|links| links.join("\n"))
+                })
+                .await;
+            this.update(cx, |editor, cx| {
+                editor.with_pane_if_alive(pane_id, |editor| match result {
+                    Ok(insertion) if !insertion.is_empty() => {
+                        if editor.active_tab_id == tab_id && editor.cursor.offset == cursor_offset {
+                            editor.insert_pasted_text(&insertion, cx);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        let message = format!("{}: {error}", editor.t(TextKey::OperationFailed));
+                        editor.notify_error(message, cx);
+                    }
+                });
+                if editor.focused_pane_id == pane_id {
+                    editor.open_external_paths_in_tabs(&markdown_paths, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn capture_workspace_rewrite_context(
@@ -6811,19 +6969,21 @@ impl EditorView {
             }
         }
         let outline_started = Instant::now();
-        if file_kind.is_markdown()
-            && self.uses_lazy_markdown_decorations()
-            && let Some(transfer) = pending_line_display_transfer.as_ref()
-        {
+        if file_kind.is_markdown() && self.uses_lazy_markdown_decorations() {
             self.markdown_outline_epoch = self.markdown_outline_epoch.wrapping_add(1);
             self.outline_headings_cache_dirty.set(true);
-            if let Some(index) = self.markdown_outline_index.borrow_mut().as_mut() {
-                index.update_after_edit(
-                    &self.buffer,
-                    transfer.dirty_start_line,
-                    transfer.old_end_line_exclusive,
-                    transfer.new_end_line_exclusive,
-                );
+            if let Some(transfer) = pending_line_display_transfer.as_ref() {
+                if let Some(index) = self.markdown_outline_index.borrow_mut().as_mut() {
+                    index.update_after_edit(
+                        &self.buffer,
+                        transfer.dirty_start_line,
+                        transfer.old_end_line_exclusive,
+                        transfer.new_end_line_exclusive,
+                    );
+                }
+            } else {
+                self.markdown_outline_index.borrow_mut().take();
+                self.markdown_outline_build_task = None;
             }
             self.invalidate_outline_layout_cache();
         }
@@ -7853,11 +8013,14 @@ impl EditorView {
         }
 
         let current_text = self.buffer.text();
-        tab.is_dirty = match tab.path.as_ref() {
-            Some(path) => std::fs::read_to_string(path)
-                .map(|saved_text| text_tab_is_dirty(Some(saved_text.as_str()), current_text))
-                .unwrap_or(true),
-            None => text_tab_is_dirty(None, current_text),
+        tab.is_dirty = if tab.path.is_none() {
+            text_tab_is_dirty(None, current_text)
+        } else if let Some(saved) = tab.history.saved_text.as_deref() {
+            text_tab_is_dirty(Some(saved), current_text)
+        } else if let Some(hash) = tab.recovery.source_content_hash.as_deref() {
+            file_ops::content_hash(current_text.as_bytes()) != hash
+        } else {
+            tab.is_dirty
         };
     }
 
@@ -8149,7 +8312,6 @@ impl EditorView {
             intrinsic_height,
             viewport_width,
             viewport_height,
-            preview_kind.is_some(),
         );
         let display_width = intrinsic_width * fit_scale * view.zoom_factor;
         let display_height = intrinsic_height * fit_scale * view.zoom_factor;
@@ -9458,13 +9620,6 @@ impl EditorView {
         }
 
         match self.import_clipboard_resources(&item, cx) {
-            Ok(ClipboardPasteOutcome::Insert(text)) => {
-                if self.table_boundary_caret.is_some() && !self.insert_line_at_table_boundary(cx) {
-                    return;
-                }
-                self.insert_pasted_text(&text, cx);
-                return;
-            }
             Ok(ClipboardPasteOutcome::Consumed) => {
                 return;
             }
@@ -10455,39 +10610,67 @@ impl EditorView {
             return;
         }
 
-        let policy = self.app_settings.workspace_link_policy();
-        let index = attachments::WorkspaceLinkIndex::build(&self.sidebar_root);
-        let unsaved_source = self.sidebar_root.join(".untitled.md");
-        let current_file = self.current_file_path.as_deref().unwrap_or(&unsaved_source);
-        let links: Vec<String> = paths
-            .iter()
-            .filter_map(|path| {
-                policy
-                    .reference_for(
-                        &self.sidebar_root,
-                        current_file,
-                        path,
-                        is_image_path(path),
-                        Some(&index),
-                    )
-                    .ok()
-            })
-            .collect();
-        if links.is_empty() {
-            return;
-        }
-
-        let insertion = links.join("\n");
-        self.checkpoint();
         let range = self.cursor.selection_range();
-        let new_offset = range.start + insertion.len();
-        self.buffer.replace(range, &insertion);
-        self.cursor.move_to(new_offset, &self.buffer);
-        self.reparse();
-        self.scroll_to_cursor();
-        self.pause_blinking(cx);
-        self.mark_active_tab_dirty();
-        self.request_editor_focus(cx);
+        let selected_text = self.buffer.text_for_range(range.clone()).to_string();
+        let pane_id = self.current_pane_id();
+        let tab_id = self.active_tab_id.clone();
+        let root = self.sidebar_root.clone();
+        let source = self
+            .current_file_path
+            .clone()
+            .unwrap_or_else(|| root.join(".untitled.md"));
+        let policy = self.app_settings.workspace_link_policy();
+        let paths = paths.to_vec();
+        cx.spawn(async move |this, cx| {
+            let links = cx
+                .background_executor()
+                .spawn(async move {
+                    let index = attachments::WorkspaceLinkIndex::build(&root);
+                    paths
+                        .iter()
+                        .filter_map(|path| {
+                            policy
+                                .reference_for(
+                                    &root,
+                                    &source,
+                                    path,
+                                    is_image_path(path),
+                                    Some(&index),
+                                )
+                                .ok()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            if links.is_empty() {
+                return;
+            }
+            let insertion = links.join("\n");
+            this.update(cx, |editor, cx| {
+                editor.with_pane_if_alive(pane_id, |editor| {
+                    if editor.active_tab_id != tab_id
+                        || editor.cursor.selection_range() != range
+                        || range.end > editor.buffer.len()
+                        || editor.buffer.text_for_range(range.clone()) != selected_text
+                    {
+                        return;
+                    }
+                    editor.checkpoint();
+                    let new_offset = range.start + insertion.len();
+                    editor.buffer.replace(range, &insertion);
+                    editor.cursor.move_to(new_offset, &editor.buffer);
+                    editor.reparse();
+                    editor.scroll_to_cursor();
+                    editor.pause_blinking(cx);
+                    editor.mark_active_tab_dirty();
+                    if editor.focused_pane_id == pane_id {
+                        editor.request_editor_focus(cx);
+                    }
+                });
+            })
+            .ok();
+        })
+        .detach();
     }
 
     // ── Table context menu operations ──────────────────────────────

@@ -7,16 +7,13 @@ use gpui::{
 
 use super::{EditorView, GeneratedPreviewAction, ImageDragState, helpers};
 
-pub(super) fn fit_scale(
-    width: f32,
-    height: f32,
-    viewport_width: f32,
-    viewport_height: f32,
-    generated: bool,
-) -> f32 {
-    let fit =
-        (viewport_width.max(1.0) / width.max(1.0)).min(viewport_height.max(1.0) / height.max(1.0));
-    if generated { fit * 0.8 } else { fit.min(1.0) }
+const PREVIEW_OVERLAY_PADDING_PX: f32 = 32.0;
+
+pub(super) fn fit_scale(width: f32, height: f32, viewport_width: f32, viewport_height: f32) -> f32 {
+    let available_width = (viewport_width - PREVIEW_OVERLAY_PADDING_PX * 2.0).max(1.0);
+    let available_height = (viewport_height - PREVIEW_OVERLAY_PADDING_PX * 2.0).max(1.0);
+    let fit = (available_width / width.max(1.0)).min(available_height / height.max(1.0));
+    fit.min(1.0)
 }
 
 impl EditorView {
@@ -150,7 +147,6 @@ impl EditorView {
                                 height,
                                 bounds.size.width.into(),
                                 bounds.size.height.into(),
-                                kind.is_some(),
                             );
                             let display_width = width * scale * overlay.view.zoom_factor;
                             let display_height = height * scale * overlay.view.zoom_factor;
@@ -238,20 +234,27 @@ mod tests {
     use super::fit_scale;
 
     #[test]
-    fn generated_fullscreen_fits_eighty_percent_of_either_dimension() {
+    fn fullscreen_preview_keeps_padding_on_every_edge() {
         for (width, height, viewport_width, viewport_height) in [
             (200.0, 100.0, 1000.0, 800.0),
             (100.0, 800.0, 1000.0, 600.0),
             (10.0, 10.0, 400.0, 300.0),
             (4000.0, 1000.0, 800.0, 600.0),
         ] {
-            let scale = fit_scale(width, height, viewport_width, viewport_height, true);
-            assert!(width * scale <= viewport_width * 0.8 + 0.01);
-            assert!(height * scale <= viewport_height * 0.8 + 0.01);
+            let scale = fit_scale(width, height, viewport_width, viewport_height);
+            assert!(scale <= 1.0);
             assert!(
-                (width * scale / viewport_width - 0.8).abs() < 0.001
-                    || (height * scale / viewport_height - 0.8).abs() < 0.001
+                width * scale <= viewport_width - super::PREVIEW_OVERLAY_PADDING_PX * 2.0 + 0.01
+            );
+            assert!(
+                height * scale <= viewport_height - super::PREVIEW_OVERLAY_PADDING_PX * 2.0 + 0.01
             );
         }
+    }
+
+    #[test]
+    fn small_generated_fullscreen_previews_keep_their_rendered_size() {
+        assert_eq!(fit_scale(120.0, 40.0, 1000.0, 800.0), 1.0);
+        assert!(fit_scale(1200.0, 400.0, 600.0, 500.0) < 1.0);
     }
 }

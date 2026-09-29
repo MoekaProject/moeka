@@ -29,6 +29,7 @@ pub(super) struct WatchRequest {
 pub(super) struct WatchBatch {
     pub events: Vec<Event>,
     pub documents_to_check: Vec<PathBuf>,
+    pub contents: HashMap<PathBuf, Option<Vec<u8>>>,
 }
 
 pub(super) struct FileWatch {
@@ -175,9 +176,19 @@ impl FileWatch {
             }
         }
         self.documents = request.documents;
+        let mut contents: HashMap<_, _> = checks
+            .iter()
+            .map(|path| (path.clone(), std::fs::read(path).ok()))
+            .collect();
+        for path in events.iter().flat_map(|event| &event.paths) {
+            contents
+                .entry(path.clone())
+                .or_insert_with(|| std::fs::read(path).ok());
+        }
         WatchBatch {
             events,
             documents_to_check: checks.into_iter().collect(),
+            contents,
         }
     }
 }

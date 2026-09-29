@@ -475,7 +475,7 @@ pub(crate) fn register_keybinding_overrides(cx: &mut gpui::App) {
 
 /// Build the native macOS menu bar for the given UI language.
 pub(crate) fn app_menus(language: UiLanguage) -> Vec<gpui::Menu> {
-    use gpui::{Menu, MenuItem};
+    use gpui::{Menu, MenuItem, OsAction};
 
     let t = |key: TextKey| crate::i18n::translate(language, key);
     let command_item = |id: CommandId| -> MenuItem {
@@ -528,10 +528,14 @@ pub(crate) fn app_menus(language: UiLanguage) -> Vec<gpui::Menu> {
                 MenuItem::action(t(TextKey::Undo), crate::actions::Undo),
                 MenuItem::action(t(TextKey::Redo), crate::actions::Redo),
                 MenuItem::separator(),
-                MenuItem::action(t(TextKey::Cut), crate::actions::Cut),
-                MenuItem::action(t(TextKey::Copy), crate::actions::Copy),
-                MenuItem::action(t(TextKey::Paste), crate::actions::Paste),
-                MenuItem::action(t(TextKey::SelectAll), crate::actions::SelectAll),
+                MenuItem::os_action(t(TextKey::Cut), crate::actions::Cut, OsAction::Cut),
+                MenuItem::os_action(t(TextKey::Copy), crate::actions::Copy, OsAction::Copy),
+                MenuItem::os_action(t(TextKey::Paste), crate::actions::Paste, OsAction::Paste),
+                MenuItem::os_action(
+                    t(TextKey::SelectAll),
+                    crate::actions::SelectAll,
+                    OsAction::SelectAll,
+                ),
                 MenuItem::separator(),
                 command_item(CommandId::Find),
                 command_item(CommandId::FindInFiles),
@@ -1416,6 +1420,23 @@ fn is_special_key_symbol(ch: char) -> bool {
 mod native_menu_tests {
     use super::{app_menus, dock_menu};
     use crate::i18n::UiLanguage;
+
+    #[test]
+    fn edit_menu_routes_paste_to_native_text_fields() {
+        let menus = app_menus(UiLanguage::English);
+        let edit = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "Edit")
+            .unwrap();
+        assert!(edit.items.iter().any(|item| matches!(
+            item,
+            gpui::MenuItem::Action {
+                name,
+                os_action: Some(gpui::OsAction::Paste),
+                ..
+            } if name.as_ref() == "Paste"
+        )));
+    }
 
     #[test]
     fn native_menus_register_window_list_and_localized_terminal_action() {

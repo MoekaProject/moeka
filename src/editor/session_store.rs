@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, mpsc};
 
 use super::config_store::{
     self, PaneLayoutRecord, SessionConfig, TabHistoryIndex, TabRecoveryState, TabSessionRecord,
@@ -9,8 +10,68 @@ use super::config_store::{
 use super::history_store;
 use super::*;
 
+enum SessionWrite {
+    Save(config_store::SessionsFile),
+    Flush(mpsc::Sender<()>),
+}
+
+fn run_session_writer(
+    receiver: mpsc::Receiver<SessionWrite>,
+    mut write: impl FnMut(&config_store::SessionsFile),
+) {
+    'writer: while let Ok(message) = receiver.recv() {
+        match message {
+            SessionWrite::Save(mut config) => loop {
+                match receiver.try_recv() {
+                    Ok(SessionWrite::Save(next)) => config = next,
+                    Ok(SessionWrite::Flush(ack)) => {
+                        write(&config);
+                        let _ = ack.send(());
+                        continue 'writer;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        write(&config);
+                        continue 'writer;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        write(&config);
+                        return;
+                    }
+                }
+            },
+            SessionWrite::Flush(ack) => {
+                let _ = ack.send(());
+            }
+        }
+    }
+}
+
+fn session_cache() -> &'static Mutex<config_store::SessionsFile> {
+    static CACHE: OnceLock<Mutex<config_store::SessionsFile>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(config_store::load_sessions()))
+}
+
+fn session_writer() -> &'static mpsc::Sender<SessionWrite> {
+    static WRITER: OnceLock<mpsc::Sender<SessionWrite>> = OnceLock::new();
+    WRITER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || run_session_writer(receiver, config_store::save_sessions));
+        sender
+    })
+}
+
+pub(crate) fn flush_session_writes() {
+    let (sender, receiver) = mpsc::channel();
+    if session_writer().send(SessionWrite::Flush(sender)).is_ok() {
+        let _ = receiver.recv();
+    }
+}
+
 pub(crate) fn persist_session(editor: &EditorView) {
-    let mut config = config_store::load_sessions();
+    let mut cached = session_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let config = &mut *cached;
     config.workspaces.roots = editor.workspaces.clone();
     config.workspaces.active_root = if editor.sidebar_root.as_os_str().is_empty() {
         None
@@ -39,7 +100,7 @@ pub(crate) fn persist_session(editor: &EditorView) {
     if !is_default_welcome_session(editor) || !session_contains_nonwelcome_tabs(&config.sessions) {
         config.sessions = session;
     }
-    config_store::save_sessions(&config);
+    let _ = session_writer().send(SessionWrite::Save(config.clone()));
 }
 
 /// Mints a bookmark for every root that lacks one and forgets closed roots.
@@ -88,7 +149,11 @@ fn is_default_welcome_session(editor: &EditorView) -> bool {
         .all_tabs()
         .filter(|tab| tab.kind != TabKind::Diff)
         .collect::<Vec<_>>();
-    tabs.len() == 1 && tabs[0].id == WELCOME_TAB_ID && tabs[0].path.is_none()
+    tabs.len() == 1 && is_placeholder_welcome_tab(tabs[0])
+}
+
+fn is_placeholder_welcome_tab(tab: &OpenTab) -> bool {
+    tab.id == WELCOME_TAB_ID && tab.path.is_none() && !tab.is_dirty
 }
 
 fn session_contains_nonwelcome_tabs(session: &SessionConfig) -> bool {
@@ -473,15 +538,13 @@ fn restore_tab_from_record(record: &TabSessionRecord, ui_language: UiLanguage) -
     if let Some(source_identity) = record.history.source_identity.clone() {
         history.source_identity = Some(source_identity);
     }
+    if !is_dirty && path.is_some() {
+        history.saved_text = Some(snapshot.text.clone());
+    }
 
     let recovery = if is_dirty {
-        let mut recovery = record.recovery.clone();
-        recovery.recovered_from_temp = recovery.temp_path.is_some();
-        recovery
+        record.recovery.clone()
     } else {
-        if let Some(temp_path) = record.recovery.temp_path.as_deref() {
-            let _ = super::temp_store::delete_temp_file(temp_path);
-        }
         TabRecoveryState::default()
     };
 
@@ -512,18 +575,14 @@ fn resolve_snapshot(
     file_kind: Option<&FileKind>,
     ui_language: UiLanguage,
 ) -> Option<(Option<PathBuf>, EditorSnapshot, bool)> {
-    let temp_text = record
-        .recovery
-        .temp_path
-        .as_ref()
-        .and_then(|path| fs::read_to_string(path).ok());
-    let has_temp_text = temp_text.is_some();
+    let recovery_text = record.recovery.text.clone();
+    let has_recovery_text = recovery_text.is_some();
 
     match record.path.as_ref() {
         Some(path) if path.exists() => {
             let (mut snapshot, resolved_kind) = load_file_snapshot(path)?;
             if resolved_kind.supports_text_buffer() {
-                if let Some(text) = temp_text {
+                if let Some(text) = recovery_text {
                     if snapshot.text != text {
                         let source_changed = record
                             .recovery
@@ -570,7 +629,7 @@ fn resolve_snapshot(
                 Some((Some(path.clone()), snapshot, false))
             }
         }
-        Some(_) => temp_text.map(|text| {
+        Some(_) => recovery_text.map(|text| {
             let snapshot = EditorSnapshot {
                 cursor_offset: record.view.cursor_offset.min(text.len()),
                 cursor_anchor: record.view.cursor_anchor.min(text.len()),
@@ -588,7 +647,7 @@ fn resolve_snapshot(
         None if record.id == super::WELCOME_TAB_ID
             && file_kind.is_some_and(FileKind::supports_text_buffer) =>
         {
-            let text = temp_text.unwrap_or_else(|| super::default_document_text(ui_language));
+            let text = recovery_text.unwrap_or_else(|| super::default_document_text(ui_language));
             let snapshot = EditorSnapshot {
                 cursor_offset: record.view.cursor_offset.min(text.len()),
                 cursor_anchor: record.view.cursor_anchor.min(text.len()),
@@ -601,23 +660,27 @@ fn resolve_snapshot(
                     .collect(),
                 text,
             };
-            Some((None, snapshot, has_temp_text))
+            Some((None, snapshot, has_recovery_text))
         }
-        None if file_kind.is_some_and(FileKind::supports_text_buffer) => temp_text.map(|text| {
-            let snapshot = EditorSnapshot {
-                cursor_offset: record.view.cursor_offset.min(text.len()),
-                cursor_anchor: record.view.cursor_anchor.min(text.len()),
-                scroll_offset: record.view.scroll_offset,
-                extra_cursors: record
-                    .view
-                    .extra_cursors
-                    .iter()
-                    .map(|(offset, anchor)| ((*offset).min(text.len()), (*anchor).min(text.len())))
-                    .collect(),
-                text,
-            };
-            (None, snapshot, true)
-        }),
+        None if file_kind.is_some_and(FileKind::supports_text_buffer) => {
+            recovery_text.map(|text| {
+                let snapshot = EditorSnapshot {
+                    cursor_offset: record.view.cursor_offset.min(text.len()),
+                    cursor_anchor: record.view.cursor_anchor.min(text.len()),
+                    scroll_offset: record.view.scroll_offset,
+                    extra_cursors: record
+                        .view
+                        .extra_cursors
+                        .iter()
+                        .map(|(offset, anchor)| {
+                            ((*offset).min(text.len()), (*anchor).min(text.len()))
+                        })
+                        .collect(),
+                    text,
+                };
+                (None, snapshot, true)
+            })
+        }
         None => None,
     }
 }
@@ -846,6 +909,36 @@ mod tests {
 
     use tempfile::tempdir;
 
+    #[test]
+    fn edited_welcome_tab_is_not_discarded_as_a_placeholder() {
+        let mut tab = super::super::builtin_welcome_tab(UiLanguage::English);
+        assert!(is_placeholder_welcome_tab(&tab));
+        tab.is_dirty = true;
+        tab.recovery.text = Some("unsaved welcome edit".to_string());
+        assert!(!is_placeholder_welcome_tab(&tab));
+    }
+
+    #[test]
+    fn session_writer_flushes_only_the_latest_pending_snapshot() {
+        let (sender, receiver) = mpsc::channel();
+        let (ack_sender, ack_receiver) = mpsc::channel();
+        let mut first = config_store::SessionsFile::default();
+        first.sessions.active_tab_id = Some("old".to_string());
+        let mut latest = first.clone();
+        latest.sessions.active_tab_id = Some("latest".to_string());
+        sender.send(SessionWrite::Save(first)).unwrap();
+        sender.send(SessionWrite::Save(latest)).unwrap();
+        sender.send(SessionWrite::Flush(ack_sender)).unwrap();
+        drop(sender);
+
+        let mut written = Vec::new();
+        run_session_writer(receiver, |config| {
+            written.push(config.sessions.active_tab_id.clone())
+        });
+        ack_receiver.recv().unwrap();
+        assert_eq!(written, vec![Some("latest".to_string())]);
+    }
+
     fn snapshot(text: &str, cursor_offset: usize) -> EditorSnapshot {
         EditorSnapshot {
             text: text.to_string(),
@@ -858,7 +951,7 @@ mod tests {
 
     fn text_tab_record(
         source_path: Option<PathBuf>,
-        temp_path: Option<PathBuf>,
+        recovery_text: Option<&str>,
     ) -> TabSessionRecord {
         TabSessionRecord {
             id: "tab-1".to_string(),
@@ -878,11 +971,9 @@ mod tests {
                 extra_cursors: vec![(80, 70)],
             },
             recovery: TabRecoveryState {
-                temp_path,
+                text: recovery_text.map(str::to_string),
                 source_path,
-                source_mtime: Some(123),
                 source_content_hash: None,
-                recovered_from_temp: true,
             },
             history: TabHistoryIndex::default(),
         }
@@ -1035,13 +1126,11 @@ mod tests {
     }
 
     #[test]
-    fn restores_newer_temporary_contents_over_saved_file() {
+    fn restores_unsaved_contents_over_saved_file() {
         let dir = tempdir().unwrap();
         let source_path = dir.path().join("note.md");
-        let temp_path = dir.path().join(".note.md.temp");
         fs::write(&source_path, "saved").unwrap();
-        fs::write(&temp_path, "recovered draft").unwrap();
-        let record = text_tab_record(Some(source_path.clone()), Some(temp_path.clone()));
+        let record = text_tab_record(Some(source_path.clone()), Some("recovered draft"));
 
         let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
 
@@ -1054,17 +1143,29 @@ mod tests {
             vec![("recovered draft".len(), "recovered draft".len())]
         );
         assert!(restored.is_dirty);
-        assert_eq!(restored.recovery.temp_path, Some(temp_path));
-        assert!(restored.recovery.recovered_from_temp);
+        assert_eq!(restored.recovery.text.as_deref(), Some("recovered draft"));
     }
 
     #[test]
-    fn recovers_temporary_contents_when_source_file_was_deleted() {
+    fn restores_inline_recovery_without_a_workspace_temp_file() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("note.md");
+        fs::write(&source_path, "saved").unwrap();
+        let record = text_tab_record(Some(source_path.clone()), Some("inline draft"));
+
+        let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
+
+        assert_eq!(restored.path, Some(source_path));
+        assert_eq!(restored.snapshot.text, "inline draft");
+        assert!(restored.is_dirty);
+        assert_eq!(restored.recovery.text.as_deref(), Some("inline draft"));
+    }
+
+    #[test]
+    fn recovers_unsaved_contents_when_source_file_was_deleted() {
         let dir = tempdir().unwrap();
         let source_path = dir.path().join("deleted.md");
-        let temp_path = dir.path().join(".deleted.md.temp");
-        fs::write(&temp_path, "unsaved work").unwrap();
-        let record = text_tab_record(Some(source_path.clone()), Some(temp_path.clone()));
+        let record = text_tab_record(Some(source_path.clone()), Some("unsaved work"));
 
         let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
 
@@ -1072,16 +1173,31 @@ mod tests {
         assert_eq!(restored.snapshot.text, "unsaved work");
         assert!(restored.is_dirty);
         assert_eq!(restored.recovery.source_path, Some(source_path));
-        assert_eq!(restored.recovery.temp_path, Some(temp_path));
+        assert_eq!(restored.recovery.text.as_deref(), Some("unsaved work"));
     }
 
     #[test]
-    fn falls_back_to_source_when_temporary_file_is_missing() {
+    fn restores_multiple_untitled_tabs_from_session_contents() {
+        for index in 0..3 {
+            let text = format!("unsaved document {index}");
+            let mut record = text_tab_record(None, Some(&text));
+            record.id = format!("tab-{index}");
+
+            let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
+
+            assert!(restored.path.is_none());
+            assert_eq!(restored.snapshot.text, text);
+            assert!(restored.is_dirty);
+            assert_eq!(restored.recovery.text.as_deref(), Some(text.as_str()));
+        }
+    }
+
+    #[test]
+    fn falls_back_to_source_without_unsaved_contents() {
         let dir = tempdir().unwrap();
         let source_path = dir.path().join("note.md");
-        let temp_path = dir.path().join(".missing.temp");
         fs::write(&source_path, "saved contents").unwrap();
-        let record = text_tab_record(Some(source_path.clone()), Some(temp_path));
+        let record = text_tab_record(Some(source_path.clone()), None);
 
         let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
 
@@ -1092,29 +1208,24 @@ mod tests {
     }
 
     #[test]
-    fn matching_temporary_file_is_cleaned_after_restore() {
+    fn matching_recovery_content_restores_clean_tab() {
         let dir = tempdir().unwrap();
         let source_path = dir.path().join("note.md");
-        let temp_path = dir.path().join(".note.md.temp");
         fs::write(&source_path, "same contents").unwrap();
-        fs::write(&temp_path, "same contents").unwrap();
-        let record = text_tab_record(Some(source_path), Some(temp_path.clone()));
+        let record = text_tab_record(Some(source_path), Some("same contents"));
 
         let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
 
         assert!(!restored.is_dirty);
         assert_eq!(restored.recovery, TabRecoveryState::default());
-        assert!(!temp_path.exists());
     }
 
     #[test]
     fn external_source_change_restores_draft_without_overwrite_path() {
         let dir = tempdir().unwrap();
         let source_path = dir.path().join("note.md");
-        let temp_path = dir.path().join(".note.md.temp");
         fs::write(&source_path, "external edit").unwrap();
-        fs::write(&temp_path, "unsaved draft").unwrap();
-        let mut record = text_tab_record(Some(source_path.clone()), Some(temp_path));
+        let mut record = text_tab_record(Some(source_path.clone()), Some("unsaved draft"));
         record.recovery.source_content_hash = Some(file_ops::content_hash(b"original"));
 
         let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
@@ -1126,12 +1237,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_source_and_temporary_files_drop_unrestorable_tab() {
+    fn missing_source_without_recovery_drops_unrestorable_tab() {
         let dir = tempdir().unwrap();
-        let record = text_tab_record(
-            Some(dir.path().join("missing.md")),
-            Some(dir.path().join(".missing.md.temp")),
-        );
+        let record = text_tab_record(Some(dir.path().join("missing.md")), None);
 
         assert!(restore_tab_from_record(&record, UiLanguage::English).is_none());
     }
@@ -1142,10 +1250,9 @@ mod tests {
         let records = (0..8)
             .map(|index| {
                 let source = dir.path().join(format!("note-{index}.md"));
-                let temp = dir.path().join(format!(".note-{index}.md.temp"));
                 fs::write(&source, format!("saved {index}")).unwrap();
-                fs::write(&temp, format!("draft {index}")).unwrap();
-                let mut record = text_tab_record(Some(source), Some(temp));
+                let draft = format!("draft {index}");
+                let mut record = text_tab_record(Some(source), Some(&draft));
                 record.id = format!("tab-{index}");
                 record
             })

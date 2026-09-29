@@ -304,7 +304,7 @@ impl EditorView {
 
     pub(crate) fn collapse_all_dirs(&mut self, cx: &mut Context<Self>) {
         self.expanded_dirs.clear();
-        if self.sidebar_root.exists() {
+        if !self.sidebar_root.as_os_str().is_empty() {
             self.expanded_dirs.insert(self.sidebar_root.clone());
         }
         self.invalidate_sidebar_flattened_items();

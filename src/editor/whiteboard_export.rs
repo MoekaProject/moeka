@@ -446,19 +446,53 @@ impl EditorView {
             .unwrap_or_else(|| "whiteboard".to_string())
     }
 
+    fn export_whiteboard_bytes(
+        &mut self,
+        name: String,
+        bytes: Vec<u8>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            #[cfg(target_os = "macos")]
+            let path = match this.update(cx, |_, cx| {
+                cx.prompt_for_new_path(&std::env::home_dir().unwrap_or_default(), Some(&name))
+            }) {
+                Ok(receiver) => receiver.await.ok().and_then(Result::ok).flatten(),
+                Err(_) => None,
+            };
+            #[cfg(not(target_os = "macos"))]
+            let path = cx
+                .background_executor()
+                .spawn(async move || {
+                    crate::platform::dialog::run(move || {
+                        rfd::FileDialog::new().set_file_name(name).save_file()
+                    })
+                })
+                .await;
+            let Some(path) = path else { return };
+            let result = cx
+                .background_executor()
+                .spawn(async move { std::fs::write(path, bytes) })
+                .await;
+            if let Err(error) = result {
+                this.update(cx, |editor, cx| {
+                    editor.notify_error(
+                        format!("{}: {error}", editor.t(crate::i18n::TextKey::ExportFailed)),
+                        cx,
+                    );
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn whiteboard_export_svg(&mut self, cx: &mut gpui::Context<Self>) {
         let Some(svg) = self.whiteboard_export_svg_string() else {
             return;
         };
         let name = format!("{}.svg", self.whiteboard_export_file_stem());
-        if let Some(path) = rfd::FileDialog::new()
-            .set_file_name(&name)
-            .add_filter("SVG", &["svg"])
-            .save_file()
-        {
-            let _ = std::fs::write(path, svg);
-        }
-        cx.notify();
+        self.export_whiteboard_bytes(name, svg.into_bytes(), cx);
     }
 
     pub(crate) fn whiteboard_export_png(&mut self, cx: &mut gpui::Context<Self>) {
@@ -469,14 +503,7 @@ impl EditorView {
             return;
         };
         let name = format!("{}.png", self.whiteboard_export_file_stem());
-        if let Some(path) = rfd::FileDialog::new()
-            .set_file_name(&name)
-            .add_filter("PNG", &["png"])
-            .save_file()
-        {
-            let _ = std::fs::write(path, png);
-        }
-        cx.notify();
+        self.export_whiteboard_bytes(name, png, cx);
     }
 
     pub(crate) fn whiteboard_export_json(&mut self, cx: &mut gpui::Context<Self>) {
@@ -489,14 +516,7 @@ impl EditorView {
             ..Default::default()
         };
         let name = format!("{}.json", self.whiteboard_export_file_stem());
-        if let Some(path) = rfd::FileDialog::new()
-            .set_file_name(&name)
-            .add_filter("JSON", &["json"])
-            .save_file()
-        {
-            let _ = std::fs::write(path, document.to_json_string());
-        }
-        cx.notify();
+        self.export_whiteboard_bytes(name, document.to_json_string().into_bytes(), cx);
     }
 
     pub(crate) fn whiteboard_copy_as_svg(&mut self, cx: &mut gpui::Context<Self>) {

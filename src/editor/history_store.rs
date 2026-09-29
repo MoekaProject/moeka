@@ -21,6 +21,7 @@ pub(crate) struct TabHistory {
     pub redo_stack: Vec<HistoryEntry>,
     pub journal_path: Option<PathBuf>,
     pub source_identity: Option<String>,
+    pub saved_text: Option<String>,
 }
 
 /// In-memory history entry. Only the top of each stack keeps a full snapshot;
@@ -245,6 +246,7 @@ impl TabHistory {
             redo_stack: Vec::new(),
             journal_path,
             source_identity,
+            saved_text: None,
         }
     }
 
@@ -592,6 +594,7 @@ fn history_from_journal(journal: &UndoJournal) -> io::Result<(TabHistory, Editor
             redo_stack,
             journal_path: None,
             source_identity: Some(journal.source_identity.clone()),
+            saved_text: None,
         },
         current,
     ))

@@ -142,7 +142,9 @@ pub(crate) enum TextKey {
     AlphaHint,
     ThemeDebuggerInterface,
     ThemeDebuggerEditor,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     ChooseWorkspaceFolder,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     SaveFileDialog,
     SaveAs,
     Copied,
@@ -1859,6 +1861,7 @@ pub(crate) fn settings_label(language: UiLanguage, key: &str) -> &'static str {
         (UiLanguage::ChineseSimplified, "editor_display") => "编辑器显示",
         (UiLanguage::ChineseSimplified, "show_whitespace") => "显示空白符",
         (UiLanguage::ChineseSimplified, "highlight_line") => "高亮行背景",
+        (UiLanguage::ChineseSimplified, "default_left_align") => "默认左对齐",
         (UiLanguage::ChineseSimplified, "format_toolbar") => "格式工具栏",
         (UiLanguage::ChineseSimplified, "auto_save") => "自动保存",
         (UiLanguage::ChineseSimplified, "simple_mode") => "简洁模式",
@@ -1866,6 +1869,7 @@ pub(crate) fn settings_label(language: UiLanguage, key: &str) -> &'static str {
         (UiLanguage::ChineseTraditional, "editor_display") => "編輯器顯示",
         (UiLanguage::ChineseTraditional, "show_whitespace") => "顯示空白字元",
         (UiLanguage::ChineseTraditional, "highlight_line") => "高亮行背景",
+        (UiLanguage::ChineseTraditional, "default_left_align") => "預設靠左對齊",
         (UiLanguage::ChineseTraditional, "format_toolbar") => "格式工具列",
         (UiLanguage::ChineseTraditional, "auto_save") => "自動儲存",
         (UiLanguage::ChineseTraditional, "simple_mode") => "簡潔模式",
@@ -1873,6 +1877,7 @@ pub(crate) fn settings_label(language: UiLanguage, key: &str) -> &'static str {
         (UiLanguage::Japanese, "editor_display") => "エディタ表示",
         (UiLanguage::Japanese, "show_whitespace") => "空白を表示",
         (UiLanguage::Japanese, "highlight_line") => "行背景を強調",
+        (UiLanguage::Japanese, "default_left_align") => "既定で左揃え",
         (UiLanguage::Japanese, "format_toolbar") => "書式ツールバー",
         (UiLanguage::Japanese, "auto_save") => "自動保存",
         (UiLanguage::Japanese, "simple_mode") => "シンプルモード",
@@ -1880,6 +1885,7 @@ pub(crate) fn settings_label(language: UiLanguage, key: &str) -> &'static str {
         (UiLanguage::Korean, "editor_display") => "편집기 표시",
         (UiLanguage::Korean, "show_whitespace") => "공백 표시",
         (UiLanguage::Korean, "highlight_line") => "줄 배경 강조",
+        (UiLanguage::Korean, "default_left_align") => "기본 왼쪽 정렬",
         (UiLanguage::Korean, "format_toolbar") => "서식 도구 모음",
         (UiLanguage::Korean, "auto_save") => "자동 저장",
         (UiLanguage::Korean, "simple_mode") => "심플 모드",
@@ -1887,6 +1893,7 @@ pub(crate) fn settings_label(language: UiLanguage, key: &str) -> &'static str {
         (UiLanguage::French, "editor_display") => "Affichage éditeur",
         (UiLanguage::French, "show_whitespace") => "Afficher les espaces",
         (UiLanguage::French, "highlight_line") => "Surligner la ligne",
+        (UiLanguage::French, "default_left_align") => "Aligner à gauche par défaut",
         (UiLanguage::French, "format_toolbar") => "Barre de mise en forme",
         (UiLanguage::French, "auto_save") => "Enregistrement automatique",
         (UiLanguage::French, "simple_mode") => "Mode simple",
@@ -1894,6 +1901,7 @@ pub(crate) fn settings_label(language: UiLanguage, key: &str) -> &'static str {
         (UiLanguage::German, "editor_display") => "Editoranzeige",
         (UiLanguage::German, "show_whitespace") => "Leerzeichen anzeigen",
         (UiLanguage::German, "highlight_line") => "Zeile hervorheben",
+        (UiLanguage::German, "default_left_align") => "Standardmäßig linksbündig",
         (UiLanguage::German, "format_toolbar") => "Formatleiste",
         (UiLanguage::German, "auto_save") => "Automatisch speichern",
         (UiLanguage::German, "simple_mode") => "Einfacher Modus",
@@ -1901,6 +1909,7 @@ pub(crate) fn settings_label(language: UiLanguage, key: &str) -> &'static str {
         (UiLanguage::Spanish, "editor_display") => "Vista del editor",
         (UiLanguage::Spanish, "show_whitespace") => "Mostrar espacios",
         (UiLanguage::Spanish, "highlight_line") => "Resaltar línea",
+        (UiLanguage::Spanish, "default_left_align") => "Alinear a la izquierda por defecto",
         (UiLanguage::Spanish, "format_toolbar") => "Barra de formato",
         (UiLanguage::Spanish, "auto_save") => "Guardado automático",
         (UiLanguage::Spanish, "simple_mode") => "Modo simple",
@@ -1908,6 +1917,7 @@ pub(crate) fn settings_label(language: UiLanguage, key: &str) -> &'static str {
         (UiLanguage::Portuguese, "editor_display") => "Exibição do editor",
         (UiLanguage::Portuguese, "show_whitespace") => "Mostrar espaços",
         (UiLanguage::Portuguese, "highlight_line") => "Destacar linha",
+        (UiLanguage::Portuguese, "default_left_align") => "Alinhar à esquerda por padrão",
         (UiLanguage::Portuguese, "format_toolbar") => "Barra de formatação",
         (UiLanguage::Portuguese, "auto_save") => "Salvamento automático",
         (UiLanguage::Portuguese, "simple_mode") => "Modo simples",
@@ -1915,6 +1925,7 @@ pub(crate) fn settings_label(language: UiLanguage, key: &str) -> &'static str {
         (UiLanguage::Russian, "editor_display") => "Вид редактора",
         (UiLanguage::Russian, "show_whitespace") => "Показывать пробелы",
         (UiLanguage::Russian, "highlight_line") => "Подсветка строки",
+        (UiLanguage::Russian, "default_left_align") => "По умолчанию выравнивать слева",
         (UiLanguage::Russian, "format_toolbar") => "Панель форматирования",
         (UiLanguage::Russian, "auto_save") => "Автосохранение",
         (UiLanguage::Russian, "simple_mode") => "Простой режим",
@@ -1922,6 +1933,7 @@ pub(crate) fn settings_label(language: UiLanguage, key: &str) -> &'static str {
         (UiLanguage::Arabic, "editor_display") => "عرض المحرر",
         (UiLanguage::Arabic, "show_whitespace") => "إظهار الفراغات",
         (UiLanguage::Arabic, "highlight_line") => "تمييز السطر",
+        (UiLanguage::Arabic, "default_left_align") => "محاذاة لليسار افتراضيًا",
         (UiLanguage::Arabic, "format_toolbar") => "شريط التنسيق",
         (UiLanguage::Arabic, "auto_save") => "الحفظ التلقائي",
         (UiLanguage::Arabic, "simple_mode") => "الوضع البسيط",
@@ -1929,6 +1941,7 @@ pub(crate) fn settings_label(language: UiLanguage, key: &str) -> &'static str {
         (UiLanguage::Hindi, "editor_display") => "एडिटर दृश्य",
         (UiLanguage::Hindi, "show_whitespace") => "रिक्त स्थान दिखाएँ",
         (UiLanguage::Hindi, "highlight_line") => "पंक्ति हाइलाइट",
+        (UiLanguage::Hindi, "default_left_align") => "डिफ़ॉल्ट बायाँ संरेखण",
         (UiLanguage::Hindi, "format_toolbar") => "फ़ॉर्मैट टूलबार",
         (UiLanguage::Hindi, "auto_save") => "स्वतः सहेजें",
         (UiLanguage::Hindi, "simple_mode") => "सरल मोड",
@@ -1936,6 +1949,7 @@ pub(crate) fn settings_label(language: UiLanguage, key: &str) -> &'static str {
         (UiLanguage::English, "editor_display") => "Editor Display",
         (UiLanguage::English, "show_whitespace") => "Show Whitespace",
         (UiLanguage::English, "highlight_line") => "Highlight Line",
+        (UiLanguage::English, "default_left_align") => "Default Left Alignment",
         (UiLanguage::English, "format_toolbar") => "Format Toolbar",
         (UiLanguage::English, "auto_save") => "Auto Save",
         (UiLanguage::English, "simple_mode") => "Simple Mode",
@@ -3157,6 +3171,7 @@ pub(crate) fn heading_level_label(language: UiLanguage, level: usize) -> String 
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn export_dialog_title(language: UiLanguage, format_name: &str) -> String {
     let export = translate(language, TextKey::Export);
     match language {

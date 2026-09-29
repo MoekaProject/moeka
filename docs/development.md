@@ -196,13 +196,42 @@ the current scroll offset instead of scrolling to the caret or clamping against
 temporary layout estimates.
 
 Image/generated preview overlays live at the window root, above pane chrome and
-toolbars. Mermaid and math initially fit inside 80% of the window in both axes,
-preserving aspect ratio and allowing enlargement. Rendering and pan constraints
+toolbars. They retain a fixed inset from every window edge, preserve aspect ratio,
+and allow manual enlargement. Editor Mermaid and math previews display at their rendered
+logical size (100%) or shrink to fit the available width, never upscaling to fill it.
+Their backgrounds follow the fitted image size plus padding. Fullscreen previews also
+start at no more than 100% while preserving the window inset. Rendering and pan constraints
 share the same fit calculation; closing fullscreen leaves inline zoom/pan intact.
 Use `cargo test --release generated_mermaid`, `cargo test --release generated_preview`,
 and `cargo test --release editor::preview_overlay::tests` for targeted checks.
 GUI verification should cover theme changes after panning/zooming, scroll stability,
 split panes and fullscreen controls over the sidebar/tab strip.
+
+Document, whiteboard, rename, delete, copy, paste and create operations run on the
+background executor so network filesystems do not stall the GPUI thread. Document
+saves write directly to disk, serialized by path; older queued snapshots cannot
+overwrite newer ones. Config and history atomic writes use `tempfile`-managed
+sibling files with direct-write fallback where replacement is unsupported.
+Unsaved text recovery is stored in the local session record and written by a
+single background worker; shutdown waits for the final snapshot. No recovery
+files are created beside documents or inside workspaces. Existing `.temp`
+files are not read or deleted by session restoration.
+On macOS, open/save/folder/image dialogs use GPUI's native panels on the foreground
+event loop; other platforms retain their existing picker implementation.
+File contents are loaded on the background executor before constructing tabs.
+Attachment imports, WikiLink path indexing, file-list image resolution, and file
+watcher document reads also run in the background; async completions check the
+originating pane and tab before changing document contents. Mac `fs::copy` carries
+extended metadata, which can appear as `._` AppleDouble files on network volumes.
+Moeka streams file data without copying metadata and skips existing `._` entries
+when recursively copying directories; Finder and other apps can still create
+AppleDouble files independently.
+The native save panel uses macOS `NSSavePanel`; verify filename paste and focus manually
+on a real Mac, including Save As, unsaved-tab close and export dialogs.
+
+Markdown outline state is invalidated after every lazy-document edit, including edits
+that cannot transfer line-display caches incrementally. Search navigation always reveals
+and repaints the selected match, including while a large-document scan is still settling.
 
 ## External file updates
 

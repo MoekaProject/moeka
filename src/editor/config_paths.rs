@@ -55,26 +55,6 @@ pub(crate) fn history_file_name_for_untitled(tab_id: &str) -> String {
     format!("untitled-{tab_id}.undo.json")
 }
 
-pub(crate) fn hidden_temp_file_name(path: &Path) -> String {
-    let basename = file_name_or_fallback(path);
-    format!(".{basename}.temp")
-}
-
-pub(crate) fn hidden_temp_file_name_with_hash(path: &Path) -> String {
-    let basename = file_name_or_fallback(path);
-    format!(".{basename}.{}.temp", short_hash(path))
-}
-
-pub(crate) fn hidden_temp_file_path(path: &Path) -> PathBuf {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    parent.join(hidden_temp_file_name(path))
-}
-
-pub(crate) fn hidden_temp_file_path_with_hash(path: &Path) -> PathBuf {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    parent.join(hidden_temp_file_name_with_hash(path))
-}
-
 pub(crate) fn short_hash(path: &Path) -> String {
     let canonical = path.to_string_lossy();
     let hash = fnv1a64(canonical.as_bytes());
@@ -137,33 +117,6 @@ mod tests {
         let left = Path::new("/tmp/example/note.md");
         let right = Path::new("/tmp/other/note.md");
         assert_ne!(short_hash(left), short_hash(right));
-    }
-
-    #[test]
-    fn builds_hidden_temp_name_for_regular_file() {
-        let path = Path::new("/tmp/example/note.md");
-        assert_eq!(hidden_temp_file_name(path), ".note.md.temp");
-    }
-
-    #[test]
-    fn builds_hidden_temp_name_for_dotfile() {
-        let path = Path::new("/tmp/example/.env");
-        assert_eq!(hidden_temp_file_name(path), "..env.temp");
-    }
-
-    #[test]
-    fn builds_hidden_temp_name_for_extensionless_file() {
-        let path = Path::new("/tmp/example/README");
-        assert_eq!(hidden_temp_file_name(path), ".README.temp");
-    }
-
-    #[test]
-    fn builds_hidden_temp_name_with_hash_suffix() {
-        let path = Path::new("/tmp/example/note.md");
-        assert_eq!(
-            hidden_temp_file_name_with_hash(path),
-            ".note.md.44e0a532.temp"
-        );
     }
 
     #[test]

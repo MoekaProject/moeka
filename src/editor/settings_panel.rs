@@ -14,11 +14,13 @@ use crate::i18n::{
 use crate::theme::{EditorThemeMode, ThemeKind};
 
 use super::app_settings::ThemeMode;
+#[cfg(not(target_os = "macos"))]
+use super::helpers;
 use super::{
     APP_VERSION, ChatAgentCli, DOC_SVG_PATH, EditorView, FILE_INFO_SECTION_INFO_SVG_PATH,
     FLOWER_SVG_PATH, GIT_SYNC_SVG_PATH, MOUNTAIN_SVG_PATH, MermaidTheme, SITE_SVG_PATH,
     SearchMenuConfig, SearchMenuRow, THEME_AUTO_MINI_SVG_PATH, THEME_DARK_MINI_SVG_PATH,
-    THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape, attachments, helpers, tooltip,
+    THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape, attachments, tooltip,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -110,6 +112,7 @@ pub(crate) struct FontPickerState {
 enum SettingsOptionAction {
     ShowWhitespace(bool),
     HighlightLine(bool),
+    DefaultLeftAlign(bool),
     FormatToolbar(bool),
     AutoSave(bool),
     SimpleMode(bool),
@@ -697,9 +700,28 @@ impl EditorView {
     }
 
     fn pick_external_attachment_folder(&mut self, cx: &mut Context<Self>) {
+        #[cfg(not(target_os = "macos"))]
         let title =
             attachment_settings_label(self.ui_language, "choose_external_folder").to_string();
         cx.spawn(async move |this, cx| {
+            #[cfg(target_os = "macos")]
+            let path = match this.update(cx, |_, cx| {
+                cx.prompt_for_paths(gpui::PathPromptOptions {
+                    files: false,
+                    directories: true,
+                    multiple: false,
+                    prompt: None,
+                })
+            }) {
+                Ok(receiver) => receiver
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
+                    .and_then(|mut paths| paths.pop()),
+                Err(_) => None,
+            };
+            #[cfg(not(target_os = "macos"))]
             let path = cx
                 .background_executor()
                 .spawn(async move { helpers::pick_folder_blocking(&title) })
@@ -800,6 +822,16 @@ impl EditorView {
                     cx,
                 ),
             ))
+            .child(self.render_attachment_settings_row(
+                crate::i18n::settings_label(self.ui_language, "default_left_align"),
+                self.render_boolean_settings_checkbox(
+                    "settings-default-left-align",
+                    self.app_settings.default_left_align,
+                    SettingsOptionAction::DefaultLeftAlign(false),
+                    SettingsOptionAction::DefaultLeftAlign(true),
+                    cx,
+                ),
+            ))
             .into_any_element()
     }
 
@@ -871,6 +903,10 @@ impl EditorView {
             SettingsOptionAction::HighlightLine(value) => {
                 self.app_settings.highlight_line_background = value;
             }
+            SettingsOptionAction::DefaultLeftAlign(value) => {
+                self.app_settings.default_left_align = value;
+                self.apply_default_left_alignment(value);
+            }
             SettingsOptionAction::FormatToolbar(value) => {
                 self.app_settings.format_toolbar_visible = value;
             }
@@ -895,6 +931,27 @@ impl EditorView {
             }
         }
         self.finalize_settings_change(cx);
+    }
+
+    fn apply_default_left_alignment(&mut self, value: bool) {
+        for pane_id in self.pane_ids() {
+            self.with_pane(pane_id, |editor| {
+                for tab in &mut editor.tabs {
+                    if tab
+                        .file_kind
+                        .as_ref()
+                        .is_some_and(super::FileKind::is_markdown)
+                    {
+                        tab.editor_left_aligned = value;
+                    }
+                }
+                if editor.active_tab_is_markdown() {
+                    editor.editor_left_aligned = value;
+                    editor.layout_dirty = true;
+                }
+            });
+        }
+        super::session_store::persist_session(self);
     }
 
     fn date_time_format_options(&self) -> Vec<PickerOption> {
@@ -1086,7 +1143,11 @@ impl EditorView {
             }
         };
 
+        let previous_left_alignment = self.app_settings.default_left_align;
         self.app_settings = settings;
+        if self.app_settings.default_left_align != previous_left_alignment {
+            self.apply_default_left_alignment(self.app_settings.default_left_align);
+        }
         self.ui_language = self.app_settings.ui_language();
         self.theme_kind = self.app_settings.theme_kind();
         self.editor_theme_mode = self

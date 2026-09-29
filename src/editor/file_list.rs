@@ -866,20 +866,13 @@ impl EditorView {
         changed_paths: &[PathBuf],
         cx: &mut Context<Self>,
     ) {
-        let mut pending = Vec::new();
-        for item in &mut self.file_list_items {
-            if !changed_paths.iter().any(|path| path == &item.path) {
-                continue;
-            }
-            let Ok(modified) =
-                std::fs::metadata(&item.path).and_then(|metadata| metadata.modified())
-            else {
-                continue;
-            };
-            item.modified = modified;
-            pending.push((item.path.clone(), modified));
-        }
-        if pending.is_empty() {
+        let paths = self
+            .file_list_items
+            .iter()
+            .filter(|item| changed_paths.contains(&item.path))
+            .map(|item| item.path.clone())
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
             return;
         }
 
@@ -887,7 +880,18 @@ impl EditorView {
         self.file_list_detail_task = Some(cx.spawn(async move |this, cx| {
             let details = cx
                 .background_executor()
-                .spawn(async move { load_file_list_details(pending) })
+                .spawn(async move {
+                    let pending = paths
+                        .into_iter()
+                        .filter_map(|path| {
+                            std::fs::metadata(&path)
+                                .and_then(|metadata| metadata.modified())
+                                .ok()
+                                .map(|modified| (path, modified))
+                        })
+                        .collect();
+                    load_file_list_details(pending)
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if this.file_list_epoch != epoch {
@@ -897,8 +901,9 @@ impl EditorView {
                     if let Some(item) = this
                         .file_list_items
                         .iter_mut()
-                        .find(|item| item.path == path && item.modified == modified)
+                        .find(|item| item.path == path)
                     {
+                        item.modified = modified;
                         item.details = Some(detail);
                     }
                 }
@@ -1118,17 +1123,17 @@ impl EditorView {
         let workspaces = self.workspaces.clone();
         cx.spawn(async move |this, cx| {
             let file_dir = markdown_path.parent().map(PathBuf::from);
-            let load_path = if helpers::is_remote_image_url(&image_path) {
-                image_path.clone()
-            } else {
-                attachments::WorkspaceLinkIndex::build(&workspace_root)
-                    .resolve(Some(&markdown_path), &image_path)
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| image_path.clone())
-            };
             let maybe_image = cx
                 .background_executor()
                 .spawn(async move {
+                    let load_path = if helpers::is_remote_image_url(&image_path) {
+                        image_path.clone()
+                    } else {
+                        attachments::WorkspaceLinkIndex::build(&workspace_root)
+                            .resolve(Some(&markdown_path), &image_path)
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| image_path.clone())
+                    };
                     helpers::load_image(&load_path, file_dir.as_ref(), &workspaces)
                         .ok()
                         .map(square_crop_render_image)

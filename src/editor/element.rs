@@ -2413,6 +2413,11 @@ impl Element for EditorElement {
         let pane_swapped = self
             .editor
             .update(cx, |editor, _| editor.begin_pane_swap(self.pane_id));
+        let caret_was_visible = self.editor.update(cx, |editor, _| {
+            editor.focused_pane_id == self.pane_id
+                && (editor.cursor_visible_in_viewport()
+                    || editor.pending_typing_scroll_guard.is_some())
+        });
         self.editor.update(cx, |editor, _| {
             if editor.focused_pane_id == self.pane_id {
                 editor.begin_large_document_frame_work();
@@ -7499,45 +7504,27 @@ impl Element for EditorElement {
                                 let img_w = img_size.width.0 as f32;
                                 let img_h = img_size.height.0 as f32;
                                 if img_w > 0.0 && img_h > 0.0 {
-                                    let mut mermaid_is_vertical = true;
-                                    let (display_w, full_display_h) = if preview.kind
-                                        == crate::markdown::BlockPreviewKind::Mermaid
-                                    {
-                                        let (intrinsic_w, intrinsic_h) =
-                                            helpers::intrinsic_generated_preview_size_for_kind(
-                                                img_w,
-                                                img_h,
-                                                preview.kind,
-                                            );
-                                        mermaid_is_vertical = intrinsic_h > intrinsic_w;
-                                        (
-                                            intrinsic_w
-                                                * helpers::GENERATED_PREVIEW_EDITOR_MERMAID_SCALE,
-                                            intrinsic_h
-                                                * helpers::GENERATED_PREVIEW_EDITOR_MERMAID_SCALE,
-                                        )
-                                    } else {
-                                        helpers::compute_generated_preview_size_for_kind(
+                                    let (display_w, full_display_h, _, display_h) =
+                                        helpers::fit_generated_preview_size(
                                             img_w,
                                             img_h,
-                                            text_width,
                                             preview.kind,
-                                        )
-                                    };
-                                    let display_h = full_display_h.clamp(
-                                        editor.scaled(
-                                            editor
-                                                .styles
-                                                .code_block
-                                                .generated_preview_min_height_px,
-                                        ),
-                                        editor.scaled(
-                                            editor
-                                                .styles
-                                                .code_block
-                                                .generated_preview_max_height_px,
-                                        ),
-                                    );
+                                            text_width,
+                                            editor.scaled(
+                                                editor
+                                                    .styles
+                                                    .code_block
+                                                    .generated_preview_min_height_px,
+                                            ),
+                                            editor.scaled(
+                                                editor
+                                                    .styles
+                                                    .code_block
+                                                    .generated_preview_max_height_px,
+                                            ),
+                                            0.0,
+                                            0.0,
+                                        );
                                     let preview_top = row_top + text_height + image_gap_top;
                                     let img_left = if preview.kind
                                         == crate::markdown::BlockPreviewKind::Mermaid
@@ -7548,14 +7535,6 @@ impl Element for EditorElement {
                                             + ((text_width - display_w) / 2.0).max(0.0)
                                     };
                                     let img_top = preview_top + (display_h - full_display_h) * 0.5;
-                                    let img_left = if preview.kind
-                                        == crate::markdown::BlockPreviewKind::Mermaid
-                                        && !mermaid_is_vertical
-                                    {
-                                        phantom_content_x
-                                    } else {
-                                        img_left
-                                    };
                                     let img_bounds = Bounds::new(
                                         point(px(img_left), px(img_top)),
                                         size(px(display_w), px(full_display_h)),
@@ -10009,6 +9988,9 @@ impl Element for EditorElement {
                 || did_adjust_click_anchor
                 || did_preserve_typing_scroll
             {
+                cx.notify();
+            }
+            if caret_was_visible && editor.keep_previously_visible_cursor_in_view() {
                 cx.notify();
             }
             // Reset the rendered view (zoom/pan) whenever the cursor enters or

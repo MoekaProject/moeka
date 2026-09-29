@@ -225,6 +225,8 @@ pub(crate) struct AppSettings {
     pub show_whitespace: bool,
     #[serde(default = "default_highlight_line_background")]
     pub highlight_line_background: bool,
+    #[serde(default)]
+    pub default_left_align: bool,
     #[serde(default = "default_simple_mode")]
     pub simple_mode: bool,
     #[serde(default = "default_format_toolbar_visible")]
@@ -449,6 +451,7 @@ impl Default for AppSettings {
             outline_rail_visible: default_outline_rail_visible(),
             show_whitespace: default_show_whitespace(),
             highlight_line_background: default_highlight_line_background(),
+            default_left_align: false,
             simple_mode: default_simple_mode(),
             format_toolbar_visible: default_format_toolbar_visible(),
             auto_save: false,
@@ -737,6 +740,18 @@ mod tests {
     use crate::editor::attachments::{AttachmentLinkSyntax, AttachmentPathStyle};
     use crate::editor::{ChatAgentCli, TerminalCursorShape};
     use crate::theme::{EditorThemeMode, ThemeKind};
+
+    #[test]
+    fn default_left_align_is_off_for_existing_settings_and_roundtrips_when_enabled() {
+        let mut json = serde_json::to_value(AppSettings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("default_left_align");
+        let mut settings: AppSettings = serde_json::from_value(json).unwrap();
+        assert!(!settings.default_left_align);
+        settings.default_left_align = true;
+        let restored: AppSettings =
+            serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+        assert!(restored.default_left_align);
+    }
 
     #[test]
     fn curated_theme_names_round_trip() {

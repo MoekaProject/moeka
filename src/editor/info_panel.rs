@@ -36,6 +36,7 @@ pub(crate) enum ExportFormat {
 }
 
 impl ExportFormat {
+    #[cfg(not(target_os = "macos"))]
     fn label(self) -> &'static str {
         match self {
             Self::Markdown => "Markdown",
@@ -140,6 +141,7 @@ fn format_file_size(size: u64) -> String {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn export_dialog_path(default_name: &str, title: &str) -> Option<std::path::PathBuf> {
     let default_name = default_name.to_string();
     let title = title.to_string();
@@ -2910,16 +2912,8 @@ impl EditorView {
         }) else {
             return;
         };
-
-        // The stored target must match the file on disk; otherwise the diff is
-        // stale (external edit) and splicing would corrupt the file.
-        let on_disk = fs::read_to_string(&path).unwrap_or_default();
-        if on_disk != target_text {
-            self.refresh_git_diff_tab(tab_index);
-            self.reload_active_git_diff_snapshot();
-            cx.notify();
-            return;
-        }
+        let pane_id = self.current_pane_id();
+        let tab_id = self.tabs[tab_index].id.clone();
 
         let base_lines: Vec<&str> = base_text.split_inclusive('\n').collect();
         let mut target_lines: Vec<String> = target_text
@@ -2940,28 +2934,59 @@ impl EditorView {
         target_lines.splice(target_start..target_end, replacement);
         let new_text = target_lines.concat();
 
-        if let Err(error) = fs::write(&path, &new_text) {
-            let message = format!(
-                "{}: {error}",
-                self.t(crate::i18n::TextKey::GitOperationFailed)
-            );
-            self.notify_error(message, cx);
-            return;
-        }
-
-        // Reuse the git mutation invalidation chain: it refreshes diff tabs,
-        // reloads clean buffers from disk, and updates all git status caches.
-        let rel_path = self
-            .git_repo_context_for_path(&path)
-            .map(|context| context.relative_path)
-            .unwrap_or_default();
-        self.invalidate_after_git_mutation(
-            &GitOperation::DiscardPaths {
-                tracked: vec![rel_path],
-                untracked: Vec::new(),
-            },
-            cx,
-        );
+        let save = file_ops::DocumentSave::new(path.clone());
+        cx.spawn(async move |this, cx| {
+            let read_path = path.clone();
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    let on_disk = fs::read_to_string(&read_path)?;
+                    if on_disk != target_text {
+                        return Ok(None);
+                    }
+                    save.write(new_text.as_bytes()).map(Some)
+                })
+                .await;
+            this.update(cx, |editor, cx| {
+                editor.with_pane_if_alive(pane_id, |editor| {
+                    let Some(index) = editor.tabs.iter().position(|tab| tab.id == tab_id) else {
+                        return;
+                    };
+                    match outcome {
+                        Ok(Some(true)) => {
+                            let rel_path = editor
+                                .git_repo_context_for_path(&path)
+                                .map(|context| context.relative_path)
+                                .unwrap_or_default();
+                            editor.invalidate_after_git_mutation(
+                                &GitOperation::DiscardPaths {
+                                    tracked: vec![rel_path],
+                                    untracked: Vec::new(),
+                                },
+                                cx,
+                            );
+                        }
+                        Ok(Some(false)) => {}
+                        Ok(None) => {
+                            editor.refresh_git_diff_tab(index);
+                            if editor.active_tab_id.as_deref() == Some(&tab_id) {
+                                editor.reload_active_git_diff_snapshot();
+                            }
+                            cx.notify();
+                        }
+                        Err(error) => {
+                            let message = format!(
+                                "{}: {error}",
+                                editor.t(crate::i18n::TextKey::GitOperationFailed)
+                            );
+                            editor.notify_error(message, cx);
+                        }
+                    }
+                });
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn current_file_text_for_git_diff(&self, path: &Path) -> String {
@@ -3521,6 +3546,7 @@ impl EditorView {
             .to_string();
         let default_name =
             self.export_default_name_for_path(source_file_path.as_deref(), format.extension());
+        #[cfg(not(target_os = "macos"))]
         let ui_language = self.ui_language;
         let immediate_bytes = match format {
             ExportFormat::Markdown => Some(text.as_bytes().to_vec()),
@@ -3531,6 +3557,17 @@ impl EditorView {
         };
 
         cx.spawn(async move |this, cx| {
+            #[cfg(target_os = "macos")]
+            let maybe_path = match this.update(cx, |_, cx| {
+                cx.prompt_for_new_path(
+                    &std::env::home_dir().unwrap_or_default(),
+                    Some(&default_name),
+                )
+            }) {
+                Ok(receiver) => receiver.await.ok().and_then(Result::ok).flatten(),
+                Err(_) => None,
+            };
+            #[cfg(not(target_os = "macos"))]
             let maybe_path = cx
                 .background_executor()
                 .spawn(async move {
@@ -3544,7 +3581,12 @@ impl EditorView {
             };
 
             let export_error = if let Some(bytes) = immediate_bytes {
-                fs::write(&path, bytes).err().map(|error| error.to_string())
+                let write_path = path.clone();
+                cx.background_executor()
+                    .spawn(async move { fs::write(write_path, bytes) })
+                    .await
+                    .err()
+                    .map(|error| error.to_string())
             } else {
                 #[cfg(target_os = "macos")]
                 let export_result = {
@@ -3581,7 +3623,14 @@ impl EditorView {
                 };
 
                 match export_result {
-                    Ok(bytes) => fs::write(&path, bytes).err().map(|error| error.to_string()),
+                    Ok(bytes) => {
+                        let write_path = path.clone();
+                        cx.background_executor()
+                            .spawn(async move { fs::write(write_path, bytes) })
+                            .await
+                            .err()
+                            .map(|error| error.to_string())
+                    }
                     Err(error) => Some(error.to_string()),
                 }
             };
