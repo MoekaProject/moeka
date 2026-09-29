@@ -463,7 +463,7 @@ impl EditorView {
             #[cfg(not(target_os = "macos"))]
             let path = cx
                 .background_executor()
-                .spawn(async move || {
+                .spawn(async move {
                     crate::platform::dialog::run(move || {
                         rfd::FileDialog::new().set_file_name(name).save_file()
                     })
