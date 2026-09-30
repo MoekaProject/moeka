@@ -382,6 +382,22 @@ pub(crate) struct ContextMenu {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) struct SlashMenuAnchor {
+    pub position: Point<Pixels>,
+    pub row_height: f32,
+    pub scroll_offset: f32,
+}
+
+impl SlashMenuAnchor {
+    fn at_scroll_offset(self, scroll_offset: f32) -> Point<Pixels> {
+        Point::new(
+            self.position.x,
+            gpui::px(f32::from(self.position.y) + self.scroll_offset - scroll_offset),
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct ContextSubmenuAim {
     pub origin: Point<Pixels>,
 }
@@ -1555,6 +1571,38 @@ pub(crate) struct PendingLineDisplayTransfer {
     byte_delta: isize,
 }
 
+fn stable_preview_layout_context(
+    before: &LineDecoration,
+    after: &LineDecoration,
+    old_line: usize,
+    new_line: usize,
+) -> bool {
+    let (Some(old_preview), Some(new_preview)) =
+        (before.block_preview.as_ref(), after.block_preview.as_ref())
+    else {
+        return false;
+    };
+    if old_preview.cache_key != new_preview.cache_key
+        || old_preview.kind != new_preview.kind
+        || old_preview.is_anchor != new_preview.is_anchor
+        || old_preview.start_line as isize - old_line as isize
+            != new_preview.start_line as isize - new_line as isize
+        || old_preview.end_line as isize - old_line as isize
+            != new_preview.end_line as isize - new_line as isize
+    {
+        return false;
+    }
+    // The parser shifts absolute source ranges after edits before the preview;
+    // that does not change the cached visual height or line-local layout.
+    let mut normalized = before.clone();
+    if let Some(preview) = normalized.block_preview.as_mut() {
+        preview.source_range = new_preview.source_range.clone();
+        preview.start_line = new_preview.start_line;
+        preview.end_line = new_preview.end_line;
+    }
+    normalized == *after
+}
+
 fn stable_markdown_layout_context(
     decorations: &[LineDecoration],
     line: usize,
@@ -2279,6 +2327,7 @@ pub struct EditorView {
     pub(crate) sidebar_width_task: Option<Task<()>>,
     pub(crate) heading_submenu_open: bool,
     pub(crate) slash_menu_start: Option<usize>,
+    pub(crate) slash_menu_anchor: Option<SlashMenuAnchor>,
     pub(crate) slash_filter: String,
     pub(crate) wiki_link_start: Option<usize>,
     pub(crate) wiki_link_query: String,
@@ -3058,6 +3107,7 @@ impl EditorView {
             heading_submenu_open: false,
             menu_selected_index: 0,
             slash_menu_start: None,
+            slash_menu_anchor: None,
             slash_filter: String::new(),
             wiki_link_start: None,
             wiki_link_query: String::new(),
@@ -6815,6 +6865,39 @@ impl EditorView {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let stable_preview_layout_candidates = pending_line_display_transfer
+            .as_ref()
+            .filter(|_| file_kind.is_markdown())
+            .map(|transfer| {
+                transfer
+                    .cached_lines
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(old_line, info)| {
+                        if info.is_none()
+                            || (transfer.start_line..transfer.old_end_line_exclusive)
+                                .contains(&old_line)
+                        {
+                            return None;
+                        }
+                        let new_line = shift_line_after_transfer(
+                            old_line,
+                            transfer.start_line,
+                            transfer.old_end_line_exclusive,
+                            transfer.new_end_line_exclusive,
+                        );
+                        if !(transfer.dirty_start_line..transfer.dirty_end_line_exclusive)
+                            .contains(&new_line)
+                        {
+                            return None;
+                        }
+                        let decoration = self.decorations.get(old_line)?;
+                        decoration.block_preview.as_ref()?;
+                        Some((old_line, new_line, decoration.clone()))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let generated_preview_edit_range = pending_line_display_transfer.as_ref().map(|transfer| {
             transfer.start_line
                 ..transfer
@@ -7007,7 +7090,7 @@ impl EditorView {
         // fence toggles) do not queue a transfer and still fall back to a full
         // re-layout.
         if let Some(mut transfer) = pending_line_display_transfer {
-            let retained = stable_layout_candidates
+            let mut retained = stable_layout_candidates
                 .into_iter()
                 .filter_map(|(old_line, new_line, context)| {
                     if stable_markdown_layout_context(&self.decorations, new_line).as_ref()
@@ -7022,6 +7105,23 @@ impl EditorView {
                         .map(|info| (new_line, info))
                 })
                 .collect::<Vec<_>>();
+            retained.extend(stable_preview_layout_candidates.into_iter().filter_map(
+                |(old_line, new_line, decoration)| {
+                    if !stable_preview_layout_context(
+                        &decoration,
+                        self.decorations.get(new_line)?,
+                        old_line,
+                        new_line,
+                    ) {
+                        return None;
+                    }
+                    transfer
+                        .cached_lines
+                        .get_mut(old_line)?
+                        .take()
+                        .map(|info| (new_line, info))
+                },
+            ));
             let mut layout = transfer.apply(self.buffer.line_count());
             restore_stable_layout_lines(&mut layout, retained);
             self.set_line_display_info(layout);
@@ -12900,6 +13000,51 @@ mod tests {
             super::stable_markdown_layout_context(&before, 2),
             super::stable_markdown_layout_context(&after, new_line)
         );
+    }
+
+    #[test]
+    fn unchanged_previews_keep_measured_layout_across_nearby_edits() {
+        for source in [
+            "```mermaid\ngraph LR\n```\n\ntext\n",
+            "$$\nx + y\n$$\n\ntext\n",
+        ] {
+            let old = markdown::parse_decorations(source);
+            let edited_after = source.replace("text", "text!");
+            let new = markdown::parse_decorations(&edited_after);
+            let preview_line = old
+                .iter()
+                .position(|decoration| {
+                    decoration
+                        .block_preview
+                        .as_ref()
+                        .is_some_and(|p| p.is_anchor)
+                })
+                .unwrap();
+            assert!(super::stable_preview_layout_context(
+                &old[preview_line],
+                &new[preview_line],
+                preview_line,
+                preview_line,
+            ));
+            let shifted = format!("intro\n{source}");
+            let shifted_dec = markdown::parse_decorations(&shifted);
+            assert!(super::stable_preview_layout_context(
+                &old[preview_line],
+                &shifted_dec[preview_line + 1],
+                preview_line,
+                preview_line + 1,
+            ));
+            let changed = source
+                .replace("x + y", "x - y")
+                .replace("graph LR", "graph TD");
+            let changed_dec = markdown::parse_decorations(&changed);
+            assert!(!super::stable_preview_layout_context(
+                &old[preview_line],
+                &changed_dec[preview_line],
+                preview_line,
+                preview_line,
+            ));
+        }
     }
 
     #[test]

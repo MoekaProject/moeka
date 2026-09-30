@@ -25,6 +25,31 @@ pub(super) fn slash_menu_trigger(content: &str, column: usize, in_code: bool) ->
     !in_code && content.trim() == "/" && column == content.len()
 }
 
+/// Only a slash on an otherwise blank Markdown line owns a live command query.
+/// The offsets are UTF-8 byte offsets into the buffer, not character indices.
+pub(super) fn slash_menu_query<'a>(
+    text: &'a str,
+    start: usize,
+    end: usize,
+    markdown: bool,
+    in_code: bool,
+) -> Option<&'a str> {
+    if !markdown
+        || in_code
+        || end <= start
+        || !text.is_char_boundary(start)
+        || !text.is_char_boundary(end)
+    {
+        return None;
+    }
+    let before = text.get(..start)?;
+    if !before.rsplit('\n').next()?.trim().is_empty() || text.get(start..start + 1)? != "/" {
+        return None;
+    }
+    let query = text.get(start + 1..end)?;
+    (!query.contains('\n')).then_some(query)
+}
+
 pub(crate) fn paired_delimiter(input: &str) -> Option<(&'static str, &'static str)> {
     match input {
         "[" => Some(("[", "]")),
@@ -421,6 +446,26 @@ mod tests {
         assert!(super::slash_menu_trigger("/", 1, false));
         assert!(super::slash_menu_trigger("  /", 3, false));
         assert!(!super::slash_menu_trigger("text/", 5, false));
+        assert!(!super::slash_menu_trigger("/ text", 1, false));
+        assert!(!super::slash_menu_trigger(" / ", 2, false));
+    }
+
+    #[test]
+    fn slash_query_only_tracks_a_blank_markdown_line() {
+        let query = super::slash_menu_query;
+        assert_eq!(
+            query("previous\n  /todo", 11, 16, true, false),
+            Some("todo")
+        );
+        assert_eq!(query("\t/不存在", 0, 11, true, false), None); // not at the slash
+        assert_eq!(query("text/todo", 4, 9, true, false), None);
+        assert_eq!(query("/todo", 0, 5, false, false), None);
+        assert_eq!(query("/todo", 0, 5, true, true), None);
+        assert_eq!(query("/todo\nnext", 0, 10, true, false), None);
+        assert_eq!(query("/todo", 0, 0, true, false), None);
+        assert_eq!(query("/文", 0, 2, true, false), None); // partial UTF-8 character
+        assert_eq!(query(" /xyz", 1, 5, true, false), Some("xyz"));
+        assert_eq!(query("\t/文", 1, 5, true, false), Some("文"));
     }
     use crate::buffer::Buffer;
 

@@ -195,6 +195,14 @@ impl EntityInputHandler for EditorView {
             }
             return;
         }
+        if new_text == "/"
+            && !self.cursor.has_selection()
+            && !self.has_extra_cursors()
+            && self.marked_range.is_none()
+            && range_utf16.is_none()
+        {
+            self.capture_slash_menu_anchor_before_edit();
+        }
         self.capture_typing_scroll_guard();
         if ime_debug_enabled() {
             ime_debug_log(format!(

@@ -890,7 +890,10 @@ impl EditorView {
         });
     }
 
-    pub(crate) fn restore_scroll_if_typing_stayed_on_visual_line(&mut self) -> bool {
+    pub(crate) fn restore_scroll_if_typing_stayed_on_visual_line(
+        &mut self,
+        applied_anchor_delta: f32,
+    ) -> bool {
         let Some(guard) = self.pending_typing_scroll_guard.take() else {
             return false;
         };
@@ -906,6 +909,10 @@ impl EditorView {
             .map(|info| info.line_height)
             .unwrap_or_else(|| self.line_height_for_block(&BlockType::Normal));
         let cursor_top = self.text_y_offset_for_line(line) + visual_row as f32 * line_height;
+        // A preview remeasured above the viewport may already have shifted the
+        // scroll offset to keep visible content fixed. Preserve that adjustment
+        // instead of restoring the older absolute offset from before the edit.
+        let restored_offset = (guard.scroll_offset + applied_anchor_delta).max(0.0);
         if !typing_scroll_should_restore(
             guard.line == line,
             self.pending_code_fence
@@ -913,7 +920,7 @@ impl EditorView {
                 .is_some_and(|(fence_line, _)| *fence_line == line)
                 && guard.visual_row == visual_row,
             guard.visual_geometry_ready,
-            guard.scroll_offset,
+            restored_offset,
             guard.viewport_height,
             cursor_top,
             cursor_top + line_height,
@@ -923,7 +930,7 @@ impl EditorView {
 
         self.pending_scroll_to_cursor = false;
         self.pending_center_cursor_in_view = false;
-        self.scroll_offset = guard.scroll_offset;
+        self.scroll_offset = restored_offset;
         true
     }
 
@@ -1479,6 +1486,33 @@ mod tests {
         ));
         assert!(!typing_scroll_should_restore(
             false, false, false, 120.0, 300.0, 180.0, 200.0
+        ));
+    }
+
+    #[test]
+    fn typing_guard_respects_preview_height_compensation_above_the_viewport() {
+        // The chart above the viewport gains 276px while a visible caret is
+        // edited below it. Comparing to the old absolute offset would reject
+        // the guard and schedule another caret scroll in the same frame.
+        let scroll_before = 120.0;
+        let anchor_delta = 276.0;
+        assert!(!typing_scroll_should_restore(
+            true,
+            false,
+            true,
+            scroll_before,
+            300.0,
+            430.0,
+            450.0
+        ));
+        assert!(typing_scroll_should_restore(
+            true,
+            false,
+            true,
+            scroll_before + anchor_delta,
+            300.0,
+            430.0,
+            450.0
         ));
     }
 

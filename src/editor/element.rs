@@ -2714,7 +2714,7 @@ impl Element for EditorElement {
         let suppress_scroll_anchor_compensation = editor.pending_preview_reveal.is_some()
             || editor.pending_click_anchor.is_some()
             || editor.pending_center_cursor_in_view
-            || editor.pending_scroll_to_cursor;
+            || (editor.pending_scroll_to_cursor && editor.pending_typing_scroll_guard.is_none());
 
         // Collect all cursor selection ranges (primary + extra)
         let mut all_sel_ranges: Vec<std::ops::Range<usize>> =
@@ -9958,6 +9958,7 @@ impl Element for EditorElement {
             }
             editor.last_text_width = text_width;
             editor.last_window_scale_factor = window_scale_factor;
+            let scroll_before_anchor = editor.scroll_offset;
             if scroll_anchor_delta.abs() > 0.5
                 && editor.pending_preview_reveal.is_none()
                 && !editor.pending_center_cursor_in_view
@@ -9987,8 +9988,9 @@ impl Element for EditorElement {
                     did_adjust_click_anchor = true;
                 }
             }
-            let did_preserve_typing_scroll =
-                editor.restore_scroll_if_typing_stayed_on_visual_line();
+            let did_preserve_typing_scroll = editor.restore_scroll_if_typing_stayed_on_visual_line(
+                editor.scroll_offset - scroll_before_anchor,
+            );
             let mut did_adjust_preview_reveal = false;
             if let Some(pending) = editor.pending_preview_reveal.take() {
                 editor.pending_scroll_to_cursor = false;
@@ -10057,6 +10059,7 @@ impl Element for EditorElement {
                 editor.generated_preview_rerender_pending = false;
                 editor.schedule_generated_preview_rerender(cx);
             }
+            editor.sync_slash_menu_anchor_after_layout(cx);
         });
 
         // Trigger loading for any image paths not yet in cache

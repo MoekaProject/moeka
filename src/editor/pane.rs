@@ -519,6 +519,7 @@ pane_state! {
     (last_typing_checkpoint_offset, Option<usize>, None),
     // ── Buffer-anchored popup menus ──
     (slash_menu_start, Option<usize>, None),
+    (slash_menu_anchor, Option<SlashMenuAnchor>, None),
     (slash_filter, String, String::new()),
     (wiki_link_start, Option<usize>, None),
     (wiki_link_query, String, String::new()),

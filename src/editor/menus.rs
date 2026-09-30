@@ -910,15 +910,11 @@ impl EditorView {
         let had_pane_target = self.context_menu_pane_target.take().is_some();
         self.table_size_hover = None;
         if had_menu || had_submenu || had_submenu_aim || had_submenu_hovered || had_pane_target {
-            if let Some(start) = self.slash_menu_start.take() {
-                let end = self.cursor.offset;
-                if end > start {
-                    self.buffer.replace(start..end, "");
-                    self.cursor.move_to(start, &self.buffer);
-                    self.reparse();
-                }
-                self.slash_filter.clear();
-            }
+            // Dismissing a suggestion never edits the document. Only executing a
+            // slash action consumes its query.
+            self.slash_menu_start = None;
+            self.slash_menu_anchor = None;
+            self.slash_filter.clear();
             self.clear_wiki_link_menu_state();
             cx.notify();
         }
@@ -1702,18 +1698,73 @@ impl EditorView {
         gpui::point(start_position.x, cursor_position.y)
     }
 
-    /// Horizontally pinned to the `/` so the menu does not drift while the
-    /// filter is typed; vertically pinned to the bottom of the cursor's row so
-    /// the layout can flip it directly above or below that row.
+    fn slash_menu_anchor_at(&self, offset: usize) -> SlashMenuAnchor {
+        let (line, _) = self.buffer.offset_to_line_col(offset);
+        let row_height = self
+            .line_display_info
+            .get(line)
+            .and_then(|info| info.as_ref())
+            .map(|info| info.line_height)
+            .unwrap_or_else(|| self.line_height_for_block(&BlockType::Normal));
+        SlashMenuAnchor {
+            position: self.screen_position_for_offset(offset),
+            row_height,
+            scroll_offset: self.scroll_offset,
+        }
+    }
+
+    fn measured_slash_menu_anchor(&self) -> Option<SlashMenuAnchor> {
+        Some(self.slash_menu_anchor_at(self.slash_menu_start?))
+    }
+
+    pub(crate) fn capture_slash_menu_anchor_before_edit(&mut self) {
+        let (line, column) = self.buffer.offset_to_line_col(self.cursor.offset);
+        let content = self.buffer.line_content(line);
+        if self.slash_menu_start.is_none()
+            && self.active_tab_is_markdown()
+            && !self.embedded_editor
+            && column == content.len()
+            && content.trim().is_empty()
+            && !self.offset_in_code_context(self.cursor.offset)
+        {
+            self.slash_menu_anchor = Some(self.slash_menu_anchor_at(self.cursor.offset));
+        }
+    }
+
+    /// Use the last measured row while an edit invalidates layout. Computing
+    /// its position from temporary line-height estimates here moves the menu
+    /// for one frame, before editor prepaint puts the row back in place.
     pub(super) fn slash_menu_position(&self) -> Option<Point<Pixels>> {
         let start = self.slash_menu_start?;
-        let start_position = self.screen_position_for_offset(start);
-        let cursor_position = self.cursor_screen_position();
-        Some(gpui::point(start_position.x, cursor_position.y))
+        Some(slash_menu_position_for_layout(
+            self.layout_dirty,
+            self.slash_menu_anchor,
+            self.scroll_offset,
+            || self.slash_menu_anchor_at(start).position,
+        ))
+    }
+
+    pub(crate) fn sync_slash_menu_anchor_after_layout(&mut self, cx: &mut Context<Self>) {
+        if self.current_pane_id() != self.focused_pane_id {
+            return;
+        }
+        if let Some(anchor) = self.measured_slash_menu_anchor() {
+            self.slash_menu_anchor = Some(anchor);
+            if let Some(menu) = self.context_menu.as_mut()
+                && matches!(menu.kind, ContextMenuKind::Format)
+                && menu.position != anchor.position
+            {
+                menu.position = anchor.position;
+                cx.notify();
+            }
+        }
     }
 
     pub(crate) fn open_slash_menu(&mut self, cx: &mut Context<Self>) {
         self.slash_menu_start = Some(self.cursor.offset - 1);
+        if self.slash_menu_anchor.is_none() {
+            self.slash_menu_anchor = self.measured_slash_menu_anchor();
+        }
         self.slash_filter = String::new();
         self.menu_selected_index = 0;
         self.heading_submenu_open = false;
@@ -1795,26 +1846,56 @@ impl EditorView {
     }
 
     pub(crate) fn update_slash_filter(&mut self, cx: &mut Context<Self>) {
-        if let Some(start) = self.slash_menu_start {
-            self.menu_selected_index = 0;
-            let end = self.cursor.offset;
-            if end > start + 1 {
-                let text = self.buffer.text();
-                let filter_start = start + 1;
-                if filter_start <= end && end <= text.len() {
-                    self.slash_filter = text[filter_start..end].to_string();
-                }
-            } else {
-                self.slash_filter.clear();
-            }
-            let pos = self
-                .slash_menu_position()
-                .unwrap_or_else(|| self.cursor_screen_position());
-            if let Some(menu) = &mut self.context_menu {
-                menu.position = pos;
-            }
-            cx.notify();
+        let Some(start) = self.slash_menu_start else {
+            return;
+        };
+        let query = input_ime::slash_menu_query(
+            self.buffer.text(),
+            start,
+            self.cursor.offset,
+            self.active_tab_is_markdown() && !self.embedded_editor,
+            self.offset_in_code_context(self.cursor.offset),
+        );
+        let Some(query) = query else {
+            self.dismiss_slash_menu(cx);
+            return;
+        };
+        self.slash_filter = query.to_string();
+        self.menu_selected_index = 0;
+        if self.slash_menu_matched_actions().is_empty() {
+            // Keep the query alive so Backspace can reveal suggestions again.
+            self.hide_slash_menu(cx);
+            return;
         }
+        let pos = self
+            .slash_menu_position()
+            .unwrap_or_else(|| self.cursor_screen_position());
+        if let Some(menu) = &mut self.context_menu {
+            menu.position = pos;
+        } else {
+            self.open_format_context_menu(pos, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn dismiss_slash_menu(&mut self, cx: &mut Context<Self>) {
+        self.slash_menu_start = None;
+        self.slash_menu_anchor = None;
+        self.slash_filter.clear();
+        self.close_context_menu_immediately(cx);
+        cx.notify();
+    }
+
+    /// Hide an empty result list without ending the slash query or touching text.
+    fn hide_slash_menu(&mut self, cx: &mut Context<Self>) {
+        self.context_menu_opacity_epoch += 1;
+        self.context_menu_opacity_task = None;
+        self.context_menu_opacity = 0.0;
+        self.context_menu_opacity_target = 0.0;
+        self.context_menu = None;
+        self.context_submenu = None;
+        self.format_context_menu_bounds.set(None);
+        cx.notify();
     }
 
     pub(crate) fn update_wiki_link_query(&mut self, cx: &mut Context<Self>) {
@@ -2523,11 +2604,7 @@ impl EditorView {
         let filter = self.slash_filter.to_lowercase();
         self.slash_menu_items()
             .into_iter()
-            .filter(|item| {
-                filter.is_empty()
-                    || item.label.to_lowercase().contains(&filter)
-                    || item.filter_text.contains(&filter)
-            })
+            .filter(|item| slash_menu_item_matches(item, &filter))
             .collect()
     }
 
@@ -4962,7 +5039,18 @@ impl EditorView {
         if !input_anchored {
             return 0.0;
         }
-        let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
+        if matches!(kind, ContextMenuKind::Format)
+            && self.layout_dirty
+            && let Some(anchor) = self.slash_menu_anchor
+        {
+            return anchor.row_height;
+        }
+        let anchor_offset = if matches!(kind, ContextMenuKind::Format) {
+            self.slash_menu_start.unwrap_or(self.cursor.offset)
+        } else {
+            self.cursor.offset
+        };
+        let (line, _) = self.buffer.offset_to_line_col(anchor_offset);
         if let Some(Some(info)) = self.line_display_info.get(line) {
             info.line_height
         } else {
@@ -5018,54 +5106,19 @@ impl EditorView {
         estimated_menu_height: f32,
         anchor_height: f32,
     ) -> ContextMenuPanelLayout {
-        let ms = &self.styles.context_menu;
         let border_w = self.styles.window.window_border_width_px;
-        let overlay_w = self.last_window_width - 2.0 * border_w;
-        let overlay_h = self.last_window_height - 2.0 * border_w;
-        let pos_x = (f32::from(position.x) - border_w).clamp(0.0, overlay_w);
-        let pos_y = (f32::from(position.y) - border_w).clamp(0.0, overlay_h);
-        let margin = self.scaled(ms.menu_max_height_margin_px).max(4.0);
-        // For input-anchored menus, `pos_y` is the bottom of the anchor line; the
-        // top of that line is `pos_y - anchor_height`. Upward-opening menus must
-        // be anchored above that top edge so they don't cover the syntax line.
-        let anchor_top_y = (pos_y - anchor_height).max(0.0);
-
-        let space_right = overlay_w - pos_x - margin;
-        let space_left = pos_x - margin;
-        let space_below = overlay_h - pos_y - margin;
-        let space_above = anchor_top_y - margin;
-
-        let open_right = space_right >= width || space_right >= space_left;
-        let open_down = space_below >= estimated_menu_height || space_below >= space_above;
-
-        let left = if open_right {
-            pos_x
-        } else {
-            (pos_x - width).max(margin)
-        };
-        let max_height = if open_down {
-            (overlay_h - pos_y - margin).max(self.scaled(100.0))
-        } else {
-            (anchor_top_y - margin).max(self.scaled(100.0))
-        };
-
-        ContextMenuPanelLayout {
-            left,
-            estimated_top: if open_down {
-                pos_y
-            } else {
-                (anchor_top_y - estimated_menu_height).max(margin)
-            },
-            max_height,
-            bottom_anchor: if open_down {
-                None
-            } else {
-                Some(overlay_h - anchor_top_y)
-            },
-            overlay_width: overlay_w,
-            overlay_height: overlay_h,
-            margin,
-        }
+        context_menu_panel_layout_geometry(
+            f32::from(position.x) - border_w,
+            f32::from(position.y) - border_w,
+            width,
+            estimated_menu_height,
+            anchor_height,
+            self.last_window_width - 2.0 * border_w,
+            self.last_window_height - 2.0 * border_w,
+            self.scaled(self.styles.context_menu.menu_max_height_margin_px)
+                .max(4.0),
+            self.scaled(100.0),
+        )
     }
 
     fn context_menu_layout_top(&self, layout: ContextMenuPanelLayout, panel_height: f32) -> f32 {
@@ -6472,16 +6525,21 @@ impl EditorView {
             ),
         };
 
-        let estimated_menu_height = if matches!(menu.kind, ContextMenuKind::TableResize { .. }) {
-            self.scaled(105.0 + self.styles.context_menu.menu_item_height_px)
-        } else if matches!(
-            menu.kind,
-            ContextMenuKind::Table { .. } | ContextMenuKind::TableBorder { .. }
-        ) {
-            self.format_submenu_height(&menu.kind)
-        } else {
-            self.estimated_context_menu_height(items.len())
-        };
+        let estimated_menu_height =
+            if matches!(menu.kind, ContextMenuKind::Format) && self.slash_menu_start.is_some() {
+                // Choose the side using the unfiltered height. Otherwise narrowing
+                // the query can flip the menu across the anchor row mid-typing.
+                self.estimated_context_menu_height(self.slash_menu_items().len())
+            } else if matches!(menu.kind, ContextMenuKind::TableResize { .. }) {
+                self.scaled(105.0 + self.styles.context_menu.menu_item_height_px)
+            } else if matches!(
+                menu.kind,
+                ContextMenuKind::Table { .. } | ContextMenuKind::TableBorder { .. }
+            ) {
+                self.format_submenu_height(&menu.kind)
+            } else {
+                self.estimated_context_menu_height(items.len())
+            };
         let anchor_height = self.context_menu_anchor_height(&menu.kind);
         let toolbar_bounds = self
             .format_toolbar_owns_hover_menu()
@@ -6773,6 +6831,74 @@ impl EditorView {
     }
 }
 
+fn slash_menu_position_for_layout(
+    layout_dirty: bool,
+    last_measured: Option<SlashMenuAnchor>,
+    scroll_offset: f32,
+    current_measurement: impl FnOnce() -> Point<Pixels>,
+) -> Point<Pixels> {
+    if layout_dirty {
+        if let Some(anchor) = last_measured {
+            return anchor.at_scroll_offset(scroll_offset);
+        }
+    }
+    current_measurement()
+}
+
+fn slash_menu_item_matches(item: &SlashMenuItem, lowercase_filter: &str) -> bool {
+    lowercase_filter.is_empty()
+        || item.label.to_lowercase().contains(lowercase_filter)
+        || item.filter_text.contains(lowercase_filter)
+}
+
+fn context_menu_panel_layout_geometry(
+    x: f32,
+    y: f32,
+    width: f32,
+    estimated_menu_height: f32,
+    anchor_height: f32,
+    overlay_w: f32,
+    overlay_h: f32,
+    margin: f32,
+    min_height: f32,
+) -> ContextMenuPanelLayout {
+    let pos_x = x.clamp(0.0, overlay_w);
+    let pos_y = y.clamp(0.0, overlay_h);
+    // Input-anchored positions are the bottom of the visual row.
+    let anchor_top_y = (pos_y - anchor_height).max(0.0);
+    let space_right = overlay_w - pos_x - margin;
+    let space_left = pos_x - margin;
+    let space_below = overlay_h - pos_y - margin;
+    let space_above = anchor_top_y - margin;
+    let open_right = space_right >= width || space_right >= space_left;
+    let open_down = space_below >= estimated_menu_height || space_below >= space_above;
+    let left = if open_right {
+        pos_x
+    } else {
+        (pos_x - width).max(margin)
+    };
+    let available_height = if open_down { space_below } else { space_above };
+    // Input menus should never cover the anchor row, even in a short window.
+    let max_height = available_height.max(if anchor_height > 0.0 { 1.0 } else { min_height });
+    ContextMenuPanelLayout {
+        left,
+        estimated_top: if open_down {
+            pos_y
+        } else {
+            (anchor_top_y - estimated_menu_height).max(margin)
+        },
+        max_height,
+        bottom_anchor: if open_down {
+            None
+        } else {
+            Some(overlay_h - anchor_top_y)
+        },
+        overlay_width: overlay_w,
+        overlay_height: overlay_h,
+        margin,
+    }
+}
+
 fn line_format_action(block_type: &BlockType) -> FormatMenuAction {
     match block_type {
         BlockType::Heading(1) => FormatMenuAction::Heading1,
@@ -6789,6 +6915,88 @@ fn line_format_action(block_type: &BlockType) -> FormatMenuAction {
         BlockType::HorizontalRule => FormatMenuAction::HorizontalRule,
         BlockType::Table => FormatMenuAction::Table,
         BlockType::Normal | BlockType::Heading(_) => FormatMenuAction::Paragraph,
+    }
+}
+
+#[cfg(test)]
+mod slash_menu_tests {
+    use super::*;
+
+    #[test]
+    fn zero_matches_keep_the_query_available_for_backspacing() {
+        let item = SlashMenuItem {
+            label: "Code Block".into(),
+            filter_text: "code block",
+            icon: None,
+            shortcut: None,
+            action: FormatMenuAction::CodeBlock,
+        };
+        let mut buffer = crate::buffer::Buffer::from_text("/codezzz");
+        let query =
+            input_ime::slash_menu_query(buffer.text(), 0, buffer.len(), true, false).unwrap();
+        assert!(!slash_menu_item_matches(&item, &query.to_lowercase()));
+        assert_eq!(buffer.text(), "/codezzz");
+
+        buffer.replace(5..8, "");
+        let query =
+            input_ime::slash_menu_query(buffer.text(), 0, buffer.len(), true, false).unwrap();
+        assert!(slash_menu_item_matches(&item, &query.to_lowercase()));
+        assert_eq!(buffer.text(), "/code");
+    }
+
+    #[test]
+    fn slash_anchor_ignores_provisional_geometry_until_prepaint_finishes() {
+        let measured = SlashMenuAnchor {
+            position: gpui::point(gpui::px(100.0), gpui::px(300.0)),
+            row_height: 24.0,
+            scroll_offset: 120.0,
+        };
+        let provisional = gpui::point(gpui::px(100.0), gpui::px(90.0));
+        assert_eq!(
+            slash_menu_position_for_layout(true, Some(measured), 120.0, || {
+                panic!("must not measure invalid layout")
+            }),
+            measured.position
+        );
+        assert_eq!(
+            slash_menu_position_for_layout(true, Some(measured), 140.0, || provisional),
+            gpui::point(gpui::px(100.0), gpui::px(280.0))
+        );
+        let settled = gpui::point(gpui::px(100.0), gpui::px(280.0));
+        assert_eq!(
+            slash_menu_position_for_layout(true, None, 140.0, || provisional),
+            provisional
+        );
+        assert_eq!(
+            slash_menu_position_for_layout(false, Some(measured), 140.0, || settled),
+            settled
+        );
+    }
+
+    #[test]
+    fn filtered_menu_keeps_the_same_row_edge_and_direction() {
+        let layout = |y| {
+            context_menu_panel_layout_geometry(
+                120.0, y, 200.0, 250.0, 20.0, 800.0, 400.0, 8.0, 100.0,
+            )
+        };
+        let above = layout(340.0);
+        assert_eq!(above.bottom_anchor, Some(80.0));
+        // The actual (filtered) panel shrinks toward the row, not away from it.
+        for visible_height in [250.0, 80.0, 20.0] {
+            let top = above.overlay_height - above.bottom_anchor.unwrap() - visible_height;
+            assert_eq!(top + visible_height, 320.0);
+        }
+        assert_eq!(above.max_height, 312.0);
+        let below = layout(100.0);
+        assert_eq!(below.bottom_anchor, None);
+        assert_eq!(below.estimated_top, 100.0);
+        // In a constrained viewport, cap the popup rather than cover the row.
+        let constrained = context_menu_panel_layout_geometry(
+            120.0, 28.0, 200.0, 250.0, 20.0, 800.0, 90.0, 8.0, 100.0,
+        );
+        assert_eq!(constrained.estimated_top, 28.0);
+        assert_eq!(constrained.max_height, 54.0);
     }
 }
 

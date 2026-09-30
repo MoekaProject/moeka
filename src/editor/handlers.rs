@@ -177,6 +177,10 @@ impl EditorView {
             self.close_context_menu(cx);
             return;
         }
+        if self.slash_menu_start.is_some() {
+            self.dismiss_slash_menu(cx);
+            return;
+        }
         if self.dismiss_selection_toolbar(window, cx) {
             cx.notify();
             return;
@@ -447,6 +451,7 @@ impl EditorView {
         if self.delete_adjacent_table_cell_break(true, cx) {
             return;
         }
+        self.capture_typing_scroll_guard();
         self.checkpoint();
         let should_normalize_ordered_lists = self.active_tab_is_markdown();
         let cursor_line_before = self.cursor_line();
@@ -602,10 +607,7 @@ impl EditorView {
 
         if let Some(start) = self.slash_menu_start {
             if self.cursor.offset <= start {
-                self.slash_menu_start = None;
-                self.slash_filter.clear();
-                self.context_menu = None;
-                cx.notify();
+                self.dismiss_slash_menu(cx);
             } else {
                 self.update_slash_filter(cx);
             }
@@ -659,6 +661,7 @@ impl EditorView {
         if self.delete_adjacent_table_cell_break(false, cx) {
             return;
         }
+        self.capture_typing_scroll_guard();
         self.checkpoint();
         let should_normalize_ordered_lists = self.active_tab_is_markdown();
         let cursor_line_before = self.cursor_line();
@@ -885,11 +888,15 @@ impl EditorView {
             return;
         }
         if self.slash_menu_start.is_some() {
-            if self.menu_selected_index > 0 {
-                self.menu_selected_index -= 1;
+            if self.context_menu.is_none() {
+                self.dismiss_slash_menu(cx);
+            } else {
+                if self.menu_selected_index > 0 {
+                    self.menu_selected_index -= 1;
+                }
+                cx.notify();
+                return;
             }
-            cx.notify();
-            return;
         }
         if self.has_extra_cursors() {
             self.reset_cursor_visual_targeting();
@@ -958,12 +965,16 @@ impl EditorView {
             return;
         }
         if self.slash_menu_start.is_some() {
-            let max_index = self.slash_menu_matched_actions().len().saturating_sub(1);
-            if self.menu_selected_index < max_index {
-                self.menu_selected_index += 1;
+            if self.context_menu.is_none() {
+                self.dismiss_slash_menu(cx);
+            } else {
+                let max_index = self.slash_menu_matched_actions().len().saturating_sub(1);
+                if self.menu_selected_index < max_index {
+                    self.menu_selected_index += 1;
+                }
+                cx.notify();
+                return;
             }
-            cx.notify();
-            return;
         }
         if self.has_extra_cursors() {
             self.reset_cursor_visual_targeting();
@@ -1269,8 +1280,11 @@ impl EditorView {
             return;
         }
         if self.slash_menu_start.is_some() {
-            self.execute_slash_menu_selected(cx);
-            return;
+            if self.context_menu.is_some() {
+                self.execute_slash_menu_selected(cx);
+                return;
+            }
+            self.dismiss_slash_menu(cx);
         }
         if self.sidebar_edit.is_some() {
             self.commit_sidebar_edit(cx);
