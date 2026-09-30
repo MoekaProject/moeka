@@ -325,7 +325,6 @@ impl SelectionToolbarGeometry {
 
 #[derive(Clone, Copy, Debug)]
 struct SelectionToolbarVisibility {
-    enabled: bool,
     editable_markdown: bool,
     focused: bool,
     window_active: bool,
@@ -345,8 +344,7 @@ struct SelectionToolbarVisibility {
 
 impl SelectionToolbarVisibility {
     fn visible(self) -> bool {
-        self.enabled
-            && self.editable_markdown
+        self.editable_markdown
             && self.focused
             && self.window_active
             && self.primary_nonempty
@@ -748,7 +746,6 @@ impl EditorView {
                 .flatten()
                 .any(|input| input.read(cx).focus_handle(cx).is_focused(window));
         SelectionToolbarVisibility {
-            enabled: self.app_settings.format_toolbar_visible,
             editable_markdown: self.active_tab_is_markdown()
                 && !self.active_tab_is_read_only()
                 && !self.embedded_editor,
@@ -1125,7 +1122,6 @@ impl Element for LineFormatToolbarElement {
             editor.line_format_toolbar_bounds = None;
             if editor.focused_pane_id != self.pane_id
                 || (editor.cursor.has_selection() && editor.line_format_toolbar_line.is_none())
-                || !editor.app_settings.format_toolbar_visible
                 || !editor.active_tab_is_markdown()
                 || editor.active_tab_is_read_only()
             {
@@ -1637,7 +1633,6 @@ mod tests {
     #[test]
     fn every_visibility_gate_blocks_display() {
         let ready = SelectionToolbarVisibility {
-            enabled: true,
             editable_markdown: true,
             focused: true,
             window_active: true,
@@ -1655,10 +1650,9 @@ mod tests {
             dismissed: false,
         };
         assert!(ready.visible());
-        for index in 0..16 {
+        for index in 0..15 {
             let mut state = ready;
             let gates = [
-                &mut state.enabled,
                 &mut state.editable_markdown,
                 &mut state.focused,
                 &mut state.window_active,

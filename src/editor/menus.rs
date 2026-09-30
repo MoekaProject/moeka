@@ -497,84 +497,120 @@ pub(super) struct ImageMenuTarget {
     pub(super) url_range: Range<usize>,
 }
 
-impl EditorView {
-    fn render_table_cells_context_menu(
-        &self,
-        table: usize,
-        row: usize,
-        col: usize,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let mut items = Vec::new();
-        items.push(self.render_context_menu_item_with_icon(
-            self.t(crate::i18n::TextKey::Copy),
-            MENU_COPY_SVG_PATH,
-            false,
-            cx,
-            move |this, _, cx| {
-                this.ensure_table_cell_context_selection(table, row, col);
-                if let Some(text) = this.copy_table_cell_selection() {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                }
-            },
-        ));
-        items.push(self.render_context_menu_item_with_icon(
-            self.t(crate::i18n::TextKey::Cut),
-            MENU_CLIP_SVG_PATH,
-            true,
-            cx,
-            move |this, _, cx| {
-                this.ensure_table_cell_context_selection(table, row, col);
-                this.cut_table_cell_selection(cx);
-            },
-        ));
-        items.push(self.render_context_menu_item_with_icon(
-            crate::i18n::table_paste_label(self.ui_language, true),
-            MENU_PASTE_SVG_PATH,
-            false,
-            cx,
-            move |this, _, cx| {
-                this.ensure_table_cell_context_selection(table, row, col);
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    this.paste_table_cell_selection(&text, true, cx);
-                }
-            },
-        ));
-        items.push(self.render_context_menu_separator());
-        items.push(self.render_context_menu_item_with_icon(
-            crate::i18n::table_clear_cells_label(self.ui_language),
-            TABLE_DELETE_SVG,
-            true,
-            cx,
-            move |this, _, cx| {
-                this.ensure_table_cell_context_selection(table, row, col);
-                this.delete_table_cell_selection(cx);
-            },
-        ));
-        items
+const TABLE_CONTEXT_MENU_WIDTH_PX: f32 = 188.0;
+
+#[derive(Clone, Copy)]
+struct TableMenuLayout {
+    rows: bool,
+    columns: bool,
+    alignment: bool,
+    paste_insert: bool,
+    clear: bool,
+}
+
+impl TableMenuLayout {
+    fn new(is_front_matter: bool) -> Self {
+        Self {
+            rows: true,
+            columns: !is_front_matter,
+            alignment: !is_front_matter,
+            paste_insert: !is_front_matter,
+            clear: true,
+        }
     }
 
-    fn render_table_border_context_menu(
-        &self,
+    fn counts(self) -> (usize, usize) {
+        let has_structure_actions = self.rows || self.columns;
+        let items = 3 * self.alignment as usize
+            + 3 * self.rows as usize
+            + 3 * self.columns as usize
+            + 1 // Delete Table / Front Matter
+            + 3 // Copy, Cut, Paste Overwrite
+            + self.paste_insert as usize
+            + self.clear as usize;
+        let separators = self.alignment as usize
+            + 2 * has_structure_actions as usize
+            + 1 // Structure / clipboard
+            + self.clear as usize;
+        (items, separators)
+    }
+}
+
+struct TableMenuSelection {
+    table: usize,
+    rows: Vec<usize>,
+    columns: Vec<usize>,
+    first_row: usize,
+    last_row: usize,
+    first_column: usize,
+    last_column: usize,
+    is_front_matter: bool,
+    border_axis: Option<bool>,
+}
+
+impl TableMenuSelection {
+    fn for_border(
         table: usize,
         is_column: bool,
         index: usize,
+        border: Option<&super::table_handles::TableBorderSelection>,
+        is_front_matter: bool,
+    ) -> Self {
+        let (first, last) = border
+            .and_then(|selection| selection.insertion_edges())
+            .unwrap_or((index, index));
+        let indices = border
+            .map(|selection| selection.indices.clone())
+            .unwrap_or_else(|| vec![index]);
+        if is_column {
+            Self {
+                table,
+                rows: vec![0],
+                columns: indices,
+                first_row: 0,
+                last_row: 0,
+                first_column: first,
+                last_column: last,
+                is_front_matter,
+                border_axis: Some(true),
+            }
+        } else {
+            Self {
+                table,
+                rows: indices,
+                columns: vec![0],
+                first_row: first,
+                last_row: last,
+                first_column: 0,
+                last_column: 0,
+                is_front_matter,
+                border_axis: Some(false),
+            }
+        }
+    }
+}
+
+impl EditorView {
+    fn render_table_structure_menu(
+        &self,
+        selection: TableMenuSelection,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         use crate::i18n::TextKey;
+        let TableMenuSelection {
+            table,
+            rows,
+            columns,
+            first_row,
+            last_row,
+            first_column,
+            last_column,
+            is_front_matter,
+            border_axis,
+        } = selection;
+        let layout = TableMenuLayout::new(is_front_matter);
         let mut items = Vec::new();
-        if is_column {
-            let selected_columns = self
-                .table_handles
-                .selection
-                .as_ref()
-                .filter(|selection| {
-                    selection.table_start_line == table
-                        && selection.is_column
-                        && selection.contains(index)
-                })
-                .map(|selection| selection.indices.clone())
-                .unwrap_or_else(|| vec![index]);
+        if layout.alignment {
             for (label, align, icon) in [
                 (
                     TextKey::AlignLeft,
@@ -592,7 +628,7 @@ impl EditorView {
                     TABLE_ALIGN_RIGHT_SVG,
                 ),
             ] {
-                let columns = selected_columns.clone();
+                let columns = columns.clone();
                 items.push(self.render_context_menu_item_with_icon(
                     self.t(label),
                     icon,
@@ -602,60 +638,108 @@ impl EditorView {
                 ));
             }
             items.push(self.render_context_menu_separator());
-            for (label, before) in [
-                (TextKey::AddColumnLeft, true),
-                (TextKey::AddColumnRight, false),
+        }
+        if layout.rows {
+            for (label, row, above) in [
+                (TextKey::AddRowAbove, first_row, true),
+                (TextKey::AddRowBelow, last_row, false),
+            ] {
+                items.push(self.render_context_menu_item_with_icon(
+                    self.t(label),
+                    TABLE_ROWS_SVG,
+                    false,
+                    cx,
+                    move |this, _, cx| this.table_insert_row(table, row, above, cx),
+                ));
+            }
+        }
+        if layout.columns {
+            for (label, column, left) in [
+                (TextKey::AddColumnLeft, first_column, true),
+                (TextKey::AddColumnRight, last_column, false),
             ] {
                 items.push(self.render_context_menu_item_with_icon(
                     self.t(label),
                     TABLE_COLUMNS_SVG,
                     false,
                     cx,
-                    move |this, _, cx| this.table_insert_column(table, index, before, cx),
-                ));
-            }
-        } else {
-            for (label, above) in [(TextKey::AddRowAbove, true), (TextKey::AddRowBelow, false)] {
-                items.push(self.render_context_menu_item_with_icon(
-                    self.t(label),
-                    TABLE_ROWS_SVG,
-                    false,
-                    cx,
-                    move |this, _, cx| this.table_insert_row(table, index, above, cx),
+                    move |this, _, cx| this.table_insert_column(table, column, left, cx),
                 ));
             }
         }
-        items.push(self.render_context_menu_separator());
+        if layout.rows || layout.columns {
+            items.push(self.render_context_menu_separator());
+        }
+        if layout.rows {
+            items.push(self.render_context_menu_item_with_icon(
+                self.t(TextKey::DeleteRow),
+                TABLE_DELETE_SVG,
+                false,
+                cx,
+                move |this, _, cx| {
+                    if border_axis == Some(false) {
+                        this.delete_table_border_selection(cx);
+                    } else {
+                        this.table_delete_rows(table, &rows, cx);
+                    }
+                },
+            ));
+        }
+        if layout.columns {
+            items.push(self.render_context_menu_item_with_icon(
+                self.t(TextKey::DeleteColumn),
+                TABLE_DELETE_SVG,
+                false,
+                cx,
+                move |this, _, cx| {
+                    if border_axis == Some(true) {
+                        this.delete_table_border_selection(cx);
+                    } else {
+                        this.table_delete_columns(table, &columns, cx);
+                    }
+                },
+            ));
+        }
+        if layout.rows || layout.columns {
+            items.push(self.render_context_menu_separator());
+        }
+        items.push(self.render_context_menu_item_with_icon(
+            self.t(if is_front_matter {
+                TextKey::DeleteFrontMatter
+            } else {
+                TextKey::DeleteTable
+            }),
+            TABLE_GRID_SVG,
+            false,
+            cx,
+            move |this, _, cx| this.table_delete_table(table, cx),
+        ));
+        items
+    }
+
+    fn render_table_cells_context_menu(
+        &self,
+        table: usize,
+        row: usize,
+        col: usize,
+        border_axis: Option<bool>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut items = Vec::new();
         items.push(self.render_context_menu_item_with_icon(
             self.t(crate::i18n::TextKey::Copy),
             MENU_COPY_SVG_PATH,
             false,
             cx,
             move |this, _, cx| {
-                if let Some(text) = this.copy_table_border_selection() {
+                let text = if border_axis.is_some() {
+                    this.copy_table_border_selection()
+                } else {
+                    this.ensure_table_cell_context_selection(table, row, col);
+                    this.copy_table_cell_selection()
+                };
+                if let Some(text) = text {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                }
-            },
-        ));
-        items.push(self.render_context_menu_item_with_icon(
-            crate::i18n::table_paste_label(self.ui_language, false),
-            MENU_PASTE_SVG_PATH,
-            false,
-            cx,
-            move |this, _, cx| {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    this.paste_table_border_selection(&text, cx);
-                }
-            },
-        ));
-        items.push(self.render_context_menu_item_with_icon(
-            crate::i18n::table_paste_label(self.ui_language, true),
-            MENU_PASTE_SVG_PATH,
-            false,
-            cx,
-            move |this, _, cx| {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    this.paste_table_border_selection_overwrite(&text, cx);
                 }
             },
         ));
@@ -665,29 +749,61 @@ impl EditorView {
             true,
             cx,
             move |this, _, cx| {
-                this.cut_table_border_selection(cx);
+                if border_axis.is_some() {
+                    this.cut_table_border_selection(cx);
+                } else {
+                    this.ensure_table_cell_context_selection(table, row, col);
+                    this.cut_table_cell_selection(cx);
+                }
             },
         ));
+        if TableMenuLayout::new(self.block_is_front_matter(table)).paste_insert {
+            items.push(self.render_context_menu_item_with_icon(
+                crate::i18n::table_paste_label(self.ui_language, false),
+                MENU_PASTE_SVG_PATH,
+                false,
+                cx,
+                move |this, _, cx| {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        if border_axis.is_some() {
+                            this.paste_table_border_selection(&text, cx);
+                        } else {
+                            this.ensure_table_cell_context_selection(table, row, col);
+                            this.paste_table_cell_selection(&text, false, cx);
+                        }
+                    }
+                },
+            ));
+        }
         items.push(self.render_context_menu_item_with_icon(
-            self.t(if is_column {
-                TextKey::DeleteColumn
-            } else {
-                TextKey::DeleteRow
-            }),
+            crate::i18n::table_paste_label(self.ui_language, true),
+            MENU_PASTE_SVG_PATH,
+            false,
+            cx,
+            move |this, _, cx| {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    if border_axis.is_some() {
+                        this.paste_table_border_selection_overwrite(&text, cx);
+                    } else {
+                        this.ensure_table_cell_context_selection(table, row, col);
+                        this.paste_table_cell_selection(&text, true, cx);
+                    }
+                }
+            },
+        ));
+        items.push(self.render_context_menu_separator());
+        items.push(self.render_context_menu_item_with_icon(
+            crate::i18n::table_clear_cells_label(self.ui_language),
             TABLE_DELETE_SVG,
             true,
             cx,
             move |this, _, cx| {
-                if this.table_handles.selection.is_none() {
-                    this.table_handles.selection =
-                        Some(super::table_handles::TableBorderSelection {
-                            table_start_line: table,
-                            is_column,
-                            anchor: index,
-                            indices: vec![index],
-                        });
+                if border_axis.is_some() {
+                    this.clear_table_border_selection(cx);
+                } else {
+                    this.ensure_table_cell_context_selection(table, row, col);
+                    this.clear_table_cell_selection(cx);
                 }
-                this.delete_table_border_selection(cx);
             },
         ));
         items
@@ -5003,7 +5119,11 @@ impl EditorView {
         let ms = &self.styles.context_menu;
         let main_menu_width = self.scaled(ms.menu_format_width_px);
         let main_menu_height = self.format_main_menu_height();
-        let submenu_width = self.scaled(ms.menu_format_width_px);
+        let submenu_width = self.scaled(if matches!(submenu_kind, ContextMenuKind::Table { .. }) {
+            TABLE_CONTEXT_MENU_WIDTH_PX
+        } else {
+            ms.menu_format_width_px
+        });
         let submenu_height = self.format_submenu_height(submenu_kind);
         let submenu_gap = self.scaled(ms.menu_submenu_gap_px);
         let main_layout =
@@ -5116,7 +5236,11 @@ impl EditorView {
             return false;
         };
 
-        let submenu_width = self.scaled(self.styles.context_menu.menu_format_width_px);
+        let submenu_width = self.scaled(if matches!(submenu_kind, ContextMenuKind::Table { .. }) {
+            TABLE_CONTEXT_MENU_WIDTH_PX
+        } else {
+            self.styles.context_menu.menu_format_width_px
+        });
         let submenu_height = self
             .format_submenu_height(submenu_kind)
             .min(submenu_layout.max_height);
@@ -5341,6 +5465,13 @@ impl EditorView {
         padding + item_height * 7.0
     }
 
+    fn table_context_menu_height(&self, is_front_matter: bool) -> f32 {
+        let (items, separators) = TableMenuLayout::new(is_front_matter).counts();
+        self.scaled(self.styles.context_menu.menu_padding_y_px) * 2.0
+            + self.scaled(self.styles.context_menu.menu_item_height_px) * items as f32
+            + self.context_menu_separator_block_height() * separators as f32
+    }
+
     fn format_submenu_height(&self, submenu_kind: &ContextMenuKind) -> f32 {
         match submenu_kind {
             ContextMenuKind::Export { .. } => {
@@ -5349,26 +5480,12 @@ impl EditorView {
             }
             ContextMenuKind::FormatHeading => self.format_heading_menu_height(),
             ContextMenuKind::FormatMore => self.format_more_menu_height(),
-            ContextMenuKind::TableBorder { is_column, .. } => {
-                let item_count = if *is_column { 10.0 } else { 7.0 };
-                self.scaled(self.styles.context_menu.menu_item_height_px) * item_count
-                    + self.scaled(self.styles.context_menu.menu_padding_y_px) * 2.0
-                    + self.context_menu_separator_block_height()
-            }
+            ContextMenuKind::TableBorder {
+                table_start_line, ..
+            } => self.table_context_menu_height(self.block_is_front_matter(*table_start_line)),
             ContextMenuKind::Table {
                 table_start_line, ..
-            } => {
-                let is_front_matter = self
-                    .decorations
-                    .get(*table_start_line)
-                    .and_then(|dec| dec.table_info.as_ref())
-                    .is_some_and(|info| info.is_front_matter);
-                let item_count = if is_front_matter { 4.0 } else { 11.0 };
-                self.scaled(self.styles.context_menu.menu_padding_y_px) * 2.0
-                    + self.scaled(self.styles.context_menu.menu_item_height_px) * item_count
-                    + self.context_menu_separator_block_height()
-                        * if is_front_matter { 2.0 } else { 3.0 }
-            }
+            } => self.table_context_menu_height(self.block_is_front_matter(*table_start_line)),
             _ => self.format_more_menu_height(),
         }
     }
@@ -5474,14 +5591,23 @@ impl EditorView {
         table_start_line: usize,
         row: usize,
         col: usize,
+        border_axis: Option<bool>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let mut items = Vec::new();
+        let border = border_axis.and_then(|is_column| {
+            self.table_handles.selection.as_ref().filter(|selection| {
+                selection.table_start_line == table_start_line
+                    && selection.is_column == is_column
+                    && selection.contains(if is_column { col } else { row })
+            })
+        });
         let selection = self
             .table_cell_selection
             .as_ref()
             .filter(|selection| selection.contains(table_start_line, row, col));
-        let (action_row, action_col) = selection.map_or((row, col), |selection| selection.focus);
+        let (first_row, last_row, first_column, last_column) = selection
+            .map(|selection| selection.insertion_edges())
+            .unwrap_or((row, row, col, col));
         let selected_rows = selection
             .map(|selection| selection.rows.clone().collect::<Vec<_>>())
             .unwrap_or_else(|| vec![row]);
@@ -5493,118 +5619,36 @@ impl EditorView {
             .get(table_start_line)
             .and_then(|dec| dec.table_info.as_ref())
             .is_some_and(|info| info.is_front_matter);
-        if !is_front_matter {
-            let columns = selected_columns.clone();
-            items.push(self.render_context_menu_item_with_icon(
-                self.t(crate::i18n::TextKey::AlignLeft),
-                TABLE_ALIGN_LEFT_SVG,
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.table_set_columns_alignment(
-                        table_start_line,
-                        &columns,
-                        crate::markdown::TableAlign::Left,
-                        cx,
-                    )
-                },
-            ));
-            let columns = selected_columns.clone();
-            items.push(self.render_context_menu_item_with_icon(
-                self.t(crate::i18n::TextKey::AlignCenter),
-                TABLE_ALIGN_CENTER_SVG,
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.table_set_columns_alignment(
-                        table_start_line,
-                        &columns,
-                        crate::markdown::TableAlign::Center,
-                        cx,
-                    )
-                },
-            ));
-            let columns = selected_columns.clone();
-            items.push(self.render_context_menu_item_with_icon(
-                self.t(crate::i18n::TextKey::AlignRight),
-                TABLE_ALIGN_RIGHT_SVG,
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.table_set_columns_alignment(
-                        table_start_line,
-                        &columns,
-                        crate::markdown::TableAlign::Right,
-                        cx,
-                    )
-                },
-            ));
-            items.push(self.render_context_menu_separator());
-        }
-        items.push(self.render_context_menu_item_with_icon(
-            self.t(crate::i18n::TextKey::AddRowAbove),
-            TABLE_ROWS_SVG,
-            false,
-            cx,
-            move |this, _, cx| this.table_insert_row(table_start_line, action_row, true, cx),
-        ));
-        items.push(self.render_context_menu_item_with_icon(
-            self.t(crate::i18n::TextKey::AddRowBelow),
-            TABLE_ROWS_SVG,
-            false,
-            cx,
-            move |this, _, cx| this.table_insert_row(table_start_line, action_row, false, cx),
-        ));
-        if !is_front_matter {
-            items.push(self.render_context_menu_item_with_icon(
-                self.t(crate::i18n::TextKey::AddColumnLeft),
-                TABLE_COLUMNS_SVG,
-                false,
-                cx,
-                move |this, _, cx| this.table_insert_column(table_start_line, action_col, true, cx),
-            ));
-            items.push(self.render_context_menu_item_with_icon(
-                self.t(crate::i18n::TextKey::AddColumnRight),
-                TABLE_COLUMNS_SVG,
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.table_insert_column(table_start_line, action_col, false, cx)
-                },
-            ));
-        }
+        let target = if let Some(is_column) = border_axis {
+            TableMenuSelection::for_border(
+                table_start_line,
+                is_column,
+                if is_column { col } else { row },
+                border,
+                is_front_matter,
+            )
+        } else {
+            TableMenuSelection {
+                table: table_start_line,
+                rows: selected_rows,
+                columns: selected_columns,
+                first_row,
+                last_row,
+                first_column,
+                last_column,
+                is_front_matter,
+                border_axis: None,
+            }
+        };
+        let mut items = self.render_table_structure_menu(target, cx);
         items.push(self.render_context_menu_separator());
-        items.push(self.render_context_menu_item_with_icon(
-            self.t(crate::i18n::TextKey::DeleteRow),
-            TABLE_DELETE_SVG,
-            false,
+        items.extend(self.render_table_cells_context_menu(
+            table_start_line,
+            row,
+            col,
+            border_axis,
             cx,
-            move |this, _, cx| this.table_delete_rows(table_start_line, &selected_rows, cx),
         ));
-        if !is_front_matter {
-            let columns = selected_columns.clone();
-            items.push(self.render_context_menu_item_with_icon(
-                self.t(crate::i18n::TextKey::DeleteColumn),
-                TABLE_DELETE_SVG,
-                false,
-                cx,
-                move |this, _, cx| this.table_delete_columns(table_start_line, &columns, cx),
-            ));
-        }
-        items.push(self.render_context_menu_separator());
-        items.push(self.render_context_menu_item_with_icon(
-            if is_front_matter {
-                self.t(crate::i18n::TextKey::DeleteFrontMatter)
-            } else {
-                self.t(crate::i18n::TextKey::DeleteTable)
-            },
-            TABLE_GRID_SVG,
-            false,
-            cx,
-            move |this, _, cx| this.table_delete_table(table_start_line, cx),
-        ));
-        items.push(self.render_context_menu_separator());
-        items.extend(self.render_table_cells_context_menu(table_start_line, row, col, cx));
         items
     }
 
@@ -6405,16 +6449,22 @@ impl EditorView {
                 is_column,
                 index,
             } => (
-                self.render_table_border_context_menu(*table_start_line, *is_column, *index, cx),
-                self.scaled(164.0),
+                self.render_table_context_submenu(
+                    *table_start_line,
+                    if *is_column { 0 } else { *index },
+                    if *is_column { *index } else { 0 },
+                    Some(*is_column),
+                    cx,
+                ),
+                self.scaled(TABLE_CONTEXT_MENU_WIDTH_PX),
             ),
             ContextMenuKind::Table {
                 table_start_line,
                 row,
                 col,
             } => (
-                self.render_table_context_submenu(*table_start_line, *row, *col, cx),
-                self.scaled(self.styles.context_menu.menu_format_width_px),
+                self.render_table_context_submenu(*table_start_line, *row, *col, None, cx),
+                self.scaled(TABLE_CONTEXT_MENU_WIDTH_PX),
             ),
             ContextMenuKind::TableResize { table_start_line } => (
                 self.render_table_size_picker(*table_start_line, cx),
@@ -6424,6 +6474,11 @@ impl EditorView {
 
         let estimated_menu_height = if matches!(menu.kind, ContextMenuKind::TableResize { .. }) {
             self.scaled(105.0 + self.styles.context_menu.menu_item_height_px)
+        } else if matches!(
+            menu.kind,
+            ContextMenuKind::Table { .. } | ContextMenuKind::TableBorder { .. }
+        ) {
+            self.format_submenu_height(&menu.kind)
         } else {
             self.estimated_context_menu_height(items.len())
         };
@@ -6547,11 +6602,13 @@ impl EditorView {
                     table_start_line,
                     row,
                     col,
-                }) => self.render_table_context_submenu(*table_start_line, *row, *col, cx),
+                }) => self.render_table_context_submenu(*table_start_line, *row, *col, None, cx),
                 _ => Vec::new(),
             };
             let submenu_width = if export_submenu_open {
                 self.scaled(self.styles.context_menu.menu_export_width_px)
+            } else if matches!(submenu_kind, Some(ContextMenuKind::Table { .. })) {
+                self.scaled(TABLE_CONTEXT_MENU_WIDTH_PX)
             } else {
                 self.scaled(self.styles.context_menu.menu_format_width_px)
             };
@@ -6879,5 +6936,91 @@ mod submenu_layout_tests {
             ),
             (486.0, 350.0)
         );
+    }
+}
+
+#[cfg(test)]
+mod table_menu_tests {
+    use super::{TableMenuLayout, TableMenuSelection};
+    use crate::editor::table_handles::TableBorderSelection;
+
+    #[test]
+    fn handles_only_target_the_selected_structural_axis() {
+        let columns = TableBorderSelection {
+            table_start_line: 7,
+            is_column: true,
+            anchor: 3,
+            indices: vec![1, 3],
+        };
+        let target = TableMenuSelection::for_border(7, true, 3, Some(&columns), false);
+        assert_eq!(target.rows, [0]);
+        assert_eq!(target.columns, [1, 3]);
+        assert_eq!((target.first_column, target.last_column), (1, 3));
+        let layout = TableMenuLayout::new(false);
+        assert!(layout.rows && layout.columns && layout.alignment);
+
+        let rows = TableBorderSelection {
+            table_start_line: 7,
+            is_column: false,
+            anchor: 2,
+            indices: vec![2, 4],
+        };
+        let target = TableMenuSelection::for_border(7, false, 4, Some(&rows), false);
+        assert_eq!(target.rows, [2, 4]);
+        assert_eq!(target.columns, [0]);
+        assert_eq!((target.first_row, target.last_row), (2, 4));
+        let layout = TableMenuLayout::new(false);
+        assert!(layout.rows && layout.columns && layout.alignment);
+    }
+
+    #[test]
+    fn front_matter_column_handle_has_the_cell_menu_structure() {
+        let target = TableMenuSelection::for_border(7, true, 0, None, true);
+        assert_eq!(target.rows, [0]);
+        let layout = TableMenuLayout::new(target.is_front_matter);
+        assert!(layout.rows && !layout.columns && !layout.alignment);
+        assert_eq!(layout.counts(), (8, 4));
+    }
+
+    #[test]
+    fn table_menu_height_counts_match_items_and_separators_by_context() {
+        assert_eq!(TableMenuLayout::new(false).counts(), (15, 5));
+        assert_eq!(TableMenuLayout::new(true).counts(), (8, 4));
+    }
+
+    #[test]
+    fn cross_axis_delete_targets_only_the_clicked_row_or_column() {
+        let lines = [
+            "| A | B | C |",
+            "| --- | --- | --- |",
+            "| a | b | c |",
+            "| d | e | f |",
+        ]
+        .map(str::to_string);
+        let all_columns = TableBorderSelection {
+            table_start_line: 0,
+            is_column: true,
+            anchor: 0,
+            indices: vec![0, 1, 2],
+        };
+        let target = TableMenuSelection::for_border(0, true, 1, Some(&all_columns), false);
+        assert_eq!(target.rows, [0]);
+        let updated = crate::table_ops::delete_rows_at(&lines, &target.rows);
+        let model = crate::table_ops::parse_table_block(&updated);
+        assert_eq!(model.header_cells, ["a", "b", "c"]);
+        assert_eq!(model.data_rows, [["d", "e", "f"]]);
+
+        let all_rows = TableBorderSelection {
+            table_start_line: 0,
+            is_column: false,
+            anchor: 0,
+            indices: vec![0, 1, 2],
+        };
+        let target = TableMenuSelection::for_border(0, false, 1, Some(&all_rows), false);
+        assert_eq!(target.columns, [0]);
+        let updated = crate::table_ops::delete_columns_at(&lines, &target.columns);
+        let model = crate::table_ops::parse_table_block(&updated);
+        assert_eq!(model.header_cells, ["B", "C"]);
+        assert_eq!(model.data_rows, [["b", "c"], ["e", "f"]]);
     }
 }

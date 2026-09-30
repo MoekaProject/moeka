@@ -72,6 +72,15 @@ impl TableCellSelection {
         self.table_start_line == table && self.rows.contains(&row) && self.columns.contains(&column)
     }
 
+    pub fn insertion_edges(&self) -> (usize, usize, usize, usize) {
+        (
+            *self.rows.start(),
+            *self.rows.end(),
+            *self.columns.start(),
+            *self.columns.end(),
+        )
+    }
+
     pub fn whole_border(
         &self,
         row_count: usize,
@@ -102,9 +111,167 @@ fn insertion_after_selection(indices: &[usize]) -> Option<usize> {
     indices.iter().max().map(|index| index + 1)
 }
 
+fn insert_cell_matrix_rows(
+    lines: &[String],
+    selection: &TableCellSelection,
+    matrix: &[Vec<String>],
+) -> Option<Vec<String>> {
+    let column_count = crate::table_ops::parse_table_block(lines).col_count;
+    let start_column = *selection.columns.start();
+    if matrix.is_empty()
+        || matrix
+            .iter()
+            .any(|row| row.is_empty() || start_column + row.len() > column_count)
+    {
+        return None;
+    }
+    let rows = matrix
+        .iter()
+        .map(|row| {
+            let mut padded = vec![String::new(); start_column];
+            padded.extend(row.iter().cloned());
+            padded
+        })
+        .collect::<Vec<_>>();
+    crate::table_ops::insert_rows_at(lines, selection.rows.end() + 1, &rows)
+}
+
+fn front_matter_selection_matrix(
+    lines: &[String],
+    is_column: bool,
+    indices: &[usize],
+) -> Vec<Vec<String>> {
+    let entries = crate::table_ops::parse_front_matter_block(lines);
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(row, _)| is_column || indices.contains(row))
+        .map(|(_, entry)| {
+            [(0, &entry.key), (1, &entry.value)]
+                .into_iter()
+                .filter(|(col, _)| !is_column || indices.contains(col))
+                .map(|(_, text)| text.clone())
+                .collect()
+        })
+        .collect()
+}
+
+fn replace_front_matter_selection(
+    lines: &[String],
+    is_column: bool,
+    indices: &[usize],
+    matrix: &[Vec<String>],
+) -> Option<Vec<String>> {
+    if lines.len() < 2
+        || lines.first().is_none_or(|line| line.trim() != "---")
+        || lines.last().is_none_or(|line| line.trim() != "---")
+    {
+        return None;
+    }
+    let mut entries = crate::table_ops::parse_front_matter_block(lines);
+    let expected_rows = if is_column {
+        entries.len()
+    } else {
+        indices.len()
+    };
+    let expected_cols = if is_column { indices.len() } else { 2 };
+    if matrix.len() != expected_rows || matrix.iter().any(|row| row.len() != expected_cols) {
+        return None;
+    }
+    let mut updated = lines.to_vec();
+    for (row, values) in matrix.iter().enumerate() {
+        let index = if is_column { row } else { *indices.get(row)? };
+        let original = updated.get(index + 1)?;
+        let (key, _) = original.split_once(':')?;
+        if key.is_empty() || key.trim() != key || key.starts_with(['#', '-']) {
+            return None;
+        }
+        let entry = entries.get_mut(index)?;
+        if is_column {
+            for (&col, value) in indices.iter().zip(values) {
+                match col {
+                    0 => entry.key = value.clone(),
+                    1 => entry.value = value.clone(),
+                    _ => return None,
+                }
+            }
+        } else {
+            entry.key = values[0].clone();
+            entry.value = values[1].clone();
+        }
+        updated[index + 1] = format!("{}: {}", entry.key, entry.value);
+    }
+    Some(updated)
+}
+
+fn front_matter_cells_matrix(
+    lines: &[String],
+    selection: &TableCellSelection,
+) -> Option<Vec<Vec<String>>> {
+    let rows = selection.rows.clone().collect::<Vec<_>>();
+    let entries = front_matter_selection_matrix(lines, false, &rows);
+    if entries.len() != rows.len() || *selection.columns.end() > 1 {
+        return None;
+    }
+    Some(
+        entries
+            .into_iter()
+            .map(|entry| {
+                selection
+                    .columns
+                    .clone()
+                    .map(|col| entry[col].clone())
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
+fn replace_front_matter_cells(
+    lines: &[String],
+    selection: &TableCellSelection,
+    matrix: &[Vec<String>],
+) -> Option<Vec<String>> {
+    let rows = selection.rows.clone().collect::<Vec<_>>();
+    let mut entries = front_matter_selection_matrix(lines, false, &rows);
+    let width = selection.columns.clone().count();
+    if entries.len() != rows.len()
+        || *selection.columns.end() > 1
+        || matrix.len() != rows.len()
+        || matrix.iter().any(|row| row.len() != width)
+    {
+        return None;
+    }
+    for (entry, values) in entries.iter_mut().zip(matrix) {
+        for (column, value) in selection.columns.clone().zip(values) {
+            entry[column] = value.clone();
+        }
+    }
+    replace_front_matter_selection(lines, false, &rows, &entries)
+}
+
+fn clear_border_contents(
+    lines: &[String],
+    is_column: bool,
+    indices: &[usize],
+) -> Option<Vec<String>> {
+    let model = crate::table_ops::parse_table_block(lines);
+    if is_column {
+        let blanks = vec![vec![String::new(); model.data_rows.len() + 1]; indices.len()];
+        crate::table_ops::replace_columns_at(lines, indices, &blanks)
+    } else {
+        let blanks = vec![vec![String::new(); model.col_count]; indices.len()];
+        crate::table_ops::replace_rows_at(lines, indices, &blanks)
+    }
+}
+
 impl TableBorderSelection {
     pub fn contains(&self, index: usize) -> bool {
         self.indices.contains(&index)
+    }
+
+    pub fn insertion_edges(&self) -> Option<(usize, usize)> {
+        Some((*self.indices.iter().min()?, *self.indices.iter().max()?))
     }
 
     fn for_press(
@@ -458,7 +625,16 @@ impl EditorView {
     }
 
     pub(crate) fn copy_table_border_selection(&self) -> Option<String> {
-        let (_, is_column, indices, lines, _, _) = self.table_border_selection_data()?;
+        let (table, is_column, indices, lines, _, _) = self.table_border_selection_data()?;
+        if self.block_is_front_matter(table) {
+            return Some(
+                front_matter_selection_matrix(&lines, is_column, &indices)
+                    .iter()
+                    .map(|row| row.join("\t"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
         Some(crate::table_ops::selected_table_matrix_to_tsv(
             &lines, is_column, &indices,
         ))
@@ -482,6 +658,7 @@ impl EditorView {
                     && selection.is_column == is_column
                     && selection.contains(index)
             });
+        self.table_cell_selection = None;
         if !same_set {
             self.table_handles.selection = Some(TableBorderSelection {
                 table_start_line,
@@ -504,6 +681,33 @@ impl EditorView {
         );
     }
 
+    pub(crate) fn clear_table_border_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.active_tab_can_start_content_edit() {
+            return false;
+        }
+        let Some((table, is_column, indices, lines, start, end)) =
+            self.table_border_selection_data()
+        else {
+            return false;
+        };
+        let updated = if self.block_is_front_matter(table) {
+            let blank = front_matter_selection_matrix(&lines, is_column, &indices)
+                .iter()
+                .map(|row| vec![String::new(); row.len()])
+                .collect::<Vec<_>>();
+            replace_front_matter_selection(&lines, is_column, &indices, &blank)
+        } else {
+            clear_border_contents(&lines, is_column, &indices)
+        };
+        let Some(updated) = updated else {
+            return false;
+        };
+        self.replace_table_block(start, end, &updated, cx);
+        self.pause_blinking(cx);
+        cx.notify();
+        true
+    }
+
     pub(crate) fn delete_table_border_selection(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.active_tab_can_start_content_edit() {
             return false;
@@ -513,8 +717,13 @@ impl EditorView {
         else {
             return false;
         };
-        if self.block_is_front_matter(table) && is_column {
-            return false;
+        if self.block_is_front_matter(table) {
+            if is_column {
+                return false;
+            }
+            self.table_delete_rows(table, &indices, cx);
+            self.table_handles.selection = None;
+            return true;
         }
         let model = crate::table_ops::parse_table_block(&lines);
         let selected_all = selection_covers_table(
@@ -549,8 +758,22 @@ impl EditorView {
         let Some(text) = self.copy_table_border_selection() else {
             return false;
         };
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-        self.delete_table_border_selection(cx)
+        let is_front_matter_column =
+            self.table_handles
+                .selection
+                .as_ref()
+                .is_some_and(|selection| {
+                    selection.is_column && self.block_is_front_matter(selection.table_start_line)
+                });
+        let changed = if is_front_matter_column {
+            self.clear_table_border_selection(cx)
+        } else {
+            self.delete_table_border_selection(cx)
+        };
+        if changed {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
+        changed
     }
 
     pub(crate) fn paste_table_border_selection(
@@ -580,7 +803,7 @@ impl EditorView {
         else {
             return false;
         };
-        if self.block_is_front_matter(table) && is_column {
+        if self.block_is_front_matter(table) && !overwrite {
             return false;
         }
         if text.is_empty() {
@@ -597,7 +820,9 @@ impl EditorView {
             })
             .collect::<Vec<_>>();
         let model = crate::table_ops::parse_table_block(&lines);
-        let updated = if !overwrite {
+        let updated = if self.block_is_front_matter(table) {
+            replace_front_matter_selection(&lines, is_column, &indices, &matrix)
+        } else if !overwrite {
             let Some(insert_at) = insertion_after_selection(&indices) else {
                 return false;
             };
@@ -644,6 +869,15 @@ impl EditorView {
 
     pub(crate) fn copy_table_cell_selection(&self) -> Option<String> {
         let (selection, lines, _, _) = self.table_cell_selection_data()?;
+        if self.block_is_front_matter(selection.table_start_line) {
+            return Some(
+                front_matter_cells_matrix(&lines, &selection)?
+                    .iter()
+                    .map(|row| row.join("\t"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
         let model = crate::table_ops::parse_table_block(&lines);
         if let Some(border) = selection.whole_border(model.data_rows.len(), model.col_count) {
             return Some(crate::table_ops::selected_table_matrix_to_tsv(
@@ -659,6 +893,43 @@ impl EditorView {
         ))
     }
 
+    pub(crate) fn clear_table_cell_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.active_tab_can_start_content_edit() {
+            return false;
+        }
+        let Some((selection, lines, start, end)) = self.table_cell_selection_data() else {
+            return false;
+        };
+        let blank = selection
+            .rows
+            .clone()
+            .map(|_| {
+                selection
+                    .columns
+                    .clone()
+                    .map(|_| String::new())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let updated = if self.block_is_front_matter(selection.table_start_line) {
+            replace_front_matter_cells(&lines, &selection, &blank)
+        } else {
+            crate::table_ops::replace_selected_cells(
+                &lines,
+                selection.rows,
+                selection.columns,
+                &blank,
+            )
+        };
+        let Some(updated) = updated else {
+            return false;
+        };
+        self.replace_table_block(start, end, &updated, cx);
+        self.pause_blinking(cx);
+        cx.notify();
+        true
+    }
+
     pub(crate) fn delete_table_cell_selection(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.active_tab_can_start_content_edit() {
             return false;
@@ -666,6 +937,9 @@ impl EditorView {
         let Some((selection, lines, start, end)) = self.table_cell_selection_data() else {
             return false;
         };
+        if self.block_is_front_matter(selection.table_start_line) {
+            return self.clear_table_cell_selection(cx);
+        }
         let model = crate::table_ops::parse_table_block(&lines);
         if let Some(border) = selection.whole_border(model.data_rows.len(), model.col_count) {
             self.table_handles.selection = Some(border);
@@ -717,21 +991,30 @@ impl EditorView {
         overwrite: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !overwrite && text.is_empty() {
+            return false;
+        }
         if !self.begin_content_edit(cx) {
             return false;
         }
         let Some((selection, lines, start, end)) = self.table_cell_selection_data() else {
             return false;
         };
-        let model = crate::table_ops::parse_table_block(&lines);
-        if let Some(border) = selection.whole_border(model.data_rows.len(), model.col_count) {
-            self.table_handles.selection = Some(border);
-            self.table_cell_selection = None;
-            return if overwrite {
-                self.paste_table_border_selection_overwrite(text, cx)
-            } else {
-                self.paste_table_border_selection(text, cx)
-            };
+        let is_front_matter = self.block_is_front_matter(selection.table_start_line);
+        if is_front_matter && !overwrite {
+            return false;
+        }
+        if !is_front_matter {
+            let model = crate::table_ops::parse_table_block(&lines);
+            if let Some(border) = selection.whole_border(model.data_rows.len(), model.col_count) {
+                self.table_handles.selection = Some(border);
+                self.table_cell_selection = None;
+                return if overwrite {
+                    self.paste_table_border_selection_overwrite(text, cx)
+                } else {
+                    self.paste_table_border_selection(text, cx)
+                };
+            }
         }
         let matrix = text
             .trim_end_matches(['\r', '\n'])
@@ -743,12 +1026,19 @@ impl EditorView {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        let Some(updated) = crate::table_ops::replace_selected_cells(
-            &lines,
-            selection.rows,
-            selection.columns,
-            &matrix,
-        ) else {
+        let updated = if is_front_matter {
+            replace_front_matter_cells(&lines, &selection, &matrix)
+        } else if overwrite {
+            crate::table_ops::replace_selected_cells(
+                &lines,
+                selection.rows.clone(),
+                selection.columns.clone(),
+                &matrix,
+            )
+        } else {
+            insert_cell_matrix_rows(&lines, &selection, &matrix)
+        };
+        let Some(updated) = updated else {
             self.notify_error(
                 crate::i18n::table_paste_dimension_error(self.ui_language).to_string(),
                 cx,
@@ -790,6 +1080,230 @@ mod tests {
             .unwrap();
         assert!(columns.is_column);
         assert_eq!(columns.indices, vec![1, 2]);
+    }
+
+    #[test]
+    fn insertion_edges_ignore_drag_direction_and_focus() {
+        let forward = TableCellSelection::between(4, (1, 2), (3, 5));
+        let reverse = TableCellSelection::between(4, (3, 5), (1, 2));
+        assert_eq!(forward.insertion_edges(), (1, 3, 2, 5));
+        assert_eq!(reverse.insertion_edges(), forward.insertion_edges());
+        let border = TableBorderSelection {
+            table_start_line: 4,
+            is_column: true,
+            anchor: 5,
+            indices: vec![5, 2, 4],
+        };
+        assert_eq!(border.insertion_edges(), Some((2, 5)));
+    }
+
+    #[test]
+    fn insertions_use_selection_edges_not_the_clicked_cell() {
+        let lines = [
+            "| A | B | C | D |",
+            "| --- | --- | --- | --- |",
+            "| a | b | c | d |",
+            "| e | f | g | h |",
+            "| i | j | k | l |",
+        ]
+        .map(str::to_string);
+        let selection = TableCellSelection::between(0, (3, 3), (1, 1));
+        let (first_row, last_row, first_col, last_col) = selection.insertion_edges();
+        let above =
+            crate::table_ops::parse_table_block(&crate::table_ops::insert_row(&lines, first_row));
+        assert!(above.data_rows[0].iter().all(String::is_empty));
+        assert_eq!(above.data_rows[1][0], "a");
+        let below = crate::table_ops::parse_table_block(&crate::table_ops::insert_row(
+            &lines,
+            last_row + 1,
+        ));
+        assert_eq!(below.data_rows[2][0], "i");
+        assert!(below.data_rows[3].iter().all(String::is_empty));
+        let left = crate::table_ops::parse_table_block(&crate::table_ops::insert_column(
+            &lines, first_col,
+        ));
+        assert_eq!(left.header_cells[1], "");
+        assert_eq!(left.header_cells[2], "B");
+        let right = crate::table_ops::parse_table_block(&crate::table_ops::insert_column(
+            &lines,
+            last_col + 1,
+        ));
+        assert_eq!(right.header_cells[3], "D");
+        assert_eq!(right.header_cells[4], "");
+    }
+
+    #[test]
+    fn paste_insert_into_partial_cells_adds_rows_after_selection() {
+        let lines = [
+            "| A | B | C |",
+            "| --- | --- | --- |",
+            "| a | b | c |",
+            "| d | e | f |",
+        ]
+        .map(str::to_string);
+        let selection = TableCellSelection::between(0, (2, 1), (1, 1));
+        let updated = insert_cell_matrix_rows(&lines, &selection, &[vec!["new".into()]]).unwrap();
+        let model = crate::table_ops::parse_table_block(&updated);
+        assert_eq!(model.header_cells, ["A", "B", "C"]);
+        assert_eq!(
+            model.data_rows,
+            [["a", "b", "c"], ["d", "e", "f"], ["", "new", ""]]
+        );
+        assert!(
+            insert_cell_matrix_rows(
+                &lines,
+                &selection,
+                &[vec!["x".into(), "y".into(), "z".into()]]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn clearing_border_contents_preserves_rows_columns_and_unselected_cells() {
+        let lines = [
+            "| A | B | C |",
+            "| --- | --- | --- |",
+            "| a | b | c |",
+            "| d | e | f |",
+        ]
+        .map(str::to_string);
+        let cleared = clear_border_contents(&lines, true, &[0, 2]).unwrap();
+        let model = crate::table_ops::parse_table_block(&cleared);
+        assert_eq!(model.col_count, 3);
+        assert_eq!(model.header_cells, ["", "B", ""]);
+        assert_eq!(model.data_rows, [["", "b", ""], ["", "e", ""]]);
+        let cleared = clear_border_contents(&lines, false, &[1]).unwrap();
+        let model = crate::table_ops::parse_table_block(&cleared);
+        assert_eq!(model.header_cells, ["A", "B", "C"]);
+        assert_eq!(model.data_rows, [["", "", ""], ["d", "e", "f"]]);
+    }
+
+    #[test]
+    fn front_matter_border_clipboard_and_clear_preserve_unselected_entries() {
+        let lines = ["---", "title: Hello", "tags: Rust", "author: Ada", "---"].map(str::to_string);
+        assert_eq!(
+            super::front_matter_selection_matrix(&lines, false, &[0, 2]),
+            [["title", "Hello"], ["author", "Ada"]]
+        );
+        assert_eq!(
+            super::front_matter_selection_matrix(&lines, true, &[1]),
+            [["Hello"], ["Rust"], ["Ada"]]
+        );
+        let updated = super::replace_front_matter_selection(
+            &lines,
+            false,
+            &[0, 2],
+            &[
+                vec!["new".into(), "value".into()],
+                vec!["other".into(), "item".into()],
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            updated,
+            ["---", "new: value", "tags: Rust", "other: item", "---"]
+        );
+        let updated = super::replace_front_matter_selection(
+            &lines,
+            true,
+            &[1],
+            &[
+                vec![String::new()],
+                vec![String::new()],
+                vec![String::new()],
+            ],
+        )
+        .unwrap();
+        assert_eq!(updated, ["---", "title: ", "tags: ", "author: ", "---"]);
+        assert!(
+            super::replace_front_matter_selection(&lines, true, &[1], &[vec!["bad".into()]])
+                .is_none()
+        );
+        let complex = [
+            "---",
+            "title: Hello",
+            "  - nested",
+            "# keep this comment",
+            "---",
+        ]
+        .map(str::to_string);
+        let updated = super::replace_front_matter_selection(
+            &complex,
+            false,
+            &[0],
+            &[vec!["name".into(), "Moeka".into()]],
+        )
+        .unwrap();
+        assert_eq!(
+            updated,
+            [
+                "---",
+                "name: Moeka",
+                "  - nested",
+                "# keep this comment",
+                "---"
+            ]
+        );
+        assert!(
+            super::replace_front_matter_selection(
+                &complex,
+                false,
+                &[1],
+                &[vec!["bad".into(), "value".into()]],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn front_matter_cell_actions_preserve_delimiters_and_other_entries() {
+        let lines = ["---", "title: Hello", "tags: Rust", "author: Ada", "---"].map(str::to_string);
+        let selected = TableCellSelection::between(0, (2, 1), (0, 1));
+        assert_eq!(
+            front_matter_cells_matrix(&lines, &selected).unwrap(),
+            [["Hello"], ["Rust"], ["Ada"]]
+        );
+        let updated = replace_front_matter_cells(
+            &lines,
+            &selected,
+            &[vec!["One".into()], vec!["Two".into()], vec!["Three".into()]],
+        )
+        .unwrap();
+        assert_eq!(
+            updated,
+            ["---", "title: One", "tags: Two", "author: Three", "---"]
+        );
+        let key = TableCellSelection::between(0, (1, 0), (1, 0));
+        let cleared = replace_front_matter_cells(&lines, &key, &[vec![String::new()]]).unwrap();
+        assert_eq!(
+            cleared,
+            ["---", "title: Hello", ": Rust", "author: Ada", "---"]
+        );
+        let whole_row = TableCellSelection::between(0, (0, 0), (0, 1));
+        assert_eq!(
+            replace_front_matter_cells(&lines, &whole_row, &[vec!["name".into(), "Moeka".into()]])
+                .unwrap(),
+            ["---", "name: Moeka", "tags: Rust", "author: Ada", "---"]
+        );
+        assert!(
+            replace_front_matter_cells(&lines, &key, &[vec!["a".into(), "b".into()]]).is_none()
+        );
+        assert!(
+            front_matter_cells_matrix(&lines, &TableCellSelection::between(0, (3, 0), (3, 0)))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn clearing_entire_markdown_cell_row_preserves_table_shape() {
+        let lines = ["| A | B |", "| --- | --- |", "| x | y |"].map(str::to_string);
+        let blank = [vec![String::new(), String::new()]];
+        let updated =
+            crate::table_ops::replace_selected_cells(&lines, 1..=1, 0..=1, &blank).unwrap();
+        let model = crate::table_ops::parse_table_block(&updated);
+        assert_eq!(model.header_cells, ["A", "B"]);
+        assert_eq!(model.data_rows, [["", ""]]);
     }
 
     #[test]

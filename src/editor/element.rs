@@ -53,6 +53,31 @@ fn table_border_track_path(
     path.build().ok()
 }
 
+fn preview_height_anchor_delta(
+    previous_height: f32,
+    measured_height: f32,
+    previous_bottom: f32,
+    viewport_top: f32,
+) -> f32 {
+    if previous_bottom < viewport_top {
+        measured_height - previous_height
+    } else {
+        0.0
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn preview_height_changes_above_viewport_keep_the_next_line_fixed() {
+    for measured_height in [20.0, 300.0] {
+        let delta = preview_height_anchor_delta(100.0, measured_height, -12.0, 0.0);
+        assert_eq!(-12.0 + measured_height - 100.0 - delta, -12.0);
+    }
+    assert_eq!(preview_height_anchor_delta(100.0, 300.0, 12.0, 0.0), 0.0);
+    // An uncached line still has an estimated height in the geometry index.
+    assert_eq!(preview_height_anchor_delta(24.0, 300.0, -12.0, 0.0), 276.0);
+}
+
 fn gutter_fold_row_hovered(gutter_hovered: bool, pointer_y: Pixels, top: f32, height: f32) -> bool {
     gutter_hovered && (top..top + height).contains(&f32::from(pointer_y))
 }
@@ -2687,6 +2712,7 @@ impl Element for EditorElement {
         let mut _last_line_height = 0.0_f32;
         let mut scroll_anchor_delta = 0.0_f32;
         let suppress_scroll_anchor_compensation = editor.pending_preview_reveal.is_some()
+            || editor.pending_click_anchor.is_some()
             || editor.pending_center_cursor_in_view
             || editor.pending_scroll_to_cursor;
 
@@ -3098,6 +3124,11 @@ impl Element for EditorElement {
                 .and_then(|info| info.as_ref());
             let mut cached_height_before_reflow = None;
             let mut cached_line_above_viewport = false;
+            if line_has_block_preview {
+                let previous_height = editor.visual_height_for_line(line_idx);
+                cached_height_before_reflow = Some(previous_height);
+                cached_line_above_viewport = y - scroll_anchor_delta + previous_height < origin_y;
+            }
             let can_reuse_non_markdown_cached_line = editor.active_tab_is_non_markdown_text()
                 && !is_cursor_line_early
                 && !line_has_block_preview
@@ -4213,6 +4244,9 @@ impl Element for EditorElement {
             if let Some(preview) = collapsed_block_preview
                 && !preview.is_anchor
             {
+                if !suppress_scroll_anchor_compensation && cached_line_above_viewport {
+                    scroll_anchor_delta -= cached_height_before_reflow.unwrap_or(0.0);
+                }
                 let blank_run = TextRun {
                     len: 1,
                     font: body_font.clone(),
@@ -4764,14 +4798,23 @@ impl Element for EditorElement {
                 + table_extra_height;
             let total_line_height = text_line_height + extra_height;
 
-            if !suppress_scroll_anchor_compensation
-                && editor.active_tab_is_non_markdown_text()
-                && editor.editor_wraps_to_available_width()
-                && !can_reuse_non_markdown_cached_line
-                && cached_line_above_viewport
-                && let Some(cached_h) = cached_height_before_reflow
-            {
-                scroll_anchor_delta += total_line_height - cached_h;
+            if !suppress_scroll_anchor_compensation {
+                if line_has_block_preview {
+                    let previous_height = cached_height_before_reflow.unwrap_or(0.0);
+                    scroll_anchor_delta += preview_height_anchor_delta(
+                        previous_height,
+                        total_line_height,
+                        y - scroll_anchor_delta + previous_height,
+                        origin_y,
+                    );
+                } else if editor.active_tab_is_non_markdown_text()
+                    && editor.editor_wraps_to_available_width()
+                    && !can_reuse_non_markdown_cached_line
+                    && cached_line_above_viewport
+                    && let Some(cached_h) = cached_height_before_reflow
+                {
+                    scroll_anchor_delta += total_line_height - cached_h;
+                }
             }
 
             let line_top = y - scroll_anchor_delta;
@@ -4831,10 +4874,7 @@ impl Element for EditorElement {
             } else {
                 content_x
             };
-            if editor.app_settings.format_toolbar_visible
-                && editor.active_tab_is_markdown()
-                && !editor.active_tab_is_read_only()
-            {
+            if editor.active_tab_is_markdown() && !editor.active_tab_is_read_only() {
                 let viewport = bounds.intersect(&window.content_mask().bounds);
                 let icon_size = editor.scaled(LINE_FORMAT_ICON_SIZE_PX);
                 let icon_gap = editor.scaled(LINE_FORMAT_ICON_GAP_PX);
@@ -9919,13 +9959,13 @@ impl Element for EditorElement {
             editor.last_text_width = text_width;
             editor.last_window_scale_factor = window_scale_factor;
             if scroll_anchor_delta.abs() > 0.5
-                && editor.active_tab_is_non_markdown_text()
-                && editor.editor_wraps_to_available_width()
                 && editor.pending_preview_reveal.is_none()
                 && !editor.pending_center_cursor_in_view
                 && !editor.pending_scroll_to_cursor
             {
                 editor.scroll_offset = (editor.scroll_offset + scroll_anchor_delta).max(0.0);
+                editor.clamp_scroll();
+                cx.notify();
             }
             editor.content_origin = bounds.origin;
             editor.layout_dirty = false;

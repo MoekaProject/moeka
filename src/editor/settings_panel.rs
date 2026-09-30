@@ -113,7 +113,6 @@ enum SettingsOptionAction {
     ShowWhitespace(bool),
     HighlightLine(bool),
     DefaultLeftAlign(bool),
-    FormatToolbar(bool),
     AutoSave(bool),
     SimpleMode(bool),
     SidebarAlwaysDark(bool),
@@ -803,16 +802,6 @@ impl EditorView {
                 ),
             ))
             .child(self.render_attachment_settings_row(
-                crate::i18n::settings_label(self.ui_language, "format_toolbar"),
-                self.render_boolean_settings_checkbox(
-                    "settings-format-toolbar",
-                    self.app_settings.format_toolbar_visible,
-                    SettingsOptionAction::FormatToolbar(false),
-                    SettingsOptionAction::FormatToolbar(true),
-                    cx,
-                ),
-            ))
-            .child(self.render_attachment_settings_row(
                 crate::i18n::settings_label(self.ui_language, "highlight_line"),
                 self.render_boolean_settings_checkbox(
                     "settings-highlight-line-background",
@@ -906,9 +895,6 @@ impl EditorView {
             SettingsOptionAction::DefaultLeftAlign(value) => {
                 self.app_settings.default_left_align = value;
                 self.apply_default_left_alignment(value);
-            }
-            SettingsOptionAction::FormatToolbar(value) => {
-                self.app_settings.format_toolbar_visible = value;
             }
             SettingsOptionAction::AutoSave(value) => {
                 self.app_settings.auto_save = value;

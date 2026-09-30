@@ -191,19 +191,27 @@ Mermaid Auto follows the editor's light/dark appearance through merman's host
 profiles. Keep the resvg-safe editor CSS override policy; only the root background
 is transparent. Explicit Mermaid theme selections remain user-controlled.
 Theme invalidation replaces SVG/raster resources but retains the old inline image
-as a layout placeholder and preserves per-tab zoom/pan. Preview refresh guards keep
-the current scroll offset instead of scrolling to the caret or clamping against
-temporary layout estimates.
+as a layout placeholder and preserves per-tab zoom/pan. Explicit preview refresh
+guards keep the current scroll offset instead of scrolling to the caret. Lazy
+viewport previews do not restore a stale offset after wheel input; prepaint
+compensates for measured preview height changes above the viewport.
 
 Image/generated preview overlays live at the window root, above pane chrome and
 toolbars. They retain a fixed inset from every window edge, preserve aspect ratio,
 and allow manual enlargement. Editor Mermaid and math previews display at their rendered
 logical size (100%) or shrink to fit the available width, never upscaling to fill it.
-Their backgrounds follow the fitted image size plus padding. Fullscreen previews also
-start at no more than 100% while preserving the window inset. Rendering and pan constraints
-share the same fit calculation; closing fullscreen leaves inline zoom/pan intact.
-Use `cargo test --release generated_mermaid`, `cargo test --release generated_preview`,
-and `cargo test --release editor::preview_overlay::tests` for targeted checks.
+Block math renders at 1.5 times its former size; inline math remains line-height constrained.
+Mermaid keeps its previous text size except for larger sequence diagram labels and messages
+in both host and explicit themes. Backgrounds follow the fitted
+image size plus padding. Fullscreen Mermaid charts initially fill about 80% of the
+padded viewport (upscaling small charts), with a bounded higher-resolution raster for
+large charts; other previews retain their 100% cap. Chart rendering and pan constraints
+share the same fit calculation, and charts are clipped to the inset viewport while
+panning. A click outside the fullscreen controls closes the preview; dragging pans it
+without closing. Closing fullscreen leaves inline zoom/pan intact.
+Use `cargo test --release generated_math`, `cargo test --release generated_mermaid`,
+`cargo test --release generated_preview`, and
+`cargo test --release editor::preview_overlay::tests` for targeted checks.
 GUI verification should cover theme changes after panning/zooming, scroll stability,
 split panes and fullscreen controls over the sidebar/tab strip.
 

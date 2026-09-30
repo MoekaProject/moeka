@@ -371,11 +371,13 @@ mod tests {
 
     use super::{
         MarkdownOutlineIndex, OutlineHeading, OutlinePanelLayoutCache, OutlinePanelLayoutKey,
-        animated_outline_tick_influence, normalized_outline_width_bounds, outline_has_later_peer,
-        outline_has_prior_expanded_peer, outline_hover_animation_value,
-        outline_nearest_guide_ranges, outline_rail_compact_row_top, outline_rail_inner_height,
-        outline_rail_project_index, outline_rail_render_count, outline_rail_row_top,
-        outline_rail_slot_count, outline_tick_influence,
+        animated_outline_tick_influence, invalidate_outline_navigation,
+        normalized_outline_width_bounds, outline_active_line, outline_has_later_peer,
+        outline_has_prior_expanded_peer, outline_heading_at_y, outline_hover_animation_value,
+        outline_navigation_in_progress, outline_nearest_guide_ranges, outline_rail_compact_row_top,
+        outline_rail_inner_height, outline_rail_project_index, outline_rail_render_count,
+        outline_rail_row_top, outline_rail_slot_count, outline_scroll_target,
+        outline_settled_frames, outline_tick_influence,
     };
 
     #[test]
@@ -412,6 +414,105 @@ mod tests {
             headings,
             vec![(0, 1, "One"), (2, 3, "Middle"), (4, 2, "Two")]
         );
+    }
+
+    #[test]
+    fn outline_active_heading_tracks_the_section_at_the_viewport_top() {
+        let headings = [0, 10, 20].map(|line| OutlineHeading {
+            line,
+            level: 1,
+            text: "Heading".into(),
+        });
+        // The viewport remains fixed while body text edits move the next heading
+        // across its bottom edge; the active section must not change.
+        for next_y in [180.0, 220.0] {
+            assert_eq!(
+                outline_heading_at_y(&headings, 140.0, |line| match line {
+                    0 => 20.0,
+                    10 => 100.0,
+                    _ => next_y,
+                }),
+                Some(10),
+            );
+        }
+        assert_eq!(
+            outline_heading_at_y(&headings, 100.0, |line| line as f32 * 10.0),
+            Some(10)
+        );
+        assert_eq!(
+            outline_heading_at_y(&headings, 0.0, |line| line as f32 * 10.0 + 20.0),
+            Some(0)
+        );
+        assert_eq!(outline_heading_at_y(&[], 100.0, |_| 0.0), None);
+    }
+
+    #[test]
+    fn outline_click_override_expires_when_editing_another_line() {
+        let headings = [
+            OutlineHeading {
+                line: 10,
+                level: 1,
+                text: "One".into(),
+            },
+            OutlineHeading {
+                line: 20,
+                level: 1,
+                text: "Two".into(),
+            },
+        ];
+        assert_eq!(
+            outline_active_line(Some(20), 20, &headings, Some(10)),
+            Some(20)
+        );
+        assert_eq!(
+            outline_active_line(Some(20), 11, &headings, Some(10)),
+            Some(10)
+        );
+        assert_eq!(
+            outline_active_line(Some(30), 30, &headings, Some(10)),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn outline_scroll_target_rechecks_geometry_after_lazy_preview_height_changes() {
+        assert_eq!(outline_scroll_target(480.0, 40.0, 1200.0), 440.0);
+        assert_eq!(outline_scroll_target(680.0, 40.0, 1200.0), 640.0);
+        assert_eq!(outline_scroll_target(680.0, 40.0, 500.0), 500.0);
+    }
+
+    #[test]
+    fn preview_refresh_does_not_cancel_only_the_current_outline_navigation() {
+        assert!(outline_navigation_in_progress(Some(4), 4));
+        assert!(!outline_navigation_in_progress(Some(4), 5));
+        assert!(!outline_navigation_in_progress(None, 4));
+    }
+
+    #[test]
+    fn user_navigation_cancels_outline_animation_and_confirmation() {
+        let mut scroll_epoch = 4;
+        let mut navigation_epoch = Some(4);
+        invalidate_outline_navigation(&mut scroll_epoch, &mut navigation_epoch);
+        assert_eq!(scroll_epoch, 5);
+        assert_eq!(navigation_epoch, None);
+        assert!(!outline_navigation_in_progress(
+            navigation_epoch,
+            scroll_epoch
+        ));
+
+        // An already-cancelled task must not invalidate a newer scroll animation.
+        navigation_epoch = Some(4);
+        invalidate_outline_navigation(&mut scroll_epoch, &mut navigation_epoch);
+        assert_eq!(scroll_epoch, 5);
+        assert_eq!(navigation_epoch, None);
+    }
+
+    #[test]
+    fn outline_navigation_waits_for_visible_lazy_previews_to_settle() {
+        assert_eq!(outline_settled_frames(0, true), 0);
+        assert_eq!(outline_settled_frames(0, false), 1);
+        assert_eq!(outline_settled_frames(1, true), 0);
+        assert_eq!(outline_settled_frames(1, false), 2);
     }
 
     #[test]
@@ -760,6 +861,62 @@ fn outline_heading_index_for_line(headings: &[OutlineHeading], line: usize) -> O
         .then_some(index)
 }
 
+fn outline_heading_at_y(
+    headings: &[OutlineHeading],
+    y: f32,
+    mut line_y: impl FnMut(usize) -> f32,
+) -> Option<usize> {
+    if headings.is_empty() {
+        return None;
+    }
+    let mut low = 0;
+    let mut high = headings.len();
+    while low < high {
+        let middle = (low + high) / 2;
+        if line_y(headings[middle].line) <= y {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    Some(headings[low.saturating_sub(1)].line)
+}
+
+fn outline_active_line(
+    clicked_line: Option<usize>,
+    cursor_line: usize,
+    headings: &[OutlineHeading],
+    viewport_line: Option<usize>,
+) -> Option<usize> {
+    clicked_line
+        .filter(|line| {
+            *line == cursor_line && outline_heading_index_for_line(headings, *line).is_some()
+        })
+        .or(viewport_line)
+}
+
+fn outline_scroll_target(line_y: f32, padding_top: f32, max_scroll: f32) -> f32 {
+    (line_y - padding_top).clamp(0.0, max_scroll)
+}
+
+pub(super) fn outline_navigation_in_progress(
+    navigation_epoch: Option<usize>,
+    epoch: usize,
+) -> bool {
+    navigation_epoch == Some(epoch)
+}
+
+fn invalidate_outline_navigation(scroll_epoch: &mut usize, navigation_epoch: &mut Option<usize>) {
+    if outline_navigation_in_progress(*navigation_epoch, *scroll_epoch) {
+        *scroll_epoch = scroll_epoch.wrapping_add(1);
+    }
+    *navigation_epoch = None;
+}
+
+fn outline_settled_frames(previous: usize, preview_pending: bool) -> usize {
+    if preview_pending { 0 } else { previous + 1 }
+}
+
 #[cfg(test)]
 fn outline_has_later_peer(
     visible_headings: &[(usize, usize)],
@@ -908,6 +1065,14 @@ fn outline_hover_animation_value(
 }
 
 impl EditorView {
+    pub(crate) fn cancel_outline_navigation(&mut self) {
+        invalidate_outline_navigation(
+            &mut self.scroll_anim_epoch,
+            &mut self.outline_navigation_epoch,
+        );
+        self.outline_rail_clicked_active_line = None;
+    }
+
     pub(crate) fn invalidate_outline_layout_cache(&mut self) {
         self.outline_panel_layout_epoch = self.outline_panel_layout_epoch.wrapping_add(1);
         self.outline_panel_layout_cache.borrow_mut().key = None;
@@ -1058,39 +1223,21 @@ impl EditorView {
         self.outline_headings_cache.borrow()
     }
 
-    /// The first heading visible in the editor viewport, falling back to the
-    /// section heading scrolled above the viewport top.
-    fn first_visible_outline_heading_line(&self, headings: &[OutlineHeading]) -> Option<usize> {
-        if headings.is_empty() {
-            return None;
-        }
-        let top = self.scroll_offset;
-        let bottom = top + self.last_viewport_height.max(0.0);
-        let mut low = 0usize;
-        let mut high = headings.len();
-        while low < high {
-            let middle = (low + high) / 2;
-            if self.line_y_offset(headings[middle].line) < top {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-
-        if let Some(heading) = headings.get(low)
-            && self.line_y_offset(heading.line) < bottom
-        {
-            return Some(heading.line);
-        }
-        Some(headings[low.saturating_sub(1)].line)
+    /// Follow the section at the top of the editor, not the next heading at
+    /// the bottom of the viewport (which can move while body text is edited).
+    fn current_outline_heading_line(&self, headings: &[OutlineHeading]) -> Option<usize> {
+        outline_heading_at_y(headings, self.scroll_offset + self.padding_top(), |line| {
+            self.line_y_offset(line)
+        })
     }
 
     fn outline_rail_active_line(&self, headings: &[OutlineHeading]) -> Option<usize> {
-        self.outline_rail_clicked_active_line
-            .filter(|clicked_line| {
-                outline_heading_index_for_line(headings, *clicked_line).is_some()
-            })
-            .or_else(|| self.first_visible_outline_heading_line(headings))
+        outline_active_line(
+            self.outline_rail_clicked_active_line,
+            self.cursor_line(),
+            headings,
+            self.current_outline_heading_line(headings),
+        )
     }
 
     fn set_outline_rail_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
@@ -1171,10 +1318,19 @@ impl EditorView {
         let line_end = self.buffer.line_end(target_line);
         self.cursor.offset = line_end;
         self.cursor.anchor = line_end;
+        self.pending_preview_reveal = None;
+        self.pending_click_anchor = None;
+        self.pending_typing_scroll_guard = None;
+        self.pending_scroll_to_cursor = false;
+        self.pending_center_cursor_in_view = false;
+        self.pending_center_cursor_in_view_immediately = false;
+        self.center_cursor_confirm_frames = 0;
 
-        let target_scroll = (self.line_y_offset(target_line) - self.padding_top())
-            .max(0.0)
-            .min(self.max_scroll_offset());
+        let target_scroll = outline_scroll_target(
+            self.line_y_offset(target_line),
+            self.padding_top(),
+            self.max_scroll_offset(),
+        );
         let start_scroll = self.scroll_offset;
         let delta = target_scroll - start_scroll;
         let should_animate = delta.abs() >= 1.0;
@@ -1186,6 +1342,7 @@ impl EditorView {
         let step_ms = 8u64;
         self.scroll_anim_epoch += 1;
         let epoch = self.scroll_anim_epoch;
+        self.outline_navigation_epoch = Some(epoch);
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -1201,9 +1358,11 @@ impl EditorView {
                         // Offscreen wrapping and generated previews refine line geometry as the
                         // target enters view. Recompute the destination instead of animating to
                         // the estimate captured on the click frame.
-                        let latest_target = (this.line_y_offset(target_line) - this.padding_top())
-                            .max(0.0)
-                            .min(this.max_scroll_offset());
+                        let latest_target = outline_scroll_target(
+                            this.line_y_offset(target_line),
+                            this.padding_top(),
+                            this.max_scroll_offset(),
+                        );
                         let t = step as f32 / total_steps as f32;
                         let ease = 1.0 - (1.0 - t).powi(3);
                         this.scroll_offset = start_scroll + (latest_target - start_scroll) * ease;
@@ -1218,10 +1377,11 @@ impl EditorView {
                 }
             }
 
-            // The last animation step can itself expose the target line and trigger its first
-            // accurate layout. Confirm on two following frames so the heading is never left just
-            // outside the viewport on the first few outline clicks.
-            for _ in 0..2 {
+            // A newly visible chart can be rendered over several frames. Keep the
+            // target anchored until visible previews are loaded and layout has
+            // settled for two frames (bounded in case a preview cannot load).
+            let mut settled_frames = 0;
+            for _ in 0..60 {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(16))
                     .await;
@@ -1230,18 +1390,49 @@ impl EditorView {
                         if this.scroll_anim_epoch != epoch {
                             return false;
                         }
-                        this.scroll_offset = (this.line_y_offset(target_line) - this.padding_top())
-                            .max(0.0)
-                            .min(this.max_scroll_offset());
+                        this.scroll_offset = outline_scroll_target(
+                            this.line_y_offset(target_line),
+                            this.padding_top(),
+                            this.max_scroll_offset(),
+                        );
                         this.clamp_scroll();
+                        let (start, end) = this.generated_preview_priority_line_range();
+                        let pending =
+                            this.decorations
+                                .get(start..=end)
+                                .is_some_and(|decorations| {
+                                    decorations.iter().any(|decoration| {
+                                        decoration.block_preview.as_ref().is_some_and(|preview| {
+                                            preview.is_anchor
+                                                && (!this
+                                                    .image_cache
+                                                    .contains_key(&preview.cache_key)
+                                                    || !this
+                                                        .generated_preview_svg_cache
+                                                        .contains_key(&preview.cache_key))
+                                        })
+                                    })
+                                });
                         cx.notify();
-                        true
+                        !pending
                     })
                     .unwrap_or(false);
-                if !keep {
+                settled_frames = outline_settled_frames(settled_frames, !keep);
+                if settled_frames >= 2 {
+                    break;
+                }
+                if this
+                    .read_with(cx, |this, _| this.scroll_anim_epoch != epoch)
+                    .unwrap_or(true)
+                {
                     return;
                 }
             }
+            let _ = this.update(cx, |this, _| {
+                if this.outline_navigation_epoch == Some(epoch) {
+                    this.outline_navigation_epoch = None;
+                }
+            });
         })
         .detach();
     }

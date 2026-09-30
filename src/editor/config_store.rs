@@ -263,7 +263,6 @@ mod tests {
             highlight_line_background: true,
             default_left_align: false,
             simple_mode: false,
-            format_toolbar_visible: true,
             auto_save: false,
             attachment_location: "current_file".to_string(),
             attachment_folder: "attachments".to_string(),
@@ -310,6 +309,25 @@ mod tests {
         assert_eq!(loaded, config);
         assert_eq!(loaded.settings.link_syntax, "wikilink");
         assert_eq!(loaded.settings.link_path_style, "shortest");
+    }
+
+    #[test]
+    fn legacy_format_toolbar_setting_is_ignored_and_not_saved() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.yaml");
+        fs::write(&path, "settings: {}\n").unwrap();
+        let expected = load_yaml_file::<SettingsFile>(&path).unwrap();
+        fs::write(&path, "settings:\n  format_toolbar_visible: false\n").unwrap();
+
+        let config = load_yaml_file::<SettingsFile>(&path).unwrap();
+        assert_eq!(config, expected);
+
+        save_yaml_file(&path, &config).unwrap();
+        assert!(
+            !fs::read_to_string(&path)
+                .unwrap()
+                .contains("format_toolbar_visible")
+        );
     }
 
     #[test]

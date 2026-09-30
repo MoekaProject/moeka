@@ -149,6 +149,8 @@ pub(crate) const GENERATED_PREVIEW_RASTER_SCALE: f32 = 2.0;
 pub(crate) const GENERATED_PREVIEW_MATH_RASTER_SCALE: f32 = 3.0;
 const GENERATED_PREVIEW_EDITOR_MAX_RASTER_EDGE: f32 = 2048.0;
 const GENERATED_PREVIEW_EDITOR_MAX_RASTER_PIXELS: f32 = 2_097_152.0;
+const GENERATED_PREVIEW_OVERLAY_MAX_RASTER_EDGE: f32 = 4096.0;
+const GENERATED_PREVIEW_OVERLAY_MAX_RASTER_PIXELS: f32 = 8_388_608.0;
 const GENERATED_PREVIEW_DEFAULT_MONOSPACE_FONT_FAMILY: &str =
     "ui-monospace, Menlo, Monaco, Consolas, monospace";
 const GENERATED_PREVIEW_DEFAULT_CJK_FONT_FAMILY: &str =
@@ -3302,6 +3304,56 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_mermaid_raster_stays_within_texture_budget() {
+        for width in [10_000, 100_000] {
+            let svg = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"2000\" viewBox=\"0 0 {width} 2000\"><rect width=\"{width}\" height=\"2000\" fill=\"black\"/></svg>"
+            );
+            let image = super::load_generated_preview_overlay_image_from_svg(
+                &svg,
+                markdown::BlockPreviewKind::Mermaid,
+                2.0,
+            )
+            .unwrap();
+            let size = image.size(0);
+            assert!(size.width.0 <= 4096);
+            assert!(size.width.0 as u64 * size.height.0 as u64 <= 8_388_608);
+            assert!(
+                size.width.0 > 2048,
+                "fullscreen should be sharper than inline"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_math_block_preview_is_one_and_a_half_times_the_previous_size() {
+        let svg = super::render_math_block_preview_svg("E=mc^2", &Theme::one_dark()).unwrap();
+        let old_svg = super::render_mathjax_preview_svg(
+            "E=mc^2",
+            &super::MathJaxOptions {
+                font_size: 36.0,
+                horizontal_align: super::HorizontalAlign::Center,
+            },
+        )
+        .unwrap();
+        let options = usvg::Options::default();
+        let size = usvg::Tree::from_str(&svg, &options).unwrap().size();
+        let old_size = usvg::Tree::from_str(&old_svg, &options).unwrap().size();
+        assert!(
+            (size.width() / old_size.width() - 1.5).abs() < 0.05,
+            "widths: {} vs {}",
+            size.width(),
+            old_size.width()
+        );
+        assert!(
+            (size.height() / old_size.height() - 1.5).abs() < 0.05,
+            "heights: {} vs {}",
+            size.height(),
+            old_size.height()
+        );
+    }
+
+    #[test]
     fn generated_mermaid_block_preview_uses_builtin_dark_theme() {
         let theme = Theme::one_dark();
         let svg = build_generated_block_preview_svg(
@@ -3319,6 +3371,7 @@ mod tests {
         assert!(svg.contains("#111827"));
         assert!(svg.contains("#94a3b8"));
         assert!(svg.contains("background-color:transparent"));
+        assert!(svg.contains("font-size:14px"));
         assert!(!svg.contains("<foreignobject"));
     }
 
@@ -3423,10 +3476,68 @@ mod tests {
                 "{} failed to render",
                 mermaid_theme.label()
             );
+
             load_generated_preview_image_from_svg(&svg, markdown::BlockPreviewKind::Mermaid)
                 .unwrap_or_else(|error| {
                     panic!("{} failed to rasterize: {error}", mermaid_theme.label())
                 });
+        }
+    }
+
+    #[test]
+    fn generated_mermaid_sequence_text_is_larger_without_changing_other_diagrams() {
+        let sequence_source =
+            "%% comment\nsequenceDiagram\nAlice->>Bob: Hello\nNote right of Bob: Reply";
+        assert!(matches!(
+            merman::detect::DetectorRegistry::new()
+                .detect_type(sequence_source, &mut merman::MermaidConfig::default()),
+            Ok("sequence")
+        ));
+        for (theme, mermaid_theme) in [
+            (Theme::one_dark(), MermaidTheme::Auto),
+            (Theme::one_light(), MermaidTheme::Auto),
+            (Theme::one_dark(), MermaidTheme::MermaidDefault),
+        ] {
+            let font_families = GeneratedPreviewFontFamilies {
+                mermaid_theme,
+                ..generated_preview_fonts()
+            };
+            let flowchart = super::render_mermaid_block_preview_svg(
+                "flowchart LR\nA[Start] --> B[Finish]",
+                &theme,
+                font_families,
+            )
+            .unwrap();
+            let sequence =
+                super::render_mermaid_block_preview_svg(sequence_source, &theme, font_families)
+                    .unwrap();
+            assert!(
+                flowchart.contains(if mermaid_theme == MermaidTheme::Auto {
+                    "font-size:14px;fill:"
+                } else {
+                    "font-size:16px;fill:"
+                }),
+                "{mermaid_theme:?}"
+            );
+            assert!(
+                sequence.contains("font-size:18px;font-weight:400\">Hello"),
+                "{mermaid_theme:?}"
+            );
+            let with_directive = super::render_mermaid_block_preview_svg(
+                &format!("%%{{init: {{'theme': 'default'}}}}%%\n{sequence_source}"),
+                &theme,
+                font_families,
+            )
+            .unwrap();
+            assert!(
+                with_directive.contains("font-size:18px;font-weight:400\">Hello"),
+                "{mermaid_theme:?}"
+            );
+            super::load_generated_preview_image_from_svg(
+                &sequence,
+                markdown::BlockPreviewKind::Mermaid,
+            )
+            .unwrap();
         }
     }
 
@@ -3541,7 +3652,9 @@ mod tests {
         }
         for expected in [
             "白名单门控",
-            "挂载 Shadow DOM",
+            "挂载",
+            "Shadow",
+            "DOM",
             "React",
             "Root",
             "暂存",
@@ -5863,6 +5976,23 @@ pub(crate) fn load_render_image_from_svg_with_scale(
     load_render_image_from_svg_with_limits(svg, raster_scale, None, None)
 }
 
+pub(crate) fn load_generated_preview_overlay_image_from_svg(
+    svg: &str,
+    kind: BlockPreviewKind,
+    raster_scale: f32,
+) -> anyhow::Result<RenderImage> {
+    if kind == BlockPreviewKind::Mermaid {
+        load_render_image_from_svg_with_limits(
+            svg,
+            raster_scale,
+            Some(GENERATED_PREVIEW_OVERLAY_MAX_RASTER_EDGE),
+            Some(GENERATED_PREVIEW_OVERLAY_MAX_RASTER_PIXELS),
+        )
+    } else {
+        load_render_image_from_svg_with_scale(svg, raster_scale)
+    }
+}
+
 fn load_render_image_from_svg_with_limits(
     svg: &str,
     raster_scale: f32,
@@ -5883,7 +6013,7 @@ fn load_render_image_from_svg_with_limits(
         let source_pixels = size.width().max(1) as f32 * size.height().max(1) as f32;
         raster_scale = raster_scale.min((max_pixels / source_pixels).sqrt());
     }
-    let raster_scale = raster_scale.max(0.1);
+    let raster_scale = raster_scale.max(f32::MIN_POSITIVE);
     let raster_width = ((size.width() as f32) * raster_scale).round().max(1.0) as u32;
     let raster_height = ((size.height() as f32) * raster_scale).round().max(1.0) as u32;
     let mut pixmap = Pixmap::new(raster_width, raster_height)
@@ -5958,7 +6088,32 @@ fn render_math_block_preview_svg(source_text: &str, theme: &Theme) -> anyhow::Re
     };
     let normalized_source = normalize_math_preview_source(source_text);
     let svg = render_mathjax_preview_svg(&normalized_source, &options)?;
-    Ok(apply_math_preview_theme(&svg, theme))
+    let svg = apply_math_preview_theme(&svg, theme);
+    scale_math_preview_svg(&svg, 1.5)
+}
+
+fn scale_math_preview_svg(svg: &str, scale: f32) -> anyhow::Result<String> {
+    // MathJax emits ex-sized roots: changing its font_size alone does not change
+    // the size that usvg (and therefore the editor) assigns to the SVG.
+    let size = usvg::Tree::from_str(svg, &usvg::Options::default())?.size();
+    let mut scaled = svg.to_string();
+    for (attribute, value) in [("width", size.width()), ("height", size.height())] {
+        let root_end = scaled
+            .find("<svg")
+            .and_then(|start| scaled[start..].find('>').map(|end| start + end))
+            .ok_or_else(|| anyhow::anyhow!("MathJax output has no SVG root"))?;
+        let marker = format!(" {attribute}=\"");
+        let start = scaled[..root_end]
+            .find(&marker)
+            .ok_or_else(|| anyhow::anyhow!("MathJax SVG root has no {attribute}"))?
+            + marker.len();
+        let end = start
+            + scaled[start..root_end]
+                .find('"')
+                .ok_or_else(|| anyhow::anyhow!("MathJax SVG root has invalid {attribute}"))?;
+        scaled.replace_range(start..end, &format!("{}px", value * scale));
+    }
+    Ok(scaled)
 }
 
 fn normalize_math_preview_source(source_text: &str) -> String {
@@ -6034,6 +6189,11 @@ fn render_mermaid_block_preview_svg(
     font_families: GeneratedPreviewFontFamilies<'_>,
 ) -> anyhow::Result<String> {
     let font_family = build_generated_preview_font_family(font_families);
+    let is_sequence = matches!(
+        merman::detect::DetectorRegistry::new()
+            .detect_type(source_text, &mut merman::MermaidConfig::default()),
+        Ok("sequence")
+    );
     let renderer = merman::render::HeadlessRenderer::new().with_vendored_text_measurer();
     let renderer = if let Some(preset) = font_families
         .mermaid_theme
@@ -6041,7 +6201,13 @@ fn render_mermaid_block_preview_svg(
     {
         let mut host_theme = merman::render::HostThemeProfile::from_preset(preset);
         host_theme.font_family = Some(font_family);
-        host_theme.font_size = Some("14px".to_string());
+        host_theme.font_size = Some(if is_sequence { "18px" } else { "14px" }.to_string());
+        if is_sequence {
+            // Sequence layout reads the numeric root fontSize, not the theme variable.
+            host_theme
+                .site_config
+                .insert("fontSize".into(), serde_json::json!(18));
+        }
         host_theme.output = merman::render::HostThemeOutput {
             root_background: merman::render::HostThemeRootBackground::None,
             ..merman::render::HostThemeOutput::resvg_safe_editor()
@@ -6052,11 +6218,16 @@ fn render_mermaid_block_preview_svg(
             .mermaid_theme
             .mermaid_theme_name()
             .ok_or_else(|| anyhow::anyhow!("invalid Mermaid theme"))?;
+        let mut config = serde_json::json!({
+            "theme": mermaid_theme,
+            "fontFamily": font_family,
+        });
+        if is_sequence {
+            config["fontSize"] = serde_json::json!(18);
+            config["themeVariables"] = serde_json::json!({ "fontSize": "18px" });
+        }
         renderer
-            .with_site_config(merman::MermaidConfig::from_value(serde_json::json!({
-                "theme": mermaid_theme,
-                "fontFamily": font_family,
-            })))
+            .with_site_config(merman::MermaidConfig::from_value(config))
             .with_svg_pipeline(merman::render::SvgPipeline::resvg_safe())
     };
     let svg = renderer

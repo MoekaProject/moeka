@@ -781,6 +781,8 @@ impl EditorView {
         if index >= self.tabs.len() {
             return;
         }
+        // Restoring a tab's scroll position must supersede any pending heading reveal.
+        self.cancel_outline_navigation();
         // Only the metadata is copied out: cloning the whole `OpenTab` here
         // duplicated the document text and the undo history on every tab
         // switch, which is hundreds of megabytes on a large file.

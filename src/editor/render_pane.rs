@@ -86,20 +86,18 @@ impl EditorView {
             .expect("caret overlay view inserted")
             .clone();
         let content = gpui::AnyView::from(content);
-        // A selection toolbar must consume this frame's final text quads, not
-        // a replayed content view's geometry. Keep ordinary caret-only frames
-        // cached, but prepaint selected Markdown content before its overlay.
+        // Keep ordinary caret-only frames cached, but prepaint focused Markdown
+        // selection and line-format-trigger frames.
         let content = if self.table_handles.needs_render()
             || self.hovering_handle.is_some()
             || !self.table_border_segment_areas.is_empty()
-            || self.app_settings.format_toolbar_visible
-                && pane_id == self.focused_pane_id
+            || (pane_id == self.focused_pane_id
                 && self.active_tab_is_markdown()
                 && (self.cursor.has_selection()
                     || self.hovering_format_line.is_some()
                     || self.line_drag.is_some()
                     || self.line_drop_flash.is_some()
-                    || self.line_format_toolbar_line.is_some())
+                    || self.line_format_toolbar_line.is_some()))
         {
             content
         } else {
@@ -672,17 +670,9 @@ impl EditorView {
                         this.child(overlay)
                     })
                     .when(renders_document, |this| {
-                        // Priority zero: above document content, below later
-                        // deferred menus. The element explicitly clips to the
-                        // editor viewport because deferred draws lose ancestor masks.
+                        // The line toolbar clips to the editor viewport because
+                        // deferred draws lose ancestor masks.
                         this.child(
-                            deferred(selection_toolbar::SelectionToolbarElement {
-                                editor: cx.entity().clone(),
-                                pane_id,
-                            })
-                            .with_priority(0),
-                        )
-                        .child(
                             deferred(selection_toolbar::LineFormatToolbarElement {
                                 editor: cx.entity().clone(),
                                 pane_id,

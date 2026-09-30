@@ -408,6 +408,10 @@ impl EditorView {
             cx.stop_propagation();
             return;
         }
+        if self.preview_overlay.is_some() {
+            self.on_preview_overlay_mouse_down(event, window, cx);
+            return;
+        }
         if self.active_tab_is_whiteboard() {
             self.whiteboard_on_mouse_down(event, window, cx);
             return;
@@ -486,49 +490,6 @@ impl EditorView {
                 self.is_selecting = false;
                 self.selection_drag_position = None;
                 self.generated_preview_drag_state = None;
-                cx.notify();
-                return;
-            }
-
-            if let Some((_, action)) = self
-                .preview_overlay_action_areas
-                .iter()
-                .find(|(bounds, _)| bounds.contains(&event.position))
-                .copied()
-            {
-                match action {
-                    GeneratedPreviewAction::Fullscreen => self.close_preview_overlay(),
-                    GeneratedPreviewAction::Restore => {
-                        self.reset_preview_overlay_view();
-                        self.clamp_preview_overlay_view();
-                    }
-                    GeneratedPreviewAction::ZoomIn => self.zoom_preview_overlay_view(1.25),
-                    GeneratedPreviewAction::ZoomOut => self.zoom_preview_overlay_view(0.8),
-                    GeneratedPreviewAction::Copy | GeneratedPreviewAction::Code => {}
-                }
-                self.clear_wrap_boundary_affinity();
-                self.is_selecting = false;
-                self.selection_drag_position = None;
-                cx.notify();
-                return;
-            }
-
-            // When the fullscreen overlay is open it owns the whole surface:
-            // start a pan-drag for any press that is not on one of its action
-            // buttons (handled above). Doing this before the inline preview hit
-            // tests prevents an inline preview behind the overlay from
-            // intercepting the press, which intermittently blocked dragging.
-            if self.preview_overlay.is_some() {
-                if let Some(state) = self.preview_overlay_state() {
-                    self.image_drag_state = Some(ImageDragState {
-                        start_position: event.position,
-                        start_pan_x: state.view.pan_x,
-                        start_pan_y: state.view.pan_y,
-                    });
-                }
-                self.clear_wrap_boundary_affinity();
-                self.is_selecting = false;
-                self.selection_drag_position = None;
                 cx.notify();
                 return;
             }
@@ -1136,6 +1097,7 @@ impl EditorView {
             line_idx,
             view: ImageViewState::default(),
         });
+        self.preview_overlay_press = None;
         self.preview_overlay_bounds = None;
         self.preview_overlay_image_bounds = None;
         true
@@ -1172,6 +1134,7 @@ impl EditorView {
             line_idx,
             view: ImageViewState::default(),
         });
+        self.preview_overlay_press = None;
         self.preview_overlay_bounds = None;
         self.preview_overlay_image_bounds = None;
         true
@@ -1498,24 +1461,18 @@ impl EditorView {
     ) {
         window.prevent_default();
         cx.stop_propagation();
-        if self
-            .table_border_segment_areas
-            .iter()
-            .any(|(bounds, _, _, _)| bounds.contains(&event.position))
-        {
-            if let Some((_, table, is_column, index)) = self
-                .table_border_segment_areas
-                .iter()
-                .find(|(bounds, _, _, _)| bounds.contains(&event.position))
-                .copied()
-            {
-                self.open_table_border_context_menu((table, is_column, index), event.position, cx);
-            }
-            return;
-        }
         self.is_selecting = false;
         self.cancel_line_drag(cx);
         self.dismiss_line_format_toolbar(cx);
+        if let Some((_, table, is_column, index)) = self
+            .table_border_segment_areas
+            .iter()
+            .find(|(bounds, _, _, _)| bounds.contains(&event.position))
+            .copied()
+        {
+            self.open_table_border_context_menu((table, is_column, index), event.position, cx);
+            return;
+        }
         if !self
             .table_click_areas
             .iter()
@@ -1557,6 +1514,7 @@ impl EditorView {
             if let Some(selection) = self.table_cell_selection.as_ref()
                 && selection.contains(table_start, visual_row, col)
             {
+                self.table_handles.selection = None;
                 self.open_context_menu(
                     ContextMenu {
                         position: event.position,
@@ -1702,6 +1660,11 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.preview_overlay.is_some() {
+            self.on_preview_overlay_mouse_up(event, true, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.finish_table_handle_press(event, window, cx) {
             window.prevent_default();
             cx.stop_propagation();
@@ -1850,6 +1813,11 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.preview_overlay.is_some() {
+            self.on_preview_overlay_mouse_move(event, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.update_table_handle_press(event, cx) {
             cx.stop_propagation();
             return;
@@ -1915,21 +1883,6 @@ impl EditorView {
                 cx.notify();
             }
             return;
-        }
-        if self.preview_overlay.is_some() {
-            if let Some(drag) = self.image_drag_state {
-                if let Some(overlay) = self.preview_overlay_state_mut() {
-                    overlay.view.pan_x = drag.start_pan_x
-                        + (f32::from(event.position.x) - f32::from(drag.start_position.x));
-                    overlay.view.pan_y = drag.start_pan_y
-                        + (f32::from(event.position.y) - f32::from(drag.start_position.y));
-                }
-                if toolbar_hover_changed {
-                    cx.notify();
-                }
-                cx.notify();
-                return;
-            }
         }
 
         if let Some(drag) = self.generated_preview_drag_state.clone() {
@@ -2139,8 +2092,7 @@ impl EditorView {
             cx.notify();
         }
 
-        let line_format_enabled = self.app_settings.format_toolbar_visible
-            && self.active_tab_is_markdown()
+        let line_format_enabled = self.active_tab_is_markdown()
             && !self.active_tab_is_read_only()
             && !self.has_extra_cursors();
         let hovering_format_line = line_format_enabled
@@ -3357,6 +3309,10 @@ impl EditorView {
             .y
             .into();
         let scroll_offset_before_wheel = self.scroll_offset;
+        // A queued preview layout must not restore an offset captured before
+        // this wheel event (for example while a diagram was still loading).
+        self.pending_preview_reveal = None;
+        self.pending_click_anchor = None;
         self.pending_typing_scroll_guard = None;
         self.pending_scroll_to_cursor = false;
         self.pending_center_cursor_in_view = false;

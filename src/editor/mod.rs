@@ -2175,6 +2175,7 @@ pub struct EditorView {
     pub(crate) last_stable_input_bounds: Option<Bounds<Pixels>>,
     pub(crate) pending_input_bounds: Option<Bounds<Pixels>>,
     pub(crate) preview_overlay: Option<PreviewOverlayState>,
+    pub(crate) preview_overlay_press: Option<preview_overlay::PreviewOverlayPress>,
     pub(crate) preview_overlay_bounds: Option<Bounds<Pixels>>,
     pub(crate) preview_overlay_image_bounds: Option<Bounds<Pixels>>,
     pub(crate) last_mouse_down_target: Option<(Point<Pixels>, usize)>,
@@ -2475,6 +2476,7 @@ pub struct EditorView {
     pub(crate) theme_debugger_alpha_bounds:
         std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     pub(crate) scroll_anim_epoch: usize,
+    pub(crate) outline_navigation_epoch: Option<usize>,
     pub(crate) toolbar_hidden_by_scroll: bool,
     pub(crate) toolbar_corner_hovered: bool,
     pub(crate) hovered_toolbar_button: Option<&'static str>,
@@ -2976,6 +2978,7 @@ impl EditorView {
             last_stable_input_bounds: None,
             pending_input_bounds: None,
             preview_overlay: None,
+            preview_overlay_press: None,
             preview_overlay_bounds: None,
             preview_overlay_image_bounds: None,
             last_mouse_down_target: None,
@@ -3223,6 +3226,7 @@ impl EditorView {
             theme_debugger_hue_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
             theme_debugger_alpha_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
             scroll_anim_epoch: 0,
+            outline_navigation_epoch: None,
             toolbar_hidden_by_scroll: false,
             toolbar_corner_hovered: false,
             hovered_toolbar_button: None,
@@ -3876,6 +3880,12 @@ impl EditorView {
             return;
         }
 
+        self.cancel_outline_navigation();
+        self.pending_preview_reveal = None;
+        self.pending_click_anchor = None;
+        self.pending_scroll_to_cursor = false;
+        self.pending_center_cursor_in_view = false;
+        self.center_cursor_confirm_frames = 0;
         self.editor_scrollbar_revealed = true;
         self.cancel_editor_scrollbar_idle_fade();
         self.editor_scrollbar_drag = Some(EditorScrollbarDragState {
@@ -7298,6 +7308,14 @@ impl EditorView {
     }
 
     fn preserve_scroll_for_preview_refresh(&mut self) {
+        // A heading navigation already remeasures its target on each frame.
+        // Freezing the current offset here would cancel it when a chart becomes visible.
+        if outline::outline_navigation_in_progress(
+            self.outline_navigation_epoch,
+            self.scroll_anim_epoch,
+        ) {
+            return;
+        }
         self.scroll_anim_epoch = self.scroll_anim_epoch.wrapping_add(1);
         self.pending_click_anchor = None;
         self.pending_scroll_to_cursor = false;
@@ -7373,11 +7391,10 @@ impl EditorView {
             .enumerate()
             .any(|(relative_line, decoration)| {
                 let block_missing = decoration.block_preview.as_ref().is_some_and(|preview| {
-                    preview.is_anchor
-                        && (!self.image_cache.contains_key(&preview.cache_key)
-                            || !self
-                                .generated_preview_svg_cache
-                                .contains_key(&preview.cache_key))
+                    !self.image_cache.contains_key(&preview.cache_key)
+                        || !self
+                            .generated_preview_svg_cache
+                            .contains_key(&preview.cache_key)
                 });
                 let line = visible_start + relative_line;
                 let line_content = self.buffer.line_content(line);
@@ -7391,7 +7408,9 @@ impl EditorView {
                 block_missing || inline_missing
             });
         if needs_visible_preview {
-            self.preserve_scroll_for_preview_refresh();
+            // Scrolling into an uncached preview must not queue a restoration of
+            // this frame's offset: a later wheel event may already have moved on.
+            // Prepaint compensates any newly measured height above the viewport.
             self.refresh_generated_block_previews();
             cx.notify();
         }
@@ -8151,6 +8170,7 @@ impl EditorView {
 
     pub(crate) fn close_preview_overlay(&mut self) {
         self.preview_overlay = None;
+        self.preview_overlay_press = None;
         self.preview_overlay_bounds = None;
         self.preview_overlay_image_bounds = None;
         self.preview_overlay_action_areas.clear();
@@ -8307,18 +8327,23 @@ impl EditorView {
         } else {
             (image_width, image_height)
         };
+        let is_chart = matches!(preview_kind, Some(markdown::BlockPreviewKind::Mermaid));
         let fit_scale = preview_overlay::fit_scale(
             intrinsic_width,
             intrinsic_height,
             viewport_width,
             viewport_height,
+            is_chart,
         );
         let display_width = intrinsic_width * fit_scale * view.zoom_factor;
         let display_height = intrinsic_height * fit_scale * view.zoom_factor;
-        let limit_x = (display_width - viewport_width).abs() / 2.0;
-        let limit_y = (display_height - viewport_height).abs() / 2.0;
-        view.pan_x = view.pan_x.clamp(-limit_x, limit_x);
-        view.pan_y = view.pan_y.clamp(-limit_y, limit_y);
+        let (pan_width, pan_height) = if is_chart {
+            preview_overlay::inner_size(viewport_width, viewport_height)
+        } else {
+            (viewport_width, viewport_height)
+        };
+        view.pan_x = preview_overlay::clamp_pan(view.pan_x, display_width, pan_width);
+        view.pan_y = preview_overlay::clamp_pan(view.pan_y, display_height, pan_height);
     }
 
     pub(crate) fn active_image_dimensions(&self) -> Option<(f32, f32)> {
