@@ -2202,11 +2202,6 @@ pub struct EditorView {
     pub(crate) pane_bounds: HashMap<PaneId, Bounds<Pixels>>,
     pub(crate) pane_editor_content_views: HashMap<PaneId, gpui::Entity<caret::EditorContentView>>,
     pub(crate) pane_caret_overlay_views: HashMap<PaneId, gpui::Entity<caret::CaretOverlayView>>,
-    /// Root-owned pane-indexed snapshots, deliberately not part of pane_state!.
-    pub(crate) selection_toolbar_geometry:
-        HashMap<PaneId, selection_toolbar::SelectionToolbarGeometry>,
-    pub(crate) selection_toolbar_dismissed:
-        Option<(PaneId, selection_toolbar::SelectionToolbarSelectionKey)>,
     /// While a tab drag hovers a pane's content area: the hovered pane and the
     /// split direction (None = merge into that pane).
     pub(crate) tab_drag_split_target: Option<(PaneId, Option<SplitDirection>)>,
@@ -2236,12 +2231,6 @@ pub struct EditorView {
     pub(crate) format_context_menu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) format_heading_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub(crate) format_more_trigger_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    pub(crate) selection_toolbar_pointer_anchor: Option<(
-        selection_toolbar::SelectionToolbarSelectionKey,
-        Point<Pixels>,
-    )>,
-    pub(crate) selection_toolbar_popup: Option<selection_toolbar::SelectionToolbarPopup>,
-    pub(crate) selection_toolbar_animation: Option<selection_toolbar::SelectionToolbarAnimation>,
     pub(crate) selection_toolbar_menu_hover: menus::SelectionToolbarMenuHover,
     pub(crate) table_adjustment_menu: menus::TableAdjustmentMenu,
     pub(crate) line_format_toolbar_geometries: Vec<selection_toolbar::LineFormatToolbarGeometry>,
@@ -2987,11 +2976,6 @@ impl EditorView {
             pane_bounds: HashMap::new(),
             pane_editor_content_views: HashMap::new(),
             pane_caret_overlay_views: HashMap::new(),
-            selection_toolbar_geometry: HashMap::new(),
-            selection_toolbar_dismissed: None,
-            selection_toolbar_pointer_anchor: None,
-            selection_toolbar_popup: None,
-            selection_toolbar_animation: None,
             selection_toolbar_menu_hover: menus::SelectionToolbarMenuHover::default(),
             table_adjustment_menu: menus::TableAdjustmentMenu::default(),
             line_format_toolbar_geometries: Vec::new(),
@@ -4006,7 +3990,7 @@ impl EditorView {
             return;
         };
 
-        self.hide_selection_toolbar_for_scroll(cx);
+        self.hide_line_format_toolbar_for_scroll(cx);
 
         let delta_y = f32::from(position.y) - drag.start_position_y;
         let thumb_top = (drag.start_thumb_top + delta_y).clamp(0.0, drag.track_travel);
@@ -4389,7 +4373,7 @@ impl EditorView {
             thumb_left / drag.track_travel * drag.max_scroll
         };
         if self.set_code_block_horizontal_offset(drag.start_line, offset) {
-            self.hide_selection_toolbar_for_scroll(cx);
+            self.hide_line_format_toolbar_for_scroll(cx);
             cx.notify();
         }
     }

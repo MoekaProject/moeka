@@ -682,15 +682,10 @@ impl EntityInputHandler for EditorView {
             let local_display_col = disp_col
                 .saturating_sub(hard_line_range.start)
                 .min(hard_line_range.len());
+            let line_height = info.line_height;
             let pos = wrapped
-                .position_for_index(
-                    local_display_col,
-                    px(self.base_font_size()
-                        * self.styles.editor.editor_paragraph_line_height_factor),
-                )
+                .position_for_index(local_display_col, px(line_height))
                 .unwrap_or_default();
-            let line_height =
-                self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
             let preceding_height = info
                 .wrapped_lines
                 .iter()

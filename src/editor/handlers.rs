@@ -181,10 +181,6 @@ impl EditorView {
             self.dismiss_slash_menu(cx);
             return;
         }
-        if self.dismiss_selection_toolbar(window, cx) {
-            cx.notify();
-            return;
-        }
         if self.table_boundary_caret.take().is_some() {
             self.table_boundary_drag_origin = None;
             cx.notify();

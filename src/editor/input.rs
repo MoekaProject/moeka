@@ -20,6 +20,7 @@ pub(super) struct TableCellDisplayInfo {
     pub(super) buffer_to_display: Vec<usize>,
     pub(super) cell_range: Range<usize>,
     pub(super) cell_content_len: usize,
+    pub(super) line_height: f32,
 }
 
 fn nearest_table_cell_in_row(
@@ -67,8 +68,8 @@ fn table_cell_visual_position(
     info: &TableCellDisplayInfo,
     cell_offset: usize,
     inner_width: f32,
-    line_height: f32,
 ) -> Option<(usize, f32)> {
+    let line_height = info.line_height;
     let display_index = if cell_offset >= info.buffer_to_display.len() {
         info.display_text.len()
     } else {
@@ -116,8 +117,8 @@ fn table_cell_offset_for_visual_line(
     target_visual_line: usize,
     goal_x: f32,
     inner_width: f32,
-    line_height: f32,
 ) -> Option<usize> {
+    let line_height = info.line_height;
     let mut first_visual_line = 0usize;
     for (wrapped, range) in info.wrapped_lines.iter().zip(&info.hard_line_ranges) {
         let hard_text = info.display_text.get(range.clone()).unwrap_or("");
@@ -208,6 +209,17 @@ fn compute_inline_wrap_boundary_upstream_xs(
 
     for boundary in helpers::wrap_boundary_byte_indices(wrapped, display_text) {
         let segment_text = &display_text[segment_start..boundary];
+        if segment_text.contains('\u{a0}') {
+            upstream_xs.insert(
+                boundary,
+                f32::from(
+                    wrapped.unwrapped_layout.x_for_index(boundary)
+                        - wrapped.unwrapped_layout.x_for_index(segment_start),
+                ),
+            );
+            segment_start = boundary;
+            continue;
+        }
         let segment_runs = helpers::extract_runs_for_range(runs, segment_start, boundary);
         let segment_shared: SharedString = if segment_text.is_empty() {
             " ".into()
@@ -416,7 +428,6 @@ impl EditorView {
             self.whiteboard_on_mouse_down(event, window, cx);
             return;
         }
-        self.end_retained_selection_toolbar();
         self.last_mouse_down_target = None;
 
         if event.button == MouseButton::Left {
@@ -837,14 +848,12 @@ impl EditorView {
                         self.clear_extra_cursors();
                         self.clear_wrap_boundary_affinity();
                         self.select_logical_line_at_offset(offset, cx);
-                        self.capture_selection_toolbar_pointer_anchor(event.position);
                         self.selection_drag_position = None;
                         self.is_selecting = false;
                     } else if event.click_count == 2 {
                         self.clear_extra_cursors();
                         self.clear_wrap_boundary_affinity();
                         self.select_word_at_offset(offset);
-                        self.capture_selection_toolbar_pointer_anchor(event.position);
                         self.is_selecting = false;
                     } else if event.modifiers.shift {
                         self.maybe_schedule_preview_reveal_for_click(
@@ -856,7 +865,6 @@ impl EditorView {
                             self.table_visible_selection_target(self.cursor.anchor, offset);
                         self.cursor.select_to(offset, &self.buffer);
                         self.clear_wrap_boundary_affinity();
-                        self.capture_selection_toolbar_pointer_anchor(event.position);
                         self.is_selecting = false;
                     } else {
                         self.maybe_schedule_preview_reveal_for_click(
@@ -888,7 +896,6 @@ impl EditorView {
             } else {
                 self.select_word_at_offset(offset);
             }
-            self.capture_selection_toolbar_pointer_anchor(event.position);
             self.selection_drag_position = None;
             self.is_selecting = false;
             cx.notify();
@@ -1088,8 +1095,6 @@ impl EditorView {
             return false;
         }
 
-        self.selection_toolbar_popup = None;
-        self.selection_toolbar_animation = None;
         self.line_format_toolbar_line = None;
         self.line_format_toolbar_bounds = None;
         self.preview_overlay = Some(PreviewOverlayState {
@@ -1125,8 +1130,6 @@ impl EditorView {
         {
             return false;
         }
-        self.selection_toolbar_popup = None;
-        self.selection_toolbar_animation = None;
         self.line_format_toolbar_line = None;
         self.line_format_toolbar_bounds = None;
         self.preview_overlay = Some(PreviewOverlayState {
@@ -1802,7 +1805,6 @@ impl EditorView {
         self.selection_drag_has_moved = false;
         self.table_boundary_drag_origin = None;
         if was_selecting {
-            self.capture_selection_toolbar_pointer_anchor(event.position);
             cx.notify();
         }
     }
@@ -2357,30 +2359,7 @@ impl EditorView {
                 None
             },
         );
-        let cell_decoration = helpers::table_cell_decoration(dec, &cell_content, &cell_range);
-        let (folded_raw, d2b_raw, b2d_raw, _) = helpers::build_display_text(
-            &cell_content,
-            &cell_decoration,
-            &cell_active_ranges,
-            false,
-            None,
-            3,
-            3,
-            2,
-            0,
-            0,
-            self.styles.editor.editor_superscript_scale_factor,
-            self.styles.editor.editor_subscript_scale_factor,
-            self.styles.editor.editor_superscript_scale_factor,
-        );
-        let trimmed_range = helpers::table_cell_trimmed_display_range(&folded_raw);
-        let trim_start = trimmed_range.start;
-        let display_text = folded_raw[trimmed_range.clone()].to_string();
-        let display_to_buffer = d2b_raw[trimmed_range].to_vec();
-        let buffer_to_display = b2d_raw
-            .iter()
-            .map(|&display_index| display_index.saturating_sub(trim_start))
-            .collect();
+        let mut cell_decoration = helpers::table_cell_decoration(dec, &cell_content, &cell_range);
 
         let text_style = window.text_style();
         let editor_styles = &self.styles.editor;
@@ -2430,6 +2409,82 @@ impl EditorView {
         italic_cjk_font.fallbacks = body_cjk_fallbacks(editor_styles.editor_body_cjk_font_family);
 
         let font_size = self.base_font_size();
+        let base_char_width = {
+            let test_run = TextRun {
+                len: 1,
+                font: monospace_font.clone(),
+                color: gpui::transparent_black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            window
+                .text_system()
+                .shape_text("x".into(), px(font_size), &[test_run], None, None)
+                .ok()
+                .and_then(|lines| lines.first().map(|line| f32::from(line.width())))
+                .unwrap_or(font_size * 0.6)
+        };
+        let body_space_width = {
+            let test_run = TextRun {
+                len: 1,
+                font: body_font.clone(),
+                color: gpui::transparent_black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            if let Ok(test_lines) =
+                window
+                    .text_system()
+                    .shape_text(" ".into(), px(font_size), &[test_run], None, None)
+            {
+                test_lines
+                    .first()
+                    .map(|line| f32::from(line.width()).max(1.0))
+                    .unwrap_or_else(|| base_char_width.max(1.0))
+            } else {
+                base_char_width.max(1.0)
+            }
+        };
+        helpers::add_inline_math_display_replacements(
+            &mut cell_decoration,
+            &cell_content,
+            &self.image_cache,
+            body_space_width,
+        );
+        let line_height = helpers::inline_math_line_height(
+            &cell_decoration,
+            &cell_content,
+            &cell_active_ranges,
+            &self.image_cache,
+            font_size * self.styles.editor.editor_paragraph_line_height_factor,
+        );
+        let (folded_raw, d2b_raw, b2d_raw, prefix_collapsed) = helpers::build_display_text(
+            &cell_content,
+            &cell_decoration,
+            &cell_active_ranges,
+            false,
+            None,
+            3,
+            3,
+            2,
+            0,
+            0,
+            self.styles.editor.editor_superscript_scale_factor,
+            self.styles.editor.editor_subscript_scale_factor,
+            self.styles.editor.editor_superscript_scale_factor,
+        );
+        let trimmed_range = helpers::table_cell_trimmed_display_range(&folded_raw);
+        let trim_start = trimmed_range.start;
+        let trimmed_len = trimmed_range.len();
+        let display_text = folded_raw[trimmed_range.clone()].to_string();
+        let display_to_buffer = d2b_raw[trimmed_range].to_vec();
+        let buffer_to_display = b2d_raw
+            .iter()
+            .map(|&display_index| display_index.saturating_sub(trim_start).min(trimmed_len))
+            .collect::<Vec<_>>();
+
         let mut cell_runs = helpers::build_text_runs_for_display(
             &display_text,
             &cell_content,
@@ -2437,7 +2492,7 @@ impl EditorView {
             &cell_decoration,
             &cell_active_ranges,
             false,
-            false,
+            prefix_collapsed,
             &body_font,
             &body_cjk_font,
             &monospace_font,
@@ -2470,7 +2525,7 @@ impl EditorView {
             display_text.clone().into()
         };
         let letter_spacing = self.styles.editor.editor_letter_spacing_px;
-        let shape_width = cell_inner_width.max(font_size * 0.5);
+        let shape_width = cell_inner_width.max(base_char_width);
         let mut wrapped_lines = window
             .text_system()
             .shape_text(
@@ -2483,10 +2538,19 @@ impl EditorView {
             .ok()?
             .into_iter()
             .collect::<Vec<_>>();
-        for wrapped in &mut wrapped_lines {
-            helpers::apply_letter_spacing(wrapped, letter_spacing);
-        }
         let hard_line_ranges = helpers::hard_line_byte_ranges(&display_text);
+        for (wrapped, range) in wrapped_lines.iter_mut().zip(&hard_line_ranges) {
+            helpers::apply_letter_spacing(wrapped, letter_spacing);
+            helpers::keep_inline_math_placeholders_unwrapped(
+                wrapped,
+                &cell_decoration,
+                &cell_content,
+                &buffer_to_display,
+                &cell_active_ranges,
+                &self.image_cache,
+                range.start,
+            );
+        }
         if wrapped_lines.len() != hard_line_ranges.len() {
             return None;
         }
@@ -2504,6 +2568,7 @@ impl EditorView {
             buffer_to_display,
             cell_range,
             cell_content_len: cell_content.len(),
+            line_height,
         })
     }
 
@@ -2541,9 +2606,7 @@ impl EditorView {
             self.table_cell_display_geometry(window, table_start, source_line, column)?;
         let line_start = self.buffer.line_start(source_line);
         let cell_offset = offset.saturating_sub(line_start + info.cell_range.start);
-        let line_height =
-            self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
-        table_cell_visual_position(&info, cell_offset, inner_width, line_height).map(|(_, x)| x)
+        table_cell_visual_position(&info, cell_offset, inner_width).map(|(_, x)| x)
     }
 
     pub(crate) fn table_vertical_target(
@@ -2558,10 +2621,7 @@ impl EditorView {
             self.table_cell_display_geometry(window, table_start, source_line, column)?;
         let line_start = self.buffer.line_start(source_line);
         let cell_offset = offset.saturating_sub(line_start + info.cell_range.start);
-        let line_height =
-            self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
-        let (visual_line, _) =
-            table_cell_visual_position(&info, cell_offset, inner_width, line_height)?;
+        let (visual_line, _) = table_cell_visual_position(&info, cell_offset, inner_width)?;
         let visual_line_count = table_cell_visual_line_count(&info);
         let target_visual_line = if down {
             visual_line
@@ -2571,13 +2631,8 @@ impl EditorView {
             visual_line.checked_sub(1)
         };
         if let Some(target_visual_line) = target_visual_line {
-            let target_cell_offset = table_cell_offset_for_visual_line(
-                &info,
-                target_visual_line,
-                goal_x,
-                inner_width,
-                line_height,
-            )?;
+            let target_cell_offset =
+                table_cell_offset_for_visual_line(&info, target_visual_line, goal_x, inner_width)?;
             return Some(line_start + info.cell_range.start + target_cell_offset);
         }
 
@@ -2606,7 +2661,6 @@ impl EditorView {
             target_visual_line,
             goal_x,
             target_inner_width,
-            line_height,
         )?;
         Some(
             self.buffer.line_start(target_line) + target_info.cell_range.start + target_cell_offset,
@@ -2619,7 +2673,7 @@ impl EditorView {
         line_idx: usize,
         bounds: Bounds<Pixels>,
     ) -> Option<InlineLineDisplayInfo> {
-        let decoration = self.decorations.get(line_idx)?.clone();
+        let mut decoration = self.decorations.get(line_idx)?.clone();
         if matches!(decoration.block_type, BlockType::Table) {
             return None;
         }
@@ -2804,7 +2858,7 @@ impl EditorView {
                     .min(line_content.len())
             });
         let font_size = self.font_size_for_block(&decoration.block_type);
-        let line_height = self.line_height_for_block(&decoration.block_type);
+        let base_line_height = self.line_height_for_block(&decoration.block_type);
         let ime_active_on_line = self
             .marked_range
             .as_ref()
@@ -2881,24 +2935,45 @@ impl EditorView {
             .into_iter()
             .map(|(offset, anchor)| offset.min(anchor)..offset.max(anchor))
             .collect();
-        let mut active_ranges: Vec<Range<usize>> = all_sel_ranges
-            .iter()
-            .filter(|range| range.start != range.end)
-            .filter_map(|range| {
-                if range.end <= line_start_offset || range.start >= line_end_offset {
-                    return None;
+        let mut active_ranges: Vec<Range<usize>> =
+            if self.is_selecting && self.selection_drag_has_moved {
+                Vec::new()
+            } else {
+                all_sel_ranges
+                    .iter()
+                    .filter(|range| range.start != range.end)
+                    .filter_map(|range| {
+                        if range.end <= line_start_offset || range.start >= line_end_offset {
+                            return None;
+                        }
+                        let start = range
+                            .start
+                            .saturating_sub(line_start_offset)
+                            .min(line_content.len());
+                        let end = range
+                            .end
+                            .saturating_sub(line_start_offset)
+                            .min(line_content.len());
+                        Some(start..end)
+                    })
+                    .collect()
+            };
+        if self.is_selecting && self.selection_drag_has_moved && self.cursor.has_selection() {
+            let (anchor_line, anchor_col) = self.buffer.offset_to_line_col(self.cursor.anchor);
+            let (head_line, head_col) = self.buffer.offset_to_line_col(self.cursor.offset);
+            if anchor_line == line_idx && head_line == line_idx {
+                for syntax_range in &decoration.syntax_ranges {
+                    let anchor_inside = anchor_col >= syntax_range.trigger_range.start
+                        && anchor_col <= syntax_range.trigger_range.end;
+                    let head_inside = head_col >= syntax_range.trigger_range.start
+                        && head_col <= syntax_range.trigger_range.end;
+                    if anchor_inside && head_inside {
+                        active_ranges.push(syntax_range.trigger_range.clone());
+                        break;
+                    }
                 }
-                let start = range
-                    .start
-                    .saturating_sub(line_start_offset)
-                    .min(line_content.len());
-                let end = range
-                    .end
-                    .saturating_sub(line_start_offset)
-                    .min(line_content.len());
-                Some(start..end)
-            })
-            .collect();
+            }
+        }
         for marked in self.marked_ranges() {
             if heading_content_start.is_some() && ime_active_on_line {
                 continue;
@@ -2922,7 +2997,14 @@ impl EditorView {
             }
             active_ranges.push(start..end);
         }
-        if active_ranges.is_empty()
+        let syntax_expansion_allowed = self.markdown_syntax_expansion_allowed();
+        if !syntax_expansion_allowed {
+            active_ranges.clear();
+        }
+        if syntax_expansion_allowed
+            && (!self.is_selecting || !self.selection_drag_has_moved)
+            && active_ranges.is_empty()
+            && !self.suppress_fold_for_empty_selection_drag
             && let Some(col) = cursor_col
         {
             active_ranges.push(col.min(line_content.len())..col.min(line_content.len()));
@@ -2932,6 +3014,21 @@ impl EditorView {
             .is_some_and(|(start, end)| line_idx >= start && line_idx <= end)
             || active_front_matter_group
                 .is_some_and(|(start, end)| line_idx >= start && line_idx <= end);
+        let placeholder_unit_width =
+            body_space_width * (font_size / self.base_font_size()).max(0.1);
+        helpers::add_inline_math_display_replacements(
+            &mut decoration,
+            line_content,
+            &self.image_cache,
+            placeholder_unit_width,
+        );
+        let line_height = helpers::inline_math_line_height(
+            &decoration,
+            line_content,
+            &active_ranges,
+            &self.image_cache,
+            base_line_height,
+        );
         let (mut display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
             helpers::build_display_text(
                 line_content,
@@ -3045,7 +3142,16 @@ impl EditorView {
             }
         }
 
-        let wrapped_line = wrapped_lines.into_iter().next()?;
+        let mut wrapped_line = wrapped_lines.into_iter().next()?;
+        helpers::keep_inline_math_placeholders_unwrapped(
+            &mut wrapped_line,
+            &decoration,
+            line_content,
+            &buffer_to_display,
+            &active_ranges,
+            &self.image_cache,
+            0,
+        );
         let indent_px = if is_list_type && prefix_bytes > 0 && prefix_bytes <= display_text.len() {
             wrapped_line
                 .position_for_index(prefix_bytes, px(line_height))
@@ -3116,11 +3222,11 @@ impl EditorView {
         let inner_width =
             (f32::from(bounds.size.width) - padding_x * 2.0).max(self.base_font_size() * 0.5);
         let info = self.table_cell_display_info(window, source_line, col, inner_width)?;
-        let line_height =
-            self.base_font_size() * self.styles.editor.editor_paragraph_line_height_factor;
+        let line_height = info.line_height;
         let local_y = (f32::from(position.y) - f32::from(bounds.origin.y) - padding_y).max(0.0);
         let mut line_top = 0.0;
         let mut selected_line = info.wrapped_lines.len().saturating_sub(1);
+        let mut hit_y = 0.0;
         for (index, wrapped) in info.wrapped_lines.iter().enumerate() {
             let height = (helpers::wrap_boundary_byte_indices(
                 wrapped,
@@ -3132,8 +3238,10 @@ impl EditorView {
             .len()
                 + 1) as f32
                 * line_height;
-            if local_y < line_top + height {
+            // A taller sibling cell can leave space below this cell's last hard line.
+            if local_y < line_top + height || index + 1 == info.wrapped_lines.len() {
                 selected_line = index;
+                hit_y = (local_y - line_top).min((height - line_height * 0.5).max(0.0));
                 break;
             }
             line_top += height;
@@ -3149,7 +3257,7 @@ impl EditorView {
             (f32::from(position.x) - f32::from(bounds.origin.x) - padding_x - content_offset)
                 .max(0.0);
         let local_display_index = match wrapped
-            .closest_index_for_position(point(px(local_x), px(local_y - line_top)), px(line_height))
+            .closest_index_for_position(point(px(local_x), px(hit_y)), px(line_height))
         {
             Ok(index) | Err(index) => index,
         };
@@ -3174,7 +3282,7 @@ impl EditorView {
     ) {
         let delta = event.delta.pixel_delta(px(40.0));
         if delta.x != px(0.0) || delta.y != px(0.0) {
-            self.hide_selection_toolbar_for_scroll(cx);
+            self.hide_line_format_toolbar_for_scroll(cx);
         }
         if self.outline_rail_clicked_active_line.is_some() {
             self.outline_rail_clicked_active_line = None;

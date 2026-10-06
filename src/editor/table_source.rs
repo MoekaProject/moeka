@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use gpui::{Context, Window};
+use gpui::Context;
 
 use super::EditorView;
 use crate::{
@@ -269,12 +269,7 @@ impl EditorView {
         }
     }
 
-    pub(super) fn show_table_source(
-        &mut self,
-        table_start_line: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn show_table_source(&mut self, table_start_line: usize, cx: &mut Context<Self>) {
         if self.block_is_front_matter(table_start_line) || !self.begin_content_edit(cx) {
             return;
         }
@@ -284,7 +279,6 @@ impl EditorView {
         let formatted = crate::table_ops::format_table_source(&lines);
         self.close_context_menu_immediately(cx);
         self.dismiss_line_format_toolbar(cx);
-        self.dismiss_selection_toolbar(window, cx);
         if formatted != lines {
             self.replace_table_block(start, end, &formatted, cx);
         }

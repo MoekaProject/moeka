@@ -491,11 +491,6 @@ pane_state! {
     (format_trigger_opacity_target, f32, 0.0),
     (format_trigger_animation_epoch, usize, 0),
     (format_trigger_animation_task, Option<Task<()>>, None),
-    (
-        selection_toolbar_pointer_anchor,
-        Option<(selection_toolbar::SelectionToolbarSelectionKey, Point<Pixels>)>,
-        None
-    ),
     (image_drag_state, Option<ImageDragState>, None),
     (hovered_editor_position, Option<Point<Pixels>>, None),
     // ── Editor scrollbar ──

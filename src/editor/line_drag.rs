@@ -589,7 +589,6 @@ impl EditorView {
             .collect();
         self.selected_handle = None;
         self.table_boundary_caret = None;
-        self.selection_toolbar_popup = None;
         self.mark_active_tab_dirty();
         self.reparse();
         self.scroll_to_cursor();

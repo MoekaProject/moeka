@@ -1242,12 +1242,29 @@ fn push_unordered_list_marker_paint(
                 .editor
                 .editor_unordered_list_marker_font_size_offset_px,
         );
-        // The enlarged bullet is shaped with the monospace font, whose glyph
-        // has visible side bearing inside its advance cell. Pull only the
-        // painted marker left by half the size delta; the hidden prefix width
-        // remains unchanged, so wrapped text and nested-list bodies still
-        // align with their parent content.
-        let marker_x = marker_anchor_x - marker_offset * 0.5;
+        // Align the visible glyph, not its advance cell. Keep the hidden
+        // prefix unchanged so child markers still align with their parent's text.
+        let marker_ink_left = marker_wrapped
+            .unwrapped_layout
+            .runs
+            .iter()
+            .flat_map(|run| {
+                run.glyphs
+                    .iter()
+                    .filter_map(|glyph| {
+                        let character = marker_wrapped.text.get(glyph.index..)?.chars().next()?;
+                        let bounds = window
+                            .text_system()
+                            .typographic_bounds(run.font_id, px(marker_font_size), character)
+                            .ok()?;
+                        Some(f32::from(glyph.position.x + bounds.origin.x))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .reduce(f32::min)
+            .unwrap_or(0.0);
+        let marker_x =
+            super::text_layout::unordered_list_marker_origin_x(marker_anchor_x, marker_ink_left);
         let marker_line_height = line_height
             + editor.scaled(
                 editor
@@ -1484,7 +1501,7 @@ fn build_precise_table_layout(
     cell_padding_y: f32,
     base_char_width: f32,
     line_height: f32,
-    inline_math_height_factor: f32,
+    body_space_width: f32,
     handle_size: f32,
     body_font: &Font,
     body_cjk_font: &Font,
@@ -1546,13 +1563,18 @@ fn build_precise_table_layout(
                     &cell_content,
                     &cell_layout.cell_range,
                 );
-                add_inline_math_display_replacements(
+                helpers::add_inline_math_display_replacements(
                     &mut cell_decoration,
                     &cell_content,
                     image_cache,
+                    body_space_width,
+                );
+                let cell_line_height = helpers::inline_math_line_height(
+                    &cell_decoration,
+                    &cell_content,
+                    &cell_active_ranges,
+                    image_cache,
                     line_height,
-                    inline_math_height_factor,
-                    base_char_width,
                 );
                 let (folded_raw, d2b_raw, b2d_raw, prefix_collapsed) = helpers::build_display_text(
                     &cell_content,
@@ -1636,6 +1658,17 @@ fn build_precise_table_layout(
                     if !shaped_lines.is_empty() {
                         let hard_line_ranges =
                             helpers::hard_line_byte_ranges(&cell_layout.display_text);
+                        for (shaped, range) in shaped_lines.iter_mut().zip(&hard_line_ranges) {
+                            helpers::keep_inline_math_placeholders_unwrapped(
+                                shaped,
+                                &cell_decoration,
+                                &cell_content,
+                                &cell_layout.buffer_to_display,
+                                &cell_active_ranges,
+                                image_cache,
+                                range.start,
+                            );
+                        }
                         let visual_lines = shaped_lines
                             .iter()
                             .zip(hard_line_ranges)
@@ -1650,7 +1683,7 @@ fn build_precise_table_layout(
                             .sum::<usize>()
                             .max(1);
                         row_height = row_height
-                            .max(visual_lines as f32 * line_height + cell_padding_y * 2.0);
+                            .max(visual_lines as f32 * cell_line_height + cell_padding_y * 2.0);
                     }
                 }
             }
@@ -1746,6 +1779,17 @@ fn compute_wrap_boundary_upstream_xs(
 
     for boundary in helpers::wrap_boundary_byte_indices(wrapped, display_text) {
         let segment_text = &display_text[segment_start..boundary];
+        if segment_text.contains('\u{a0}') {
+            upstream_xs.insert(
+                boundary,
+                f32::from(
+                    wrapped.unwrapped_layout.x_for_index(boundary)
+                        - wrapped.unwrapped_layout.x_for_index(segment_start),
+                ),
+            );
+            segment_start = boundary;
+            continue;
+        }
         let segment_runs = helpers::extract_runs_for_range(runs, segment_start, boundary);
         let segment_shared: SharedString = if segment_text.is_empty() {
             " ".into()
@@ -2263,19 +2307,51 @@ fn push_rendered_inline_overlays(
     }
 }
 
+fn inline_math_image_bounds(
+    placeholder: Bounds<Pixels>,
+    natural_size: gpui::Size<Pixels>,
+) -> Bounds<Pixels> {
+    Bounds::new(
+        point(
+            placeholder.origin.x,
+            placeholder.origin.y + (placeholder.size.height - natural_size.height) / 2.0,
+        ),
+        natural_size,
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn inline_math_keeps_intrinsic_size_without_horizontal_padding() {
+    for (line_height, image_height, expected_y) in [
+        (24.0, 12.0, 106.0),
+        (60.0, 60.0, 100.0),
+        (80.0, 60.0, 110.0),
+    ] {
+        let bounds = inline_math_image_bounds(
+            Bounds::new(point(px(20.0), px(100.0)), size(px(66.0), px(line_height))),
+            size(px(61.0), px(image_height)),
+        );
+        assert_eq!(bounds.origin, point(px(20.0), px(expected_y)));
+        assert_eq!(bounds.size, size(px(61.0), px(image_height)));
+        assert!(bounds.bottom() <= px(100.0 + line_height));
+    }
+}
+
 fn push_inline_math_images(
     decoration: &crate::markdown::LineDecoration,
     line_content: &str,
     display_text: &str,
     buffer_to_display: &[usize],
     active_ranges: &[Range<usize>],
+    display_offset: usize,
     wrapped: &WrappedLine,
     image_cache: &HashMap<String, Option<Arc<RenderImage>>>,
     content_x: f32,
     text_line_top: f32,
     indent_px: f32,
     line_height: f32,
-    height_factor: f32,
+    clip_bounds: Option<Bounds<Pixels>>,
     images: &mut Vec<(
         Bounds<Pixels>,
         Arc<RenderImage>,
@@ -2296,23 +2372,34 @@ fn push_inline_math_images(
         let Some(Some(image)) = image_cache.get(&cache_key) else {
             continue;
         };
-        let display_start =
-            helpers::buffer_to_display_offset(buffer_to_display, source_range.start);
-        let display_end = helpers::buffer_to_display_offset(buffer_to_display, source_range.end)
-            .min(display_text.len());
-        let (Some(start), Some(end)) = (
-            wrapped.position_for_index(display_start, px(line_height)),
-            wrapped.position_for_index(display_end, px(line_height)),
-        ) else {
+        let Some(display_range) =
+            helpers::inline_math_display_range(decoration, source_range, buffer_to_display)
+        else {
             continue;
         };
-        if start.y != end.y {
+        if display_range.start < display_offset
+            || display_range.end > display_offset + display_text.len()
+        {
             continue;
         }
-        let source_width = f32::from(end.x - start.x);
+        let display_start = display_range.start - display_offset;
+        let display_end = display_range.end - display_offset;
+        let Some(start) =
+            downstream_wrap_boundary_position(wrapped, display_text, display_start, line_height)
+                .or_else(|| wrapped.position_for_index(display_start, px(line_height)))
+        else {
+            continue;
+        };
+        let source_width = f32::from(
+            wrapped.unwrapped_layout.x_for_index(display_end)
+                - wrapped.unwrapped_layout.x_for_index(display_start),
+        );
         let image_size = image.size(0);
-        let natural_width = image_size.width.0 as f32;
-        let natural_height = image_size.height.0 as f32;
+        let (natural_width, natural_height) = helpers::intrinsic_generated_preview_size_for_kind(
+            image_size.width.0 as f32,
+            image_size.height.0 as f32,
+            crate::markdown::BlockPreviewKind::Math,
+        );
         if source_width <= 0.0 || natural_width <= 0.0 || natural_height <= 0.0 {
             continue;
         }
@@ -2320,64 +2407,19 @@ fn push_inline_math_images(
         let row_indent = helpers::indent_for_y(indent_px, start.y, line_height);
         let source_x = content_x + row_indent + f32::from(start.x);
         let source_y = text_line_top + f32::from(start.y);
-        let max_image_height = line_height * height_factor.clamp(0.1, 1.0);
-        let mut image_width = source_width;
-        let mut image_height = natural_height * image_width / natural_width;
-        if image_height > max_image_height {
-            image_height = max_image_height;
-            image_width = natural_width * image_height / natural_height;
-        }
-        let image_x = source_x + (source_width - image_width) / 2.0;
-        let image_y = source_y + (line_height - image_height) / 2.0;
         images.push((
-            Bounds::new(
-                point(px(image_x), px(image_y)),
-                size(px(image_width), px(image_height)),
+            inline_math_image_bounds(
+                Bounds::new(
+                    point(px(source_x), px(source_y)),
+                    size(px(source_width), px(line_height)),
+                ),
+                size(px(natural_width), px(natural_height)),
             ),
             image.clone(),
             px(0.0),
-            None,
+            clip_bounds,
         ));
     }
-}
-
-fn add_inline_math_display_replacements(
-    decoration: &mut crate::markdown::LineDecoration,
-    line_content: &str,
-    image_cache: &HashMap<String, Option<Arc<RenderImage>>>,
-    line_height: f32,
-    height_factor: f32,
-    placeholder_unit_width: f32,
-) -> bool {
-    let mut added = false;
-    for source_range in decoration.inline_math_spans.clone() {
-        let Some(source_text) = line_content.get(source_range.clone()) else {
-            continue;
-        };
-        let Some(Some(image)) = image_cache.get(&helpers::inline_math_cache_key(source_text))
-        else {
-            continue;
-        };
-        let image_size = image.size(0);
-        let natural_width = image_size.width.0 as f32;
-        let natural_height = image_size.height.0 as f32;
-        if natural_width <= 0.0 || natural_height <= 0.0 || placeholder_unit_width <= 0.0 {
-            continue;
-        }
-        let target_width =
-            natural_width * (line_height * height_factor.clamp(0.1, 1.0)) / natural_height;
-        let placeholder_columns = (target_width / placeholder_unit_width).round().max(1.0) as usize;
-        decoration
-            .display_replacements
-            .push(crate::markdown::DisplayReplacement {
-                source_range: source_range.clone(),
-                display_text: "\u{a0}".repeat(placeholder_columns),
-                trigger_range: source_range.start.saturating_sub(1)
-                    ..(source_range.end + 1).min(line_content.len()),
-            });
-        added = true;
-    }
-    added
 }
 
 fn non_markdown_cached_line_can_reuse(
@@ -2526,9 +2568,6 @@ impl Element for EditorElement {
         let cursor = &editor.cursor;
         let decorations = &editor.decorations;
         let scroll_offset = editor.scroll_offset;
-        // Capture the state that actually produces these quads, before any
-        // end-of-prepaint scroll reconciliation can change the live state.
-        let selection_toolbar_key = editor.selection_toolbar_snapshot_key();
         let caret_cursor_offset = cursor.offset;
         let cursor_line = editor.cursor_line();
 
@@ -4300,18 +4339,27 @@ impl Element for EditorElement {
                 let mut dynamic_decoration = decoration.clone();
                 let placeholder_unit_width =
                     body_space_width * (font_size / editor.base_font_size()).max(0.1);
-                if add_inline_math_display_replacements(
+                if helpers::add_inline_math_display_replacements(
                     &mut dynamic_decoration,
                     line_content,
                     image_cache,
-                    line_height,
-                    editor.styles.editor.editor_inline_math_height_factor,
                     placeholder_unit_width,
                 ) {
                     render_decoration_override = Some(dynamic_decoration);
                 }
             }
             let render_decoration = render_decoration_override.as_ref().unwrap_or(&decoration);
+            let line_height = if *block_type != BlockType::Table || active_tab_is_diff {
+                helpers::inline_math_line_height(
+                    render_decoration,
+                    line_content,
+                    &active_ranges,
+                    image_cache,
+                    line_height,
+                )
+            } else {
+                line_height
+            };
             let (mut display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
                 if collapsed_block_preview.is_some() {
                     (
@@ -4611,6 +4659,17 @@ impl Element for EditorElement {
                 }
             }
 
+            for wrapped in &mut wrapped_lines {
+                helpers::keep_inline_math_placeholders_unwrapped(
+                    wrapped,
+                    render_decoration,
+                    line_content,
+                    &buffer_to_display,
+                    &active_ranges,
+                    image_cache,
+                    0,
+                );
+            }
             let Some(wrapped) = wrapped_lines.first() else {
                 display_info_updates.push((line_idx, None));
                 y += estimated_total_line_height;
@@ -4758,7 +4817,7 @@ impl Element for EditorElement {
                                     editor.scaled(table_styles.table_cell_padding_px) * 0.6,
                                     base_char_width,
                                     line_height,
-                                    editor.styles.editor.editor_inline_math_height_factor,
+                                    body_space_width,
                                     editor.scaled(table_styles.table_border_track_width_px),
                                     &body_font,
                                     &body_cjk_font,
@@ -4799,8 +4858,9 @@ impl Element for EditorElement {
             let total_line_height = text_line_height + extra_height;
 
             if !suppress_scroll_anchor_compensation {
-                if line_has_block_preview {
-                    let previous_height = cached_height_before_reflow.unwrap_or(0.0);
+                if line_has_block_preview || !decoration.inline_math_spans.is_empty() {
+                    let previous_height = cached_height_before_reflow
+                        .unwrap_or_else(|| editor.visual_height_for_line(line_idx));
                     scroll_anchor_delta += preview_height_anchor_delta(
                         previous_height,
                         total_line_height,
@@ -5075,6 +5135,15 @@ impl Element for EditorElement {
                             if letter_spacing != 0.0 {
                                 helpers::apply_letter_spacing(&mut seg_wrapped, letter_spacing);
                             }
+                            helpers::keep_inline_math_placeholders_unwrapped(
+                                &mut seg_wrapped,
+                                render_decoration,
+                                line_content,
+                                &buffer_to_display,
+                                &active_ranges,
+                                image_cache,
+                                segment_range.start,
+                            );
                             let seg_x = if seg_idx == 0 {
                                 content_x
                             } else {
@@ -5312,7 +5381,7 @@ impl Element for EditorElement {
                                     table_cell_padding_px * 0.6,
                                     base_char_width,
                                     line_height,
-                                    editor.styles.editor.editor_inline_math_height_factor,
+                                    body_space_width,
                                     editor.scaled(table_styles.table_border_track_width_px),
                                     &body_font,
                                     &body_cjk_font,
@@ -5602,13 +5671,18 @@ impl Element for EditorElement {
                                         &cell_content,
                                         &cell_layout.cell_range,
                                     );
-                                    add_inline_math_display_replacements(
+                                    helpers::add_inline_math_display_replacements(
                                         &mut cell_decoration,
                                         &cell_content,
                                         image_cache,
+                                        body_space_width,
+                                    );
+                                    let line_height = helpers::inline_math_line_height(
+                                        &cell_decoration,
+                                        &cell_content,
+                                        &cell_active_ranges,
+                                        image_cache,
                                         line_height,
-                                        editor.styles.editor.editor_inline_math_height_factor,
-                                        base_char_width,
                                     );
 
                                     let mut cell_runs = helpers::build_text_runs_for_display(
@@ -5720,9 +5794,18 @@ impl Element for EditorElement {
                                             &cell_layout.display_text,
                                         );
                                         let mut hard_line_y = cell_text_y;
-                                        for (shaped, hard_line_range) in
+                                        for (mut shaped, hard_line_range) in
                                             shaped_lines.into_iter().zip(hard_line_ranges)
                                         {
+                                            helpers::keep_inline_math_placeholders_unwrapped(
+                                                &mut shaped,
+                                                &cell_decoration,
+                                                &cell_content,
+                                                &cell_layout.buffer_to_display,
+                                                &cell_active_ranges,
+                                                image_cache,
+                                                hard_line_range.start,
+                                            );
                                             let hard_display_text = cell_layout
                                                 .display_text
                                                 .get(hard_line_range.clone())
@@ -6470,18 +6553,22 @@ impl Element for EditorElement {
                                                 &cell_decoration,
                                                 &cell_content,
                                                 hard_display_text,
-                                                &hard_buffer_to_display,
+                                                &cell_layout.buffer_to_display,
                                                 &cell_active_ranges,
+                                                hard_line_range.start,
                                                 &shaped,
                                                 image_cache,
                                                 cell_x,
                                                 hard_line_y,
                                                 0.0,
                                                 line_height,
-                                                editor
-                                                    .styles
-                                                    .editor
-                                                    .editor_inline_math_height_factor,
+                                                Some(Bounds::new(
+                                                    point(
+                                                        px(table_left + cell_layout.x),
+                                                        px(row_y),
+                                                    ),
+                                                    size(px(cell_layout.width), px(row_h)),
+                                                )),
                                                 &mut image_previews,
                                             );
 
@@ -7037,13 +7124,14 @@ impl Element for EditorElement {
                     &display_text,
                     &buffer_to_display,
                     &active_ranges,
+                    0,
                     wrapped,
                     image_cache,
                     content_x,
                     text_line_top,
                     indent_px,
                     line_height,
-                    editor.styles.editor.editor_inline_math_height_factor,
+                    None,
                     &mut image_previews,
                 );
             }
@@ -10172,39 +10260,6 @@ impl Element for EditorElement {
             link_underlines,
             inline_overlays,
         };
-
-        self.editor.update(cx, |editor, _| {
-            // Only real text selection paint participates: never search,
-            // inline diff, phantom-row highlights, or caret approximations.
-            let geometry = selection_toolbar_key.and_then(|key| {
-                let pointer_anchor = editor
-                    .selection_toolbar_pointer_anchor
-                    .as_ref()
-                    .filter(|(selection, _)| *selection == key.selection)
-                    .map(|(_, position)| *position);
-                selection_toolbar::SelectionToolbarGeometry::from_quads(
-                    key,
-                    bounds,
-                    window.content_mask().bounds,
-                    prepaint_state.horizontal_editor_clip_bounds,
-                    &prepaint_state.selection_quads,
-                    &prepaint_state.clipped_code_block_selections,
-                )
-                .map(|mut geometry| {
-                    geometry.pointer_anchor = pointer_anchor;
-                    geometry
-                })
-            });
-            if let Some(geometry) = geometry {
-                editor
-                    .selection_toolbar_geometry
-                    .insert(self.pane_id, geometry);
-            } else {
-                editor.selection_toolbar_geometry.remove(&self.pane_id);
-            }
-            // No notify: the deferred toolbar reads this snapshot later in
-            // this same prepaint pass.
-        });
 
         self.editor.update(cx, |editor, _| {
             if let Some(source) = editor.line_drag_ghost_source() {

@@ -11,6 +11,10 @@ pub(crate) fn text_baseline_paint_offset(
     reference_baseline - ((line_height - shaped_ascent - shaped_descent) * 0.5 + shaped_ascent)
 }
 
+pub(crate) fn unordered_list_marker_origin_x(anchor_x: f32, glyph_ink_left: f32) -> f32 {
+    anchor_x - glyph_ink_left
+}
+
 pub(crate) fn table_cell_content_offset(
     alignment: crate::markdown::TableAlign,
     inner_width: f32,
@@ -62,6 +66,25 @@ mod tests {
                 assert_eq!(painted_baseline, row_top + reference_baseline);
             }
         }
+    }
+
+    #[test]
+    fn unordered_list_markers_align_visible_left_edges_at_each_level() {
+        for scale in [0.75, 1.0, 1.5, 2.0] {
+            let content_left = 100.0;
+            let parent_prefix_width = 12.0 * scale;
+            for (level, bearing) in [3.0, 4.0, 2.0].into_iter().enumerate() {
+                let anchor = content_left + level as f32 * parent_prefix_width;
+                let bearing = bearing * scale;
+                let origin = unordered_list_marker_origin_x(anchor, bearing);
+                assert_eq!(origin + bearing, anchor);
+                if level > 0 {
+                    let parent_text_left = content_left + level as f32 * parent_prefix_width;
+                    assert_eq!(origin + bearing, parent_text_left);
+                }
+            }
+        }
+        assert_eq!(unordered_list_marker_origin_x(100.0, -2.0), 102.0);
     }
 
     #[test]

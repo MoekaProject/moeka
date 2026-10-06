@@ -1458,7 +1458,12 @@ pub(crate) fn build_highlight_bounds(
                 )
             };
 
-            let end_x = if overlap_end == segment_end {
+            let end_x = if display_text[segment_start..segment_end].contains('\u{a0}') {
+                f32::from(
+                    wrapped.unwrapped_layout.x_for_index(overlap_end)
+                        - wrapped.unwrapped_layout.x_for_index(segment_start),
+                )
+            } else if overlap_end == segment_end {
                 let segment_text = &display_text[segment_start..segment_end];
                 let segment_runs = extract_runs_for_range(runs, segment_start, segment_end);
                 let shared: SharedString = if segment_text.is_empty() {
@@ -2334,6 +2339,167 @@ mod tests {
         prefix_is_folded, table_cell_content_offset, table_cell_decoration, task_prefix_is_folded,
         wrap_segment_byte_ranges,
     };
+
+    fn inline_math_image_cache(
+        entries: &[(&str, u32, u32)],
+    ) -> std::collections::HashMap<String, Option<std::sync::Arc<gpui::RenderImage>>> {
+        entries
+            .iter()
+            .map(|&(source, width, height)| {
+                (
+                    super::inline_math_cache_key(source),
+                    Some(std::sync::Arc::new(gpui::RenderImage::new([
+                        image::Frame::new(image::RgbaImage::new(width, height)),
+                    ]))),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inline_math_placeholder_reserves_intrinsic_width_without_upscaling() {
+        let source = "energy $E=mc^2$";
+        let mut decoration = markdown::parse_decorations(source).remove(0);
+        let cache = inline_math_image_cache(&[("E=mc^2", 183, 120)]);
+        assert!(super::add_inline_math_display_replacements(
+            &mut decoration,
+            source,
+            &cache,
+            6.0
+        ));
+        let replacement = decoration.display_replacements.last().unwrap();
+        // 183 raster pixels / 3 = 61 logical pixels: round 61 / 6 up, not down.
+        assert_eq!(replacement.display_text, "\u{a0}".repeat(11));
+        assert_eq!(replacement.trigger_range, 7..15);
+        assert_eq!(
+            super::inline_math_line_height(&decoration, source, &[], &cache, 24.0),
+            40.0
+        );
+    }
+
+    #[test]
+    fn inline_math_placeholder_advance_matches_image_without_horizontal_padding() {
+        // Eleven NBSPs occupy 66px before letter spacing, while the formula is 61px.
+        let range = 4..26;
+        for shaped_width in [44.0, 61.0, 66.0, 88.0] {
+            let spans = [(&range, px(20.0), 61.0, 61.0 - shaped_width)];
+            assert_eq!(
+                super::inline_math_placeholder_glyph_x(2, px(14.0), &spans),
+                px(14.0)
+            );
+            assert_eq!(
+                super::inline_math_placeholder_glyph_x(4, px(20.0), &spans),
+                px(20.0)
+            );
+            assert_eq!(
+                super::inline_math_placeholder_glyph_x(26, px(20.0 + shaped_width), &spans),
+                px(81.0)
+            );
+            // A real space after the formula keeps its own width.
+            assert_eq!(
+                super::inline_math_placeholder_glyph_x(28, px(26.0 + shaped_width), &spans),
+                px(87.0)
+            );
+        }
+    }
+
+    #[test]
+    fn adjacent_inline_math_placeholders_do_not_accumulate_rounding_gaps() {
+        let first = 0..22;
+        let second = 22..30;
+        let spans = [
+            (&first, px(10.0), 61.0, -5.0),
+            (&second, px(76.0), 20.0, -4.0),
+        ];
+        assert_eq!(
+            super::inline_math_placeholder_glyph_x(22, px(76.0), &spans),
+            px(71.0)
+        );
+        assert_eq!(
+            super::inline_math_placeholder_glyph_x(30, px(100.0), &spans),
+            px(91.0)
+        );
+    }
+
+    #[test]
+    fn inline_math_display_range_includes_all_placeholder_characters() {
+        let source = "before $x$ after";
+        let mut decoration = markdown::parse_decorations(source).remove(0);
+        let cache = inline_math_image_cache(&[("x", 183, 120)]);
+        super::add_inline_math_display_replacements(&mut decoration, source, &cache, 6.0);
+        let (display, _, buffer_to_display, _) = build_display_text(
+            source,
+            &decoration,
+            &[],
+            false,
+            None,
+            3,
+            3,
+            2,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let range = super::inline_math_display_range(
+            &decoration,
+            &decoration.inline_math_spans[0],
+            &buffer_to_display,
+        )
+        .unwrap();
+        assert_eq!(range, 7..29);
+        assert_eq!(&display[range], "\u{a0}".repeat(11));
+        assert!(super::buffer_to_display_offset(&buffer_to_display, 8) > 7);
+    }
+
+    #[test]
+    fn inline_math_line_height_fits_only_the_tallest_collapsed_formula() {
+        let source = "$x$ and $y$ and $z$";
+        let decoration = markdown::parse_decorations(source).remove(0);
+        let cache = inline_math_image_cache(&[("x", 30, 30), ("y", 60, 180), ("z", 60, 120)]);
+        assert_eq!(
+            super::inline_math_line_height(&decoration, source, &[], &cache, 24.0),
+            60.0
+        );
+        assert_eq!(
+            super::inline_math_line_height(&decoration, source, &[9..9], &cache, 24.0),
+            40.0
+        );
+        assert_eq!(
+            super::inline_math_line_height(&decoration, source, &[0..source.len()], &cache, 24.0),
+            24.0
+        );
+        assert_eq!(
+            super::inline_math_line_height(&decoration, source, &[], &cache, 80.0),
+            80.0
+        );
+    }
+
+    #[test]
+    fn inline_math_uncached_images_keep_source_geometry() {
+        let source = "$x$";
+        let mut decoration = markdown::parse_decorations(source).remove(0);
+        let cache = std::collections::HashMap::new();
+        assert!(!super::add_inline_math_display_replacements(
+            &mut decoration,
+            source,
+            &cache,
+            6.0
+        ));
+        assert!(decoration.display_replacements.is_empty());
+        assert_eq!(
+            super::inline_math_line_height(&decoration, source, &[], &cache, 24.0),
+            24.0
+        );
+        let cache = inline_math_image_cache(&[("x", 30, 120)]);
+        assert!(!super::add_inline_math_display_replacements(
+            &mut decoration,
+            source,
+            &cache,
+            0.0
+        ));
+    }
 
     #[test]
     fn baseline_font_tracks_block_role_not_inline_content() {
@@ -6051,6 +6217,244 @@ fn generated_mathjax_renderer() -> &'static Mutex<MathJax> {
 
 pub(crate) fn inline_math_cache_key(source_text: &str) -> String {
     format!("__generated_preview__:inline-math:{source_text}")
+}
+
+pub(crate) fn add_inline_math_display_replacements(
+    decoration: &mut LineDecoration,
+    line_content: &str,
+    image_cache: &HashMap<String, Option<Arc<RenderImage>>>,
+    placeholder_unit_width: f32,
+) -> bool {
+    if placeholder_unit_width <= 0.0 {
+        return false;
+    }
+    let mut added = false;
+    for source_range in decoration.inline_math_spans.clone() {
+        let Some(source_text) = line_content.get(source_range.clone()) else {
+            continue;
+        };
+        let Some(Some(image)) = image_cache.get(&inline_math_cache_key(source_text)) else {
+            continue;
+        };
+        let image_size = image.size(0);
+        let (natural_width, natural_height) = intrinsic_generated_preview_size_for_kind(
+            image_size.width.0 as f32,
+            image_size.height.0 as f32,
+            BlockPreviewKind::Math,
+        );
+        if natural_width <= 0.0 || natural_height <= 0.0 {
+            continue;
+        }
+        // Keep enough characters for source mappings; shaping later sets their
+        // total advance to the exact intrinsic width.
+        let placeholder_columns = (natural_width / placeholder_unit_width).ceil().max(1.0) as usize;
+        decoration.display_replacements.push(DisplayReplacement {
+            source_range: source_range.clone(),
+            display_text: "\u{a0}".repeat(placeholder_columns),
+            trigger_range: source_range.start.saturating_sub(1)
+                ..(source_range.end + 1).min(line_content.len()),
+        });
+        added = true;
+    }
+    added
+}
+
+pub(crate) fn inline_math_display_range(
+    decoration: &LineDecoration,
+    source_range: &Range<usize>,
+    buffer_to_display: &[usize],
+) -> Option<Range<usize>> {
+    let replacement = decoration.display_replacements.iter().find(|replacement| {
+        replacement.source_range == *source_range
+            && !replacement.display_text.is_empty()
+            && replacement.display_text.chars().all(|ch| ch == '\u{a0}')
+    })?;
+    // Expanded replacements can map several placeholder characters to one source
+    // byte, so the source start does not necessarily map to the placeholder start.
+    let end = buffer_to_display_offset(buffer_to_display, source_range.end);
+    Some(end.checked_sub(replacement.display_text.len())?..end)
+}
+
+fn inline_math_placeholder_glyph_x(
+    index: usize,
+    original_x: Pixels,
+    spans: &[(&Range<usize>, Pixels, f32, f32)],
+) -> Pixels {
+    let mut x = original_x;
+    let mut offset = 0.0;
+    for (range, start_x, width, delta) in spans {
+        if index >= range.end {
+            offset += delta;
+        } else if index >= range.start {
+            let fraction = (index - range.start) as f32 / range.len() as f32;
+            x = *start_x + px(fraction * width);
+        }
+    }
+    x + px(offset)
+}
+
+pub(crate) fn keep_inline_math_placeholders_unwrapped(
+    wrapped: &mut WrappedLine,
+    decoration: &LineDecoration,
+    line_content: &str,
+    buffer_to_display: &[usize],
+    active_ranges: &[Range<usize>],
+    image_cache: &HashMap<String, Option<Arc<RenderImage>>>,
+    display_offset: usize,
+) {
+    let ranges = decoration
+        .inline_math_spans
+        .iter()
+        .filter_map(|source_range| {
+            let trigger_range = source_range.start.saturating_sub(1)..source_range.end + 1;
+            if active_ranges_intersect(active_ranges, &trigger_range) {
+                return None;
+            }
+            let display_range =
+                inline_math_display_range(decoration, source_range, buffer_to_display)?;
+            let start = display_range.start;
+            let end = display_range.end;
+            if start < display_offset || end > display_offset + wrapped.text.len() {
+                return None;
+            }
+            let range = start - display_offset..end - display_offset;
+            let placeholder = wrapped.text.get(range.clone())?;
+            if placeholder.is_empty() || !placeholder.chars().all(|ch| ch == '\u{a0}') {
+                return None;
+            }
+            let source = line_content.get(source_range.clone())?;
+            let image = image_cache.get(&inline_math_cache_key(source))?.as_ref()?;
+            let image_size = image.size(0);
+            let (natural_width, _) = intrinsic_generated_preview_size_for_kind(
+                image_size.width.0 as f32,
+                image_size.height.0 as f32,
+                BlockPreviewKind::Math,
+            );
+            Some((range, natural_width))
+        })
+        .collect::<Vec<_>>();
+    if ranges.is_empty() {
+        return;
+    }
+
+    let old_line = &wrapped.unwrapped_layout;
+    let spans = ranges
+        .iter()
+        .map(|(range, natural_width)| {
+            let start_x = old_line.x_for_index(range.start);
+            let width = f32::from(old_line.x_for_index(range.end) - start_x);
+            let target_width = *natural_width;
+            (range, start_x, target_width, target_width - width)
+        })
+        .collect::<Vec<_>>();
+    let mut runs = old_line.runs.clone();
+    // Placeholder characters preserve source mappings, not horizontal padding.
+    // Match the raster width exactly, removing rounding and letter-spacing excess
+    // as well as expanding undersized advances, and shift following text accordingly.
+    for glyph in runs.iter_mut().flat_map(|run| &mut run.glyphs) {
+        glyph.position.x = inline_math_placeholder_glyph_x(glyph.index, glyph.position.x, &spans);
+    }
+    let line = Arc::new(LineLayout {
+        font_size: old_line.font_size,
+        width: old_line.width + px(spans.iter().map(|span| span.3).sum::<f32>()),
+        ascent: old_line.ascent,
+        descent: old_line.descent,
+        runs,
+        len: old_line.len,
+    });
+    let wrap_width = wrapped.wrap_width;
+    let mut wrap_boundaries = Default::default();
+    if let Some(wrap_width) = wrap_width {
+        // GPUI wraps between NBSP glyphs. Temporarily make each placeholder a
+        // single glyph for wrapping, then restore all glyphs for accurate hit testing.
+        let mut glyph_maps = Vec::new();
+        let atomic_runs = line
+            .runs
+            .iter()
+            .map(|run| {
+                let glyph_indices = run
+                    .glyphs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, glyph)| {
+                        (!ranges
+                            .iter()
+                            .any(|(range, _)| range.start < glyph.index && glyph.index < range.end))
+                        .then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                let glyphs = glyph_indices
+                    .iter()
+                    .map(|&index| run.glyphs[index].clone())
+                    .collect();
+                glyph_maps.push(glyph_indices);
+                ShapedRun {
+                    font_id: run.font_id,
+                    glyphs,
+                }
+            })
+            .collect();
+        let arc_mut: &mut Arc<WrappedLineLayout> = &mut *wrapped;
+        *arc_mut = Arc::new(WrappedLineLayout {
+            unwrapped_layout: Arc::new(LineLayout {
+                font_size: line.font_size,
+                width: line.width,
+                ascent: line.ascent,
+                descent: line.descent,
+                runs: atomic_runs,
+                len: line.len,
+            }),
+            wrap_boundaries: Default::default(),
+            wrap_width: Some(wrap_width),
+        });
+        wrapped.rewrap(wrap_width);
+        wrap_boundaries = wrapped
+            .wrap_boundaries
+            .iter()
+            .map(|boundary| gpui::WrapBoundary {
+                run_ix: boundary.run_ix,
+                glyph_ix: glyph_maps[boundary.run_ix][boundary.glyph_ix],
+            })
+            .collect();
+    }
+    let arc_mut: &mut Arc<WrappedLineLayout> = &mut *wrapped;
+    *arc_mut = Arc::new(WrappedLineLayout {
+        unwrapped_layout: line,
+        wrap_boundaries,
+        wrap_width,
+    });
+}
+
+pub(crate) fn inline_math_line_height(
+    decoration: &LineDecoration,
+    line_content: &str,
+    active_ranges: &[Range<usize>],
+    image_cache: &HashMap<String, Option<Arc<RenderImage>>>,
+    base_line_height: f32,
+) -> f32 {
+    decoration
+        .inline_math_spans
+        .iter()
+        .fold(base_line_height, |height, source_range| {
+            let trigger_range = source_range.start.saturating_sub(1)
+                ..(source_range.end + 1).min(line_content.len());
+            if active_ranges_intersect(active_ranges, &trigger_range) {
+                return height;
+            }
+            let Some(source_text) = line_content.get(source_range.clone()) else {
+                return height;
+            };
+            let Some(Some(image)) = image_cache.get(&inline_math_cache_key(source_text)) else {
+                return height;
+            };
+            let image_size = image.size(0);
+            let (_, natural_height) = intrinsic_generated_preview_size_for_kind(
+                image_size.width.0 as f32,
+                image_size.height.0 as f32,
+                BlockPreviewKind::Math,
+            );
+            height.max(natural_height)
+        })
 }
 
 pub(crate) fn build_generated_block_preview_svg(

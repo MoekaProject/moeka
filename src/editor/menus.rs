@@ -827,7 +827,6 @@ impl EditorView {
     ) {
         self.selection_toolbar_menu_hover = SelectionToolbarMenuHover::default();
         self.table_adjustment_menu = TableAdjustmentMenu::default();
-        self.clear_selection_toolbar_menu_owner();
         self.context_menu = Some(menu);
         self.context_submenu = None;
         self.context_submenu_aim = None;
@@ -902,7 +901,6 @@ impl EditorView {
     fn finish_close_context_menu(&mut self, cx: &mut Context<Self>) {
         self.selection_toolbar_menu_hover = SelectionToolbarMenuHover::default();
         self.table_adjustment_menu = TableAdjustmentMenu::default();
-        self.clear_selection_toolbar_menu_owner();
         let had_menu = self.context_menu.take().is_some();
         let had_submenu = self.context_submenu.take().is_some();
         let had_submenu_aim = self.context_submenu_aim.take().is_some();
@@ -2167,9 +2165,7 @@ impl EditorView {
         action: FormatMenuAction,
         cx: &mut Context<Self>,
     ) {
-        let retain_popup = self.selection_toolbar_format_session();
-        if !retain_popup
-            && let Some(line) = self.line_format_toolbar_line
+        if let Some(line) = self.line_format_toolbar_line
             && line < self.buffer.line_count()
         {
             let line_start = self.buffer.line_start(line);
@@ -2210,9 +2206,6 @@ impl EditorView {
             self.reset_cursor_visual_targeting();
         }
         self.execute_format_menu_action_inner(action, cx);
-        if retain_popup {
-            self.retain_selection_toolbar_after_format();
-        }
     }
 
     fn execute_format_menu_action_inner(
@@ -4212,7 +4205,7 @@ impl EditorView {
                         this.on_click(cx.listener(move |this, _, window, cx| {
                             window.prevent_default();
                             cx.stop_propagation();
-                            this.show_table_source(table_start_line, window, cx);
+                            this.show_table_source(table_start_line, cx);
                         }))
                     }),
             );
@@ -4305,7 +4298,7 @@ impl EditorView {
     }
 
     pub(crate) fn format_toolbar_owns_hover_menu(&self) -> bool {
-        (self.selection_toolbar_format_session() || self.line_format_toolbar_line.is_some())
+        self.line_format_toolbar_line.is_some()
             && self.context_menu.as_ref().is_some_and(|menu| {
                 matches!(
                     menu.kind,
@@ -4323,8 +4316,7 @@ impl EditorView {
         bounds: Option<Bounds<Pixels>>,
         cx: &mut Context<Self>,
     ) {
-        let selection_session = self.selection_toolbar_format_session();
-        if !selection_session && self.line_format_toolbar_line.is_none() {
+        if self.line_format_toolbar_line.is_none() {
             return;
         }
         self.selection_toolbar_menu_hover.close_task = None;
@@ -4339,9 +4331,6 @@ impl EditorView {
             .map(|bounds| Point::new(bounds.left(), bounds.bottom()))
             .unwrap_or_else(|| self.cursor_screen_position());
         self.open_context_menu(ContextMenu { position, kind }, true, cx);
-        if selection_session {
-            self.mark_selection_toolbar_menu();
-        }
     }
 
     fn schedule_selection_toolbar_menu(
@@ -6546,11 +6535,6 @@ impl EditorView {
             .then(|| {
                 self.line_format_toolbar_line
                     .and_then(|_| self.line_format_toolbar_bounds)
-                    .or_else(|| {
-                        self.selection_toolbar_geometry
-                            .get(&self.focused_pane_id)
-                            .and_then(|geometry| geometry.toolbar_bounds)
-                    })
             })
             .flatten();
         // Recompute from the live layout: filtering changes the row count and
@@ -6765,8 +6749,12 @@ impl EditorView {
                         .on_scroll_wheel(cx.listener(
                             |this, event: &gpui::ScrollWheelEvent, window, cx| {
                                 let over_editor = this
-                                    .selection_toolbar_geometry
-                                    .get(&this.focused_pane_id)
+                                    .line_format_toolbar_line
+                                    .and_then(|line| {
+                                        this.line_format_toolbar_geometries
+                                            .iter()
+                                            .find(|geometry| geometry.line == line)
+                                    })
                                     .is_some_and(|geometry| {
                                         geometry.viewport.contains(&event.position)
                                     });
