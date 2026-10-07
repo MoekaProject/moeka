@@ -208,7 +208,7 @@ impl LineLayout {
 }
 
 /// A line of text that has been wrapped to fit a given width
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct WrappedLineLayout {
     /// The line layout, pre-wrapping.
     pub unwrapped_layout: Arc<LineLayout>,
@@ -218,14 +218,18 @@ pub struct WrappedLineLayout {
 
     /// The width of the line, if it was wrapped
     pub wrap_width: Option<Pixels>,
+
+    /// Heights of individual soft-wrapped rows. Empty means a uniform fallback height.
+    /// Nonempty metadata must contain one positive, finite height per row and a finite total.
+    pub row_heights: Vec<Pixels>,
 }
 
 /// A boundary at which a line was wrapped
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WrapBoundary {
-    /// The index in the run just before the line was wrapped
+    /// The run containing the first glyph of the next wrapped row.
     pub run_ix: usize,
-    /// The index of the glyph just before the line was wrapped
+    /// The index of the first glyph of the next wrapped row within that run.
     pub glyph_ix: usize,
 }
 
@@ -243,12 +247,78 @@ impl WrappedLineLayout {
             .min(self.unwrapped_layout.width)
     }
 
-    /// The size of the whole wrapped text, for the given line_height.
-    /// can span multiple lines if there are multiple wrap boundaries.
+    pub(super) fn valid_row_heights(&self) -> &[Pixels] {
+        if self.row_heights.len() == self.wrap_boundaries.len() + 1
+            && self
+                .row_heights
+                .iter()
+                .try_fold(Pixels::ZERO, |top, height| {
+                    let bottom = top + *height;
+                    (height.0.is_finite() && *height > Pixels::ZERO && bottom.0.is_finite())
+                        .then_some(bottom)
+                })
+                .is_some()
+        {
+            &self.row_heights
+        } else {
+            &[]
+        }
+    }
+
+    /// The height of a soft-wrapped row, or `fallback` when no valid metadata exists.
+    /// Out-of-range rows also return `fallback`.
+    pub fn row_height(&self, row: usize, fallback: Pixels) -> Pixels {
+        self.valid_row_heights()
+            .get(row)
+            .copied()
+            .unwrap_or(fallback)
+    }
+
+    /// The top of a soft-wrapped row, relative to this layout's origin.
+    /// Rows at or beyond the row count return the total height.
+    pub fn row_top(&self, row: usize, fallback: Pixels) -> Pixels {
+        let row = row.min(self.wrap_boundaries.len() + 1);
+        let row_heights = self.valid_row_heights();
+        if row_heights.is_empty() {
+            fallback * row
+        } else {
+            row_heights[..row]
+                .iter()
+                .copied()
+                .fold(Pixels::ZERO, |top, height| top + height)
+        }
+    }
+
+    /// The row containing `y`, relative to this layout's origin.
+    /// Negative coordinates select row zero; exact row bottoms select the next row.
+    /// Coordinates at or below the total height return the row count (out of bounds).
+    pub fn row_for_y(&self, y: Pixels, fallback: Pixels) -> usize {
+        if y <= Pixels::ZERO {
+            return 0;
+        }
+        let row_count = self.wrap_boundaries.len() + 1;
+        let row_heights = self.valid_row_heights();
+        if row_heights.is_empty() {
+            if y >= fallback * row_count {
+                return row_count;
+            }
+            return ((y / fallback) as usize).min(row_count);
+        }
+        let mut bottom = Pixels::ZERO;
+        for (row, height) in row_heights.iter().enumerate() {
+            bottom += *height;
+            if y < bottom {
+                return row;
+            }
+        }
+        row_count
+    }
+
+    /// The size of the whole wrapped text, using `line_height` as the uniform fallback.
     pub fn size(&self, line_height: Pixels) -> Size<Pixels> {
         Size {
             width: self.width(),
-            height: line_height * (self.wrap_boundaries.len() + 1),
+            height: self.row_top(self.wrap_boundaries.len() + 1, line_height),
         }
     }
 
@@ -303,11 +373,11 @@ impl WrappedLineLayout {
 
     fn _index_for_position(
         &self,
-        mut position: Point<Pixels>,
+        position: Point<Pixels>,
         line_height: Pixels,
         closest: bool,
     ) -> Result<usize, usize> {
-        let wrapped_line_ix = (position.y / line_height) as usize;
+        let wrapped_line_ix = self.row_for_y(position.y, line_height);
 
         let wrapped_line_start_index;
         let wrapped_line_start_x;
@@ -359,9 +429,10 @@ impl WrappedLineLayout {
     }
 
     /// Returns the pixel position for the given byte index.
+    /// An index exactly at a wrap boundary belongs to the preceding row's end.
     pub fn position_for_index(&self, index: usize, line_height: Pixels) -> Option<Point<Pixels>> {
         let mut line_start_ix = 0;
-        let mut line_end_indices = self
+        let line_end_indices = self
             .wrap_boundaries
             .iter()
             .map(|wrap_boundary| {
@@ -372,7 +443,6 @@ impl WrappedLineLayout {
             .chain([self.len()])
             .enumerate();
         for (ix, line_end_ix) in line_end_indices {
-            let line_y = ix as f32 * line_height;
             if index < line_start_ix {
                 break;
             } else if index > line_end_ix {
@@ -381,7 +451,7 @@ impl WrappedLineLayout {
             } else {
                 let line_start_x = self.unwrapped_layout.x_for_index(line_start_ix);
                 let x = self.unwrapped_layout.x_for_index(index) - line_start_x;
-                return Some(point(x, line_y));
+                return Some(point(x, self.row_top(ix, line_height)));
             }
         }
 
@@ -511,6 +581,7 @@ impl LineLayoutCache {
                 unwrapped_layout,
                 wrap_boundaries,
                 wrap_width,
+                row_heights: Vec::new(),
             });
             let key = Arc::new(CacheKey {
                 text,
@@ -668,5 +739,295 @@ impl<'a> Borrow<dyn AsCacheKeyRef + 'a> for Arc<CacheKey> {
 impl AsCacheKeyRef for CacheKeyRef<'_> {
     fn as_cache_key_ref(&self) -> CacheKeyRef<'_> {
         *self
+    }
+}
+
+#[cfg(test)]
+pub(super) fn test_wrapped_layout(row_heights: Vec<Pixels>) -> WrappedLineLayout {
+    WrappedLineLayout {
+        unwrapped_layout: Arc::new(LineLayout {
+            font_size: px(18.),
+            width: px(60.),
+            ascent: px(18.),
+            descent: px(6.),
+            runs: vec![ShapedRun {
+                font_id: FontId(0),
+                glyphs: (0..6)
+                    .map(|index| ShapedGlyph {
+                        id: GlyphId(0),
+                        position: point(px(index as f32 * 10.), Pixels::ZERO),
+                        index,
+                        is_emoji: false,
+                    })
+                    .collect(),
+            }],
+            len: 6,
+        }),
+        wrap_boundaries: smallvec::smallvec![
+            WrapBoundary {
+                run_ix: 0,
+                glyph_ix: 2,
+            },
+            WrapBoundary {
+                run_ix: 0,
+                glyph_ix: 4,
+            },
+        ],
+        wrap_width: Some(px(20.)),
+        row_heights,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn independent_row_heights_and_exact_boundaries() {
+        let fallback = px(24.);
+        for heights in [[24., 60., 24.], [60., 24., 24.]] {
+            let layout = test_wrapped_layout(heights.map(px).to_vec());
+            assert_eq!(
+                layout.size(fallback),
+                Size {
+                    width: px(20.),
+                    height: px(108.)
+                }
+            );
+            assert_eq!(layout.row_for_y(px(-1.), fallback), 0);
+            assert_eq!(layout.row_for_y(px(0.), fallback), 0);
+            let mut top = Pixels::ZERO;
+            for (row, height) in heights.into_iter().enumerate() {
+                assert_eq!(layout.row_height(row, fallback), px(height));
+                assert_eq!(layout.row_top(row, fallback), top);
+                assert_eq!(layout.row_for_y(top, fallback), row);
+                top += px(height);
+                assert_eq!(layout.row_for_y(top - px(0.25), fallback), row);
+                assert_eq!(layout.row_for_y(top, fallback), row + 1);
+            }
+            assert_eq!(layout.row_top(3, fallback), px(108.));
+            assert_eq!(layout.row_top(usize::MAX, fallback), px(108.));
+            assert_eq!(layout.row_height(usize::MAX, fallback), fallback);
+            assert_eq!(layout.row_for_y(px(109.), fallback), 3);
+            assert_eq!(layout.row_for_y(px(f32::INFINITY), fallback), 3);
+        }
+    }
+
+    #[test]
+    fn position_for_index_preserves_upstream_wrap_affinity() {
+        let fallback = px(24.);
+        for heights in [[24., 60., 24.], [60., 24., 24.]] {
+            let layout = test_wrapped_layout(heights.map(px).to_vec());
+            for (index, x, y) in [
+                (0, 0., 0.),
+                (1, 10., 0.),
+                (2, 20., 0.),
+                (3, 10., heights[0]),
+                (4, 20., heights[0]),
+                (5, 10., heights[0] + heights[1]),
+                (6, 20., heights[0] + heights[1]),
+            ] {
+                assert_eq!(
+                    layout.position_for_index(index, fallback),
+                    Some(point(px(x), px(y)))
+                );
+            }
+            assert_eq!(layout.position_for_index(7, fallback), None);
+        }
+    }
+
+    #[test]
+    fn utf8_byte_indices_and_wrap_affinity_survive_multiple_font_runs() {
+        let text = "aé中😀bé";
+        let mut runs = test_wrapped_layout(Vec::new())
+            .unwrapped_layout
+            .runs
+            .clone();
+        for (glyph, index) in runs[0].glyphs.iter_mut().zip([0, 1, 3, 6, 10, 11]) {
+            glyph.index = index;
+        }
+        let glyphs = runs[0].glyphs.split_off(2);
+        runs.push(ShapedRun {
+            font_id: FontId(1),
+            glyphs,
+        });
+        let layout = WrappedLineLayout {
+            unwrapped_layout: Arc::new(LineLayout {
+                runs,
+                width: px(60.),
+                len: text.len(),
+                ..Default::default()
+            }),
+            wrap_boundaries: smallvec::smallvec![
+                WrapBoundary {
+                    run_ix: 1,
+                    glyph_ix: 0
+                },
+                WrapBoundary {
+                    run_ix: 1,
+                    glyph_ix: 2
+                },
+            ],
+            wrap_width: Some(px(20.)),
+            row_heights: vec![px(24.), px(60.), px(24.)],
+        };
+        for (index, x, y) in [
+            (0, 0., 0.),
+            (1, 10., 0.),
+            (2, 20., 0.),
+            (3, 20., 0.),
+            (4, 10., 24.),
+            (6, 10., 24.),
+            (7, 20., 24.),
+            (10, 20., 24.),
+            (11, 10., 84.),
+            (12, 20., 84.),
+            (13, 20., 84.),
+        ] {
+            assert_eq!(
+                layout.position_for_index(index, px(24.)),
+                Some(point(px(x), px(y)))
+            );
+        }
+        assert_eq!(layout.position_for_index(text.len() + 1, px(24.)), None);
+        for (row, start, next, end) in [(0, 0, 1, 3), (1, 3, 6, 10), (2, 10, 11, 13)] {
+            let y = layout.row_top(row, px(24.));
+            assert_eq!(
+                layout.index_for_position(point(px(6.), y), px(24.)),
+                Ok(start)
+            );
+            assert_eq!(
+                layout.closest_index_for_position(point(px(6.), y), px(24.)),
+                Ok(next)
+            );
+            assert!(text.is_char_boundary(next));
+            for closest in [false, true] {
+                assert_eq!(
+                    layout._index_for_position(point(px(-1.), y), px(24.), closest),
+                    Err(start)
+                );
+                assert_eq!(
+                    layout._index_for_position(point(px(20.), y), px(24.), closest),
+                    Err(end)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hit_testing_uses_actual_rows_and_retains_out_of_bounds_errors() {
+        let fallback = px(24.);
+        for heights in [[24., 60., 24.], [60., 24., 24.]] {
+            let layout = test_wrapped_layout(heights.map(px).to_vec());
+            let mut top = Pixels::ZERO;
+            for (row, height) in heights.into_iter().enumerate() {
+                let start = row * 2;
+                for y in [top, top + px(height / 2.), top + px(height) - px(0.25)] {
+                    assert_eq!(
+                        layout.index_for_position(point(px(6.), y), fallback),
+                        Ok(start)
+                    );
+                    assert_eq!(
+                        layout.closest_index_for_position(point(px(6.), y), fallback),
+                        Ok(start + 1)
+                    );
+                    for closest in [false, true] {
+                        assert_eq!(
+                            layout._index_for_position(point(px(-1.), y), fallback, closest),
+                            Err(start)
+                        );
+                        assert_eq!(
+                            layout._index_for_position(point(px(20.), y), fallback, closest),
+                            Err(start + 2)
+                        );
+                    }
+                }
+                top += px(height);
+            }
+            for closest in [false, true] {
+                assert_eq!(
+                    layout._index_for_position(point(px(1.), px(-1.)), fallback, closest),
+                    Ok(0)
+                );
+                assert_eq!(
+                    layout._index_for_position(point(px(1.), top), fallback, closest),
+                    Err(0)
+                );
+                assert_eq!(
+                    layout._index_for_position(point(px(1.), top + px(100.)), fallback, closest),
+                    Err(0)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_or_invalid_metadata_uses_uniform_fallback() {
+        let fallback = px(24.);
+        for heights in [
+            vec![],
+            vec![px(60.)],
+            vec![px(24.), px(60.)],
+            vec![px(24.), px(60.), px(24.), px(24.)],
+            vec![px(24.), px(0.), px(24.)],
+            vec![px(24.), px(-1.), px(24.)],
+            vec![px(24.), px(f32::NAN), px(24.)],
+            vec![px(24.), px(f32::INFINITY), px(24.)],
+            vec![px(24.), px(f32::NEG_INFINITY), px(24.)],
+            vec![px(f32::MAX), px(f32::MAX), px(24.)],
+        ] {
+            let layout = test_wrapped_layout(heights);
+            assert!(layout.valid_row_heights().is_empty());
+            assert_eq!(layout.size(fallback).height, px(72.));
+            for row in 0..3 {
+                let top = fallback * row;
+                assert_eq!(layout.row_height(row, fallback), fallback);
+                assert_eq!(layout.row_top(row, fallback), top);
+                assert_eq!(layout.row_for_y(top, fallback), row);
+                assert_eq!(layout.row_for_y(top + px(23.), fallback), row);
+                assert_eq!(
+                    layout.index_for_position(point(px(1.), top), fallback),
+                    Ok(row * 2)
+                );
+                assert_eq!(
+                    layout.closest_index_for_position(point(px(6.), top), fallback),
+                    Ok(row * 2 + 1)
+                );
+            }
+            assert_eq!(
+                layout.position_for_index(5, fallback),
+                Some(point(px(10.), px(48.)))
+            );
+            assert_eq!(layout.row_for_y(px(72.), fallback), 3);
+            assert_eq!(
+                layout.index_for_position(point(px(1.), px(72.)), fallback),
+                Err(0)
+            );
+            assert_eq!(
+                layout.closest_index_for_position(point(px(1.), px(72.)), fallback),
+                Err(0)
+            );
+        }
+    }
+
+    #[test]
+    fn empty_text_still_has_one_row() {
+        let layout = WrappedLineLayout {
+            row_heights: vec![px(60.)],
+            ..Default::default()
+        };
+        assert_eq!(layout.row_height(0, px(24.)), px(60.));
+        assert_eq!(layout.size(px(24.)).height, px(60.));
+        assert_eq!(layout.row_top(1, px(24.)), px(60.));
+        assert_eq!(layout.row_for_y(px(59.), px(24.)), 0);
+        assert_eq!(layout.row_for_y(px(60.), px(24.)), 1);
+        assert_eq!(
+            layout.position_for_index(0, px(24.)),
+            Some(point(Pixels::ZERO, Pixels::ZERO))
+        );
+        assert_eq!(
+            layout.index_for_position(point(Pixels::ZERO, px(60.)), px(24.)),
+            Err(0)
+        );
     }
 }

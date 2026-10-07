@@ -2,7 +2,7 @@
 
 [package]
 name = "moeka"
-version = "0.1.24"
+version = "0.1.25"
 edition = "2024"
 description = "A local-first Markdown editor with live rendering, workspaces, and native desktop tools"
 license = "GPL-3.0-or-later"
@@ -67,6 +67,9 @@ usvg = { version = "0.45.1", default-features = false, features = [
 tantivy = "0.26.1"
 tempfile = "3"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 pprof = "0.15"
 
@@ -94,6 +97,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Storage_FileSystem",
+  "Win32_System_Com",
   "Win32_System_DataExchange",
   "Win32_System_IO",
   "Win32_System_LibraryLoader",

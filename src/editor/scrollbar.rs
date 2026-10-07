@@ -1,7 +1,9 @@
 use gpui::{
-    AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, Pixels, Point, ScrollHandle,
-    Task, div, point, prelude::*, px,
+    AnyElement, Bounds, Context, CursorStyle, Hsla, MouseButton, MouseDownEvent, Pixels, Point,
+    ScrollHandle, Task, canvas, div, point, prelude::*, px,
 };
+
+use crate::style::{EditorStyles, Styles};
 
 use super::EditorView;
 
@@ -66,6 +68,7 @@ pub(crate) struct PanelScrollbarState {
     hover_task: Option<Task<()>>,
     idle_epoch: usize,
     idle_task: Option<Task<()>>,
+    track_bounds: Option<Bounds<Pixels>>,
     drag: Option<PanelScrollbarDragState>,
 }
 
@@ -86,9 +89,46 @@ impl PanelScrollbarState {
             hover_task: None,
             idle_epoch: 0,
             idle_task: None,
+            track_bounds: None,
             drag: None,
         }
     }
+
+    fn stop_drag(&mut self, position: Point<Pixels>, can_show: bool) {
+        self.drag = None;
+        self.hovered = can_show
+            && self
+                .track_bounds
+                .is_some_and(|bounds| bounds.contains(&position));
+        if !can_show {
+            self.revealed = false;
+        }
+    }
+
+    fn desired_opacity(&self, can_show: bool, styles: &EditorStyles) -> f32 {
+        if !can_show {
+            0.0
+        } else if self.hovered || self.drag.is_some() {
+            styles.editor_scrollbar_hover_opacity
+        } else if self.revealed {
+            styles.editor_scrollbar_opacity
+        } else {
+            styles.editor_scrollbar_idle_opacity
+        }
+    }
+}
+
+fn panel_scrollbar_thumb_color(kind: PanelScrollbarKind, opacity: f32, styles: &Styles) -> Hsla {
+    // Sidebar-side panels sit on the dark chrome palette even in light
+    // mode, so their thumb must not use the (dark) editor text color.
+    let mut color = match kind {
+        PanelScrollbarKind::Sidebar
+        | PanelScrollbarKind::WorkspaceSearch
+        | PanelScrollbarKind::FileList => styles.sidebar.sidebar_scrollbar_thumb_color,
+        _ => styles.editor.editor_scrollbar_thumb_color,
+    };
+    color.a *= opacity.clamp(0.0, 1.0);
+    color
 }
 
 #[derive(Clone, Copy)]
@@ -184,27 +224,8 @@ impl EditorView {
         let width = self.scaled(state.width);
         let hit_width = self.scaled(self.styles.editor.editor_scrollbar_hit_width_px);
         let radius = self.scaled(self.styles.editor.editor_scrollbar_radius_px);
-        // Sidebar-side panels sit on the dark chrome palette even in light
-        // mode, so their thumb must not use the (dark) editor text color.
-        let mut thumb_color = match kind {
-            PanelScrollbarKind::Sidebar
-            | PanelScrollbarKind::WorkspaceSearch
-            | PanelScrollbarKind::FileList => self.styles.sidebar.sidebar_scrollbar_thumb_color,
-            _ => self.styles.editor.editor_scrollbar_thumb_color,
-        };
-        let opacity = if matches!(
-            kind,
-            PanelScrollbarKind::WorkspaceSearch
-                | PanelScrollbarKind::Info
-                | PanelScrollbarKind::Outline
-        ) {
-            state
-                .opacity
-                .max(self.styles.editor.editor_scrollbar_opacity * 0.55)
-        } else {
-            state.opacity
-        };
-        thumb_color.a *= opacity.clamp(0.0, 1.0);
+        let thumb_color = panel_scrollbar_thumb_color(kind, state.opacity, &self.styles);
+        let editor = cx.entity().clone();
 
         Some(
             div()
@@ -218,6 +239,23 @@ impl EditorView {
                 .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                     this.set_panel_scrollbar_hovered(kind, *hovering, cx);
                 }))
+                .child(
+                    canvas(
+                        move |bounds, window, cx| {
+                            let bounds = bounds.intersect(&window.content_mask().bounds);
+                            editor.update(cx, |this, _| {
+                                if let Some(state) = this.panel_scrollbar_state_mut(kind) {
+                                    state.track_bounds = (!bounds.is_empty()).then_some(bounds);
+                                }
+                            });
+                        },
+                        |_, (), _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                )
                 .child(
                     div()
                         .absolute()
@@ -377,15 +415,7 @@ impl EditorView {
             return 0.0;
         };
 
-        if !self.panel_scrollbar_can_show(kind) {
-            0.0
-        } else if state.hovered || state.drag.is_some() {
-            self.styles.editor.editor_scrollbar_hover_opacity
-        } else if state.revealed {
-            self.styles.editor.editor_scrollbar_opacity
-        } else {
-            self.styles.editor.editor_scrollbar_idle_opacity
-        }
+        state.desired_opacity(self.panel_scrollbar_can_show(kind), &self.styles.editor)
     }
 
     fn desired_panel_scrollbar_width(&self, kind: PanelScrollbarKind) -> f32 {
@@ -588,9 +618,12 @@ impl EditorView {
     ) {
         if !self.panel_scrollbar_can_show(kind) {
             if let Some(state) = self.panel_scrollbar_state_mut(kind) {
+                state.hovered = false;
                 state.revealed = false;
+                state.track_bounds = None;
                 state.drag = None;
             }
+            self.cancel_panel_scrollbar_hover_reveal(kind);
             self.cancel_panel_scrollbar_idle_fade(kind);
             self.sync_panel_scrollbar_opacity(kind, cx);
             self.sync_panel_scrollbar_width(kind, cx);
@@ -707,7 +740,11 @@ impl EditorView {
         true
     }
 
-    pub(crate) fn stop_panel_scrollbar_drag(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn stop_panel_scrollbar_drag(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(kind) = PanelScrollbarKind::ALL.into_iter().find(|kind| {
             self.panel_scrollbar_state(*kind)
                 .map(|state| state.drag.is_some())
@@ -716,15 +753,19 @@ impl EditorView {
             return false;
         };
 
+        let can_show = self.panel_scrollbar_can_show(kind);
         if let Some(state) = self.panel_scrollbar_state_mut(kind) {
-            state.drag = None;
+            state.stop_drag(position, can_show);
         }
+        self.cancel_panel_scrollbar_hover_reveal(kind);
         let should_schedule = self
             .panel_scrollbar_state(kind)
             .map(|state| state.revealed && !state.hovered)
             .unwrap_or(false);
         if should_schedule {
             self.schedule_panel_scrollbar_idle_fade(kind, cx);
+        } else {
+            self.cancel_panel_scrollbar_idle_fade(kind);
         }
         self.sync_panel_scrollbar_opacity(kind, cx);
         self.sync_panel_scrollbar_width(kind, cx);
@@ -758,5 +799,168 @@ impl EditorView {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Bounds, point, px, size};
+
+    use crate::{style::Styles, theme::Theme};
+
+    use super::{
+        PanelScrollbarDragState, PanelScrollbarKind, PanelScrollbarState, VerticalScrollbarMetrics,
+        panel_scrollbar_thumb_color,
+    };
+
+    fn drag_state() -> PanelScrollbarDragState {
+        PanelScrollbarDragState {
+            start_position_y: 0.0,
+            start_thumb_top: 0.0,
+            track_travel: 100.0,
+            max_scroll: 200.0,
+        }
+    }
+
+    #[test]
+    fn panel_scrollbars_hide_when_idle_and_show_when_hovered_revealed_or_dragged() {
+        for theme in [Theme::one_light(), Theme::one_dark()] {
+            let styles = Styles::from_theme(&theme, &theme);
+            assert_eq!(styles.editor.editor_scrollbar_idle_opacity, 0.0);
+            for kind in PanelScrollbarKind::ALL {
+                let mut state = PanelScrollbarState::new(
+                    styles.editor.editor_scrollbar_idle_opacity,
+                    styles.editor.editor_scrollbar_width_px,
+                );
+                for hovered in [false, true] {
+                    for revealed in [false, true] {
+                        for dragging in [false, true] {
+                            state.hovered = hovered;
+                            state.revealed = revealed;
+                            state.drag = dragging.then(drag_state);
+                            let expected = if hovered || dragging {
+                                styles.editor.editor_scrollbar_hover_opacity
+                            } else if revealed {
+                                styles.editor.editor_scrollbar_opacity
+                            } else {
+                                0.0
+                            };
+                            assert_eq!(state.desired_opacity(true, &styles.editor), expected);
+                            state.opacity = expected;
+                            let color = panel_scrollbar_thumb_color(kind, state.opacity, &styles);
+                            if hovered || revealed || dragging {
+                                assert!(color.a > 0.0, "{kind:?} should be visible");
+                            } else {
+                                assert_eq!(color.a, 0.0, "{kind:?} should be hidden at idle");
+                            }
+                            assert_eq!(state.desired_opacity(false, &styles.editor), 0.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn panel_scrollbar_drag_release_reconciles_hover_with_current_track_bounds() {
+        let theme = Theme::one_dark();
+        let styles = Styles::from_theme(&theme, &theme);
+        let bounds = Bounds::new(point(px(100.0), px(20.0)), size(px(11.0), px(200.0)));
+        for kind in PanelScrollbarKind::ALL {
+            for (position, inside) in [
+                (point(px(105.0), px(100.0)), true),
+                (point(px(99.0), px(100.0)), false),
+                (point(px(112.0), px(100.0)), false),
+                (point(px(105.0), px(19.0)), false),
+                (point(px(105.0), px(221.0)), false),
+            ] {
+                for stale_hover in [false, true] {
+                    let mut state = PanelScrollbarState::new(0.3, 6.0);
+                    state.track_bounds = Some(bounds);
+                    state.hovered = stale_hover;
+                    state.revealed = true;
+                    state.drag = Some(drag_state());
+                    state.stop_drag(position, true);
+                    assert!(state.drag.is_none());
+                    assert_eq!(state.hovered, inside, "{kind:?}");
+                    assert!(state.revealed);
+                    assert_eq!(
+                        state.desired_opacity(true, &styles.editor),
+                        if inside { 0.3 } else { 0.2 },
+                        "{kind:?}"
+                    );
+                    state.revealed = false;
+                    assert_eq!(
+                        state.desired_opacity(true, &styles.editor),
+                        if inside { 0.3 } else { 0.0 },
+                        "{kind:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn panel_scrollbar_drag_release_clears_hover_without_a_scrollable_track() {
+        let position = point(px(105.0), px(100.0));
+        for can_show in [false, true] {
+            let mut state = PanelScrollbarState::new(0.3, 6.0);
+            state.hovered = true;
+            state.revealed = true;
+            state.drag = Some(drag_state());
+            if !can_show {
+                state.track_bounds = Some(Bounds::new(
+                    point(px(100.0), px(20.0)),
+                    size(px(11.0), px(200.0)),
+                ));
+            }
+            state.stop_drag(position, can_show);
+            assert!(state.drag.is_none());
+            assert!(!state.hovered);
+            assert_eq!(state.revealed, can_show);
+        }
+    }
+
+    #[test]
+    fn panel_scrollbar_thumb_preserves_palette_and_has_no_opacity_floor() {
+        let theme = Theme::one_light();
+        let styles = Styles::from_theme(&theme, &theme);
+        for kind in PanelScrollbarKind::ALL {
+            let base = match kind {
+                PanelScrollbarKind::Sidebar
+                | PanelScrollbarKind::WorkspaceSearch
+                | PanelScrollbarKind::FileList => styles.sidebar.sidebar_scrollbar_thumb_color,
+                _ => styles.editor.editor_scrollbar_thumb_color,
+            };
+            for opacity in [-1.0_f32, 0.0, 0.01, 0.2, 0.3, 1.0, 2.0] {
+                let mut expected = base;
+                expected.a *= opacity.clamp(0.0, 1.0);
+                assert_eq!(
+                    panel_scrollbar_thumb_color(kind, opacity, &styles),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn panel_scrollbar_respects_configured_idle_opacity() {
+        let theme = Theme::one_dark();
+        let mut styles = Styles::from_theme(&theme, &theme);
+        styles.editor.editor_scrollbar_idle_opacity = 0.1;
+        let state = PanelScrollbarState::new(0.1, styles.editor.editor_scrollbar_width_px);
+        assert_eq!(state.desired_opacity(true, &styles.editor), 0.1);
+    }
+
+    #[test]
+    fn panel_scrollbar_metrics_hide_without_overflow_and_clamp_scroll_position() {
+        assert!(VerticalScrollbarMetrics::new(200.0, 0.0, 0.0).is_none());
+        assert!(VerticalScrollbarMetrics::new(200.0, 1.0, 0.0).is_none());
+        assert!(VerticalScrollbarMetrics::new(1.0, 200.0, 0.0).is_none());
+        let above = VerticalScrollbarMetrics::new(200.0, 300.0, -10.0).unwrap();
+        let below = VerticalScrollbarMetrics::new(200.0, 300.0, 400.0).unwrap();
+        assert_eq!(above.scroll_top, 0.0);
+        assert_eq!(below.scroll_top, 300.0);
+        assert_eq!(below.content_height(), 500.0);
     }
 }

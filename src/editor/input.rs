@@ -23,6 +23,16 @@ pub(super) struct TableCellDisplayInfo {
     pub(super) line_height: f32,
 }
 
+impl TableCellDisplayInfo {
+    pub(super) fn hard_line_top(&self, hard_line_index: usize) -> f32 {
+        self.wrapped_lines
+            .iter()
+            .take(hard_line_index)
+            .map(|line| f32::from(line.size(px(self.line_height)).height))
+            .sum()
+    }
+}
+
 fn nearest_table_cell_in_row(
     areas: &[(Bounds<Pixels>, usize, usize, usize)],
     table: usize,
@@ -64,11 +74,35 @@ fn table_cell_visual_line_count(info: &TableCellDisplayInfo) -> usize {
         .max(1)
 }
 
-fn table_cell_visual_position(
+fn table_cell_wrapped_line_for_y(
+    info: &TableCellDisplayInfo,
+    local_y: f32,
+) -> Option<(usize, f32)> {
+    let mut line_top = 0.0;
+    for (index, wrapped) in info.wrapped_lines.iter().enumerate() {
+        let height = f32::from(wrapped.size(px(info.line_height)).height);
+        // A taller sibling cell can leave space below this cell's last hard line.
+        if local_y < line_top + height || index + 1 == info.wrapped_lines.len() {
+            let last_row = wrapped.wrap_boundaries().len();
+            let last_row_center = wrapped.row_top(last_row, px(info.line_height))
+                + wrapped.row_height(last_row, px(info.line_height)) * 0.5;
+            return Some((
+                index,
+                (local_y - line_top)
+                    .max(0.0)
+                    .min(f32::from(last_row_center)),
+            ));
+        }
+        line_top += height;
+    }
+    None
+}
+
+fn table_cell_position(
     info: &TableCellDisplayInfo,
     cell_offset: usize,
-    inner_width: f32,
-) -> Option<(usize, f32)> {
+    affinity: Option<WrapBoundaryAffinityKind>,
+) -> Option<(usize, Point<Pixels>)> {
     let line_height = info.line_height;
     let display_index = if cell_offset >= info.buffer_to_display.len() {
         info.display_text.len()
@@ -83,9 +117,27 @@ fn table_cell_visual_position(
     let range = info.hard_line_ranges.get(hard_line_index)?;
     let wrapped = info.wrapped_lines.get(hard_line_index)?;
     let local_index = display_index.saturating_sub(range.start).min(range.len());
-    let position = wrapped
-        .position_for_index(local_index, px(line_height))
-        .unwrap_or_default();
+    let position = EditorView::visual_position_for_wrapped_display(
+        wrapped,
+        info.display_text.get(range.clone())?,
+        local_index,
+        line_height,
+        0.0,
+        &HashMap::new(),
+        affinity,
+    )?;
+    Some((hard_line_index, position))
+}
+
+fn table_cell_visual_position(
+    info: &TableCellDisplayInfo,
+    cell_offset: usize,
+    inner_width: f32,
+    affinity: Option<WrapBoundaryAffinityKind>,
+) -> Option<(usize, f32)> {
+    let (hard_line_index, position) = table_cell_position(info, cell_offset, affinity)?;
+    let wrapped = info.wrapped_lines.get(hard_line_index)?;
+    let line_height = info.line_height;
     let prior_lines = info
         .wrapped_lines
         .iter()
@@ -100,7 +152,7 @@ fn table_cell_visual_position(
                 + 1
         })
         .sum::<usize>();
-    let soft_line = (f32::from(position.y) / line_height.max(1.0)) as usize;
+    let soft_line = wrapped.row_for_y(position.y, px(line_height));
     let content_offset = helpers::table_cell_content_offset(
         info.alignment,
         inner_width,
@@ -117,7 +169,7 @@ fn table_cell_offset_for_visual_line(
     target_visual_line: usize,
     goal_x: f32,
     inner_width: f32,
-) -> Option<usize> {
+) -> Option<(usize, Option<WrapBoundaryAffinityKind>)> {
     let line_height = info.line_height;
     let mut first_visual_line = 0usize;
     for (wrapped, range) in info.wrapped_lines.iter().zip(&info.hard_line_ranges) {
@@ -131,18 +183,28 @@ fn table_cell_offset_for_visual_line(
                 f32::from(wrapped.unwrapped_layout.width),
             );
             let local_x = (goal_x - content_offset).max(0.0);
-            let target_y = (soft_line as f32 + 0.5) * line_height;
+            let target_y = wrapped.row_top(soft_line, px(line_height))
+                + wrapped.row_height(soft_line, px(line_height)) * 0.5;
             let local_display_index = match wrapped
-                .closest_index_for_position(point(px(local_x), px(target_y)), px(line_height))
+                .closest_index_for_position(point(px(local_x), target_y), px(line_height))
             {
                 Ok(index) | Err(index) => index.min(range.len()),
             };
             let display_index = range.start + local_display_index;
-            return Some(if display_index < info.display_to_buffer.len() {
+            let offset = if display_index < info.display_to_buffer.len() {
                 info.display_to_buffer[display_index]
             } else {
                 info.cell_content_len
-            });
+            };
+            return Some((
+                offset,
+                EditorView::wrap_boundary_affinity_for_row(
+                    wrapped,
+                    hard_text,
+                    local_display_index,
+                    soft_line,
+                ),
+            ));
         }
         first_visual_line += line_count;
     }
@@ -864,7 +926,6 @@ impl EditorView {
                         let offset =
                             self.table_visible_selection_target(self.cursor.anchor, offset);
                         self.cursor.select_to(offset, &self.buffer);
-                        self.clear_wrap_boundary_affinity();
                         self.is_selecting = false;
                     } else {
                         self.maybe_schedule_preview_reveal_for_click(
@@ -873,7 +934,6 @@ impl EditorView {
                             event.position,
                         );
                         self.cursor.move_to(offset, &self.buffer);
-                        self.clear_wrap_boundary_affinity();
                         self.is_selecting = true;
                         self.selection_drag_position = Some(event.position);
                         self.sync_selection_drag_scroll_task(cx);
@@ -1340,7 +1400,13 @@ impl EditorView {
                     px(info.content_x + f32::from(pos.x)),
                     px(text_top_y + f32::from(pos.y)),
                 ),
-                size(px(info.font_size * 0.6), px(info.line_height)),
+                size(
+                    px(info.font_size * 0.6),
+                    info.wrapped_line.row_height(
+                        info.wrapped_line.row_for_y(pos.y, px(info.line_height)),
+                        px(info.line_height),
+                    ),
+                ),
             );
         }
 
@@ -2211,6 +2277,7 @@ impl EditorView {
         }
         if self.is_selecting {
             let old_cursor_offset = self.cursor.offset;
+            let old_wrap_affinity = self.wrap_boundary_affinity_for_offset(old_cursor_offset);
             let old_scroll_offset = self.scroll_offset;
             if self
                 .last_mouse_down_target
@@ -2320,6 +2387,7 @@ impl EditorView {
                 self.suppress_fold_for_empty_selection_drag = false;
             }
             if self.cursor.offset != old_cursor_offset
+                || self.wrap_boundary_affinity_for_offset(self.cursor.offset) != old_wrap_affinity
                 || (self.scroll_offset - old_scroll_offset).abs() > f32::EPSILON
             {
                 cx.notify();
@@ -2453,13 +2521,7 @@ impl EditorView {
             &self.image_cache,
             body_space_width,
         );
-        let line_height = helpers::inline_math_line_height(
-            &cell_decoration,
-            &cell_content,
-            &cell_active_ranges,
-            &self.image_cache,
-            font_size * self.styles.editor.editor_paragraph_line_height_factor,
-        );
+        let line_height = font_size * self.styles.editor.editor_paragraph_line_height_factor;
         let (folded_raw, d2b_raw, b2d_raw, prefix_collapsed) = helpers::build_display_text(
             &cell_content,
             &cell_decoration,
@@ -2550,6 +2612,16 @@ impl EditorView {
                 &self.image_cache,
                 range.start,
             );
+            helpers::apply_inline_math_row_heights(
+                wrapped,
+                &cell_decoration,
+                &cell_content,
+                &buffer_to_display,
+                &cell_active_ranges,
+                &self.image_cache,
+                line_height,
+                range.start,
+            );
         }
         if wrapped_lines.len() != hard_line_ranges.len() {
             return None;
@@ -2596,6 +2668,94 @@ impl EditorView {
         Some((info, inner_width))
     }
 
+    pub(crate) fn apply_table_cursor_target(
+        &mut self,
+        (offset, affinity): (usize, Option<WrapBoundaryAffinityKind>),
+    ) -> usize {
+        self.wrap_boundary_affinity = affinity.map(|kind| WrapBoundaryAffinity { offset, kind });
+        self.table_cursor_paint_bounds = None;
+        offset
+    }
+
+    pub(crate) fn table_row_bounds_for_offset(
+        &self,
+        window: &mut Window,
+        offset: usize,
+        affinity: Option<WrapBoundaryAffinityKind>,
+    ) -> Option<Bounds<Pixels>> {
+        if self.active_tab_is_diff() {
+            return None;
+        }
+        let (table, line, column) = self.table_cell_for_offset(offset)?;
+        let row = self.table_visual_row_for_source_line(table, line)?;
+        let bounds = self
+            .table_click_areas
+            .iter()
+            .find_map(|(bounds, t, r, c)| {
+                (*t == table && *r == row && *c == column).then_some(*bounds)
+            })?;
+        let (info, inner_width) = self.table_cell_display_geometry(window, table, line, column)?;
+        let cell_offset =
+            offset.saturating_sub(self.buffer.line_start(line) + info.cell_range.start);
+        let (hard_line, position) = table_cell_position(&info, cell_offset, affinity)?;
+        let wrapped = info.wrapped_lines.get(hard_line)?;
+        let padding_x = self.scaled(self.styles.table.table_cell_padding_px);
+        let padding_y = padding_x * 0.6;
+        let content_offset = helpers::table_cell_content_offset(
+            info.alignment,
+            inner_width,
+            f32::from(wrapped.unwrapped_layout.width),
+        );
+        Some(Bounds::new(
+            point(
+                bounds.origin.x + px(padding_x + content_offset) + position.x,
+                bounds.origin.y + px(padding_y + info.hard_line_top(hard_line)) + position.y,
+            ),
+            size(
+                px(self.base_font_size() * 0.6),
+                wrapped.row_height(
+                    wrapped.row_for_y(position.y, px(info.line_height)),
+                    px(info.line_height),
+                ),
+            ),
+        ))
+    }
+
+    pub(crate) fn document_row_bounds_for_offset(
+        &self,
+        window: &mut Window,
+        offset: usize,
+        affinity: Option<WrapBoundaryAffinityKind>,
+    ) -> Option<(f32, f32)> {
+        if self.table_cell_for_offset(offset).is_some() && !self.active_tab_is_diff() {
+            let bounds = self.table_row_bounds_for_offset(window, offset, affinity)?;
+            let top = f32::from(bounds.origin.y - self.content_origin.y) + self.scroll_offset;
+            return Some((top, top + f32::from(bounds.size.height)));
+        }
+        let (line, col) = self.buffer.offset_to_line_col(offset);
+        let info = self.line_display_info.get(line)?.as_ref()?;
+        if info.visual_line_count == 0 {
+            return None;
+        }
+        let position = Self::visual_position_for_wrapped_display(
+            &info.wrapped_line,
+            &info.display_text,
+            helpers::buffer_to_display_offset(&info.buffer_to_display, col),
+            info.line_height,
+            info.indent_px,
+            &info.wrap_boundary_upstream_xs,
+            affinity,
+        )?;
+        let row = info
+            .wrapped_line
+            .row_for_y(position.y, px(info.line_height));
+        let top = self.text_y_offset_for_line(line) + f32::from(position.y);
+        Some((
+            top,
+            top + f32::from(info.wrapped_line.row_height(row, px(info.line_height))),
+        ))
+    }
+
     pub(crate) fn table_visual_x_for_offset(
         &self,
         window: &mut Window,
@@ -2606,7 +2766,13 @@ impl EditorView {
             self.table_cell_display_geometry(window, table_start, source_line, column)?;
         let line_start = self.buffer.line_start(source_line);
         let cell_offset = offset.saturating_sub(line_start + info.cell_range.start);
-        table_cell_visual_position(&info, cell_offset, inner_width).map(|(_, x)| x)
+        table_cell_visual_position(
+            &info,
+            cell_offset,
+            inner_width,
+            self.wrap_boundary_affinity_for_offset(offset),
+        )
+        .map(|(_, x)| x)
     }
 
     pub(crate) fn table_vertical_target(
@@ -2615,13 +2781,18 @@ impl EditorView {
         offset: usize,
         down: bool,
         goal_x: f32,
-    ) -> Option<usize> {
+    ) -> Option<(usize, Option<WrapBoundaryAffinityKind>)> {
         let (table_start, source_line, column) = self.table_cell_for_offset(offset)?;
         let (info, inner_width) =
             self.table_cell_display_geometry(window, table_start, source_line, column)?;
         let line_start = self.buffer.line_start(source_line);
         let cell_offset = offset.saturating_sub(line_start + info.cell_range.start);
-        let (visual_line, _) = table_cell_visual_position(&info, cell_offset, inner_width)?;
+        let (visual_line, _) = table_cell_visual_position(
+            &info,
+            cell_offset,
+            inner_width,
+            self.wrap_boundary_affinity_for_offset(offset),
+        )?;
         let visual_line_count = table_cell_visual_line_count(&info);
         let target_visual_line = if down {
             visual_line
@@ -2631,9 +2802,12 @@ impl EditorView {
             visual_line.checked_sub(1)
         };
         if let Some(target_visual_line) = target_visual_line {
-            let target_cell_offset =
+            let (target_cell_offset, affinity) =
                 table_cell_offset_for_visual_line(&info, target_visual_line, goal_x, inner_width)?;
-            return Some(line_start + info.cell_range.start + target_cell_offset);
+            return Some((
+                line_start + info.cell_range.start + target_cell_offset,
+                affinity,
+            ));
         }
 
         let rows = super::input_table::visible_table_line_indices(&self.decorations, table_start)?;
@@ -2656,15 +2830,16 @@ impl EditorView {
         } else {
             table_cell_visual_line_count(&target_info).saturating_sub(1)
         };
-        let target_cell_offset = table_cell_offset_for_visual_line(
+        let (target_cell_offset, affinity) = table_cell_offset_for_visual_line(
             &target_info,
             target_visual_line,
             goal_x,
             target_inner_width,
         )?;
-        Some(
+        Some((
             self.buffer.line_start(target_line) + target_info.cell_range.start + target_cell_offset,
-        )
+            affinity,
+        ))
     }
 
     pub(super) fn inline_line_display_info(
@@ -3022,13 +3197,7 @@ impl EditorView {
             &self.image_cache,
             placeholder_unit_width,
         );
-        let line_height = helpers::inline_math_line_height(
-            &decoration,
-            line_content,
-            &active_ranges,
-            &self.image_cache,
-            base_line_height,
-        );
+        let line_height = base_line_height;
         let (mut display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
             helpers::build_display_text(
                 line_content,
@@ -3152,6 +3321,16 @@ impl EditorView {
             &self.image_cache,
             0,
         );
+        helpers::apply_inline_math_row_heights(
+            &mut wrapped_line,
+            &decoration,
+            line_content,
+            &buffer_to_display,
+            &active_ranges,
+            &self.image_cache,
+            line_height,
+            0,
+        );
         let indent_px = if is_list_type && prefix_bytes > 0 && prefix_bytes <= display_text.len() {
             wrapped_line
                 .position_for_index(prefix_bytes, px(line_height))
@@ -3205,9 +3384,8 @@ impl EditorView {
         })
     }
 
-    /// Compute the buffer offset for a mouse position within a table cell.
     fn table_cell_offset_for_position(
-        &self,
+        &mut self,
         window: &mut Window,
         table_start: usize,
         visual_row: usize,
@@ -3215,6 +3393,26 @@ impl EditorView {
         bounds: &Bounds<Pixels>,
         position: Point<Pixels>,
     ) -> Option<usize> {
+        let target = self.table_cell_hit_for_position(
+            window,
+            table_start,
+            visual_row,
+            col,
+            bounds,
+            position,
+        )?;
+        Some(self.apply_table_cursor_target(target))
+    }
+
+    pub(super) fn table_cell_hit_for_position(
+        &self,
+        window: &mut Window,
+        table_start: usize,
+        visual_row: usize,
+        col: usize,
+        bounds: &Bounds<Pixels>,
+        position: Point<Pixels>,
+    ) -> Option<(usize, Option<WrapBoundaryAffinityKind>)> {
         let source_line = self.table_source_line_for_visual_row(table_start, visual_row)?;
         let line_start = self.buffer.line_start(source_line);
         let padding_x = self.scaled(self.styles.table.table_cell_padding_px);
@@ -3224,28 +3422,7 @@ impl EditorView {
         let info = self.table_cell_display_info(window, source_line, col, inner_width)?;
         let line_height = info.line_height;
         let local_y = (f32::from(position.y) - f32::from(bounds.origin.y) - padding_y).max(0.0);
-        let mut line_top = 0.0;
-        let mut selected_line = info.wrapped_lines.len().saturating_sub(1);
-        let mut hit_y = 0.0;
-        for (index, wrapped) in info.wrapped_lines.iter().enumerate() {
-            let height = (helpers::wrap_boundary_byte_indices(
-                wrapped,
-                info.hard_line_ranges
-                    .get(index)
-                    .and_then(|range| info.display_text.get(range.clone()))
-                    .unwrap_or(""),
-            )
-            .len()
-                + 1) as f32
-                * line_height;
-            // A taller sibling cell can leave space below this cell's last hard line.
-            if local_y < line_top + height || index + 1 == info.wrapped_lines.len() {
-                selected_line = index;
-                hit_y = (local_y - line_top).min((height - line_height * 0.5).max(0.0));
-                break;
-            }
-            line_top += height;
-        }
+        let (selected_line, hit_y) = table_cell_wrapped_line_for_y(&info, local_y)?;
         let wrapped = info.wrapped_lines.get(selected_line)?;
         let hard_range = info.hard_line_ranges.get(selected_line)?;
         let content_offset = helpers::table_cell_content_offset(
@@ -3271,7 +3448,15 @@ impl EditorView {
         } else {
             info.cell_content_len
         };
-        Some(line_start + info.cell_range.start + buffer_col)
+        Some((
+            line_start + info.cell_range.start + buffer_col,
+            Self::wrap_boundary_affinity_for_row(
+                wrapped,
+                info.display_text.get(hard_range.clone())?,
+                display_index - hard_range.start,
+                wrapped.row_for_y(px(hit_y), px(line_height)),
+            ),
+        ))
     }
 
     pub(crate) fn on_scroll(
@@ -3485,14 +3670,20 @@ impl EditorView {
         if let Some(Some(info)) = self.line_display_info.get(line) {
             let line_text_inset = self.block_padding_for_line(line).0
                 + self.image_preview_extra_height_for_line(line);
-            let local_y = local_text_y_for_hit(
-                pos_y,
-                y,
-                visible_line_geometry.map(|(_, top)| top),
-                self.text_y_offset_for_line(line),
-                line_text_inset,
+            let local_y = Self::clamp_wrapped_hit_y(
+                &info.wrapped_line,
+                local_text_y_for_hit(
+                    pos_y,
+                    y,
+                    visible_line_geometry.map(|(_, top)| top),
+                    self.text_y_offset_for_line(line),
+                    line_text_inset,
+                ),
+                info.line_height,
             );
-            let visual_line_idx = (local_y / info.line_height) as usize;
+            let visual_line_idx = info
+                .wrapped_line
+                .row_for_y(px(local_y), px(info.line_height));
             let indent_adjust = if info.indent_px > 0.0 && visual_line_idx > 0 {
                 info.indent_px
             } else {
@@ -3623,10 +3814,119 @@ impl EditorView {
 
 #[cfg(test)]
 mod tests {
+    use super::super::input_wrap::test_wrapped_line;
     use super::{
-        display_index_to_buffer_col, local_text_y_for_hit, nearest_table_cell_in_row,
+        EditorView, TableCellDisplayInfo, WrapBoundaryAffinityKind, display_index_to_buffer_col,
+        local_text_y_for_hit, nearest_table_cell_in_row, table_cell_offset_for_visual_line,
+        table_cell_position, table_cell_visual_position, table_cell_wrapped_line_for_y,
         visible_line_hit,
     };
+
+    fn test_table_cell() -> TableCellDisplayInfo {
+        let display_text = "abcdef\nabcdef".to_string();
+        TableCellDisplayInfo {
+            wrapped_lines: vec![
+                test_wrapped_line(&[24.0, 60.0, 24.0]),
+                test_wrapped_line(&[24.0, 24.0, 80.0]),
+            ],
+            hard_line_ranges: vec![0..6, 7..13],
+            alignment: crate::markdown::TableAlign::Left,
+            display_to_buffer: (0..display_text.len()).collect(),
+            buffer_to_display: (0..display_text.len()).collect(),
+            cell_range: 0..display_text.len(),
+            cell_content_len: display_text.len(),
+            display_text,
+            line_height: 24.0,
+        }
+    }
+
+    #[test]
+    fn table_hit_accumulates_actual_hard_line_heights_and_clamps_sibling_space() {
+        let info = test_table_cell();
+        assert_eq!(info.hard_line_top(0), 0.0);
+        assert_eq!(info.hard_line_top(1), 108.0);
+        assert_eq!(info.hard_line_top(2), 236.0);
+        assert_eq!(table_cell_wrapped_line_for_y(&info, 70.0), Some((0, 70.0)));
+        assert_eq!(table_cell_wrapped_line_for_y(&info, 108.0), Some((1, 0.0)));
+        assert_eq!(table_cell_wrapped_line_for_y(&info, 130.0), Some((1, 22.0)));
+        assert_eq!(table_cell_wrapped_line_for_y(&info, 400.0), Some((1, 88.0)));
+    }
+
+    #[test]
+    fn table_vertical_navigation_targets_actual_soft_row_centers() {
+        let info = test_table_cell();
+        assert_eq!(
+            table_cell_visual_position(&info, 5, 100.0, None),
+            Some((2, 10.0))
+        );
+        assert_eq!(
+            table_cell_visual_position(&info, 12, 100.0, None),
+            Some((5, 10.0))
+        );
+        for (visual_row, offset) in [(0, 1), (1, 3), (2, 5), (3, 8), (4, 10), (5, 12)] {
+            assert_eq!(
+                table_cell_offset_for_visual_line(&info, visual_row, 10.0, 100.0),
+                Some((offset, None))
+            );
+        }
+    }
+
+    #[test]
+    fn table_zero_column_down_preserves_exact_wrap_boundary_row() {
+        let info = test_table_cell();
+        let mut target = (0, None);
+        for (row, expected_offset) in [(1, 2), (2, 4), (3, 7), (4, 9), (5, 11)] {
+            let (current_row, x) =
+                table_cell_visual_position(&info, target.0, 100.0, target.1).unwrap();
+            assert_eq!(current_row + 1, row);
+            assert_eq!(x, 0.0);
+            target = table_cell_offset_for_visual_line(&info, row, 0.0, 100.0).unwrap();
+            assert_eq!(target.0, expected_offset);
+            assert_eq!(
+                table_cell_visual_position(&info, target.0, 100.0, target.1),
+                Some((row, 0.0))
+            );
+        }
+        for row in (0..5).rev() {
+            let (offset, affinity) =
+                table_cell_offset_for_visual_line(&info, row, 0.0, 100.0).unwrap();
+            assert_eq!(
+                table_cell_visual_position(&info, offset, 100.0, affinity),
+                Some((row, 0.0))
+            );
+        }
+        assert_eq!(
+            table_cell_visual_position(&info, 2, 100.0, Some(WrapBoundaryAffinityKind::Upstream)),
+            Some((0, 20.0)),
+        );
+    }
+
+    #[test]
+    fn table_affinity_geometry_includes_tall_prior_hard_lines() {
+        let info = test_table_cell();
+        for (offset, hard_line, expected_y) in [(2, 0, 24.0), (9, 1, 132.0), (11, 1, 156.0)] {
+            let (line, pos) =
+                table_cell_position(&info, offset, Some(WrapBoundaryAffinityKind::Downstream))
+                    .unwrap();
+            assert_eq!(line, hard_line);
+            assert_eq!(info.hard_line_top(line) + f32::from(pos.y), expected_y);
+            assert_eq!(pos.x, px(0.0));
+        }
+    }
+
+    #[test]
+    fn bottom_padding_hits_stay_in_last_measured_row() {
+        let wrapped = test_wrapped_line(&[24.0, 60.0, 24.0]);
+        for y in [108.0, 120.0, 400.0] {
+            let y = EditorView::clamp_wrapped_hit_y(&wrapped, y, 24.0);
+            assert_eq!(wrapped.row_for_y(px(y), px(24.0)), 2);
+            assert_eq!(
+                wrapped.closest_index_for_position(point(px(5.0), px(y)), px(24.0)),
+                Ok(4)
+            );
+        }
+        assert_eq!(EditorView::clamp_wrapped_hit_y(&wrapped, 70.0, 24.0), 70.0);
+    }
     use gpui::{Bounds, point, px, size};
 
     #[test]
@@ -3684,6 +3984,21 @@ mod tests {
     fn local_text_y_selects_soft_wrap_visual_row_from_screen_coordinates() {
         let local_y = local_text_y_for_hit(178.0, 39_000_178.0, Some(100.0), 38_990_000.0, 6.0);
         assert_eq!((local_y / 24.0) as usize, 3);
+    }
+
+    #[test]
+    fn screen_hit_stays_on_tall_row_until_its_actual_bottom() {
+        let wrapped = test_wrapped_line(&[24.0, 60.0, 24.0]);
+        for (screen_y, expected_row) in [(178.0, 1), (189.9, 1), (190.0, 2)] {
+            let local_y = local_text_y_for_hit(
+                screen_y,
+                39_000_000.0 + screen_y,
+                Some(100.0),
+                38_990_000.0,
+                6.0,
+            );
+            assert_eq!(wrapped.row_for_y(px(local_y), px(24.0)), expected_row);
+        }
     }
 
     #[test]

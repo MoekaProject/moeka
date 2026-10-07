@@ -32,10 +32,97 @@ pub(crate) fn code_block_soft_wrap_width(viewport_width: f32, character_advance:
     (viewport_width - character_advance.max(1.0)).max(1.0)
 }
 
+/// Formula positions and sorted wrap boundaries are display-text byte offsets.
+/// A formula starting exactly at a boundary belongs to the downstream row.
+pub(crate) fn inline_math_row_heights(
+    base_line_height: f32,
+    boundaries: &[usize],
+    formulas: &[(usize, f32)],
+) -> Vec<f32> {
+    let mut heights = vec![base_line_height; boundaries.len() + 1];
+    for &(start, height) in formulas {
+        let row = boundaries.partition_point(|&boundary| boundary <= start);
+        heights[row] = heights[row].max(height);
+    }
+    heights
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::markdown::TableAlign;
+
+    #[test]
+    fn inline_math_expands_only_its_wrapped_row() {
+        assert_eq!(
+            inline_math_row_heights(24.0, &[10, 20], &[(15, 60.0)]),
+            vec![24.0, 60.0, 24.0]
+        );
+        assert_eq!(
+            inline_math_row_heights(24.0, &[10, 20], &[(5, 60.0)]),
+            vec![60.0, 24.0, 24.0]
+        );
+    }
+
+    #[test]
+    fn inline_math_redistribution_preserves_total_height() {
+        let first_row = inline_math_row_heights(24.0, &[10, 20], &[(5, 60.0)]);
+        let second_row = inline_math_row_heights(24.0, &[10, 20], &[(10, 60.0)]);
+        assert_eq!(first_row, vec![60.0, 24.0, 24.0]);
+        assert_eq!(second_row, vec![24.0, 60.0, 24.0]);
+        assert_eq!(first_row.iter().sum::<f32>(), 108.0);
+        assert_eq!(second_row.iter().sum::<f32>(), 108.0);
+    }
+
+    #[test]
+    fn inline_math_at_exact_wrap_boundaries_belongs_to_downstream_rows() {
+        assert_eq!(
+            inline_math_row_heights(24.0, &[10, 20], &[(10, 60.0)]),
+            vec![24.0, 60.0, 24.0]
+        );
+        assert_eq!(
+            inline_math_row_heights(24.0, &[10, 20], &[(20, 40.0)]),
+            vec![24.0, 24.0, 40.0]
+        );
+        assert_eq!(
+            inline_math_row_heights(24.0, &[10, 20], &[(9, 60.0)]),
+            vec![60.0, 24.0, 24.0]
+        );
+    }
+
+    #[test]
+    fn inline_math_takes_the_maximum_only_within_each_row() {
+        assert_eq!(
+            inline_math_row_heights(
+                24.0,
+                &[10, 20],
+                &[(12, 40.0), (5, 30.0), (18, 60.0), (11, 50.0), (25, 10.0)]
+            ),
+            vec![30.0, 60.0, 24.0]
+        );
+    }
+
+    #[test]
+    fn inline_math_without_tall_formulas_keeps_base_row_heights() {
+        assert_eq!(
+            inline_math_row_heights(24.0, &[10, 20], &[]),
+            vec![24.0, 24.0, 24.0]
+        );
+        assert_eq!(
+            inline_math_row_heights(24.0, &[10, 20], &[(0, 10.0), (10, 24.0)]),
+            vec![24.0, 24.0, 24.0]
+        );
+    }
+
+    #[test]
+    fn inline_math_unwrapped_row_fits_its_tallest_formula() {
+        assert_eq!(inline_math_row_heights(24.0, &[], &[]), vec![24.0]);
+        assert_eq!(
+            inline_math_row_heights(24.0, &[], &[(0, 40.0), (10, 60.0)]),
+            vec![60.0]
+        );
+        assert_eq!(inline_math_row_heights(80.0, &[], &[(0, 60.0)]), vec![80.0]);
+    }
 
     #[test]
     fn first_cjk_run_does_not_move_the_latin_baseline() {

@@ -75,6 +75,7 @@ impl ShapedLine {
             None,
             &self.decoration_runs,
             &[],
+            &[],
             window,
             cx,
         )?;
@@ -97,6 +98,7 @@ impl ShapedLine {
             TextAlign::default(),
             None,
             &self.decoration_runs,
+            &[],
             &[],
             window,
             cx,
@@ -133,7 +135,19 @@ impl WrappedLine {
             unwrapped_layout,
             wrap_boundaries,
             wrap_width: Some(wrap_width),
+            row_heights: Vec::new(),
         });
+    }
+
+    /// Set the heights of individual soft-wrapped rows without changing cached shaping.
+    /// Empty metadata uses the paint/layout fallback height. Invalid metadata is cleared.
+    /// Rewrapping clears these heights, so callers must set them after computing wraps.
+    pub fn set_row_heights(&mut self, row_heights: Vec<Pixels>) {
+        let layout = Arc::make_mut(&mut self.layout);
+        layout.row_heights = row_heights;
+        if layout.valid_row_heights().len() != layout.row_heights.len() {
+            layout.row_heights.clear();
+        }
     }
 
     /// Paint this line of text to the window.
@@ -159,6 +173,7 @@ impl WrappedLine {
             align_width,
             &self.decoration_runs,
             &self.wrap_boundaries,
+            self.layout.valid_row_heights(),
             window,
             cx,
         )?;
@@ -189,11 +204,60 @@ impl WrappedLine {
             align_width,
             &self.decoration_runs,
             &self.wrap_boundaries,
+            self.layout.valid_row_heights(),
             window,
             cx,
         )?;
 
         Ok(())
+    }
+}
+
+/// Vertical geometry shared by glyphs and decorations in a soft-wrapped row.
+struct PaintRow {
+    top: Pixels,
+    height: Pixels,
+    baseline_offset: Point<Pixels>,
+    strikethrough_offset: Pixels,
+}
+
+impl PaintRow {
+    fn new(top: Pixels, height: Pixels, fallback: Pixels, layout: &LineLayout) -> Self {
+        let padding_top = (height - layout.ascent - layout.descent) / 2.;
+        let fallback_baseline = (fallback - layout.ascent - layout.descent) / 2. + layout.ascent;
+        Self {
+            top,
+            height,
+            baseline_offset: point(Pixels::ZERO, padding_top + layout.ascent),
+            // Preserve uniform placement, then move with the centered glyph baseline.
+            strikethrough_offset: ((layout.ascent * 0.5 + fallback_baseline) * 0.5)
+                + (height - fallback) / 2.,
+        }
+    }
+
+    fn underline_y(&self, layout: &LineLayout) -> Pixels {
+        self.top + self.baseline_offset.y + layout.descent * 0.618
+    }
+
+    fn strikethrough_y(&self) -> Pixels {
+        self.top + self.strikethrough_offset
+    }
+
+    fn glyph_bounds(
+        &self,
+        origin: Point<Pixels>,
+        max_glyph_size: crate::Size<Pixels>,
+        fallback: Pixels,
+    ) -> Bounds<Pixels> {
+        let baseline_shift = (self.height - fallback) / 2.;
+        // Keep the uniform culling box and include its baseline-shifted counterpart.
+        Bounds::new(
+            origin + point(Pixels::ZERO, baseline_shift.min(Pixels::ZERO)),
+            size(
+                max_glyph_size.width,
+                max_glyph_size.height + baseline_shift.abs(),
+            ),
+        )
     }
 }
 
@@ -205,6 +269,7 @@ fn paint_line(
     align_width: Option<Pixels>,
     decoration_runs: &[DecorationRun],
     wrap_boundaries: &[WrapBoundary],
+    row_heights: &[Pixels],
     window: &mut Window,
     cx: &mut App,
 ) -> Result<()> {
@@ -212,12 +277,21 @@ fn paint_line(
         origin,
         size(
             layout.width,
-            line_height * (wrap_boundaries.len() as f32 + 1.),
+            if row_heights.is_empty() {
+                line_height * (wrap_boundaries.len() as f32 + 1.)
+            } else {
+                row_heights.iter().copied().fold(Pixels::ZERO, |a, b| a + b)
+            },
         ),
     );
     window.paint_layer(line_bounds, |window| {
-        let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
-        let baseline_offset = point(px(0.), padding_top + layout.ascent);
+        let mut row_ix = 0;
+        let mut row = PaintRow::new(
+            origin.y,
+            row_heights.first().copied().unwrap_or(line_height),
+            line_height,
+            layout,
+        );
         let mut decoration_runs = decoration_runs.iter();
         let mut wraps = wrap_boundaries.iter().peekable();
         let mut run_end = 0;
@@ -238,15 +312,12 @@ fn paint_line(
         );
         let mut prev_glyph_position = Point::default();
         let mut max_glyph_size = size(px(0.), px(0.));
-        let mut first_glyph_x = origin.x;
+
         for (run_ix, run) in layout.runs.iter().enumerate() {
             max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
 
             for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
                 glyph_origin.x += glyph.position.x - prev_glyph_position.x;
-                if glyph_ix == 0 && run_ix == 0 {
-                    first_glyph_x = glyph_origin.x;
-                }
 
                 if wraps.peek() == Some(&&WrapBoundary { run_ix, glyph_ix }) {
                     wraps.next();
@@ -259,8 +330,6 @@ fn paint_line(
                             glyph_origin.x - underline_origin.x,
                             underline_style,
                         );
-                        underline_origin.x = origin.x;
-                        underline_origin.y += line_height;
                     }
                     if let Some((strikethrough_origin, strikethrough_style)) =
                         current_strikethrough.as_mut()
@@ -273,8 +342,6 @@ fn paint_line(
                             glyph_origin.x - strikethrough_origin.x,
                             strikethrough_style,
                         );
-                        strikethrough_origin.x = origin.x;
-                        strikethrough_origin.y += line_height;
                     }
 
                     glyph_origin.x = aligned_origin_x(
@@ -285,7 +352,27 @@ fn paint_line(
                         layout,
                         wraps.peek(),
                     );
-                    glyph_origin.y += line_height;
+                    row_ix += 1;
+                    row = PaintRow::new(
+                        row.top + row.height,
+                        row_heights.get(row_ix).copied().unwrap_or(line_height),
+                        line_height,
+                        layout,
+                    );
+                    glyph_origin.y = row.top;
+                    // A style ending at this wrap has already been painted on the old row.
+                    if glyph.index >= run_end {
+                        current_underline = None;
+                        current_strikethrough = None;
+                    }
+                    if let Some((underline_origin, _)) = current_underline.as_mut() {
+                        underline_origin.x = glyph_origin.x;
+                        underline_origin.y = row.underline_y(layout);
+                    }
+                    if let Some((strikethrough_origin, _)) = current_strikethrough.as_mut() {
+                        strikethrough_origin.x = glyph_origin.x;
+                        strikethrough_origin.y = row.strikethrough_y();
+                    }
                 }
                 prev_glyph_position = glyph.position;
 
@@ -311,10 +398,7 @@ fn paint_line(
                         }
                         if let Some(run_underline) = style_run.underline.as_ref() {
                             current_underline.get_or_insert((
-                                point(
-                                    glyph_origin.x,
-                                    glyph_origin.y + baseline_offset.y + (layout.descent * 0.618),
-                                ),
+                                point(glyph_origin.x, row.underline_y(layout)),
                                 UnderlineStyle {
                                     color: Some(run_underline.color.unwrap_or(style_run.color)),
                                     thickness: run_underline.thickness,
@@ -329,11 +413,7 @@ fn paint_line(
                         }
                         if let Some(run_strikethrough) = style_run.strikethrough.as_ref() {
                             current_strikethrough.get_or_insert((
-                                point(
-                                    glyph_origin.x,
-                                    glyph_origin.y
-                                        + (((layout.ascent * 0.5) + baseline_offset.y) * 0.5),
-                                ),
+                                point(glyph_origin.x, row.strikethrough_y()),
                                 StrikethroughStyle {
                                     color: Some(run_strikethrough.color.unwrap_or(style_run.color)),
                                     thickness: run_strikethrough.thickness,
@@ -374,23 +454,20 @@ fn paint_line(
                     );
                 }
 
-                let max_glyph_bounds = Bounds {
-                    origin: glyph_origin,
-                    size: max_glyph_size,
-                };
+                let max_glyph_bounds = row.glyph_bounds(glyph_origin, max_glyph_size, line_height);
 
                 let content_mask = window.content_mask();
                 if max_glyph_bounds.intersects(&content_mask.bounds) {
                     if glyph.is_emoji {
                         window.paint_emoji(
-                            glyph_origin + baseline_offset,
+                            glyph_origin + row.baseline_offset,
                             run.font_id,
                             glyph.id,
                             layout.font_size,
                         )?;
                     } else {
                         window.paint_glyph(
-                            glyph_origin + baseline_offset,
+                            glyph_origin + row.baseline_offset,
                             run.font_id,
                             glyph.id,
                             layout.font_size,
@@ -401,12 +478,7 @@ fn paint_line(
             }
         }
 
-        let mut last_line_end_x = first_glyph_x + layout.width;
-        if let Some(boundary) = wrap_boundaries.last() {
-            let run = &layout.runs[boundary.run_ix];
-            let glyph = &run.glyphs[boundary.glyph_ix];
-            last_line_end_x -= glyph.position.x;
-        }
+        let last_line_end_x = glyph_origin.x + layout.width - prev_glyph_position.x;
 
         if let Some((mut underline_start, underline_style)) = current_underline.take() {
             if last_line_end_x == underline_start.x {
@@ -442,6 +514,7 @@ fn paint_line_background(
     align_width: Option<Pixels>,
     decoration_runs: &[DecorationRun],
     wrap_boundaries: &[WrapBoundary],
+    row_heights: &[Pixels],
     window: &mut Window,
     cx: &mut App,
 ) -> Result<()> {
@@ -449,13 +522,24 @@ fn paint_line_background(
         origin,
         size(
             layout.width,
-            line_height * (wrap_boundaries.len() as f32 + 1.),
+            if row_heights.is_empty() {
+                line_height * (wrap_boundaries.len() as f32 + 1.)
+            } else {
+                row_heights.iter().copied().fold(Pixels::ZERO, |a, b| a + b)
+            },
         ),
     );
     window.paint_layer(line_bounds, |window| {
         let mut decoration_runs = decoration_runs.iter();
         let mut wraps = wrap_boundaries.iter().peekable();
         let mut run_end = 0;
+        let mut row_ix = 0;
+        let mut row = PaintRow::new(
+            origin.y,
+            row_heights.first().copied().unwrap_or(line_height),
+            line_height,
+            layout,
+        );
         let mut current_background: Option<(Point<Pixels>, Hsla)> = None;
         let text_system = cx.text_system().clone();
         let mut glyph_origin = point(
@@ -487,12 +571,10 @@ fn paint_line_background(
                         window.paint_quad(fill(
                             Bounds {
                                 origin: *background_origin,
-                                size: size(glyph_origin.x - background_origin.x, line_height),
+                                size: size(glyph_origin.x - background_origin.x, row.height),
                             },
                             *background_color,
                         ));
-                        background_origin.x = origin.x;
-                        background_origin.y += line_height;
                     }
 
                     glyph_origin.x = aligned_origin_x(
@@ -503,7 +585,21 @@ fn paint_line_background(
                         layout,
                         wraps.peek(),
                     );
-                    glyph_origin.y += line_height;
+                    row_ix += 1;
+                    row = PaintRow::new(
+                        row.top + row.height,
+                        row_heights.get(row_ix).copied().unwrap_or(line_height),
+                        line_height,
+                        layout,
+                    );
+                    glyph_origin.y = row.top;
+                    if glyph.index >= run_end {
+                        current_background = None;
+                    }
+                    if let Some((background_origin, _)) = current_background.as_mut() {
+                        background_origin.x = glyph_origin.x;
+                        background_origin.y = row.top;
+                    }
                 }
                 prev_glyph_position = glyph.position;
 
@@ -540,14 +636,14 @@ fn paint_line_background(
                 }
 
                 if let Some((mut background_origin, background_color)) = finished_background {
-                    let mut width = glyph_origin.x - background_origin.x;
                     if background_origin.x == glyph_origin.x {
                         background_origin.x -= max_glyph_size.width.half();
                     };
+                    let width = glyph_origin.x - background_origin.x;
                     window.paint_quad(fill(
                         Bounds {
                             origin: background_origin,
-                            size: size(width, line_height),
+                            size: size(width, row.height),
                         },
                         background_color,
                     ));
@@ -555,12 +651,7 @@ fn paint_line_background(
             }
         }
 
-        let mut last_line_end_x = origin.x + layout.width;
-        if let Some(boundary) = wrap_boundaries.last() {
-            let run = &layout.runs[boundary.run_ix];
-            let glyph = &run.glyphs[boundary.glyph_ix];
-            last_line_end_x -= glyph.position.x;
-        }
+        let last_line_end_x = glyph_origin.x + layout.width - prev_glyph_position.x;
 
         if let Some((mut background_origin, background_color)) = current_background.take() {
             if last_line_end_x == background_origin.x {
@@ -569,7 +660,7 @@ fn paint_line_background(
             window.paint_quad(fill(
                 Bounds {
                     origin: background_origin,
-                    size: size(last_line_end_x - background_origin.x, line_height),
+                    size: size(last_line_end_x - background_origin.x, row.height),
                 },
                 background_color,
             ));
@@ -599,5 +690,307 @@ fn aligned_origin_x(
         TextAlign::Left => origin.x,
         TextAlign::Center => (origin.x * 2.0 + align_width - line_width) / 2.0,
         TextAlign::Right => origin.x + align_width - line_width,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::line_layout::{LineLayoutCache, test_wrapped_layout};
+    use super::*;
+
+    fn wrapped_line() -> WrappedLine {
+        WrappedLine {
+            layout: Arc::new(test_wrapped_layout(Vec::new())),
+            text: "abcdef".into(),
+            decoration_runs: SmallVec::new(),
+        }
+    }
+
+    fn decorated_line(len: u32) -> WrappedLine {
+        let mut line = wrapped_line();
+        line.decoration_runs.push(DecorationRun {
+            len,
+            color: black(),
+            background_color: Some(black()),
+            underline: Some(UnderlineStyle {
+                color: Some(black()),
+                thickness: px(1.),
+                wavy: false,
+            }),
+            strikethrough: Some(StrikethroughStyle {
+                color: Some(black()),
+                thickness: px(1.),
+            }),
+        });
+        line
+    }
+
+    fn painted_decorations(
+        line: &WrappedLine,
+        align: TextAlign,
+    ) -> (Vec<Bounds<Pixels>>, Vec<Bounds<Pixels>>) {
+        let mut cx = crate::TestAppContext::single();
+        cx.add_empty_window().update(|window, cx| {
+            window.invalidator.set_phase(crate::DrawPhase::Paint);
+            let quad_start = window.next_frame.scene.quads.len();
+            let underline_start = window.next_frame.scene.underlines.len();
+            let origin = point(px(100.), px(100.));
+            let bounds = Some(Bounds::new(origin, size(px(80.), px(200.))));
+            line.paint_background(origin, px(24.), align, bounds, window, cx)
+                .unwrap();
+            line.paint(origin, px(24.), align, bounds, window, cx)
+                .unwrap();
+            let scale = window.scale_factor();
+            let backgrounds = window.next_frame.scene.quads[quad_start..]
+                .iter()
+                .map(|quad| quad.bounds.map(|value| px(value.0 / scale)))
+                .collect();
+            let underlines = window.next_frame.scene.underlines[underline_start..]
+                .iter()
+                .map(|underline| underline.bounds.map(|value| px(value.0 / scale)))
+                .collect();
+            window.invalidator.set_phase(crate::DrawPhase::None);
+            (backgrounds, underlines)
+        })
+    }
+
+    #[test]
+    fn wrapped_decorations_follow_each_rows_height_and_alignment() {
+        for heights in [
+            vec![],
+            vec![px(24.), px(60.), px(24.)],
+            vec![px(60.), px(24.), px(24.)],
+        ] {
+            for align in [TextAlign::Left, TextAlign::Center, TextAlign::Right] {
+                let mut line = decorated_line(6);
+                Arc::make_mut(&mut line.layout).wrap_boundaries[1].glyph_ix = 5;
+                line.set_row_heights(heights.clone());
+                let (backgrounds, underlines) = painted_decorations(&line, align);
+                assert_eq!(backgrounds.len(), 3);
+                assert_eq!(underlines.len(), 6);
+                for (row_ix, width) in [20., 30., 10.].into_iter().enumerate() {
+                    let x = match align {
+                        TextAlign::Left => 100.,
+                        TextAlign::Center => 100. + (80. - width) / 2.,
+                        TextAlign::Right => 100. + 80. - width,
+                    };
+                    let top = px(100.) + line.row_top(row_ix, px(24.));
+                    let height = line.row_height(row_ix, px(24.));
+                    let row = PaintRow::new(top, height, px(24.), &line.unwrapped_layout);
+                    assert_eq!(
+                        backgrounds[row_ix],
+                        Bounds::new(point(px(x), top), size(px(width), height))
+                    );
+                    for (decoration_ix, y) in [
+                        row.underline_y(&line.unwrapped_layout),
+                        row.strikethrough_y(),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        assert_eq!(
+                            underlines[row_ix * 2 + decoration_ix],
+                            Bounds::new(point(px(x), y), size(px(width), px(1.)))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decorations_ending_at_a_wrap_do_not_paint_on_the_next_row() {
+        let mut line = decorated_line(2);
+        line.set_row_heights(vec![px(24.), px(60.), px(24.)]);
+        let (backgrounds, underlines) = painted_decorations(&line, TextAlign::Left);
+        assert_eq!(backgrounds.len(), 1);
+        assert_eq!(
+            backgrounds[0],
+            Bounds::new(point(px(100.), px(100.)), size(px(20.), px(24.)))
+        );
+        assert_eq!(underlines.len(), 2);
+        for underline in underlines {
+            assert_eq!(underline.size.width, px(20.));
+            assert!(underline.origin.y < px(124.));
+        }
+    }
+
+    #[test]
+    fn zero_advance_background_runs_retain_the_minimum_painted_width() {
+        let mut line = decorated_line(1);
+        let mut layout = LineLayout {
+            runs: line.unwrapped_layout.runs.clone(),
+            font_size: line.font_size(),
+            width: line.unwrapped_layout.width,
+            ascent: line.ascent(),
+            descent: line.descent(),
+            len: line.len(),
+        };
+        layout.runs[0].glyphs[1].position.x = Pixels::ZERO;
+        Arc::make_mut(&mut line.layout).unwrapped_layout = Arc::new(layout);
+        line.set_row_heights(vec![px(24.), px(60.), px(24.)]);
+        let (backgrounds, _) = painted_decorations(&line, TextAlign::Left);
+        assert_eq!(backgrounds.len(), 1);
+        assert_eq!(backgrounds[0].origin.y, px(100.));
+        assert_eq!(backgrounds[0].size.height, px(24.));
+        assert!(backgrounds[0].size.width > Pixels::ZERO);
+        assert_eq!(backgrounds[0].right(), px(100.));
+    }
+
+    #[test]
+    fn set_row_heights_does_not_mutate_shared_shaping() {
+        let mut line = wrapped_line();
+        let cached_layout = line.layout.clone();
+        let original = line.clone();
+        line.set_row_heights(vec![px(24.), px(60.), px(24.)]);
+        assert!(!Arc::ptr_eq(&line.layout, &cached_layout));
+        assert!(Arc::ptr_eq(
+            &line.unwrapped_layout,
+            &cached_layout.unwrapped_layout
+        ));
+        assert!(cached_layout.row_heights.is_empty());
+        assert!(original.row_heights.is_empty());
+        assert_eq!(original.size(px(24.)).height, px(72.));
+        assert_eq!(line.size(px(24.)).height, px(108.));
+
+        let clone = line.clone();
+        line.set_row_heights(vec![px(60.), px(24.), px(24.)]);
+        assert_eq!(clone.row_heights, vec![px(24.), px(60.), px(24.)]);
+        assert_eq!(line.row_heights, vec![px(60.), px(24.), px(24.)]);
+    }
+
+    #[test]
+    fn row_heights_do_not_leak_into_current_or_previous_frame_caches() {
+        let cache = LineLayoutCache::new(Arc::new(crate::NoopTextSystem::new()));
+        let cached = cache.layout_wrapped_line("abcdef", px(18.), &[], Some(px(24.)), None);
+        assert_eq!(cached.wrap_boundaries.len(), 2);
+        let mut line = WrappedLine {
+            layout: cached.clone(),
+            text: "abcdef".into(),
+            decoration_runs: SmallVec::new(),
+        };
+        line.set_row_heights(vec![px(24.), px(60.), px(24.)]);
+        for _ in 0..2 {
+            let reused = cache.layout_wrapped_line("abcdef", px(18.), &[], Some(px(24.)), None);
+            assert!(Arc::ptr_eq(&cached, &reused));
+            assert!(reused.row_heights.is_empty());
+            assert!(Arc::ptr_eq(
+                &line.unwrapped_layout,
+                &reused.unwrapped_layout
+            ));
+            assert_eq!(reused.size(px(24.)).height, px(72.));
+            assert_eq!(line.size(px(24.)).height, px(108.));
+            cache.finish_frame();
+        }
+    }
+
+    #[test]
+    fn set_row_heights_clears_invalid_metadata_without_panicking() {
+        let mut line = wrapped_line();
+        for heights in [
+            vec![],
+            vec![px(60.)],
+            vec![px(24.), px(60.)],
+            vec![px(24.), px(60.), px(24.), px(24.)],
+            vec![px(24.), px(0.), px(24.)],
+            vec![px(24.), px(-1.), px(24.)],
+            vec![px(24.), px(f32::NAN), px(24.)],
+            vec![px(24.), px(f32::INFINITY), px(24.)],
+            vec![px(24.), px(f32::NEG_INFINITY), px(24.)],
+            vec![px(f32::MAX), px(f32::MAX), px(24.)],
+        ] {
+            line.set_row_heights(vec![px(24.), px(60.), px(24.)]);
+            line.set_row_heights(heights);
+            assert!(line.row_heights.is_empty());
+            assert_eq!(line.size(px(24.)).height, px(72.));
+        }
+
+        let mut unwrapped = WrappedLine::default();
+        unwrapped.set_row_heights(vec![px(60.)]);
+        assert_eq!(unwrapped.size(px(24.)).height, px(60.));
+    }
+
+    #[test]
+    fn rewrap_clears_old_row_metrics_even_when_row_count_is_unchanged() {
+        let mut line = wrapped_line();
+        line.set_row_heights(vec![px(24.), px(60.), px(24.)]);
+        let original = line.clone();
+        line.rewrap(px(20.));
+        assert_eq!(line.wrap_boundaries.len(), 2);
+        assert!(line.row_heights.is_empty());
+        assert_eq!(line.size(px(24.)).height, px(72.));
+        assert_eq!(original.row_heights, vec![px(24.), px(60.), px(24.)]);
+
+        line.set_row_heights(vec![px(24.), px(60.), px(24.)]);
+        line.rewrap(px(60.));
+        assert!(line.wrap_boundaries.is_empty());
+        assert!(line.row_heights.is_empty());
+        assert_eq!(line.size(px(24.)).height, px(24.));
+    }
+
+    #[test]
+    fn painting_rows_center_baselines_and_follow_them_with_decorations() {
+        let layout = test_wrapped_layout(Vec::new()).unwrapped_layout;
+        for (heights, baselines, strikes) in [
+            ([24., 60., 24.], [18., 60., 102.], [13.5, 55.5, 97.5]),
+            ([60., 24., 24.], [36., 78., 102.], [31.5, 73.5, 97.5]),
+        ] {
+            let mut top = px(100.);
+            for (row_ix, height) in heights.into_iter().enumerate() {
+                let row = PaintRow::new(top, px(height), px(24.), &layout);
+                assert_eq!(row.height, px(height));
+                assert_eq!(row.top, top);
+                assert_eq!(
+                    row.top + row.baseline_offset.y,
+                    px(100. + baselines[row_ix])
+                );
+                assert_eq!(row.strikethrough_y(), px(100. + strikes[row_ix]));
+                let expected_underline = px(100. + baselines[row_ix]) + layout.descent * 0.618;
+                assert!((row.underline_y(&layout).0 - expected_underline.0).abs() < 0.0001);
+                top += row.height;
+            }
+            assert_eq!(top, px(208.));
+        }
+    }
+
+    #[test]
+    fn glyph_culling_includes_the_shifted_font_box_for_tall_and_short_rows() {
+        let layout = test_wrapped_layout(Vec::new()).unwrapped_layout;
+        let origin = point(px(100.), px(100.));
+        let font_size = size(px(30.), px(100.));
+        for height in [12., 24., 60.] {
+            let row = PaintRow::new(origin.y, px(height), px(24.), &layout);
+            let bounds = row.glyph_bounds(origin, font_size, px(24.));
+            let shifted_top = origin.y + (px(height) - px(24.)) / 2.;
+            assert!(bounds.top() <= shifted_top);
+            assert!(bounds.bottom() >= shifted_top + font_size.height);
+            assert_eq!(bounds.origin.x, origin.x);
+            assert_eq!(bounds.size.width, font_size.width);
+            if height == 24. {
+                assert_eq!(bounds, Bounds::new(origin, font_size));
+            }
+        }
+    }
+
+    #[test]
+    fn uniform_paint_geometry_is_unchanged() {
+        let layout = test_wrapped_layout(Vec::new()).unwrapped_layout;
+        for height in [24., 30., 60.] {
+            let height = px(height);
+            let old_baseline = (height - layout.ascent - layout.descent) / 2. + layout.ascent;
+            for row_ix in 0..3 {
+                let top = px(100.) + height * row_ix;
+                let row = PaintRow::new(top, height, height, &layout);
+                assert_eq!(row.baseline_offset, point(Pixels::ZERO, old_baseline));
+                assert_eq!(
+                    row.underline_y(&layout),
+                    top + old_baseline + layout.descent * 0.618
+                );
+                assert_eq!(
+                    row.strikethrough_y(),
+                    top + ((layout.ascent * 0.5 + old_baseline) * 0.5)
+                );
+            }
+        }
     }
 }

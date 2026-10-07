@@ -532,6 +532,21 @@ mod tests {
     }
 
     #[test]
+    fn outline_resize_minimum_is_independent_of_preferred_width() {
+        for scale in [0.8, 1.0, 1.6] {
+            let min_width = 10.0 * scale;
+            let max_width = 420.0 * scale;
+            let (min_width, max_width) = normalized_outline_width_bounds(min_width, max_width);
+            for preferred_width in [150.0, 240.0, 380.0] {
+                let preferred_width = preferred_width * scale;
+                assert_eq!(0.0_f32.clamp(min_width, max_width), 10.0 * scale);
+                assert_eq!(preferred_width.clamp(min_width, max_width), preferred_width);
+            }
+            assert_eq!(f32::MAX.clamp(min_width, max_width), 420.0 * scale);
+        }
+    }
+
+    #[test]
     fn outline_rail_respects_vertical_padding_without_scrolling() {
         let row_height = 6.0;
         let tick_thickness = 2.0;
@@ -1724,12 +1739,7 @@ impl EditorView {
             self.scaled(os.outline_rail_label_indent_guide_dash_length_px);
         let indent_guide_gap_length = self.scaled(os.outline_rail_label_indent_guide_gap_length_px);
         let indent_guide_color = multiply_alpha(os.outline_rail_label_indent_guide_color, 0.45);
-        let panel_width = self
-            .utility_panel_width()
-            .max(f32::from(
-                self.outline_panel_scroll_handle.bounds().size.width,
-            ))
-            .max(self.scaled(140.0));
+        let panel_width = self.utility_panel_layout_width().max(self.scaled(10.0));
         let scrollbar_reserve = self.scaled(
             self.styles
                 .editor
@@ -1974,6 +1984,7 @@ impl EditorView {
             .id("outline-panel")
             .h_full()
             .w_full()
+            .min_w(px(0.0))
             .bg(ups.utility_panel_bg)
             .relative()
             .overflow_hidden()
@@ -2048,8 +2059,7 @@ impl EditorView {
     }
 
     pub(crate) fn outline_panel_resize_bounds(&self) -> (f32, f32) {
-        let preferred = self.outline_panel_preferred_width();
-        let min_width = (preferred * 0.85).max(self.scaled(140.0));
+        let min_width = self.scaled(10.0);
         let global_max = self.scaled(self.styles.utility_panel.utility_panel_resize_max_width_px);
         normalized_outline_width_bounds(min_width, global_max)
     }

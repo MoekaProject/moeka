@@ -1040,7 +1040,6 @@ fn push_cursor_aligned_highlight_quads(
     letter_spacing: f32,
     window: &mut Window,
 ) {
-    let vertical_inset = cursor_aligned_vertical_inset(editor, line_height);
     for bounds in helpers::build_highlight_bounds(
         display_text,
         runs,
@@ -1056,6 +1055,7 @@ fn push_cursor_aligned_highlight_quads(
         letter_spacing,
         window,
     ) {
+        let vertical_inset = cursor_aligned_vertical_inset(editor, f32::from(bounds.size.height));
         quads.push(fill(inset_bounds_vertically(bounds, vertical_inset), color));
     }
 }
@@ -1108,7 +1108,8 @@ fn push_task_checkbox_paint(
         .map(|pos| f32::from(pos.x))
         .unwrap_or(0.0);
     let checkbox_x = content_x + text_start_x - checkbox_text_gap_px - checkbox_size;
-    let checkbox_y = text_line_top + (line_height - checkbox_size) / 2.0;
+    let first_row_height = f32::from(wrapped.row_height(0, px(line_height)));
+    let checkbox_y = text_line_top + (first_row_height - checkbox_size) / 2.0;
     let checkbox_bounds = Bounds::new(
         point(px(checkbox_x), px(checkbox_y)),
         size(px(checkbox_size), px(checkbox_size)),
@@ -1265,7 +1266,7 @@ fn push_unordered_list_marker_paint(
             .unwrap_or(0.0);
         let marker_x =
             super::text_layout::unordered_list_marker_origin_x(marker_anchor_x, marker_ink_left);
-        let marker_line_height = line_height
+        let marker_line_height = f32::from(wrapped.row_height(0, px(line_height)))
             + editor.scaled(
                 editor
                     .styles
@@ -1569,13 +1570,7 @@ fn build_precise_table_layout(
                     image_cache,
                     body_space_width,
                 );
-                let cell_line_height = helpers::inline_math_line_height(
-                    &cell_decoration,
-                    &cell_content,
-                    &cell_active_ranges,
-                    image_cache,
-                    line_height,
-                );
+
                 let (folded_raw, d2b_raw, b2d_raw, prefix_collapsed) = helpers::build_display_text(
                     &cell_content,
                     &cell_decoration,
@@ -1669,21 +1664,23 @@ fn build_precise_table_layout(
                                 range.start,
                             );
                         }
-                        let visual_lines = shaped_lines
+                        for (shaped, range) in shaped_lines.iter_mut().zip(&hard_line_ranges) {
+                            helpers::apply_inline_math_row_heights(
+                                shaped,
+                                &cell_decoration,
+                                &cell_content,
+                                &cell_layout.buffer_to_display,
+                                &cell_active_ranges,
+                                image_cache,
+                                line_height,
+                                range.start,
+                            );
+                        }
+                        let cell_text_height = shaped_lines
                             .iter()
-                            .zip(hard_line_ranges)
-                            .map(|(shaped, range)| {
-                                helpers::wrap_boundary_byte_indices(
-                                    shaped,
-                                    &cell_layout.display_text[range],
-                                )
-                                .len()
-                                    + 1
-                            })
-                            .sum::<usize>()
-                            .max(1);
-                        row_height = row_height
-                            .max(visual_lines as f32 * cell_line_height + cell_padding_y * 2.0);
+                            .map(|shaped| f32::from(shaped.size(px(line_height)).height))
+                            .sum::<f32>();
+                        row_height = row_height.max(cell_text_height + cell_padding_y * 2.0);
                     }
                 }
             }
@@ -1750,7 +1747,10 @@ fn push_whitespace_dot_quads(
         };
         let width = (end_x - start_x).abs().max(dot_size);
         let dot_x = f32::from(origin.x) + start_x + (width - dot_size) * 0.5;
-        let dot_y = f32::from(origin.y) + start_y + (line_height - dot_size) * 0.5;
+        let row_height = f32::from(
+            wrapped.row_height(wrapped.row_for_y(start.y, px(line_height)), px(line_height)),
+        );
+        let dot_y = f32::from(origin.y) + start_y + (row_height - dot_size) * 0.5;
         dots.push(quad(
             Bounds::new(
                 point(px(dot_x), px(dot_y)),
@@ -1850,7 +1850,7 @@ fn downstream_wrap_boundary_position(
         + 1;
     Some(point(
         px(0.0),
-        px(downstream_visual_idx as f32 * line_height),
+        wrapped.row_top(downstream_visual_idx, px(line_height)),
     ))
 }
 
@@ -2119,13 +2119,19 @@ fn push_inline_text_overlay(
     };
     let overlay_line_height = px((overlay_font_size * 1.15).max(overlay_font_size + 1.0));
     let line_top = text_line_top + f32::from(pos_start.y);
-    let line_bottom = line_top + line_height;
+    let row_height = f32::from(wrapped.row_height(
+        wrapped.row_for_y(pos_start.y, px(line_height)),
+        px(line_height),
+    ));
+    let line_bottom = line_top + row_height;
     let overlay_origin_y = match vertical_align {
         InlineOverlayVerticalAlign::Top(inset) => line_top + inset,
         InlineOverlayVerticalAlign::Bottom(inset) => {
             line_bottom - f32::from(overlay_line_height) - inset
         }
-        InlineOverlayVerticalAlign::Offset(offset) => line_top + offset,
+        InlineOverlayVerticalAlign::Offset(offset) => {
+            line_top + (row_height - line_height) / 2.0 + offset
+        }
     };
     let overlay_origin = point(
         px(content_x + indent_start + horizontal_offset) + pos_start.x,
@@ -2192,7 +2198,11 @@ fn push_rendered_inline_overlays(
                 quote_styles.quote_block_callout_icon_max_line_height_factor,
             );
             let icon_x = content_x + indent_start + f32::from(pos_start.x);
-            let icon_y = text_line_top + f32::from(pos_start.y) + (line_height - icon_size) / 2.0;
+            let row_height = f32::from(wrapped.row_height(
+                wrapped.row_for_y(pos_start.y, px(line_height)),
+                px(line_height),
+            ));
+            let icon_y = text_line_top + f32::from(pos_start.y) + (row_height - icon_size) / 2.0;
             inline_svgs.push((
                 Bounds::new(
                     point(px(icon_x), px(icon_y)),
@@ -2411,7 +2421,13 @@ fn push_inline_math_images(
             inline_math_image_bounds(
                 Bounds::new(
                     point(px(source_x), px(source_y)),
-                    size(px(source_width), px(line_height)),
+                    size(
+                        px(source_width),
+                        wrapped.row_height(
+                            wrapped.row_for_y(start.y, px(line_height)),
+                            px(line_height),
+                        ),
+                    ),
                 ),
                 size(px(natural_width), px(natural_height)),
             ),
@@ -2501,6 +2517,7 @@ impl Element for EditorElement {
             if !editor.pending_scroll_to_cursor
                 || editor.pending_center_cursor_in_view
                 || editor.pending_preview_reveal.is_some()
+                || (editor.table_cursor_cell().is_some() && !editor.active_tab_is_diff())
                 // A live typing guard means the end-of-prepaint restore will
                 // cancel this scroll when the cursor stays on its visual
                 // line; resolving it here first would snap the view to the
@@ -3177,8 +3194,7 @@ impl Element for EditorElement {
                 });
             if !is_cursor_line_early && !line_has_block_preview {
                 if let Some(cached) = cached_line {
-                    let cached_h =
-                        cached.line_height * cached.visual_line_count as f32 + cached.extra_height;
+                    let cached_h = cached.total_height();
                     let est_top = y - scroll_anchor_delta;
                     let est_bottom = est_top + cached_h;
                     cached_height_before_reflow = Some(cached_h);
@@ -3549,8 +3565,8 @@ impl Element for EditorElement {
                 let font_size = cached.font_size;
                 let line_height = cached.line_height;
                 let visual_line_count = cached.visual_line_count;
-                let text_line_height = line_height * visual_line_count as f32;
-                let total_line_height = text_line_height + cached.extra_height;
+                let text_line_height = cached.text_height();
+                let total_line_height = cached.total_height();
                 let line_top = y - scroll_anchor_delta;
                 let line_bottom = line_top + total_line_height;
                 let text_line_top = line_top;
@@ -3694,7 +3710,9 @@ impl Element for EditorElement {
                     let fi_size = editor.scaled(gutter_styles.gutter_fold_icon_size_px);
                     let fi_hit_padding = editor.scaled(gutter_styles.gutter_fold_hit_padding_px);
                     let fi_x = editor.gutter_icon_x(editor_left, fi_size);
-                    let fi_y = text_line_top + (line_height - fi_size) / 2.0;
+                    let fi_y = text_line_top
+                        + (f32::from(cached.wrapped_line.row_height(0, px(line_height))) - fi_size)
+                            / 2.0;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
                     let is_folded = editor.folded_sections.contains(&line_idx);
                     let is_hovered = editor.hovering_fold_line == Some(line_idx)
@@ -4141,11 +4159,15 @@ impl Element for EditorElement {
                             }
                             _ => cursor_pos,
                         };
+                        let row_height = f32::from(cached.wrapped_line.row_height(
+                            cached.wrapped_line.row_for_y(cursor_pos.y, px(line_height)),
+                            px(line_height),
+                        ));
                         let cursor_height =
-                            line_height * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
+                            row_height * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
                         let cursor_top = text_line_top
                             + f32::from(cursor_pos.y)
-                            + (line_height - cursor_height) / 2.0;
+                            + (row_height - cursor_height) / 2.0;
                         cursor_paints.push(super::caret::CaretPaint {
                             bounds: Bounds::new(
                                 point(px(content_x) + cursor_pos.x, px(cursor_top)),
@@ -4167,23 +4189,29 @@ impl Element for EditorElement {
                             helpers::buffer_to_display_offset(&cached.buffer_to_display, buf_start);
                         let disp_end =
                             helpers::buffer_to_display_offset(&cached.buffer_to_display, buf_end);
-                        let pos_start = cached
-                            .wrapped_line
-                            .position_for_index(disp_start, px(line_height))
-                            .unwrap_or_default();
-                        let pos_end = cached
-                            .wrapped_line
-                            .position_for_index(disp_end, px(line_height))
-                            .unwrap_or_default();
-                        let underline_y =
-                            text_line_top + f32::from(pos_start.y) + line_height - 2.0;
-                        marked_underlines.push(fill(
-                            Bounds::from_corners(
-                                point(px(content_x) + pos_start.x, px(underline_y)),
-                                point(px(content_x) + pos_end.x, px(underline_y + 1.0)),
-                            ),
-                            theme.text_primary,
-                        ));
+                        for bounds in helpers::build_highlight_bounds(
+                            &cached.display_text,
+                            &runs,
+                            &cached.wrapped_line,
+                            disp_start,
+                            disp_end,
+                            content_x,
+                            text_line_top,
+                            line_height,
+                            font_size,
+                            cached.indent_px,
+                            0.0,
+                            editor_styles.editor_letter_spacing_px,
+                            window,
+                        ) {
+                            marked_underlines.push(fill(
+                                Bounds::new(
+                                    point(bounds.left(), bounds.bottom() - px(2.0)),
+                                    size(bounds.size.width, px(1.0)),
+                                ),
+                                theme.text_primary,
+                            ));
+                        }
                     }
                 }
 
@@ -4349,17 +4377,7 @@ impl Element for EditorElement {
                 }
             }
             let render_decoration = render_decoration_override.as_ref().unwrap_or(&decoration);
-            let line_height = if *block_type != BlockType::Table || active_tab_is_diff {
-                helpers::inline_math_line_height(
-                    render_decoration,
-                    line_content,
-                    &active_ranges,
-                    image_cache,
-                    line_height,
-                )
-            } else {
-                line_height
-            };
+
             let (mut display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
                 if collapsed_block_preview.is_some() {
                     (
@@ -4669,6 +4687,16 @@ impl Element for EditorElement {
                     image_cache,
                     0,
                 );
+                helpers::apply_inline_math_row_heights(
+                    wrapped,
+                    render_decoration,
+                    line_content,
+                    &buffer_to_display,
+                    &active_ranges,
+                    image_cache,
+                    line_height,
+                    0,
+                );
             }
             let Some(wrapped) = wrapped_lines.first() else {
                 display_info_updates.push((line_idx, None));
@@ -4715,7 +4743,7 @@ impl Element for EditorElement {
                     0.0
                 };
             let visual_line_count = wrapped.wrap_boundaries().len() + 1;
-            let text_line_height = line_height * visual_line_count as f32;
+            let text_line_height = f32::from(wrapped.size(px(line_height)).height);
             let image_gap_top = editor.scaled(editor.styles.image_preview.image_gap_top_px);
             let image_gap_bottom = editor.scaled(editor.styles.image_preview.image_gap_bottom_px);
             let image_styles = &editor.styles.image_preview;
@@ -5149,12 +5177,15 @@ impl Element for EditorElement {
                             } else {
                                 content_x + indent_px
                             };
-                            let seg_y = text_line_top + seg_idx as f32 * line_height;
+                            let seg_height = wrapped.row_height(seg_idx, px(line_height));
+                            seg_wrapped.set_row_heights(vec![seg_height]);
+                            let seg_y = text_line_top
+                                + f32::from(wrapped.row_top(seg_idx, px(line_height)));
                             let paint_origin = helpers::baseline_aligned_text_origin(
                                 &seg_wrapped,
                                 point(px(seg_x), px(seg_y)),
-                                px(line_height),
-                                reference_baseline,
+                                seg_height,
+                                reference_baseline + (seg_height - px(line_height)) / 2.0,
                             );
                             shaped_segments.push((seg_wrapped, paint_origin));
                         }
@@ -5677,13 +5708,6 @@ impl Element for EditorElement {
                                         image_cache,
                                         body_space_width,
                                     );
-                                    let line_height = helpers::inline_math_line_height(
-                                        &cell_decoration,
-                                        &cell_content,
-                                        &cell_active_ranges,
-                                        image_cache,
-                                        line_height,
-                                    );
 
                                     let mut cell_runs = helpers::build_text_runs_for_display(
                                         &cell_layout.display_text,
@@ -5804,6 +5828,16 @@ impl Element for EditorElement {
                                                 &cell_layout.buffer_to_display,
                                                 &cell_active_ranges,
                                                 image_cache,
+                                                hard_line_range.start,
+                                            );
+                                            helpers::apply_inline_math_row_heights(
+                                                &mut shaped,
+                                                &cell_decoration,
+                                                &cell_content,
+                                                &cell_layout.buffer_to_display,
+                                                &cell_active_ranges,
+                                                image_cache,
+                                                line_height,
                                                 hard_line_range.start,
                                             );
                                             let hard_display_text = cell_layout
@@ -6476,13 +6510,26 @@ impl Element for EditorElement {
                                                                         hard_line_range.start,
                                                                     )
                                                                     .min(hard_line_range.len());
-                                                                if let Some(pos) = shaped
-                                                                    .position_for_index(
-                                                                        disp_col,
-                                                                        px(line_height),
-                                                                    )
+                                                                if let Some(pos) = EditorView::visual_position_for_wrapped_display(
+                                                                    &shaped,
+                                                                    hard_display_text,
+                                                                    disp_col,
+                                                                    line_height,
+                                                                    0.0,
+                                                                    &HashMap::new(),
+                                                                    editor.wrap_boundary_affinity_for_offset(cur_off),
+                                                                )
                                                                 {
-                                                                    let cursor_height = line_height
+                                                                    let row_height = f32::from(
+                                                                        shaped.row_height(
+                                                                            shaped.row_for_y(
+                                                                                pos.y,
+                                                                                px(line_height),
+                                                                            ),
+                                                                            px(line_height),
+                                                                        ),
+                                                                    );
+                                                                    let cursor_height = row_height
                                                                         * editor
                                                                             .styles
                                                                             .cursor
@@ -6490,7 +6537,7 @@ impl Element for EditorElement {
                                                                             .clamp(0.1, 1.0);
                                                                     let cursor_top = hard_line_y
                                                                         + f32::from(pos.y)
-                                                                        + (line_height
+                                                                        + (row_height
                                                                             - cursor_height)
                                                                             / 2.0;
                                                                     if cur_off
@@ -6597,16 +6644,14 @@ impl Element for EditorElement {
                                                 paint_origin,
                                                 px(line_height),
                                             ));
-                                            let visual_lines = helpers::wrap_boundary_byte_indices(
-                                                &table_cell_texts
+                                            hard_line_y += f32::from(
+                                                table_cell_texts
                                                     .last()
                                                     .expect("cell line was just appended")
-                                                    .0,
-                                                hard_display_text,
-                                            )
-                                            .len()
-                                                + 1;
-                                            hard_line_y += visual_lines as f32 * line_height;
+                                                    .0
+                                                    .size(px(line_height))
+                                                    .height,
+                                            );
                                         }
                                     }
 
@@ -7104,8 +7149,12 @@ impl Element for EditorElement {
                         quote_block_styles.quote_block_callout_icon_max_line_height_factor,
                     );
                     let icon_x = content_x + indent_start + f32::from(pos_start.x);
+                    let row_height = f32::from(wrapped.row_height(
+                        wrapped.row_for_y(pos_start.y, px(line_height)),
+                        px(line_height),
+                    ));
                     let icon_y =
-                        text_line_top + f32::from(pos_start.y) + (line_height - icon_size) / 2.0;
+                        text_line_top + f32::from(pos_start.y) + (row_height - icon_size) / 2.0;
                     inline_svgs.push((
                         Bounds::new(
                             point(px(icon_x), px(icon_y)),
@@ -7202,7 +7251,8 @@ impl Element for EditorElement {
                     } else {
                         editor.format_trigger_line == Some(line_idx)
                     };
-                    let fi_y = text_line_top + (line_height - fi_size) / 2.0;
+                    let fi_y = text_line_top
+                        + (f32::from(wrapped.row_height(0, px(line_height))) - fi_size) / 2.0;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
                     let fold_hovered = editor.hovering_fold_line == Some(line_idx);
                     let fi_alpha = if !editor.active_tab_is_non_markdown_text() && fold_hovered {
@@ -7291,7 +7341,8 @@ impl Element for EditorElement {
                     let fi_y = if image_extra_height > 0.0 {
                         text_line_top - image_extra_height + image_gap_top
                     } else {
-                        text_line_top + (line_height - fi_size) / 2.0
+                        text_line_top
+                            + (f32::from(wrapped.row_height(0, px(line_height))) - fi_size) / 2.0
                     };
                     let gs = &editor.styles.gutter;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
@@ -7367,7 +7418,11 @@ impl Element for EditorElement {
                     .position_for_index(display_text.len(), px(line_height))
                     .unwrap_or_default();
                 let ie_x = content_x + f32::from(syntax_end.x) + editor.scaled(10.0);
-                let ie_y = text_line_top + f32::from(syntax_end.y) + (line_height - ie_size) / 2.0;
+                let row_height = f32::from(wrapped.row_height(
+                    wrapped.row_for_y(syntax_end.y, px(line_height)),
+                    px(line_height),
+                ));
+                let ie_y = text_line_top + f32::from(syntax_end.y) + (row_height - ie_size) / 2.0;
                 let ie_bounds =
                     Bounds::new(point(px(ie_x), px(ie_y)), size(px(ie_size), px(ie_size)));
                 let is_hovered = editor.hovering_image_edit_line == Some(line_idx);
@@ -8158,7 +8213,12 @@ impl Element for EditorElement {
                                     px(content_x + indent_end)
                                         + pos_end.x
                                         + px(editor.base_font_size() * 0.4),
-                                    px(text_line_top) + pos_end.y + px(line_height),
+                                    px(text_line_top)
+                                        + pos_end.y
+                                        + wrapped.row_height(
+                                            wrapped.row_for_y(pos_end.y, px(line_height)),
+                                            px(line_height),
+                                        ),
                                 ),
                             ),
                             theme.selection,
@@ -8355,11 +8415,15 @@ impl Element for EditorElement {
                     };
 
                     let cursor_indent = helpers::indent_for_y(indent_px, cursor_pos.y, line_height);
+                    let row_height = f32::from(wrapped.row_height(
+                        wrapped.row_for_y(cursor_pos.y, px(line_height)),
+                        px(line_height),
+                    ));
                     let cursor_height =
-                        line_height * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
+                        row_height * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
                     let cursor_top = text_line_top
                         + f32::from(cursor_pos.y)
-                        + (line_height - cursor_height) / 2.0;
+                        + (row_height - cursor_height) / 2.0;
                     let cursor_bounds = Bounds::new(
                         point(px(content_x + cursor_indent) + cursor_pos.x, px(cursor_top)),
                         size(px(editor.styles.cursor.cursor_width_px), px(cursor_height)),
@@ -8391,24 +8455,29 @@ impl Element for EditorElement {
                     let disp_start =
                         helpers::buffer_to_display_offset(&buffer_to_display, buf_start);
                     let disp_end = helpers::buffer_to_display_offset(&buffer_to_display, buf_end);
-                    let pos_start = wrapped
-                        .position_for_index(disp_start, px(line_height))
-                        .unwrap_or_default();
-                    let pos_end = wrapped
-                        .position_for_index(disp_end, px(line_height))
-                        .unwrap_or_default();
-                    let indent_start = helpers::indent_for_y(indent_px, pos_start.y, line_height);
-                    let underline_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
-                    marked_underlines.push(fill(
-                        Bounds::from_corners(
-                            point(px(content_x + indent_start) + pos_start.x, px(underline_y)),
-                            point(
-                                px(content_x + indent_start) + pos_end.x,
-                                px(underline_y + 1.0),
+                    for bounds in helpers::build_highlight_bounds(
+                        &display_text,
+                        &runs,
+                        wrapped,
+                        disp_start,
+                        disp_end,
+                        content_x,
+                        text_line_top,
+                        line_height,
+                        font_size,
+                        indent_px,
+                        0.0,
+                        letter_spacing,
+                        window,
+                    ) {
+                        marked_underlines.push(fill(
+                            Bounds::new(
+                                point(bounds.left(), bounds.bottom() - px(2.0)),
+                                size(bounds.size.width, px(1.0)),
                             ),
-                        ),
-                        theme.text_primary,
-                    ));
+                            theme.text_primary,
+                        ));
+                    }
                 }
             }
 
@@ -8424,29 +8493,27 @@ impl Element for EditorElement {
                     let disp_start =
                         helpers::buffer_to_display_offset(&buffer_to_display, buf_start);
                     let disp_end = helpers::buffer_to_display_offset(&buffer_to_display, buf_end);
-                    if let (Some(pos_start), Some(pos_end)) = (
-                        wrapped.position_for_index(disp_start, px(line_height)),
-                        wrapped.position_for_index(disp_end, px(line_height)),
+                    for link_bounds in helpers::build_highlight_bounds(
+                        &display_text,
+                        &runs,
+                        wrapped,
+                        disp_start,
+                        disp_end,
+                        content_x,
+                        text_line_top,
+                        line_height,
+                        font_size,
+                        indent_px,
+                        0.0,
+                        letter_spacing,
+                        window,
                     ) {
-                        let indent_start =
-                            helpers::indent_for_y(indent_px, pos_start.y, line_height);
-                        let link_bounds = Bounds::from_corners(
-                            point(
-                                px(content_x + indent_start) + pos_start.x,
-                                px(text_line_top + f32::from(pos_start.y)),
-                            ),
-                            point(
-                                px(content_x + indent_start) + pos_end.x,
-                                px(text_line_top + f32::from(pos_start.y) + line_height),
-                            ),
-                        );
                         if hovered_position.is_some_and(|position| link_bounds.contains(&position))
                         {
-                            let ul_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
                             link_underlines.push(fill(
-                                Bounds::from_corners(
-                                    point(px(content_x + indent_start) + pos_start.x, px(ul_y)),
-                                    point(px(content_x + indent_start) + pos_end.x, px(ul_y + 1.5)),
+                                Bounds::new(
+                                    point(link_bounds.left(), link_bounds.bottom() - px(2.0)),
+                                    size(link_bounds.size.width, px(1.5)),
                                 ),
                                 theme.link,
                             ));
@@ -8471,29 +8538,27 @@ impl Element for EditorElement {
                         helpers::buffer_to_display_offset(&buffer_to_display, visible_range.start);
                     let disp_end =
                         helpers::buffer_to_display_offset(&buffer_to_display, visible_range.end);
-                    if let (Some(pos_start), Some(pos_end)) = (
-                        wrapped.position_for_index(disp_start, px(line_height)),
-                        wrapped.position_for_index(disp_end, px(line_height)),
+                    for link_bounds in helpers::build_highlight_bounds(
+                        &display_text,
+                        &runs,
+                        wrapped,
+                        disp_start,
+                        disp_end,
+                        content_x,
+                        text_line_top,
+                        line_height,
+                        font_size,
+                        indent_px,
+                        0.0,
+                        letter_spacing,
+                        window,
                     ) {
-                        let indent_start =
-                            helpers::indent_for_y(indent_px, pos_start.y, line_height);
-                        let link_bounds = Bounds::from_corners(
-                            point(
-                                px(content_x + indent_start) + pos_start.x,
-                                px(text_line_top + f32::from(pos_start.y)),
-                            ),
-                            point(
-                                px(content_x + indent_start) + pos_end.x,
-                                px(text_line_top + f32::from(pos_start.y) + line_height),
-                            ),
-                        );
                         if hovered_position.is_some_and(|position| link_bounds.contains(&position))
                         {
-                            let ul_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
                             link_underlines.push(fill(
-                                Bounds::from_corners(
-                                    point(px(content_x + indent_start) + pos_start.x, px(ul_y)),
-                                    point(px(content_x + indent_start) + pos_end.x, px(ul_y + 1.5)),
+                                Bounds::new(
+                                    point(link_bounds.left(), link_bounds.bottom() - px(2.0)),
+                                    size(link_bounds.size.width, px(1.5)),
                                 ),
                                 theme.link,
                             ));
@@ -8523,29 +8588,27 @@ impl Element for EditorElement {
                         helpers::buffer_to_display_offset(&buffer_to_display, visible_range.start);
                     let disp_end =
                         helpers::buffer_to_display_offset(&buffer_to_display, visible_range.end);
-                    if let (Some(pos_start), Some(pos_end)) = (
-                        wrapped.position_for_index(disp_start, px(line_height)),
-                        wrapped.position_for_index(disp_end, px(line_height)),
+                    for link_bounds in helpers::build_highlight_bounds(
+                        &display_text,
+                        &runs,
+                        wrapped,
+                        disp_start,
+                        disp_end,
+                        content_x,
+                        text_line_top,
+                        line_height,
+                        font_size,
+                        indent_px,
+                        0.0,
+                        letter_spacing,
+                        window,
                     ) {
-                        let indent_start =
-                            helpers::indent_for_y(indent_px, pos_start.y, line_height);
-                        let link_bounds = Bounds::from_corners(
-                            point(
-                                px(content_x + indent_start) + pos_start.x,
-                                px(text_line_top + f32::from(pos_start.y)),
-                            ),
-                            point(
-                                px(content_x + indent_start) + pos_end.x,
-                                px(text_line_top + f32::from(pos_start.y) + line_height),
-                            ),
-                        );
                         if hovered_position.is_some_and(|position| link_bounds.contains(&position))
                         {
-                            let ul_y = text_line_top + f32::from(pos_start.y) + line_height - 2.0;
                             link_underlines.push(fill(
-                                Bounds::from_corners(
-                                    point(px(content_x + indent_start) + pos_start.x, px(ul_y)),
-                                    point(px(content_x + indent_start) + pos_end.x, px(ul_y + 1.5)),
+                                Bounds::new(
+                                    point(link_bounds.left(), link_bounds.bottom() - px(2.0)),
+                                    size(link_bounds.size.width, px(1.5)),
                                 ),
                                 theme.link,
                             ));
@@ -10102,15 +10165,12 @@ impl Element for EditorElement {
                     && !did_adjust_click_anchor
                     && !did_adjust_preview_reveal
                 {
-                    let cursor_line = editor.cursor_line();
-                    let cursor_y = editor.line_y_offset(cursor_line);
-                    let cursor_line_height = editor.visual_height_for_line(cursor_line);
-                    let target = (cursor_y + cursor_line_height * 0.5
-                        - editor.last_viewport_height * 0.5)
-                        .max(0.0);
-                    if (target - editor.scroll_offset).abs() > 0.5 {
+                    if let Some(target) = editor.cursor_center_scroll_target()
+                        && (target - editor.scroll_offset).abs() > 0.5
+                    {
                         editor.scroll_offset = target;
                         editor.clamp_scroll();
+                        editor.table_cursor_paint_bounds = None;
                     }
                 }
                 cx.notify();
@@ -10148,6 +10208,7 @@ impl Element for EditorElement {
                 editor.schedule_generated_preview_rerender(cx);
             }
             editor.sync_slash_menu_anchor_after_layout(cx);
+            editor.sync_table_input_menu_after_layout(window, cx);
         });
 
         // Trigger loading for any image paths not yet in cache

@@ -5,13 +5,51 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyElement, ClipboardItem, Context, CursorStyle, FontWeight, Image, ImageFormat, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, div, prelude::*, px, svg,
+    MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, Window, div, prelude::*, px, svg,
 };
 
 use crate::markdown::{BlockType, InlineKind, LineDecoration, raw_wiki_link_ranges};
 
 use super::shortcut::{ShortcutRenderStyle, render_shortcut};
 use super::*;
+
+fn wrapped_menu_anchor(
+    wrapped: &WrappedLine,
+    position: Point<Pixels>,
+    line_height: f32,
+    content_x: f32,
+    text_top: f32,
+) -> Point<Pixels> {
+    let row = wrapped.row_for_y(position.y, px(line_height));
+    gpui::point(
+        px(content_x) + position.x,
+        px(text_top)
+            + wrapped.row_top(row, px(line_height))
+            + wrapped.row_height(row, px(line_height)),
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn input_menu_anchors_follow_actual_row_bottoms() {
+    let wrapped = super::input_wrap::test_wrapped_line(&[24.0, 60.0, 24.0]);
+    let tall_row = wrapped_menu_anchor(
+        &wrapped,
+        gpui::point(px(10.0), px(24.0)),
+        24.0,
+        100.0,
+        200.0,
+    );
+    assert_eq!(tall_row, gpui::point(px(110.0), px(284.0)));
+    let following_row =
+        wrapped_menu_anchor(&wrapped, gpui::point(px(8.0), px(84.0)), 24.0, 100.0, 200.0);
+    assert_eq!(following_row, gpui::point(px(108.0), px(308.0)));
+    let uniform = super::input_wrap::test_wrapped_line(&[]);
+    assert_eq!(
+        wrapped_menu_anchor(&uniform, gpui::point(px(8.0), px(48.0)), 24.0, 100.0, 200.0),
+        gpui::point(px(108.0), px(272.0))
+    );
+}
 
 fn current_raw_wiki_link_range(
     decoration: Option<&LineDecoration>,
@@ -1660,34 +1698,88 @@ impl EditorView {
         let origin_y: f32 = self.content_origin.y.into();
         // Top of the line's text content (after any block padding).
         let text_top = origin_y + self.text_y_offset_for_line(line) - self.scroll_offset;
-        let (x, row_top_within, row_height) =
-            if let Some(Some(info)) = self.line_display_info.get(line) {
-                let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
-                let pos = info
-                    .wrapped_line
-                    .position_for_index(disp_col, gpui::px(info.line_height))
-                    .unwrap_or_default();
-                (
-                    info.content_x + f32::from(pos.x),
-                    f32::from(pos.y),
-                    info.line_height,
-                )
-            } else {
-                (
-                    self.last_content_left + col as f32 * self.base_font_size() * 0.6,
-                    0.0,
-                    self.visual_height_for_line(line),
-                )
-            };
-        // Anchor to the cursor's specific visual row (handles wrapped lines and
-        // block padding precisely) rather than the whole line block, so the menu
-        // sits exactly below/above the syntax being edited.
-        let row_top = text_top + row_top_within;
-        gpui::point(px(x), px(row_top + row_height))
+        if let Some(Some(info)) = self.line_display_info.get(line) {
+            let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
+            let affinity = self
+                .wrap_boundary_affinity
+                .and_then(|current| (current.offset == offset).then_some(current.kind));
+            let pos = Self::visual_position_for_wrapped_display(
+                &info.wrapped_line,
+                &info.display_text,
+                disp_col,
+                info.line_height,
+                info.indent_px,
+                &info.wrap_boundary_upstream_xs,
+                affinity,
+            )
+            .unwrap_or_default();
+            // Anchor to the cursor's visual row, including wrap affinity and block padding.
+            return wrapped_menu_anchor(
+                &info.wrapped_line,
+                pos,
+                info.line_height,
+                info.content_x,
+                text_top,
+            );
+        }
+        gpui::point(
+            px(self.last_content_left + col as f32 * self.base_font_size() * 0.6),
+            px(text_top + self.visual_height_for_line(line)),
+        )
     }
 
     pub(crate) fn cursor_screen_position(&self) -> Point<Pixels> {
+        if self.table_cursor_cell().is_some()
+            && let Some((offset, bounds)) = self.table_cursor_paint_bounds
+            && offset == self.cursor.offset
+        {
+            return gpui::point(bounds.left(), bounds.bottom());
+        }
         self.screen_position_for_offset(self.cursor.offset)
+    }
+
+    pub(crate) fn sync_table_input_menu_after_layout(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.layout_dirty
+            || self.current_pane_id() != self.focused_pane_id
+            || self.table_cursor_cell().is_none()
+            || !self
+                .table_cursor_paint_bounds
+                .is_some_and(|(offset, _)| offset == self.cursor.offset)
+            || !self
+                .context_menu
+                .as_ref()
+                .is_some_and(|menu| matches!(menu.kind, ContextMenuKind::WikiLink))
+        {
+            return;
+        }
+        let Some(start) = self.wiki_link_start else {
+            return;
+        };
+        let Some(start_bounds) = self.table_row_bounds_for_offset(
+            window,
+            start,
+            Some(WrapBoundaryAffinityKind::Downstream),
+        ) else {
+            return;
+        };
+        let Some(cursor_bounds) = self.table_row_bounds_for_offset(
+            window,
+            self.cursor.offset,
+            self.wrap_boundary_affinity_for_offset(self.cursor.offset),
+        ) else {
+            return;
+        };
+        let position = gpui::point(start_bounds.left(), cursor_bounds.bottom());
+        if let Some(menu) = self.context_menu.as_mut()
+            && menu.position != position
+        {
+            menu.position = position;
+            cx.notify();
+        }
     }
 
     fn wiki_link_menu_position(&self, start: usize) -> Point<Pixels> {
@@ -1697,12 +1789,9 @@ impl EditorView {
     }
 
     fn slash_menu_anchor_at(&self, offset: usize) -> SlashMenuAnchor {
-        let (line, _) = self.buffer.offset_to_line_col(offset);
         let row_height = self
-            .line_display_info
-            .get(line)
-            .and_then(|info| info.as_ref())
-            .map(|info| info.line_height)
+            .visual_row_vertical_bounds_for_offset(offset)
+            .map(|(top, bottom)| bottom - top)
             .unwrap_or_else(|| self.line_height_for_block(&BlockType::Normal));
         SlashMenuAnchor {
             position: self.screen_position_for_offset(offset),
@@ -5039,12 +5128,17 @@ impl EditorView {
         } else {
             self.cursor.offset
         };
-        let (line, _) = self.buffer.offset_to_line_col(anchor_offset);
-        if let Some(Some(info)) = self.line_display_info.get(line) {
-            info.line_height
-        } else {
-            self.visual_height_for_line(line)
+        if self.table_cell_for_offset(anchor_offset).is_some()
+            && let Some((offset, bounds)) = self.table_cursor_paint_bounds
+            && offset == anchor_offset
+        {
+            return f32::from(bounds.size.height)
+                / self.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
         }
+        let (line, _) = self.buffer.offset_to_line_col(anchor_offset);
+        self.visual_row_vertical_bounds_for_offset(anchor_offset)
+            .map(|(top, bottom)| bottom - top)
+            .unwrap_or_else(|| self.visual_height_for_line(line))
     }
 
     fn context_menu_panel_layout(

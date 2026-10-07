@@ -12,6 +12,16 @@ fn caret_vertical_overflow(
     viewport_top: f32,
     viewport_bottom: f32,
 ) -> std::cmp::Ordering {
+    if cursor_bottom - cursor_top > viewport_bottom - viewport_top {
+        let anchor = (cursor_top + cursor_bottom) * 0.5;
+        return if anchor < viewport_top {
+            std::cmp::Ordering::Less
+        } else if anchor > viewport_bottom {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        };
+    }
     if cursor_top < viewport_top {
         std::cmp::Ordering::Less
     } else if cursor_bottom > viewport_bottom {
@@ -32,11 +42,28 @@ fn cursor_visibility_scroll_delta(
     viewport_height: f32,
 ) -> f32 {
     let viewport_bottom = scroll_offset + viewport_height;
+    if cursor_bottom - cursor_top > viewport_height {
+        return if caret_vertical_overflow(cursor_top, cursor_bottom, scroll_offset, viewport_bottom)
+            == std::cmp::Ordering::Equal
+        {
+            0.0
+        } else {
+            (cursor_top + cursor_bottom - scroll_offset - viewport_bottom) * 0.5
+        };
+    }
     match caret_vertical_overflow(cursor_top, cursor_bottom, scroll_offset, viewport_bottom) {
         std::cmp::Ordering::Less => cursor_top - scroll_offset,
         std::cmp::Ordering::Greater => cursor_bottom - viewport_bottom,
         std::cmp::Ordering::Equal => 0.0,
     }
+}
+
+fn centered_row_scroll_target(top: f32, bottom: f32, viewport_height: f32) -> f32 {
+    ((top + bottom - viewport_height) * 0.5).max(0.0)
+}
+
+fn last_soft_row_scroll_limit(content_bottom: f32, last_row_top: f32, viewport_height: f32) -> f32 {
+    last_row_top.max(content_bottom - viewport_height).max(0.0)
 }
 
 fn typing_scroll_should_restore(
@@ -63,17 +90,19 @@ impl EditorView {
         if !self.active_tab_supports_text_buffer() || self.last_viewport_height <= 0.0 {
             return None;
         }
-        if let Some((offset, bounds)) = self.table_cursor_paint_bounds
-            && offset == self.cursor.offset
-        {
+        if self.table_cursor_cell().is_some() && !self.active_tab_is_diff() {
+            let (offset, bounds) = self.table_cursor_paint_bounds?;
+            if offset != self.cursor.offset {
+                return None;
+            }
             let top = f32::from(bounds.origin.y - self.content_origin.y) + self.scroll_offset;
             return Some((top, top + f32::from(bounds.size.height)));
         }
         let line = self.cursor_line();
-        let info = self.line_display_info.get(line)?.as_ref()?;
-        let (row, _) = self.cursor_visual_position(self.cursor.offset)?;
-        let top = self.text_y_offset_for_line(line) + row as f32 * info.line_height;
-        Some((top, top + info.line_height))
+        let (row_top, row_bottom) =
+            self.visual_row_vertical_bounds_for_offset(self.cursor.offset)?;
+        let text_top = self.text_y_offset_for_line(line);
+        Some((text_top + row_top, text_top + row_bottom))
     }
 
     pub(crate) fn cursor_visible_in_viewport(&self) -> bool {
@@ -101,11 +130,19 @@ impl EditorView {
         let before = self.scroll_offset;
         self.scroll_offset = (self.scroll_offset + correction).max(0.0);
         self.clamp_scroll();
-        (self.scroll_offset - before).abs() > 0.5
+        let changed = (self.scroll_offset - before).abs() > 0.5;
+        if changed {
+            self.table_cursor_paint_bounds = None;
+        }
+        changed
     }
 
     fn actual_visual_line_count(info: &LineDisplayInfo) -> usize {
-        info.wrapped_line.wrap_boundaries().len() + 1
+        if info.visual_line_count == 0 {
+            0
+        } else {
+            info.wrapped_line.wrap_boundaries().len() + 1
+        }
     }
 
     pub(crate) fn set_visible_utility_panel(
@@ -526,7 +563,7 @@ impl EditorView {
 
     fn current_visual_height_for_line(&self, line: usize) -> f32 {
         if let Some(Some(info)) = self.line_display_info.get(line) {
-            info.line_height * info.visual_line_count as f32 + info.extra_height
+            info.total_height()
         } else {
             if !self.folded_sections.is_empty()
                 && self.folded_sections.iter().any(|&fold_line| {
@@ -713,26 +750,26 @@ impl EditorView {
         if self.focused_code_mode_preview_key().is_some() {
             return;
         }
-        if self.table_cursor_cell().is_some() {
-            if let Some((offset, bounds)) = self.table_cursor_paint_bounds
-                && offset == self.cursor.offset
-            {
-                let top = f32::from(bounds.origin.y);
-                let bottom = top + f32::from(bounds.size.height);
-                let visible_top = f32::from(self.content_origin.y);
-                let visible_bottom = visible_top + self.editor_visible_height();
-                if top < visible_top {
-                    self.scroll_offset = (self.scroll_offset + top - visible_top).max(0.0);
-                    self.clamp_scroll();
-                } else if bottom > visible_bottom {
-                    self.scroll_offset += bottom - visible_bottom;
-                    self.clamp_scroll();
-                }
+        if self.table_cursor_cell().is_some() && !self.active_tab_is_diff() {
+            let Some((top, bottom)) = self.cursor_vertical_bounds() else {
+                self.pending_scroll_to_cursor = true;
+                return;
+            };
+            let correction = cursor_visibility_scroll_delta(
+                top,
+                bottom,
+                self.scroll_offset,
+                self.editor_visible_height(),
+            );
+            if correction != 0.0 {
+                self.scroll_offset = (self.scroll_offset + correction).max(0.0);
+                self.clamp_scroll();
+                self.table_cursor_paint_bounds = None;
             }
             return;
         }
         let cursor_line = self.cursor_line();
-        let (cursor_visual_row, cursor_visual_x) = self
+        let (_, cursor_visual_x) = self
             .cursor_visual_position(self.cursor.offset)
             .unwrap_or((0, 0.0));
         if let Some(start_line) = self
@@ -809,54 +846,50 @@ impl EditorView {
                 self.layout_dirty = true;
             }
         }
-        let cursor_y = self.text_y_offset_for_line(cursor_line)
-            + cursor_visual_row as f32
-                * self
-                    .line_display_info
-                    .get(cursor_line)
-                    .and_then(|info| info.as_ref())
-                    .map(|info| info.line_height)
-                    .unwrap_or_else(|| {
-                        let block_type = self
-                            .decorations
-                            .get(cursor_line)
-                            .map(|decoration| &decoration.block_type)
-                            .unwrap_or(&BlockType::Normal);
-                        self.line_height_for_block(block_type)
-                    });
-        let cursor_line_height = self
-            .line_display_info
-            .get(cursor_line)
-            .and_then(|info| info.as_ref())
-            .map(|info| info.line_height)
+        let (row_top, row_bottom) = self
+            .visual_row_vertical_bounds_for_offset(self.cursor.offset)
             .unwrap_or_else(|| {
                 let block_type = self
                     .decorations
                     .get(cursor_line)
                     .map(|decoration| &decoration.block_type)
                     .unwrap_or(&BlockType::Normal);
-                self.line_height_for_block(block_type)
+                (0.0, self.line_height_for_block(block_type))
             });
+        let cursor_y = self.text_y_offset_for_line(cursor_line) + row_top;
+        let cursor_line_height = row_bottom - row_top;
         let viewport_height = self.editor_visible_height();
         let (viewport_top, viewport_bottom) =
             cursor_scroll_viewport(self.scroll_offset, viewport_height);
         let cursor_top = cursor_y;
         let cursor_bottom = cursor_y + cursor_line_height;
-        let is_visible = cursor_top >= viewport_top && cursor_bottom <= viewport_bottom;
-
-        if is_visible {
+        if cursor_line_height > viewport_height {
+            self.scroll_offset = (self.scroll_offset
+                + cursor_visibility_scroll_delta(
+                    cursor_top,
+                    cursor_bottom,
+                    self.scroll_offset,
+                    viewport_height,
+                ))
+            .max(0.0);
+            self.clamp_scroll();
             return;
         }
 
         match caret_vertical_overflow(cursor_top, cursor_bottom, viewport_top, viewport_bottom) {
             std::cmp::Ordering::Less => {
-                self.scroll_offset = (cursor_y - self.padding_top()).max(0.0);
+                let margin = self
+                    .padding_top()
+                    .min((viewport_height - cursor_line_height).max(0.0));
+                self.scroll_offset = (cursor_y - margin).max(0.0);
                 self.clamp_scroll();
                 self.last_scroll_cursor_visual_x = Some(cursor_visual_x);
             }
             std::cmp::Ordering::Greater => {
-                self.scroll_offset =
-                    cursor_y + cursor_line_height - viewport_height + self.padding_bottom();
+                let margin = self
+                    .padding_bottom()
+                    .min((viewport_height - cursor_line_height).max(0.0));
+                self.scroll_offset = cursor_y + cursor_line_height - viewport_height + margin;
                 self.clamp_scroll();
                 self.last_scroll_cursor_visual_x = Some(cursor_visual_x);
             }
@@ -885,7 +918,11 @@ impl EditorView {
             visual_geometry_ready: visual_position.is_some()
                 && !self.layout_dirty
                 && self.last_viewport_height > 0.0,
-            viewport_height: self.last_viewport_height,
+            viewport_height: if self.last_viewport_height > 0.0 {
+                self.editor_visible_height()
+            } else {
+                0.0
+            },
             scroll_offset: self.scroll_offset,
         });
     }
@@ -902,13 +939,19 @@ impl EditorView {
             .cursor_visual_position(self.cursor.offset)
             .map(|(row, _)| row)
             .unwrap_or(0);
-        let line_height = self
-            .line_display_info
-            .get(line)
-            .and_then(|info| info.as_ref())
-            .map(|info| info.line_height)
-            .unwrap_or_else(|| self.line_height_for_block(&BlockType::Normal));
-        let cursor_top = self.text_y_offset_for_line(line) + visual_row as f32 * line_height;
+        let (row_top, row_bottom) = self
+            .visual_row_vertical_bounds_for_offset(self.cursor.offset)
+            .unwrap_or_else(|| (0.0, self.line_height_for_block(&BlockType::Normal)));
+        let text_top = self.text_y_offset_for_line(line);
+        let (cursor_top, cursor_bottom) =
+            if self.table_cursor_cell().is_some() && !self.active_tab_is_diff() {
+                let Some(bounds) = self.cursor_vertical_bounds() else {
+                    return false;
+                };
+                bounds
+            } else {
+                (text_top + row_top, text_top + row_bottom)
+            };
         // A preview remeasured above the viewport may already have shifted the
         // scroll offset to keep visible content fixed. Preserve that adjustment
         // instead of restoring the older absolute offset from before the edit.
@@ -923,13 +966,16 @@ impl EditorView {
             restored_offset,
             guard.viewport_height,
             cursor_top,
-            cursor_top + line_height,
+            cursor_bottom,
         ) {
             return false;
         }
 
         self.pending_scroll_to_cursor = false;
         self.pending_center_cursor_in_view = false;
+        if (self.scroll_offset - restored_offset).abs() > 0.5 {
+            self.table_cursor_paint_bounds = None;
+        }
         self.scroll_offset = restored_offset;
         true
     }
@@ -942,6 +988,9 @@ impl EditorView {
 
         if (final_scroll - start_scroll).abs() < 1.0 {
             self.scroll_offset = final_scroll;
+            if final_scroll != start_scroll {
+                self.table_cursor_paint_bounds = None;
+            }
             cx.notify();
             return;
         }
@@ -968,6 +1017,7 @@ impl EditorView {
                         let ease = 1.0 - (1.0 - t).powi(3);
                         this.scroll_offset = start_scroll + (final_scroll - start_scroll) * ease;
                         this.clamp_scroll();
+                        this.table_cursor_paint_bounds = None;
                         cx.notify();
                         step == total_steps
                     })
@@ -990,13 +1040,12 @@ impl EditorView {
             return;
         }
 
+        let Some(target_scroll) = self.cursor_center_scroll_target() else {
+            self.pending_center_cursor_in_view = true;
+            return;
+        };
         self.pending_center_cursor_in_view = false;
         self.pending_scroll_to_cursor = false;
-        let cursor_line = self.cursor_line();
-        let cursor_y = self.line_y_offset(cursor_line);
-        let cursor_line_height = self.visual_height_for_line(cursor_line);
-        let target_scroll =
-            (cursor_y + cursor_line_height * 0.5 - self.last_viewport_height * 0.5).max(0.0);
         self.animate_scroll_to(target_scroll, cx);
     }
 
@@ -1011,19 +1060,30 @@ impl EditorView {
             return;
         }
 
+        let Some(target_scroll) = self.cursor_center_scroll_target() else {
+            self.pending_center_cursor_in_view = true;
+            self.pending_center_cursor_in_view_immediately = true;
+            return;
+        };
         self.pending_center_cursor_in_view = false;
         self.pending_scroll_to_cursor = false;
-        let cursor_line = self.cursor_line();
-        let cursor_y = self.line_y_offset(cursor_line);
-        let cursor_line_height = self.visual_height_for_line(cursor_line);
-        self.scroll_offset =
-            (cursor_y + cursor_line_height * 0.5 - self.last_viewport_height * 0.5).max(0.0);
+        self.scroll_offset = target_scroll;
         self.clamp_scroll();
+        self.table_cursor_paint_bounds = None;
         // Line geometry can still shift while wrap layout and generated
         // previews settle after a fresh tab activation; re-affirm the
         // centered target for a couple of frames.
         self.center_cursor_confirm_frames = self.center_cursor_confirm_frames.max(2);
         cx.notify();
+    }
+
+    pub(crate) fn cursor_center_scroll_target(&self) -> Option<f32> {
+        let (top, bottom) = self.cursor_vertical_bounds()?;
+        Some(centered_row_scroll_target(
+            top,
+            bottom,
+            self.editor_visible_height(),
+        ))
     }
 
     pub(crate) fn max_scroll_offset(&self) -> f32 {
@@ -1040,14 +1100,30 @@ impl EditorView {
         } else {
             // No scrolling (and no scrollbar) when the whole document
             // already fits inside the viewport.
-            if self.total_content_height() <= self.last_viewport_height {
+            let viewport_height = self.editor_visible_height();
+            if self.total_content_height() <= viewport_height {
                 return 0.0;
             }
-            // Allow scrolling the last line to the top (like Monaco's
-            // scrollBeyondLastLine).
-            let last_line_height =
-                self.visual_height_for_line(self.buffer.line_count().saturating_sub(1));
-            (self.total_content_height() - last_line_height - self.padding_bottom()).max(0.0)
+            // Scroll beyond the final soft row, not just the final source line.
+            let last_line = self.buffer.line_count().saturating_sub(1);
+            let last_row_top = self
+                .line_display_info
+                .get(last_line)
+                .and_then(|info| info.as_ref())
+                .filter(|info| info.visual_line_count > 0)
+                .map(|info| {
+                    self.text_y_offset_for_line(last_line)
+                        + f32::from(info.wrapped_line.row_top(
+                            info.wrapped_line.wrap_boundaries().len(),
+                            gpui::px(info.line_height),
+                        ))
+                })
+                .unwrap_or_else(|| self.line_y_offset(last_line));
+            last_soft_row_scroll_limit(
+                self.total_content_height() - self.padding_bottom(),
+                last_row_top,
+                viewport_height,
+            )
         }
     }
 
@@ -1086,7 +1162,13 @@ impl EditorView {
 
         if cur_visual > 0 {
             let target_visual = cur_visual - 1;
-            let target_y = gpui::px((cur_visual as f32 - 0.5) * info.line_height);
+            let target_y = info
+                .wrapped_line
+                .row_top(target_visual, gpui::px(info.line_height))
+                + info
+                    .wrapped_line
+                    .row_height(target_visual, gpui::px(info.line_height))
+                    * 0.5;
             let target_indent = if target_visual > 0 {
                 info.indent_px
             } else {
@@ -1108,7 +1190,13 @@ impl EditorView {
         } else if line > 0 {
             let prev_info = self.line_display_info.get(line - 1)?.as_ref()?;
             let last_visual = Self::actual_visual_line_count(prev_info).saturating_sub(1);
-            let target_y = gpui::px((last_visual as f32 + 0.5) * prev_info.line_height);
+            let target_y = prev_info
+                .wrapped_line
+                .row_top(last_visual, gpui::px(prev_info.line_height))
+                + prev_info
+                    .wrapped_line
+                    .row_height(last_visual, gpui::px(prev_info.line_height))
+                    * 0.5;
             let target_indent = if last_visual > 0 {
                 prev_info.indent_px
             } else {
@@ -1141,7 +1229,13 @@ impl EditorView {
 
         if cur_visual + 1 < Self::actual_visual_line_count(info) {
             let target_visual = cur_visual + 1;
-            let target_y = gpui::px((cur_visual as f32 + 1.5) * info.line_height);
+            let target_y = info
+                .wrapped_line
+                .row_top(target_visual, gpui::px(info.line_height))
+                + info
+                    .wrapped_line
+                    .row_height(target_visual, gpui::px(info.line_height))
+                    * 0.5;
             let target_indent = if target_visual > 0 {
                 info.indent_px
             } else {
@@ -1162,7 +1256,13 @@ impl EditorView {
             Some(self.disp_to_buffer_offset(info, line, new_disp))
         } else if line + 1 < self.buffer.line_count() {
             let next_info = self.line_display_info.get(line + 1)?.as_ref()?;
-            let target_y = gpui::px(0.5 * next_info.line_height);
+            let target_y = next_info
+                .wrapped_line
+                .row_top(0, gpui::px(next_info.line_height))
+                + next_info
+                    .wrapped_line
+                    .row_height(0, gpui::px(next_info.line_height))
+                    * 0.5;
             let target_x = goal_x.max(0.0);
             let new_disp = if target_x <= 0.5 {
                 0
@@ -1415,9 +1515,44 @@ mod tests {
     #[cfg(target_os = "macos")]
     use super::{EditorView, traffic_light_offsets_for_layout};
     use super::{
-        caret_vertical_overflow, cursor_scroll_viewport, cursor_visibility_scroll_delta,
-        typing_scroll_should_restore,
+        caret_vertical_overflow, centered_row_scroll_target, cursor_scroll_viewport,
+        cursor_visibility_scroll_delta, last_soft_row_scroll_limit, typing_scroll_should_restore,
     };
+
+    #[test]
+    fn oversized_row_reveal_converges_without_top_bottom_oscillation() {
+        let (top, bottom, viewport) = (100.0, 400.0, 80.0);
+        for initial_scroll in [0.0, 100.0, 210.0, 350.0, 500.0] {
+            let scroll = initial_scroll
+                + cursor_visibility_scroll_delta(top, bottom, initial_scroll, viewport);
+            assert_eq!(
+                cursor_visibility_scroll_delta(top, bottom, scroll, viewport),
+                0.0
+            );
+            assert_eq!(
+                caret_vertical_overflow(top, bottom, scroll, scroll + viewport),
+                std::cmp::Ordering::Equal
+            );
+        }
+    }
+
+    #[test]
+    fn last_soft_row_scroll_limit_and_center_use_measured_rows() {
+        let wrapped = super::super::input_wrap::test_wrapped_line(&[24.0, 60.0, 24.0]);
+        let text_top = 100.0;
+        let content_bottom = text_top + f32::from(wrapped.size(gpui::px(24.0)).height);
+        let last_top = text_top + f32::from(wrapped.row_top(2, gpui::px(24.0)));
+        assert_eq!(
+            last_soft_row_scroll_limit(content_bottom, last_top, 80.0),
+            184.0
+        );
+        assert_eq!(
+            centered_row_scroll_target(last_top, content_bottom, 60.0),
+            166.0
+        );
+        // A single oversized final row must still allow its lower content to be revealed.
+        assert_eq!(last_soft_row_scroll_limit(500.0, 100.0, 80.0), 420.0);
+    }
 
     #[test]
     fn lazy_layout_only_corrects_caret_that_leaves_the_viewport() {
@@ -1449,6 +1584,44 @@ mod tests {
 
             let initial = EditorView::traffic_light_position_for_ui_scale(ui_scale);
             assert_eq!(initial, offsets);
+        }
+    }
+
+    #[test]
+    fn tall_row_scroll_and_typing_guard_use_its_actual_bottom() {
+        let wrapped = super::super::input_wrap::test_wrapped_line(&[24.0, 60.0, 24.0]);
+        let top = 100.0 + f32::from(wrapped.row_top(1, gpui::px(24.0)));
+        let bottom = top + f32::from(wrapped.row_height(1, gpui::px(24.0)));
+        assert_eq!((top, bottom), (124.0, 184.0));
+        assert_eq!(
+            cursor_visibility_scroll_delta(top, bottom, 100.0, 60.0),
+            24.0
+        );
+        assert!(!typing_scroll_should_restore(
+            true, false, true, 100.0, 60.0, top, bottom
+        ));
+        assert!(typing_scroll_should_restore(
+            true, false, true, 100.0, 84.0, top, bottom
+        ));
+        let following_top = 100.0 + f32::from(wrapped.row_top(2, gpui::px(24.0)));
+        assert_eq!(following_top, bottom);
+    }
+
+    #[test]
+    fn up_down_targets_stay_inside_each_actual_row() {
+        let wrapped = super::super::input_wrap::test_wrapped_line(&[24.0, 60.0, 24.0]);
+        for (row, center) in [(0, 12.0), (1, 54.0), (2, 96.0)] {
+            let target_y = wrapped.row_top(row, gpui::px(24.0))
+                + wrapped.row_height(row, gpui::px(24.0)) * 0.5;
+            assert_eq!(f32::from(target_y), center);
+            assert_eq!(wrapped.row_for_y(target_y, gpui::px(24.0)), row);
+            assert_eq!(
+                wrapped.closest_index_for_position(
+                    gpui::point(gpui::px(10.0), target_y),
+                    gpui::px(24.0)
+                ),
+                Ok(row * 2 + 1)
+            );
         }
     }
 

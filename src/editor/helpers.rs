@@ -1497,7 +1497,8 @@ pub(crate) fn build_highlight_bounds(
             };
 
             let indent = if segment_index > 0 { indent_px } else { 0.0 };
-            let segment_y = line_top + segment_index as f32 * line_height;
+            let segment_y = line_top + f32::from(wrapped.row_top(segment_index, px(line_height)));
+            let segment_height = f32::from(wrapped.row_height(segment_index, px(line_height)));
             bounds_list.push(Bounds::from_corners(
                 point(
                     px(if overlap_start == segment_start {
@@ -1507,7 +1508,10 @@ pub(crate) fn build_highlight_bounds(
                     }),
                     px(segment_y),
                 ),
-                point(px(content_x + indent + end_x), px(segment_y + line_height)),
+                point(
+                    px(content_x + indent + end_x),
+                    px(segment_y + segment_height),
+                ),
             ));
         }
         segment_start = segment_end;
@@ -2322,9 +2326,12 @@ fn apply_mermaid_block_highlighting(
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Range;
+    use std::{collections::HashMap, ops::Range, sync::Arc};
 
-    use gpui::{Bounds, FontStyle, FontWeight, TextRun, font, point, px, size};
+    use gpui::{
+        Bounds, FontId, FontStyle, FontWeight, GlyphId, LineLayout, RenderImage, ShapedGlyph,
+        ShapedRun, TextRun, WrapBoundary, WrappedLine, WrappedLineLayout, font, point, px, size,
+    };
 
     use crate::editor::MermaidTheme;
     use crate::markdown;
@@ -2356,6 +2363,78 @@ mod tests {
             .collect()
     }
 
+    fn inline_math_test_wrapped_line(display: &str, boundaries: &[usize]) -> WrappedLine {
+        // GlyphId is a repr(C) u32 without a public constructor; these glyphs are never painted.
+        let glyph_id = unsafe { std::mem::zeroed::<GlyphId>() };
+        let glyphs = display
+            .char_indices()
+            .enumerate()
+            .map(|(column, (index, _))| ShapedGlyph {
+                id: glyph_id,
+                position: point(px(column as f32 * 6.0), px(0.0)),
+                index,
+                is_emoji: false,
+            })
+            .collect::<Vec<_>>();
+        let wrap_boundaries = boundaries
+            .iter()
+            .map(|index| WrapBoundary {
+                run_ix: 0,
+                glyph_ix: glyphs
+                    .iter()
+                    .position(|glyph| glyph.index == *index)
+                    .unwrap(),
+            })
+            .collect();
+        let mut wrapped = WrappedLine::default();
+        wrapped.text = display.to_string().into();
+        let layout: &mut Arc<WrappedLineLayout> = &mut wrapped;
+        *layout = Arc::new(WrappedLineLayout {
+            unwrapped_layout: Arc::new(LineLayout {
+                font_size: px(16.0),
+                width: px(glyphs.len() as f32 * 6.0),
+                ascent: px(16.0),
+                descent: px(4.0),
+                runs: vec![ShapedRun {
+                    font_id: FontId(0),
+                    glyphs,
+                }],
+                len: display.len(),
+            }),
+            wrap_boundaries,
+            wrap_width: None,
+            row_heights: Vec::new(),
+        });
+        wrapped
+    }
+
+    fn inline_math_test_display(
+        source: &str,
+        active_ranges: &[Range<usize>],
+        cache: &HashMap<String, Option<Arc<RenderImage>>>,
+        boundaries: &[usize],
+    ) -> (markdown::LineDecoration, Vec<usize>, WrappedLine) {
+        let mut decoration = markdown::parse_decorations(source).remove(0);
+        super::add_inline_math_display_replacements(&mut decoration, source, cache, 6.0);
+        let (display, _, buffer_to_display, _) = build_display_text(
+            source,
+            &decoration,
+            active_ranges,
+            false,
+            None,
+            3,
+            3,
+            2,
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let wrapped = inline_math_test_wrapped_line(&display, boundaries);
+        (decoration, buffer_to_display, wrapped)
+    }
+
     #[test]
     fn inline_math_placeholder_reserves_intrinsic_width_without_upscaling() {
         let source = "energy $E=mc^2$";
@@ -2371,10 +2450,19 @@ mod tests {
         // 183 raster pixels / 3 = 61 logical pixels: round 61 / 6 up, not down.
         assert_eq!(replacement.display_text, "\u{a0}".repeat(11));
         assert_eq!(replacement.trigger_range, 7..15);
-        assert_eq!(
-            super::inline_math_line_height(&decoration, source, &[], &cache, 24.0),
-            40.0
+        let (decoration, buffer_to_display, mut wrapped) =
+            inline_math_test_display(source, &[], &cache, &[]);
+        super::apply_inline_math_row_heights(
+            &mut wrapped,
+            &decoration,
+            source,
+            &buffer_to_display,
+            &[],
+            &cache,
+            24.0,
+            0,
         );
+        assert_eq!(wrapped.row_heights, vec![px(40.0)]);
     }
 
     #[test]
@@ -2454,26 +2542,135 @@ mod tests {
     }
 
     #[test]
-    fn inline_math_line_height_fits_only_the_tallest_collapsed_formula() {
+    fn inline_math_row_height_fits_only_the_tallest_collapsed_formula() {
         let source = "$x$ and $y$ and $z$";
-        let decoration = markdown::parse_decorations(source).remove(0);
         let cache = inline_math_image_cache(&[("x", 30, 30), ("y", 60, 180), ("z", 60, 120)]);
-        assert_eq!(
-            super::inline_math_line_height(&decoration, source, &[], &cache, 24.0),
-            60.0
+        for (active_ranges, base_height, expected_height) in [
+            (vec![], 24.0, 60.0),
+            (vec![9..9], 24.0, 40.0),
+            (vec![0..source.len()], 24.0, 24.0),
+            (vec![], 80.0, 80.0),
+        ] {
+            let (decoration, buffer_to_display, mut wrapped) =
+                inline_math_test_display(source, &active_ranges, &cache, &[]);
+            super::apply_inline_math_row_heights(
+                &mut wrapped,
+                &decoration,
+                source,
+                &buffer_to_display,
+                &active_ranges,
+                &cache,
+                base_height,
+                0,
+            );
+            assert_eq!(wrapped.row_height(0, px(base_height)), px(expected_height));
+            assert_eq!(wrapped.size(px(base_height)).height, px(expected_height));
+            if expected_height == base_height {
+                assert!(wrapped.row_heights.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn inline_math_row_heights_expand_only_the_formula_row_at_wrap_boundaries() {
+        let cache = inline_math_image_cache(&[("y", 60, 180)]);
+        for (source, boundaries, expected) in [
+            ("text $y$ after", [5, 14], [24.0, 60.0, 24.0]),
+            ("$y$ text after", [9, 14], [60.0, 24.0, 24.0]),
+        ] {
+            let (decoration, buffer_to_display, mut wrapped) =
+                inline_math_test_display(source, &[], &cache, &boundaries);
+            super::apply_inline_math_row_heights(
+                &mut wrapped,
+                &decoration,
+                source,
+                &buffer_to_display,
+                &[],
+                &cache,
+                24.0,
+                0,
+            );
+            assert_eq!(wrapped.row_heights, expected.map(px).to_vec());
+            assert_eq!(wrapped.size(px(24.0)).height, px(108.0));
+            assert_eq!(wrapped.row_top(2, px(24.0)), px(84.0));
+        }
+    }
+
+    #[test]
+    fn inline_math_row_heights_clear_when_formulas_expand() {
+        let source = "text $y$ after";
+        let cache = inline_math_image_cache(&[("y", 60, 180)]);
+        let (decoration, buffer_to_display, mut wrapped) =
+            inline_math_test_display(source, &[], &cache, &[5, 14]);
+        wrapped.set_row_heights(vec![px(24.0), px(60.0), px(24.0)]);
+        super::apply_inline_math_row_heights(
+            &mut wrapped,
+            &decoration,
+            source,
+            &buffer_to_display,
+            &[7..7],
+            &cache,
+            24.0,
+            0,
         );
-        assert_eq!(
-            super::inline_math_line_height(&decoration, source, &[9..9], &cache, 24.0),
-            40.0
+        assert!(wrapped.row_heights.is_empty());
+        assert_eq!(wrapped.size(px(24.0)).height, px(72.0));
+    }
+
+    #[test]
+    fn inline_math_row_heights_use_local_display_offsets() {
+        let source = "before $x$ and $y$ after";
+        let cache = inline_math_image_cache(&[("x", 30, 120), ("y", 60, 180)]);
+        let (decoration, buffer_to_display, wrapped) =
+            inline_math_test_display(source, &[], &cache, &[]);
+        let range = super::inline_math_display_range(
+            &decoration,
+            &decoration.inline_math_spans[1],
+            &buffer_to_display,
+        )
+        .unwrap();
+        let mut segment = inline_math_test_wrapped_line(&wrapped.text[range.start..], &[]);
+        super::apply_inline_math_row_heights(
+            &mut segment,
+            &decoration,
+            source,
+            &buffer_to_display,
+            &[],
+            &cache,
+            24.0,
+            range.start,
         );
-        assert_eq!(
-            super::inline_math_line_height(&decoration, source, &[0..source.len()], &cache, 24.0),
-            24.0
+        assert_eq!(segment.row_heights, vec![px(60.0)]);
+        // Include "and " before the formula so global byte offsets would assign it to the wrong row.
+        let display_offset = range.start - 4;
+        let formula_end = range.end - display_offset;
+        let mut segment =
+            inline_math_test_wrapped_line(&wrapped.text[display_offset..], &[4, formula_end + 1]);
+        super::apply_inline_math_row_heights(
+            &mut segment,
+            &decoration,
+            source,
+            &buffer_to_display,
+            &[],
+            &cache,
+            24.0,
+            display_offset,
         );
-        assert_eq!(
-            super::inline_math_line_height(&decoration, source, &[], &cache, 80.0),
-            80.0
+        assert_eq!(segment.row_heights, vec![px(24.0), px(60.0), px(24.0)]);
+        assert_eq!(segment.row_top(1, px(24.0)), px(24.0));
+        assert_eq!(segment.row_top(2, px(24.0)), px(84.0));
+        let mut segment = inline_math_test_wrapped_line(&wrapped.text[..range.start], &[]);
+        super::apply_inline_math_row_heights(
+            &mut segment,
+            &decoration,
+            source,
+            &buffer_to_display,
+            &[],
+            &cache,
+            24.0,
+            0,
         );
+        assert_eq!(segment.row_heights, vec![px(40.0)]);
     }
 
     #[test]
@@ -2488,10 +2685,21 @@ mod tests {
             6.0
         ));
         assert!(decoration.display_replacements.is_empty());
-        assert_eq!(
-            super::inline_math_line_height(&decoration, source, &[], &cache, 24.0),
-            24.0
+        let (mut decoration, buffer_to_display, mut wrapped) =
+            inline_math_test_display(source, &[], &cache, &[]);
+        wrapped.set_row_heights(vec![px(60.0)]);
+        super::apply_inline_math_row_heights(
+            &mut wrapped,
+            &decoration,
+            source,
+            &buffer_to_display,
+            &[],
+            &cache,
+            24.0,
+            0,
         );
+        assert!(wrapped.row_heights.is_empty());
+        assert_eq!(wrapped.size(px(24.0)).height, px(24.0));
         let cache = inline_math_image_cache(&[("x", 30, 120)]);
         assert!(!super::add_inline_math_display_replacements(
             &mut decoration,
@@ -6406,6 +6614,7 @@ pub(crate) fn keep_inline_math_placeholders_unwrapped(
             }),
             wrap_boundaries: Default::default(),
             wrap_width: Some(wrap_width),
+            row_heights: Vec::new(),
         });
         wrapped.rewrap(wrap_width);
         wrap_boundaries = wrapped
@@ -6422,39 +6631,61 @@ pub(crate) fn keep_inline_math_placeholders_unwrapped(
         unwrapped_layout: line,
         wrap_boundaries,
         wrap_width,
+        row_heights: Vec::new(),
     });
 }
 
-pub(crate) fn inline_math_line_height(
+pub(crate) fn apply_inline_math_row_heights(
+    wrapped: &mut WrappedLine,
     decoration: &LineDecoration,
     line_content: &str,
+    buffer_to_display: &[usize],
     active_ranges: &[Range<usize>],
     image_cache: &HashMap<String, Option<Arc<RenderImage>>>,
     base_line_height: f32,
-) -> f32 {
-    decoration
+    display_offset: usize,
+) {
+    let formulas = decoration
         .inline_math_spans
         .iter()
-        .fold(base_line_height, |height, source_range| {
+        .filter_map(|source_range| {
             let trigger_range = source_range.start.saturating_sub(1)
                 ..(source_range.end + 1).min(line_content.len());
             if active_ranges_intersect(active_ranges, &trigger_range) {
-                return height;
+                return None;
             }
-            let Some(source_text) = line_content.get(source_range.clone()) else {
-                return height;
-            };
-            let Some(Some(image)) = image_cache.get(&inline_math_cache_key(source_text)) else {
-                return height;
-            };
+            let range = inline_math_display_range(decoration, source_range, buffer_to_display)?;
+            if range.start < display_offset || range.end > display_offset + wrapped.text.len() {
+                return None;
+            }
+            let local_range = range.start - display_offset..range.end - display_offset;
+            if !wrapped
+                .text
+                .get(local_range)?
+                .chars()
+                .all(|ch| ch == '\u{a0}')
+            {
+                return None;
+            }
+            let source = line_content.get(source_range.clone())?;
+            let image = image_cache.get(&inline_math_cache_key(source))?.as_ref()?;
             let image_size = image.size(0);
-            let (_, natural_height) = intrinsic_generated_preview_size_for_kind(
+            let (_, height) = intrinsic_generated_preview_size_for_kind(
                 image_size.width.0 as f32,
                 image_size.height.0 as f32,
                 BlockPreviewKind::Math,
             );
-            height.max(natural_height)
+            Some((range.start - display_offset, height))
         })
+        .collect::<Vec<_>>();
+    let boundaries = wrap_boundary_byte_indices(wrapped, &wrapped.text);
+    let heights =
+        super::text_layout::inline_math_row_heights(base_line_height, &boundaries, &formulas);
+    if heights.iter().all(|height| *height == base_line_height) {
+        wrapped.set_row_heights(Vec::new());
+    } else {
+        wrapped.set_row_heights(heights.into_iter().map(px).collect());
+    }
 }
 
 pub(crate) fn build_generated_block_preview_svg(
@@ -7887,6 +8118,7 @@ pub(crate) fn apply_letter_spacing(wrapped: &mut WrappedLine, spacing_px: f32) {
         unwrapped_layout: new_line_layout,
         wrap_boundaries: old_layout.wrap_boundaries.clone(),
         wrap_width: old_layout.wrap_width,
+        row_heights: Vec::new(),
     });
 
     let arc_mut: &mut Arc<WrappedLineLayout> = &mut *wrapped;

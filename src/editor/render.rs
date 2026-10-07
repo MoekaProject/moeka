@@ -669,7 +669,7 @@ impl Render for EditorView {
                                 if event.dragging() {
                                     this.update_panel_scrollbar_drag(event.position, cx)
                                 } else {
-                                    this.stop_panel_scrollbar_drag(cx)
+                                    this.stop_panel_scrollbar_drag(event.position, cx)
                                 }
                             });
                             if handled {
@@ -699,8 +699,9 @@ impl Render for EditorView {
                                 return;
                             }
 
-                            let handled =
-                                editor.update(cx, |this, cx| this.stop_panel_scrollbar_drag(cx));
+                            let handled = editor.update(cx, |this, cx| {
+                                this.stop_panel_scrollbar_drag(event.position, cx)
+                            });
                             if handled {
                                 cx.stop_propagation();
                             }

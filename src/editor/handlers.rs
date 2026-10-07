@@ -6,6 +6,52 @@ use crate::markdown::{self, BlockType};
 use super::profiler::{RuntimeProfilePaths, RuntimeProfiler};
 use super::*;
 
+fn page_down_row_fits(remaining_height: f32, step_distance: f32, first_step: bool) -> bool {
+    first_step || step_distance <= remaining_height
+}
+
+#[cfg(test)]
+#[test]
+fn page_down_budgets_actual_rows_instead_of_uniform_steps() {
+    let steps = |heights: &[f32], viewport: f32| {
+        let mut remaining = viewport;
+        let mut steps = 0;
+        for &height in heights {
+            if !page_down_row_fits(remaining, height, steps == 0) {
+                break;
+            }
+            remaining -= height;
+            steps += 1;
+        }
+        steps
+    };
+    assert_eq!(steps(&[24.0, 60.0, 24.0, 24.0], 100.0), 2);
+    assert_eq!(steps(&[24.0; 5], 100.0), 4);
+    assert_eq!(steps(&[120.0, 24.0], 100.0), 1);
+    assert_eq!(steps(&[24.0; 5], 0.0), 1);
+}
+
+#[cfg(test)]
+#[test]
+fn page_down_counts_document_gaps_and_tall_sibling_cells() {
+    let steps = |tops: &[f32], viewport: f32| {
+        let mut remaining = viewport;
+        let mut steps = 0;
+        for pair in tops.windows(2) {
+            let distance = pair[1] - pair[0];
+            if !page_down_row_fits(remaining, distance, steps == 0) {
+                break;
+            }
+            remaining -= distance;
+            steps += 1;
+        }
+        steps
+    };
+    assert_eq!(steps(&[0.0, 24.0, 84.0, 108.0], 100.0), 2);
+    assert_eq!(steps(&[0.0, 24.0, 144.0, 168.0], 100.0), 1);
+    assert_eq!(steps(&[0.0, 144.0, 168.0], 100.0), 1);
+}
+
 impl EditorView {
     // ── Action handlers ─────────────────────────────────────────────
 
@@ -907,9 +953,10 @@ impl EditorView {
                     self.table_visual_x_for_offset(window, self.cursor.offset);
             }
             let goal_x = self.vertical_move_goal_x.unwrap_or_default();
-            if let Some(offset) =
+            if let Some(target) =
                 self.table_vertical_target(window, self.cursor.offset, false, goal_x)
             {
+                let offset = self.apply_table_cursor_target(target);
                 self.cursor.move_to(offset, &self.buffer);
                 self.navigate_scroll_to_cursor();
                 self.pause_blinking(cx);
@@ -985,9 +1032,10 @@ impl EditorView {
                     self.table_visual_x_for_offset(window, self.cursor.offset);
             }
             let goal_x = self.vertical_move_goal_x.unwrap_or_default();
-            if let Some(offset) =
+            if let Some(target) =
                 self.table_vertical_target(window, self.cursor.offset, true, goal_x)
             {
+                let offset = self.apply_table_cursor_target(target);
                 self.cursor.move_to(offset, &self.buffer);
                 self.navigate_scroll_to_cursor();
                 self.pause_blinking(cx);
@@ -1076,9 +1124,10 @@ impl EditorView {
                     .or_else(|| self.cursor_visual_x(self.cursor.offset));
             }
             let goal_x = self.vertical_move_goal_x.unwrap_or_default();
-            if let Some(offset) =
+            if let Some(target) =
                 self.table_vertical_target(window, self.cursor.offset, false, goal_x)
             {
+                let offset = self.apply_table_cursor_target(target);
                 self.cursor.select_to(offset, &self.buffer);
             } else if !in_table && let Some(offset) = self.offset_for_visual_up(self.cursor.offset)
             {
@@ -1086,7 +1135,9 @@ impl EditorView {
             } else if !in_table {
                 self.cursor.select_up(&self.buffer);
             }
-            self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
+            if !in_table {
+                self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
+            }
         }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -1110,9 +1161,10 @@ impl EditorView {
                     .or_else(|| self.cursor_visual_x(self.cursor.offset));
             }
             let goal_x = self.vertical_move_goal_x.unwrap_or_default();
-            if let Some(offset) =
+            if let Some(target) =
                 self.table_vertical_target(window, self.cursor.offset, true, goal_x)
             {
+                let offset = self.apply_table_cursor_target(target);
                 self.cursor.select_to(offset, &self.buffer);
             } else if !in_table
                 && let Some(offset) = self.offset_for_visual_down(self.cursor.offset)
@@ -1121,7 +1173,9 @@ impl EditorView {
             } else if !in_table {
                 self.cursor.select_down(&self.buffer);
             }
-            self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
+            if !in_table {
+                self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
+            }
         }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -2054,9 +2108,70 @@ impl EditorView {
         let line_height = (self.base_font_size()
             * self.styles.editor.editor_paragraph_line_height_factor)
             .max(1.0);
-        let steps = ((self.last_viewport_height / line_height).floor() as usize).max(1);
-        for _ in 0..steps {
+        let use_editor_geometry = self.focused_sidebar_path.is_none()
+            && self.wiki_link_start.is_none()
+            && self.slash_menu_start.is_none()
+            && !self.has_extra_cursors();
+        let mut remaining_height = self.editor_visible_height();
+        if !use_editor_geometry {
+            let steps = ((remaining_height / line_height).floor() as usize).max(1);
+            for _ in 0..steps {
+                self.on_down(&Down, window, cx);
+            }
+            return;
+        }
+        let goal_x = self
+            .vertical_move_goal_x
+            .or_else(|| self.table_visual_x_for_offset(window, self.cursor.offset))
+            .or_else(|| self.cursor_visual_x(self.cursor.offset))
+            .unwrap_or_default();
+        self.vertical_move_goal_x = Some(goal_x);
+        let mut first_step = true;
+        loop {
+            let before = self.cursor.offset;
+            let before_affinity = self.wrap_boundary_affinity_for_offset(before);
+            let before_bounds =
+                self.document_row_bounds_for_offset(window, before, before_affinity);
+            let target = self
+                .table_vertical_target(window, before, true, goal_x)
+                .or_else(|| {
+                    self.offset_for_visual_down(before).map(|offset| {
+                        (
+                            offset,
+                            self.wrap_boundary_affinity_for_goal_x(offset, goal_x),
+                        )
+                    })
+                });
+            let fallback_height = before_bounds
+                .map(|(top, bottom)| bottom - top)
+                .unwrap_or(line_height)
+                .max(1.0);
+            let distance = target
+                .and_then(|(offset, affinity)| {
+                    let (top, _) = self.document_row_bounds_for_offset(window, offset, affinity)?;
+                    Some((top - before_bounds?.0).max(1.0))
+                })
+                .unwrap_or(fallback_height);
+            if !page_down_row_fits(remaining_height, distance, first_step) {
+                break;
+            }
             self.on_down(&Down, window, cx);
+            if self.cursor.offset == before
+                && self.wrap_boundary_affinity_for_offset(before) == before_affinity
+            {
+                break;
+            }
+            let actual_distance = self
+                .document_row_bounds_for_offset(
+                    window,
+                    self.cursor.offset,
+                    self.wrap_boundary_affinity_for_offset(self.cursor.offset),
+                )
+                .zip(before_bounds)
+                .map(|((top, _), (before_top, _))| (top - before_top).max(1.0))
+                .unwrap_or(distance);
+            remaining_height -= actual_distance;
+            first_step = false;
         }
     }
 

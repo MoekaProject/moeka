@@ -5,93 +5,6 @@ use gpui::{AppContext, Context, Window};
 
 use super::*;
 
-fn trash_is_unavailable(error: &anyhow::Error) -> bool {
-    #[cfg(target_os = "macos")]
-    if error
-        .chain()
-        .filter_map(|cause| cause.downcast_ref::<trash::Error>())
-        .any(|trash_error| {
-            let trash::Error::Unknown { description } = trash_error else {
-                return false;
-            };
-            let description = description.to_ascii_lowercase();
-            description.contains("trashitematurl")
-                && description.contains("volume")
-                && description.contains("have one")
-                && (description.contains("doesn't") || description.contains("doesn’t"))
-        })
-    {
-        return true;
-    }
-    if error
-        .chain()
-        .filter_map(|cause| cause.downcast_ref::<trash::Error>())
-        .any(|trash_error| {
-            matches!(
-                trash_error,
-                trash::Error::Os {
-                    code: 18 | 45 | 95,
-                    ..
-                }
-            )
-        })
-    {
-        return true;
-    }
-    if error
-        .chain()
-        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
-        .any(|io| {
-            io.kind() == std::io::ErrorKind::Unsupported
-                || matches!(io.raw_os_error(), Some(18 | 45 | 95))
-        })
-    {
-        return true;
-    }
-    let message = error.to_string().to_ascii_lowercase();
-    [
-        "trash not supported",
-        "trash unavailable",
-        "no trash",
-        "recycle bin unavailable",
-    ]
-    .iter()
-    .any(|phrase| message.contains(phrase))
-        || (message.contains(".trash")
-            && (message.contains("no such file") || message.contains("not supported")))
-}
-
-#[cfg(test)]
-#[test]
-fn only_unsupported_trash_errors_allow_direct_delete() {
-    assert!(trash_is_unavailable(&anyhow::Error::from(
-        std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported",)
-    )));
-    assert!(!trash_is_unavailable(&anyhow::Error::from(
-        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied",)
-    )));
-    assert!(trash_is_unavailable(&anyhow::anyhow!(
-        "/mnt/sshfs/.Trash: No such file or directory"
-    )));
-    assert!(trash_is_unavailable(&anyhow::Error::from(
-        trash::Error::Os {
-            code: 45,
-            description: "operation not supported".into(),
-        }
-    )));
-    assert!(trash_is_unavailable(&anyhow::Error::from(
-        trash::Error::Unknown {
-            description: "While deleting '/Volumes/homes/imeoer/docs/abc/abc.md', `trashItemAtURL` failed: \"abc.md\" couldn’t be moved to the trash because the volume \"homes\" doesn’t have one.".into(),
-        }
-    )));
-    assert!(!trash_is_unavailable(&anyhow::Error::from(
-        trash::Error::Unknown {
-            description:
-                "While deleting '/tmp/note.md', `trashItemAtURL` failed: permission denied".into(),
-        }
-    )));
-}
-
 impl EditorView {
     fn reveal_sidebar_create_row(&mut self, parent: PathBuf, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
@@ -188,12 +101,9 @@ impl EditorView {
     }
 
     fn remove_copied_path(path: &Path) -> std::io::Result<()> {
-        if path.is_dir() {
-            std::fs::remove_dir_all(path)
-        } else if path.exists() {
-            std::fs::remove_file(path)
-        } else {
-            Ok(())
+        match crate::platform::trash::remove_permanently(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => result,
         }
     }
 
@@ -207,12 +117,21 @@ impl EditorView {
             Ok(()) => return Ok(()),
             Err(error) => error,
         };
-        if !src.exists() || dst.exists() {
+        let destination_missing = dst
+            .symlink_metadata()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        if !src.exists() || !destination_missing {
             return Err(rename_error.into());
         }
 
-        if let Err(copy_error) = Self::copy_path_recursively(src, dst) {
-            let cleanup_error = Self::remove_copied_path(dst).err();
+        let mut destination_created = false;
+        if let Err(copy_error) = Self::copy_path_recursively_with_creation(src, dst, || {
+            destination_created = true;
+        }) {
+            // A failed create_new/create_dir may belong to another operation.
+            let cleanup_error = destination_created
+                .then(|| Self::remove_copied_path(dst).err())
+                .flatten();
             return Err(anyhow::anyhow!(
                 "rename failed ({rename_error}); copy fallback failed ({copy_error}){}",
                 cleanup_error
@@ -221,23 +140,12 @@ impl EditorView {
             ));
         }
 
-        if let Err(trash_error) = trash(src).or_else(|trash_error| {
-            if trash_is_unavailable(&trash_error) {
-                Self::remove_copied_path(src).map_err(|error| {
-                    anyhow::anyhow!(
-                        "trash unavailable ({trash_error}); direct delete failed ({error})"
-                    )
-                })
-            } else {
-                Err(trash_error)
-            }
-        }) {
-            let cleanup_error = Self::remove_copied_path(dst).err();
+        if let Err(trash_error) = trash(src) {
+            // Recursive network deletion or a native Trash operation may have
+            // partially removed the source before failing. Keep the complete copy.
             return Err(anyhow::anyhow!(
-                "rename failed ({rename_error}); copied source but could not move it to Trash ({trash_error}){}",
-                cleanup_error
-                    .map(|error| format!("; destination cleanup failed ({error})"))
-                    .unwrap_or_default()
+                "rename failed ({rename_error}); source removal failed ({trash_error:#}); destination retained for recovery: {}",
+                dst.display()
             ));
         }
 
@@ -264,23 +172,7 @@ impl EditorView {
                     paths
                         .into_iter()
                         .map(|path| {
-                            let result = crate::platform::trash::move_to_trash(&path).or_else(
-                                |trash_error| {
-                                    if !trash_is_unavailable(&trash_error) {
-                                        return Err(trash_error);
-                                    }
-                                    let direct = if path.is_dir() {
-                                        std::fs::remove_dir_all(&path)
-                                    } else {
-                                        std::fs::remove_file(&path)
-                                    };
-                                    direct.map_err(|error| {
-                                        anyhow::anyhow!(
-                                            "trash unavailable ({trash_error}); direct delete failed: {error}"
-                                        )
-                                    })
-                                },
-                            );
+                            let result = crate::platform::trash::move_to_trash(&path);
                             (path, result)
                         })
                         .collect::<Vec<_>>()
@@ -303,7 +195,7 @@ impl EditorView {
                 Ok(()) => deleted.push(path),
                 Err(error) => {
                     let message = format!(
-                        "{}: {error}",
+                        "{}: {error:#}",
                         self.t(crate::i18n::TextKey::FileOperationFailed)
                     );
                     self.notify_error(message, cx);
@@ -763,12 +655,21 @@ impl EditorView {
     }
 
     fn copy_path_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
+        Self::copy_path_recursively_with_creation(src, dst, || {})
+    }
+
+    fn copy_path_recursively_with_creation(
+        src: &Path,
+        dst: &Path,
+        on_destination_created: impl FnOnce(),
+    ) -> std::io::Result<()> {
         // `symlink_metadata` keeps a symlinked directory from being walked into.
         if std::fs::symlink_metadata(src)?.is_dir() {
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::create_dir(dst)?;
+            on_destination_created();
             for entry in std::fs::read_dir(src)? {
                 let entry = entry?;
                 if entry.file_name().to_string_lossy().starts_with("._") {
@@ -789,6 +690,7 @@ impl EditorView {
             .write(true)
             .create_new(true)
             .open(dst)?;
+        on_destination_created();
         std::io::copy(&mut source, &mut destination)?;
         if let Ok(metadata) = source.metadata() {
             let _ = destination.set_permissions(metadata.permissions());
@@ -1319,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn move_fallback_keeps_source_and_removes_copy_when_trash_fails() {
+    fn move_fallback_keeps_source_and_recovery_copy_when_trash_fails() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.md");
         let destination = temp.path().join("destination.md");
@@ -1334,11 +1236,183 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(fs::read_to_string(source).unwrap(), "network content");
-        assert!(!destination.exists());
+        assert_eq!(fs::read_to_string(destination).unwrap(), "network content");
+        assert!(format!("{:#}", result.unwrap_err()).contains("retained for recovery"));
     }
 
     #[test]
-    fn move_fallback_directly_removes_source_when_volume_has_no_trash() {
+    fn move_fallback_does_not_interpret_unavailable_messages_or_os_codes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.md");
+        let destination = temp.path().join("destination.md");
+        fs::write(&source, "keep").unwrap();
+        for error in [
+            anyhow::anyhow!("trash unavailable: permission denied"),
+            trash::Error::Os {
+                code: 45,
+                description: "unsupported".into(),
+            }
+            .into(),
+            trash::Error::Unknown {
+                description: "trashItemAtURL: volume doesn't have one".into(),
+            }
+            .into(),
+        ] {
+            let result = EditorView::move_path_with_fallback(
+                &source,
+                &destination,
+                |_, _| Err(std::io::Error::other("rename failed")),
+                |_| Err(error),
+            );
+            assert!(result.is_err());
+            assert_eq!(fs::read_to_string(&source).unwrap(), "keep");
+            assert_eq!(fs::read_to_string(&destination).unwrap(), "keep");
+            fs::remove_file(&destination).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_cleanup_unlinks_dangling_and_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("keep.md"), "keep").unwrap();
+        for destination in [&target, &temp.path().join("missing")] {
+            let link = temp.path().join("copy");
+            symlink(destination, &link).unwrap();
+            EditorView::remove_copied_path(&link).unwrap();
+            assert!(fs::symlink_metadata(&link).is_err());
+            assert_eq!(fs::read_to_string(target.join("keep.md")).unwrap(), "keep");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_fallback_keeps_an_existing_dangling_destination_link() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.md");
+        let destination = temp.path().join("destination.md");
+        let target = temp.path().join("missing.md");
+        fs::write(&source, "keep").unwrap();
+        symlink(&target, &destination).unwrap();
+
+        assert!(
+            EditorView::move_path_with_fallback(
+                &source,
+                &destination,
+                |_, _| Err(std::io::Error::other("rename failed")),
+                |_| panic!("existing destination must stop the move"),
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_link(destination).unwrap(), target);
+        assert_eq!(fs::read_to_string(source).unwrap(), "keep");
+    }
+
+    #[test]
+    fn copy_failure_does_not_claim_an_existing_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        for is_dir in [false, true] {
+            let source = temp
+                .path()
+                .join(if is_dir { "source-dir" } else { "source.md" });
+            let destination = temp.path().join(if is_dir {
+                "existing-dir"
+            } else {
+                "existing.md"
+            });
+            if is_dir {
+                fs::create_dir(&source).unwrap();
+                fs::create_dir(&destination).unwrap();
+            } else {
+                fs::write(&source, "source").unwrap();
+                fs::write(&destination, "existing").unwrap();
+            }
+            let mut created = false;
+            assert!(
+                EditorView::copy_path_recursively_with_creation(&source, &destination, || {
+                    created = true;
+                })
+                .is_err()
+            );
+            assert!(!created);
+            assert!(source.exists());
+            assert!(destination.exists());
+            if !is_dir {
+                assert_eq!(fs::read_to_string(destination).unwrap(), "existing");
+            }
+        }
+    }
+
+    #[test]
+    fn directory_move_fallback_keeps_source_when_removal_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested/keep.md"), "keep").unwrap();
+
+        assert!(
+            EditorView::move_path_with_fallback(
+                &source,
+                &destination,
+                |_, _| Err(std::io::Error::other("rename failed")),
+                |_| Err(anyhow::anyhow!("unknown Trash failure")),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("nested/keep.md")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("nested/keep.md")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn move_fallback_retains_complete_copy_after_partial_source_removal() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("removed.md"), "recover me").unwrap();
+        fs::write(source.join("locked.md"), "keep").unwrap();
+
+        let result = EditorView::move_path_with_fallback(
+            &source,
+            &destination,
+            |_, _| Err(std::io::Error::other("rename failed")),
+            |path| {
+                fs::remove_file(path.join("removed.md"))?;
+                Err(
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, "locked child")
+                        .into(),
+                )
+            },
+        );
+        assert!(format!("{:#}", result.unwrap_err()).contains("retained for recovery"));
+        assert!(!source.join("removed.md").exists());
+        assert_eq!(
+            fs::read_to_string(source.join("locked.md")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("removed.md")).unwrap(),
+            "recover me"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("locked.md")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn move_fallback_accepts_platform_network_deletion() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.md");
         let destination = temp.path().join("destination.md");
@@ -1348,12 +1422,7 @@ mod tests {
             &source,
             &destination,
             |_, _| Err(std::io::Error::other("rename unsupported")),
-            |_| {
-                Err(trash::Error::Unknown {
-                    description: "`trashItemAtURL` failed: file couldn’t be moved to the trash because the volume \"homes\" doesn’t have one.".into(),
-                }
-                .into())
-            },
+            |path| crate::platform::trash::remove_permanently(path).map_err(anyhow::Error::from),
         )
         .unwrap();
 

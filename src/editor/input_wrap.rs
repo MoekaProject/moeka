@@ -37,6 +37,43 @@ fn utf16_offset_in_text_for_utf8(text: &str, utf8_offset: usize) -> usize {
 }
 
 impl EditorView {
+    pub(crate) fn wrap_boundary_affinity_for_offset(
+        &self,
+        offset: usize,
+    ) -> Option<WrapBoundaryAffinityKind> {
+        self.wrap_boundary_affinity
+            .and_then(|affinity| (affinity.offset == offset).then_some(affinity.kind))
+    }
+
+    pub(crate) fn wrap_boundary_affinity_for_row(
+        wrapped: &WrappedLine,
+        text: &str,
+        index: usize,
+        row: usize,
+    ) -> Option<WrapBoundaryAffinityKind> {
+        let upstream = helpers::wrap_boundary_byte_indices(wrapped, text)
+            .iter()
+            .position(|boundary| *boundary == index)?;
+        Some(if row > upstream {
+            WrapBoundaryAffinityKind::Downstream
+        } else {
+            WrapBoundaryAffinityKind::Upstream
+        })
+    }
+
+    pub(crate) fn clamp_wrapped_hit_y(wrapped: &WrappedLine, y: f32, line_height: f32) -> f32 {
+        let last_row = wrapped.wrap_boundaries().len();
+        let height = f32::from(wrapped.size(px(line_height)).height);
+        if y >= height {
+            f32::from(
+                wrapped.row_top(last_row, px(line_height))
+                    + wrapped.row_height(last_row, px(line_height)) * 0.5,
+            )
+        } else {
+            y.max(0.0)
+        }
+    }
+
     pub(crate) fn wrap_boundary_display_index_for_visual_line(
         info: &LineDisplayInfo,
         visual_line_idx: usize,
@@ -99,7 +136,7 @@ impl EditorView {
                 };
                 return Some(point(
                     px(downstream_x),
-                    px(downstream_visual_idx as f32 * line_height),
+                    wrapped_line.row_top(downstream_visual_idx, px(line_height)),
                 ));
             }
 
@@ -133,6 +170,9 @@ impl EditorView {
     pub(crate) fn cursor_visual_position(&self, offset: usize) -> Option<(usize, f32)> {
         let (line, col) = self.buffer.offset_to_line_col(offset);
         let info = self.line_display_info.get(line)?.as_ref()?;
+        if info.visual_line_count == 0 {
+            return None;
+        }
         let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
         let affinity = self
             .wrap_boundary_affinity
@@ -147,9 +187,21 @@ impl EditorView {
             affinity,
         )?;
         Some((
-            (f32::from(pos.y) / info.line_height) as usize,
+            info.wrapped_line.row_for_y(pos.y, px(info.line_height)),
             f32::from(pos.x),
         ))
+    }
+
+    pub(crate) fn visual_row_vertical_bounds_for_offset(
+        &self,
+        offset: usize,
+    ) -> Option<(f32, f32)> {
+        let (line, _) = self.buffer.offset_to_line_col(offset);
+        let info = self.line_display_info.get(line)?.as_ref()?;
+        let (row, _) = self.cursor_visual_position(offset)?;
+        let top = f32::from(info.wrapped_line.row_top(row, px(info.line_height)));
+        let height = f32::from(info.wrapped_line.row_height(row, px(info.line_height)));
+        Some((top, top + height))
     }
 
     pub(crate) fn cursor_visual_x(&self, offset: usize) -> Option<f32> {
@@ -171,6 +223,9 @@ impl EditorView {
         offset: usize,
         position: Point<Pixels>,
     ) {
+        if self.table_cell_for_offset(offset).is_some() {
+            return;
+        }
         let (line, col) = self.buffer.offset_to_line_col(offset);
         let Some(Some(info)) = self.line_display_info.get(line) else {
             self.clear_wrap_boundary_affinity();
@@ -190,7 +245,9 @@ impl EditorView {
         let y = (pos_y - origin_y) + self.scroll_offset;
         let text_top_y = self.text_y_offset_for_line(line);
         let local_y = (y - text_top_y).max(0.0);
-        let visual_line_idx = (local_y / info.line_height) as usize;
+        let visual_line_idx = info
+            .wrapped_line
+            .row_for_y(px(local_y), px(info.line_height));
 
         if visual_line_idx >= downstream_visual_idx {
             self.set_wrap_boundary_affinity(offset, WrapBoundaryAffinityKind::Downstream);
@@ -201,25 +258,28 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn update_wrap_boundary_affinity_for_goal_x(&mut self, offset: usize, goal_x: f32) {
+    pub(crate) fn wrap_boundary_affinity_for_goal_x(
+        &self,
+        offset: usize,
+        goal_x: f32,
+    ) -> Option<WrapBoundaryAffinityKind> {
         let (line, col) = self.buffer.offset_to_line_col(offset);
-        let Some(Some(info)) = self.line_display_info.get(line) else {
-            self.clear_wrap_boundary_affinity();
-            return;
-        };
-
+        let info = self.line_display_info.get(line)?.as_ref()?;
         let disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
-        let Some((upstream_x, downstream_x)) = Self::wrap_boundary_visual_x_pair(info, disp_col)
-        else {
-            self.clear_wrap_boundary_affinity();
-            return;
-        };
+        let (upstream_x, downstream_x) = Self::wrap_boundary_visual_x_pair(info, disp_col)?;
+        Some(
+            if (goal_x - downstream_x).abs() <= (goal_x - upstream_x).abs() {
+                WrapBoundaryAffinityKind::Downstream
+            } else {
+                WrapBoundaryAffinityKind::Upstream
+            },
+        )
+    }
 
-        if (goal_x - downstream_x).abs() <= (goal_x - upstream_x).abs() {
-            self.set_wrap_boundary_affinity(offset, WrapBoundaryAffinityKind::Downstream);
-        } else {
-            self.set_wrap_boundary_affinity(offset, WrapBoundaryAffinityKind::Upstream);
-        }
+    pub(crate) fn update_wrap_boundary_affinity_for_goal_x(&mut self, offset: usize, goal_x: f32) {
+        self.wrap_boundary_affinity = self
+            .wrap_boundary_affinity_for_goal_x(offset, goal_x)
+            .map(|kind| WrapBoundaryAffinity { offset, kind });
     }
 
     pub(crate) fn offset_from_utf16(&self, utf16_offset: usize) -> usize {
@@ -244,8 +304,105 @@ impl EditorView {
 }
 
 #[cfg(test)]
+pub(super) fn test_wrapped_line(row_heights: &[f32]) -> WrappedLine {
+    use std::sync::Arc;
+
+    use gpui::{
+        FontId, GlyphId, LineLayout, ShapedGlyph, ShapedRun, WrapBoundary, WrappedLineLayout,
+    };
+
+    // GlyphId is a repr(C) u32 without a public constructor; these glyphs are never painted.
+    let glyph_id = unsafe { std::mem::zeroed::<GlyphId>() };
+    let mut wrapped = WrappedLine::default();
+    wrapped.text = "abcdef".into();
+    let layout: &mut Arc<WrappedLineLayout> = &mut *wrapped;
+    *layout = Arc::new(WrappedLineLayout {
+        unwrapped_layout: Arc::new(LineLayout {
+            width: px(60.0),
+            len: 6,
+            runs: vec![ShapedRun {
+                font_id: FontId(0),
+                glyphs: (0..6)
+                    .map(|index| ShapedGlyph {
+                        id: glyph_id,
+                        position: point(px(index as f32 * 10.0), px(0.0)),
+                        index,
+                        is_emoji: false,
+                    })
+                    .collect(),
+            }],
+            ..Default::default()
+        }),
+        wrap_boundaries: [2, 4]
+            .into_iter()
+            .map(|glyph_ix| WrapBoundary {
+                run_ix: 0,
+                glyph_ix,
+            })
+            .collect(),
+        wrap_width: Some(px(20.0)),
+        ..Default::default()
+    });
+    wrapped.set_row_heights(row_heights.iter().copied().map(px).collect());
+    wrapped
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{utf8_offset_in_text_for_utf16, utf16_offset_in_text_for_utf8};
+    use super::{
+        EditorView, WrapBoundaryAffinityKind, test_wrapped_line, utf8_offset_in_text_for_utf16,
+        utf16_offset_in_text_for_utf8,
+    };
+    use gpui::{point, px};
+    use std::collections::HashMap;
+
+    #[test]
+    fn wrap_affinity_uses_actual_row_tops_and_continuation_indent() {
+        let wrapped = test_wrapped_line(&[24.0, 60.0, 24.0]);
+        let upstream_xs = HashMap::from([(2, 20.0), (4, 20.0)]);
+        for (boundary, upstream_top, downstream_top, upstream_x) in
+            [(2, 0.0, 24.0, 20.0), (4, 24.0, 84.0, 28.0)]
+        {
+            let position = |affinity| {
+                EditorView::visual_position_for_wrapped_display(
+                    &wrapped,
+                    "abcdef",
+                    boundary,
+                    24.0,
+                    8.0,
+                    &upstream_xs,
+                    Some(affinity),
+                )
+                .unwrap()
+            };
+            assert_eq!(
+                position(WrapBoundaryAffinityKind::Upstream),
+                point(px(upstream_x), px(upstream_top))
+            );
+            let downstream = position(WrapBoundaryAffinityKind::Downstream);
+            assert_eq!(downstream, point(px(8.0), px(downstream_top)));
+            assert_eq!(wrapped.row_for_y(downstream.y, px(24.0)), boundary / 2);
+        }
+        assert_eq!(wrapped.row_for_y(px(70.0), px(24.0)), 1);
+        assert_eq!(wrapped.row_for_y(px(108.0), px(24.0)), 3);
+    }
+
+    #[test]
+    fn wrap_affinity_keeps_uniform_fallback_geometry() {
+        let wrapped = test_wrapped_line(&[]);
+        let position = EditorView::visual_position_for_wrapped_display(
+            &wrapped,
+            "abcdef",
+            4,
+            24.0,
+            8.0,
+            &HashMap::new(),
+            Some(WrapBoundaryAffinityKind::Downstream),
+        )
+        .unwrap();
+        assert_eq!(position, point(px(8.0), px(48.0)));
+        assert_eq!(wrapped.size(px(24.0)).height, px(72.0));
+    }
 
     #[test]
     fn utf16_to_utf8_offset_handles_multibyte_chars() {

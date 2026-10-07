@@ -851,6 +851,20 @@ pub(crate) struct LineDisplayInfo {
     pub selection_padding_left_px: f32,
 }
 
+impl LineDisplayInfo {
+    pub(crate) fn text_height(&self) -> f32 {
+        if self.visual_line_count == 0 {
+            0.0
+        } else {
+            f32::from(self.wrapped_line.size(gpui::px(self.line_height)).height)
+        }
+    }
+
+    pub(crate) fn total_height(&self) -> f32 {
+        self.text_height() + self.extra_height
+    }
+}
+
 pub(crate) type LineDisplayCache = Vec<Option<Box<LineDisplayInfo>>>;
 
 const LARGE_MARKDOWN_MIN_LINES: usize = 100_000;
@@ -11715,9 +11729,7 @@ impl EditorView {
         // actually changes a line's visual height. During steady scrolling the
         // window keeps re-emitting identical cached heights, and a blind
         // invalidation would force an O(n) prefix-sum rebuild every frame.
-        let info_height = |info: Option<&LineDisplayInfo>| {
-            info.map(|info| info.line_height * info.visual_line_count as f32 + info.extra_height)
-        };
+        let info_height = |info: Option<&LineDisplayInfo>| info.map(LineDisplayInfo::total_height);
         let mut geometry_changed = false;
         let sparse_geometry = self.uses_sparse_line_geometry();
         if sparse_geometry {
@@ -12911,6 +12923,80 @@ fn table_task_checkbox_edit_at(cell: &str, offset: usize) -> Option<(usize, &'st
 #[cfg(test)]
 mod tests {
     use crate::markdown;
+
+    fn test_line_display_info(row_heights: &[f32], extra_height: f32) -> super::LineDisplayInfo {
+        let mut wrapped_line = gpui::WrappedLine::default();
+        let layout: &mut std::sync::Arc<gpui::WrappedLineLayout> = &mut wrapped_line;
+        std::sync::Arc::make_mut(layout).wrap_boundaries = (1..row_heights.len())
+            .map(|glyph_ix| gpui::WrapBoundary {
+                run_ix: 0,
+                glyph_ix,
+            })
+            .collect();
+        wrapped_line.set_row_heights(row_heights.iter().copied().map(gpui::px).collect());
+        super::LineDisplayInfo {
+            display_text: String::new(),
+            display_to_buffer: Vec::new(),
+            buffer_to_display: Vec::new(),
+            base_runs: Vec::new(),
+            font_size: 16.0,
+            line_height: 24.0,
+            visual_line_count: row_heights.len(),
+            wrapped_line,
+            wrap_width_px: None,
+            unwrapped_width_px: 0.0,
+            wrap_boundary_upstream_xs: Default::default(),
+            extra_height,
+            indent_px: 0.0,
+            content_x: 0.0,
+            horizontal_clip_right_x: None,
+            selection_padding_left_px: 0.0,
+        }
+    }
+
+    #[test]
+    fn line_display_info_totals_measured_row_heights_and_extra_height() {
+        let mut info = test_line_display_info(&[24.0, 60.0, 24.0], 12.0);
+        assert_eq!(info.text_height(), 108.0);
+        assert_eq!(info.total_height(), 120.0);
+        // The row count and base height stay unchanged, but the measured total changes.
+        info.wrapped_line
+            .set_row_heights(vec![gpui::px(60.0), gpui::px(40.0), gpui::px(24.0)]);
+        assert_eq!(info.text_height(), 124.0);
+        assert_eq!(info.total_height(), 136.0);
+    }
+
+    #[test]
+    fn line_display_info_redistributed_row_heights_keep_totals_but_change_row_tops() {
+        let mut info = test_line_display_info(&[60.0, 24.0, 24.0], 12.0);
+        assert_eq!(info.text_height(), 108.0);
+        assert_eq!(info.total_height(), 120.0);
+        assert_eq!(info.wrapped_line.row_top(1, gpui::px(24.0)), gpui::px(60.0));
+        assert_eq!(info.wrapped_line.row_top(2, gpui::px(24.0)), gpui::px(84.0));
+
+        info.wrapped_line
+            .set_row_heights(vec![gpui::px(24.0), gpui::px(60.0), gpui::px(24.0)]);
+        assert_eq!(info.text_height(), 108.0);
+        assert_eq!(info.total_height(), 120.0);
+        assert_eq!(info.wrapped_line.row_top(1, gpui::px(24.0)), gpui::px(24.0));
+        assert_eq!(info.wrapped_line.row_top(2, gpui::px(24.0)), gpui::px(84.0));
+    }
+
+    #[test]
+    fn line_display_info_uses_uniform_fallback_without_row_metadata() {
+        let mut info = test_line_display_info(&[24.0, 60.0, 24.0], 12.0);
+        info.wrapped_line.set_row_heights(Vec::new());
+        assert_eq!(info.text_height(), 72.0);
+        assert_eq!(info.total_height(), 84.0);
+    }
+
+    #[test]
+    fn line_display_info_hidden_text_does_not_contribute_height() {
+        let mut info = test_line_display_info(&[60.0], 12.0);
+        info.visual_line_count = 0;
+        assert_eq!(info.text_height(), 0.0);
+        assert_eq!(info.total_height(), 12.0);
+    }
 
     #[test]
     fn table_task_click_targets_only_the_clicked_cell() {

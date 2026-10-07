@@ -4351,7 +4351,7 @@ dependencies = [
 
 [[package]]
 name = "moeka"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4363,6 +4363,7 @@ dependencies = [
  "emojis",
  "gpui",
  "image",
+ "libc",
  "mathjax-svg-rs",
  "merman",
  "notify",

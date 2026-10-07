@@ -10,6 +10,64 @@ use crate::markdown::{BlockType, TableLineInfo};
 use super::input::{InlineLineDisplayInfo, ime_debug_enabled, ime_debug_log};
 use super::*;
 
+fn input_bounds_for_wrapped_position(
+    wrapped: &WrappedLine,
+    position: Point<Pixels>,
+    font_size: f32,
+    line_height: f32,
+    content_x: f32,
+    text_top_y: f32,
+) -> Bounds<Pixels> {
+    let row = wrapped.row_for_y(position.y, px(line_height));
+    Bounds::new(
+        point(px(content_x) + position.x, px(text_top_y) + position.y),
+        size(
+            px(font_size * 0.6),
+            wrapped.row_height(row, px(line_height)),
+        ),
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn ime_bounds_use_actual_row_height_after_tall_wrapped_rows() {
+    let wrapped = super::input_wrap::test_wrapped_line(&[24.0, 60.0, 24.0]);
+    let tall = input_bounds_for_wrapped_position(
+        &wrapped,
+        point(px(10.0), px(24.0)),
+        20.0,
+        24.0,
+        100.0,
+        200.0,
+    );
+    assert_eq!(tall.origin, point(px(110.0), px(224.0)));
+    assert_eq!(tall.size, size(px(12.0), px(60.0)));
+    let following = input_bounds_for_wrapped_position(
+        &wrapped,
+        point(px(10.0), px(84.0)),
+        20.0,
+        24.0,
+        100.0,
+        200.0,
+    );
+    assert_eq!(following.origin.y, px(284.0));
+    assert_eq!(following.size.height, px(24.0));
+    let uniform = super::input_wrap::test_wrapped_line(&[]);
+    assert_eq!(
+        input_bounds_for_wrapped_position(
+            &uniform,
+            point(px(0.0), px(48.0)),
+            20.0,
+            24.0,
+            100.0,
+            200.0,
+        )
+        .size
+        .height,
+        px(24.0)
+    );
+}
+
 fn uses_table_ime_geometry(active_tab_is_diff: bool, table_info: &TableLineInfo) -> bool {
     !active_tab_is_diff && !table_info.is_separator && !table_info.is_front_matter
 }
@@ -57,18 +115,26 @@ impl EditorView {
             affinity,
         )
         .unwrap_or_default();
-        let x = content_x + f32::from(pos.x);
-        let y = text_top_y + f32::from(pos.y);
+        let bounds = input_bounds_for_wrapped_position(
+            wrapped_line,
+            pos,
+            font_size,
+            line_height,
+            content_x,
+            text_top_y,
+        );
         if ime_debug_enabled() {
             ime_debug_log(format!(
                 "bounds_for_range normal line={} col={} anchor_utf8={} -> x={} y={} h={}",
-                line, col, anchor_offset, x, y, line_height
+                line,
+                col,
+                anchor_offset,
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.height)
             ));
         }
-        Bounds::new(
-            point(px(x), px(y)),
-            size(px(font_size * 0.6), px(line_height)),
-        )
+        bounds
     }
 }
 
@@ -638,95 +704,23 @@ impl EntityInputHandler for EditorView {
             .and_then(|decoration| decoration.table_info.as_ref())
             && uses_table_ime_geometry(self.active_tab_is_diff(), table_info)
         {
-            let table_start_line = table_info.table_start_line;
-            let visual_row = self.table_visual_row_for_source_line(table_start_line, line)?;
-            let cell_col = table_info
-                .cell_ranges
-                .iter()
-                .position(|cell_range| col >= cell_range.start && col <= cell_range.end)
-                .or_else(|| {
-                    table_info
-                        .cell_ranges
-                        .iter()
-                        .enumerate()
-                        .find(|(_, cell_range)| col == cell_range.end)
-                        .map(|(index, _)| index)
-                })?;
-            let cell_bounds = self
-                .table_click_areas
-                .iter()
-                .find(|(_, tsl, vr, c)| {
-                    *tsl == table_start_line && *vr == visual_row && *c == cell_col
-                })
-                .map(|(bounds, _, _, _)| *bounds)?;
-
-            let padding_x = self.scaled(self.styles.table.table_cell_padding_px);
-            let padding_y = self.scaled(self.styles.table.table_cell_padding_px) * 0.6;
-            let inner_width = (f32::from(cell_bounds.size.width) - padding_x * 2.0)
-                .max(self.base_font_size() * 0.5);
-            let info = self.table_cell_display_info(window, line, cell_col, inner_width)?;
-            let cell_offset =
-                anchor_offset.saturating_sub(self.buffer.line_start(line) + info.cell_range.start);
-            let disp_col = if cell_offset >= info.buffer_to_display.len() {
-                info.display_text.len()
-            } else {
-                helpers::buffer_to_display_offset(&info.buffer_to_display, cell_offset)
-            };
-            let hard_line_index = info
-                .hard_line_ranges
-                .iter()
-                .position(|range| disp_col <= range.end)
-                .unwrap_or_else(|| info.hard_line_ranges.len().saturating_sub(1));
-            let hard_line_range = info.hard_line_ranges.get(hard_line_index)?;
-            let wrapped = info.wrapped_lines.get(hard_line_index)?;
-            let local_display_col = disp_col
-                .saturating_sub(hard_line_range.start)
-                .min(hard_line_range.len());
-            let line_height = info.line_height;
-            let pos = wrapped
-                .position_for_index(local_display_col, px(line_height))
-                .unwrap_or_default();
-            let preceding_height = info
-                .wrapped_lines
-                .iter()
-                .zip(&info.hard_line_ranges)
-                .take(hard_line_index)
-                .map(|(line, range)| {
-                    (helpers::wrap_boundary_byte_indices(
-                        line,
-                        info.display_text.get(range.clone()).unwrap_or(""),
-                    )
-                    .len()
-                        + 1) as f32
-                        * line_height
-                })
-                .sum::<f32>();
-            let content_offset = helpers::table_cell_content_offset(
-                info.alignment,
-                inner_width,
-                f32::from(wrapped.unwrapped_layout.width),
-            );
-            let x = f32::from(cell_bounds.origin.x) + padding_x + content_offset + f32::from(pos.x);
-            let y =
-                f32::from(cell_bounds.origin.y) + padding_y + preceding_height + f32::from(pos.y);
+            let bounds = self.table_row_bounds_for_offset(
+                window,
+                anchor_offset,
+                self.wrap_boundary_affinity_for_offset(anchor_offset),
+            )?;
             if ime_debug_enabled() {
                 ime_debug_log(format!(
-                    "bounds_for_range table line={} col={} cell_col={} visual_row={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",
+                    "bounds_for_range table line={} col={} queried_utf8={:?} anchor_utf8={} -> x={} y={} h={}",
                     line,
                     col,
-                    cell_col,
-                    visual_row,
                     queried_range,
                     anchor_offset,
-                    x,
-                    y,
-                    line_height
+                    f32::from(bounds.origin.x),
+                    f32::from(bounds.origin.y),
+                    f32::from(bounds.size.height)
                 ));
             }
-            let bounds = Bounds::new(
-                point(px(x), px(y)),
-                size(px(self.base_font_size() * 0.6), px(line_height)),
-            );
             self.pending_input_bounds = None;
             self.last_stable_input_bounds = Some(bounds);
             return Some(bounds);
@@ -803,7 +797,7 @@ impl EntityInputHandler for EditorView {
     fn character_index_for_point(
         &mut self,
         point: Point<Pixels>,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         if let Some((target_point, target_offset)) = self.last_mouse_down_target.take() {
@@ -826,7 +820,15 @@ impl EntityInputHandler for EditorView {
             return Some(utf16_offset);
         }
 
-        let utf8_offset = self.offset_for_position(point);
+        let table_offset = self
+            .table_click_areas
+            .iter()
+            .find(|(bounds, ..)| bounds.contains(&point))
+            .and_then(|(bounds, table, row, column)| {
+                self.table_cell_hit_for_position(window, *table, *row, *column, bounds, point)
+            })
+            .map(|(offset, _)| offset);
+        let utf8_offset = table_offset.unwrap_or_else(|| self.offset_for_position(point));
         let utf16_offset = self.offset_to_utf16(utf8_offset);
         if ime_debug_enabled() {
             ime_debug_log(format!(
