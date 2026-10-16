@@ -1789,13 +1789,21 @@ impl EditorView {
                                 .and_then(|index| this.tabs.get(index))
                                 .and_then(|tab| tab.path.clone())
                             {
-                                if let Err(error) = crate::platform::shell::open_path(&path) {
-                                    let message = format!(
-                                        "{}: {error}",
-                                        this.t(crate::i18n::TextKey::OpenFailed)
-                                    );
-                                    this.notify_error(message, cx);
-                                }
+                                cx.spawn(async move |this, cx| {
+                                    if let Err(error) =
+                                        crate::platform::shell::open_path_async(path.clone()).await
+                                    {
+                                        let _ = this.update(cx, |this, cx| {
+                                            let message = format!(
+                                                "{} — {}: {error}",
+                                                this.t(crate::i18n::TextKey::OpenFailed),
+                                                path.display(),
+                                            );
+                                            this.notify_error(message, cx);
+                                        });
+                                    }
+                                })
+                                .detach();
                             }
                             cx.notify();
                         }),

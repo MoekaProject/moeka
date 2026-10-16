@@ -109,6 +109,18 @@ pub(crate) struct ChatTerminalSession {
     warn_on_close: bool,
 }
 
+// A timed-out launch can finish after its receiver is gone. In that case the
+// worker drops this guard and tears down the late PTY instead of orphaning it.
+struct PendingTerminalLaunch(Option<ChatTerminalSession>);
+
+impl Drop for PendingTerminalLaunch {
+    fn drop(&mut self) {
+        if let Some(mut session) = self.0.take() {
+            session.stop();
+        }
+    }
+}
+
 /// Per-terminal-tab runtime state, keyed by [`OpenTab::id`] in
 /// `EditorView::terminal_tab_states`. Lives outside `OpenTab` because the PTY
 /// session is not cloneable, and outside the per-pane swap state so terminal
@@ -134,6 +146,8 @@ pub(crate) struct TerminalTabState {
     path_links: Vec<TerminalPathLink>,
     hovered_path_link: Option<TerminalPathLink>,
     path_links_generation: u64,
+    launch_in_progress: bool,
+    launch_path: Option<OsString>,
 }
 
 impl TerminalTabState {
@@ -156,6 +170,8 @@ impl TerminalTabState {
             path_links: Vec::new(),
             hovered_path_link: None,
             path_links_generation: 0,
+            launch_in_progress: false,
+            launch_path: None,
         }
     }
 
@@ -407,10 +423,10 @@ fn resolve_terminal_markdown_path(
     } else {
         cwd.join(path)
     };
-    if !path.is_file() || !super::is_markdown_file(&path) {
+    if !super::is_markdown_file(&path) {
         return None;
     }
-    Some((std::fs::canonicalize(&path).unwrap_or(path), line, column))
+    Some((path, line, column))
 }
 
 fn terminal_columns_for_byte_range(
@@ -1832,12 +1848,28 @@ fn agent_cli_command_exists(agent_cli: ChatAgentCli) -> bool {
 static LOGIN_SHELL_PATH: std::sync::OnceLock<Option<OsString>> = std::sync::OnceLock::new();
 static LOGIN_SHELL_PATH_PREFETCH: std::sync::Once = std::sync::Once::new();
 
-pub(crate) fn prefetch_login_shell_path() {
+pub(crate) fn prefetch_login_shell_path(cx: &mut Context<EditorView>) {
     LOGIN_SHELL_PATH_PREFETCH.call_once(|| {
-        std::thread::spawn(|| {
-            let value = crate::platform::terminal::login_shell_path();
-            let _ = LOGIN_SHELL_PATH.set(value);
-        });
+        cx.spawn(async move |this, cx| {
+            let result = crate::platform::fs_task::run_value(
+                "read login shell PATH",
+                PathBuf::from(chat_terminal_default_shell_program()),
+                crate::platform::terminal::login_shell_path,
+            )
+            .await;
+            match result {
+                Ok(value) => {
+                    let _ = LOGIN_SHELL_PATH.set(value);
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                }
+                Err(error) => {
+                    let _ = LOGIN_SHELL_PATH.set(None);
+                    this.update(cx, |editor, cx| editor.notify_error(error.to_string(), cx))
+                        .ok();
+                }
+            }
+        })
+        .detach();
     });
 }
 
@@ -2528,14 +2560,78 @@ impl EditorView {
     }
 
     fn open_terminal_path_link(&mut self, link: TerminalPathLink, cx: &mut Context<Self>) {
-        self.open_path_in_permanent_tab(link.path, true, cx);
-        let Some(line) = link.line else {
-            return;
-        };
-        let offset = terminal_link_offset(&self.buffer, line, link.column.unwrap_or(1));
-        self.clear_extra_cursors();
-        self.cursor.move_to(offset, &self.buffer);
-        self.reveal_line_in_current_buffer(line.saturating_sub(1), cx);
+        let pane_id = self.current_pane_id();
+        self.preview_open_epoch = self.preview_open_epoch.wrapping_add(1);
+        let validation_epoch = self.preview_open_epoch;
+        cx.spawn(async move |this, cx| {
+            let path = link.path.clone();
+            let result =
+                crate::platform::fs_task::run("validate terminal link", path.clone(), move || {
+                    if !std::fs::metadata(&path)?.is_file() {
+                        return Err(std::io::Error::other("terminal link is not a file"));
+                    }
+                    std::fs::canonicalize(path)
+                })
+                .await;
+            let Some((path, open_epoch, opened_pane_id)) = this
+                .update(cx, |editor, cx| {
+                    if editor.focused_pane_id != pane_id
+                        || editor.preview_open_epoch != validation_epoch
+                    {
+                        return None;
+                    }
+                    match result {
+                        Ok(path) => {
+                            editor.open_path_in_permanent_tab(path.clone(), true, cx);
+                            Some((path, editor.preview_open_epoch, editor.current_pane_id()))
+                        }
+                        Err(error) => {
+                            editor.notify_error(error.to_string(), cx);
+                            None
+                        }
+                    }
+                })
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
+            let Some(line) = link.line else { return };
+            // Opening a new file is asynchronous. Never apply its location to
+            // the terminal's previous buffer, or to a later navigation request.
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(5) {
+                let pending = this
+                    .update(cx, |editor, cx| {
+                        if editor.focused_pane_id != opened_pane_id
+                            || editor.preview_open_epoch != open_epoch
+                        {
+                            return false;
+                        }
+                        if editor.current_file_path.as_ref() != Some(&path)
+                            || editor.active_tab_is_diff()
+                            || !editor.active_tab_supports_text_buffer()
+                        {
+                            return true;
+                        }
+                        let offset =
+                            terminal_link_offset(&editor.buffer, line, link.column.unwrap_or(1));
+                        editor.clear_extra_cursors();
+                        editor.cursor.move_to(offset, &editor.buffer);
+                        editor.reveal_line_in_current_buffer(line.saturating_sub(1), cx);
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(false);
+                if !pending {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+            }
+        })
+        .detach();
     }
 
     fn chat_terminal_cursor_display_row(snapshot: &ChatTerminalSnapshot) -> Option<usize> {
@@ -2651,40 +2747,6 @@ impl EditorView {
         }
     }
 
-    fn build_chat_terminal_session(&self, agent_cli: ChatAgentCli) -> ChatTerminalSession {
-        let Some(cwd) = self.chat_panel_working_directory() else {
-            return ChatTerminalSession::unavailable(
-                "No workspace root available for chat terminal.",
-            );
-        };
-
-        if !agent_cli_command_exists(agent_cli) {
-            return ChatTerminalSession::unavailable(format!(
-                "{} command not found: {}",
-                agent_cli.label(),
-                agent_cli.command_name()
-            ));
-        }
-
-        let configured_command = self.app_settings.terminal_command_args.trim();
-        let custom_command_line = (agent_cli == self.app_settings.terminal_launch_cli()
-            && !configured_command.is_empty()
-            && configured_command != agent_cli.command_name())
-        .then_some(configured_command);
-        match ChatTerminalSession::launch(
-            cwd,
-            agent_cli,
-            custom_command_line,
-            self.app_settings.terminal_cursor_shape(),
-        ) {
-            Ok(mut session) => {
-                session.status = ChatTerminalStatus::Running;
-                session
-            }
-            Err(error) => ChatTerminalSession::unavailable(error.to_string()),
-        }
-    }
-
     fn missing_agent_cli_install_target(
         &self,
         tab_id: &str,
@@ -2694,10 +2756,9 @@ impl EditorView {
             .find(|tab| tab.id == tab_id)
             .and_then(|tab| tab.kind.terminal_agent())?;
         let session = self.terminal_session(tab_id)?;
-        if !matches!(session.status, ChatTerminalStatus::Unavailable(_)) {
-            return None;
-        }
-        if agent_cli_command_exists(agent_cli) {
+        if !matches!(&session.status, ChatTerminalStatus::Unavailable(message)
+            if message.contains("command not found"))
+        {
             return None;
         }
         Some((agent_cli, agent_cli.install_url()?))
@@ -2961,11 +3022,7 @@ impl EditorView {
                 (!self.sidebar_root.as_os_str().is_empty()).then(|| self.sidebar_root.clone())
             })
             // Without a workspace, behave like a regular terminal app.
-            .or_else(|| {
-                env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .filter(|path| path.is_dir())
-            })
+            .or_else(|| env::var_os("HOME").map(PathBuf::from))
     }
 
     /// Lazily spawns the PTY session for a terminal tab (no-op when already
@@ -2982,33 +3039,104 @@ impl EditorView {
         let Some(state) = self.terminal_tab_states.get(tab_id) else {
             return;
         };
+        if state.launch_in_progress {
+            return;
+        }
+        let paths = chat_terminal_path_env();
         if let Some(session) = &state.session {
-            // Retry once the login-shell PATH prefetch makes a previously
-            // "missing" CLI resolvable.
-            let missing_command_retry = matches!(
-                &session.status,
-                ChatTerminalStatus::Unavailable(message) if message.contains("command not found")
-            ) && agent_cli_command_exists(agent_cli);
-            if !missing_command_retry {
+            // A changed prefetched PATH permits a retry without probing it on render.
+            let retry = matches!(&session.status, ChatTerminalStatus::Unavailable(message)
+                if message.contains("command not found"))
+                && state.launch_path.as_ref() != Some(&paths);
+            if !retry {
                 return;
             }
         }
-
-        let session = self.build_chat_terminal_session(agent_cli);
-        let should_poll = matches!(session.status, ChatTerminalStatus::Running);
-        let initial_title = session.dynamic_title.clone();
+        let Some(cwd) = self.chat_panel_working_directory() else {
+            if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
+                state.session = Some(ChatTerminalSession::unavailable(
+                    "No workspace root available for chat terminal.",
+                ));
+            }
+            return;
+        };
+        let configured_command = self.app_settings.terminal_command_args.trim();
+        let custom_command_line = (agent_cli == self.app_settings.terminal_launch_cli()
+            && !configured_command.is_empty()
+            && configured_command != agent_cli.command_name())
+        .then(|| configured_command.to_string());
+        let cursor_shape = self.app_settings.terminal_cursor_shape();
+        let mut launching = ChatTerminalSession::unavailable("");
+        launching.status = ChatTerminalStatus::Launching;
         if let Some(state) = self.terminal_tab_states.get_mut(tab_id) {
-            state.session = Some(session);
+            state.launch_path = Some(paths);
+            state.launch_in_progress = true;
+            state.session = Some(launching);
         }
-        if let Some(title) = initial_title
-            && let Some(tab) = self.all_tabs_mut().find(|tab| tab.id == tab_id)
-        {
-            tab.title = title;
-        }
-        if should_poll {
-            self.start_chat_terminal_poll(tab_id.to_string(), cx);
-        }
-        self.resize_chat_terminal(tab_id);
+        let tab_id = tab_id.to_string();
+        let task_tab_id = tab_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result =
+                crate::platform::fs_task::run_anyhow("launch terminal", cwd.clone(), move || {
+                    anyhow::ensure!(
+                        agent_cli_command_exists(agent_cli),
+                        "{} command not found: {}",
+                        agent_cli.label(),
+                        agent_cli.command_name()
+                    );
+                    let mut session = ChatTerminalSession::launch(
+                        cwd,
+                        agent_cli,
+                        custom_command_line.as_deref(),
+                        cursor_shape,
+                    )?;
+                    session.status = ChatTerminalStatus::Running;
+                    Ok(PendingTerminalLaunch(Some(session)))
+                })
+                .await
+                .map(|mut launch| launch.0.take().expect("successful terminal launch"));
+            this.update(cx, |editor, cx| {
+                let Some(state) = editor.terminal_tab_states.get_mut(&task_tab_id) else {
+                    // If the tab closed during launch, stop the late session off UI.
+                    if let Ok(mut session) = result {
+                        cx.background_executor()
+                            .spawn(async move {
+                                let _ = crate::platform::fs_task::run_value(
+                                    "stop closed terminal",
+                                    PathBuf::new(),
+                                    move || session.stop(),
+                                )
+                                .await;
+                            })
+                            .detach();
+                    }
+                    return;
+                };
+                state.launch_in_progress = false;
+                let session = match result {
+                    Ok(session) => session,
+                    Err(error) => {
+                        let message = error.to_string();
+                        state.session = Some(ChatTerminalSession::unavailable(message.clone()));
+                        editor.notify_error(message, cx);
+                        cx.notify();
+                        return;
+                    }
+                };
+                let initial_title = session.dynamic_title.clone();
+                state.session = Some(session);
+                if let Some(title) = initial_title
+                    && let Some(tab) = editor.all_tabs_mut().find(|tab| tab.id == task_tab_id)
+                {
+                    tab.title = title;
+                }
+                editor.start_chat_terminal_poll(task_tab_id.clone(), cx);
+                editor.resize_chat_terminal(&task_tab_id);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -4732,21 +4860,20 @@ fn chat_reference_path(path: &std::path::Path, workspace_root: Option<&std::path
         };
     }
 
-    let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|current| current.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
-        }
-    });
-    absolute.to_string_lossy().into_owned()
+    // Paths supplied by workspace/tab state are already absolute. Preserve
+    // their spelling instead of touching a possibly disconnected mount.
+    path.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_session_can_be_launched_on_the_filesystem_workers() {
+        fn assert_send<T: Send>() {}
+        assert_send::<ChatTerminalSession>();
+    }
 
     #[test]
     fn terminal_poll_interval_backs_off_with_a_small_cap() {
@@ -4902,13 +5029,10 @@ mod tests {
 
     #[test]
     fn terminal_markdown_links_resolve_relative_and_quoted_paths() {
-        let directory = tempfile::tempdir().unwrap();
-        let docs = directory.path().join("docs");
-        std::fs::create_dir(&docs).unwrap();
+        let directory = PathBuf::from("unavailable-terminal-mount");
+        let docs = directory.join("docs");
         let note = docs.join("note.md");
         let spaced = docs.join("a b.mdx");
-        std::fs::write(&note, "# Note").unwrap();
-        std::fs::write(&spaced, "# Spaced").unwrap();
 
         let line = "open docs/note.md:12:3 and \"docs/a b.mdx\" but missing.md";
         let candidates = terminal_path_candidate_spans(line)
@@ -4919,39 +5043,41 @@ mod tests {
             candidates.contains(&"docs/a b.mdx"),
             "candidates: {candidates:?}"
         );
-        assert!(resolve_terminal_markdown_path("docs/a b.mdx", directory.path()).is_some());
+        assert!(resolve_terminal_markdown_path("docs/a b.mdx", &directory).is_some());
         let snapshot = snapshot_with_line(line);
         let rows = EditorView::chat_terminal_rows(&snapshot);
         let (rebuilt, _) = terminal_row_text_and_columns(&rows[0]);
         assert_eq!(rebuilt, line);
-        let links = detect_terminal_markdown_links(&snapshot, directory.path());
+        let links = detect_terminal_markdown_links(&snapshot, &directory);
 
-        assert_eq!(links.len(), 2, "detected links: {links:?}");
-        assert_eq!(links[0].path, note.canonicalize().unwrap());
+        assert_eq!(
+            links.len(),
+            3,
+            "lexical links include missing files: {links:?}"
+        );
+        assert_eq!(links[0].path, note);
         assert_eq!((links[0].line, links[0].column), (Some(12), Some(3)));
-        assert_eq!(links[1].path, spaced.canonicalize().unwrap());
+        assert_eq!(links[1].path, spaced);
         assert_eq!((links[1].line, links[1].column), (None, None));
+        assert_eq!(links[2].path, directory.join("missing.md"));
     }
 
     #[test]
     fn terminal_markdown_links_allow_escaped_quotes_inside_quotes() {
-        let directory = tempfile::tempdir().unwrap();
-        let note = directory.path().join("a\"b.md");
-        std::fs::write(&note, "# Note").unwrap();
+        let directory = PathBuf::from("unavailable-terminal-mount");
+        let note = directory.join("a\"b.md");
         let line = r#"open "a\"b.md""#;
         let snapshot = snapshot_with_line(line);
 
-        let links = detect_terminal_markdown_links(&snapshot, directory.path());
+        let links = detect_terminal_markdown_links(&snapshot, &directory);
 
         assert_eq!(links.len(), 1, "detected links: {links:?}");
-        assert_eq!(links[0].path, note.canonicalize().unwrap());
+        assert_eq!(links[0].path, note);
     }
 
     #[test]
     fn terminal_markdown_link_columns_account_for_wide_characters() {
-        let directory = tempfile::tempdir().unwrap();
-        let note = directory.path().join("note.md");
-        std::fs::write(&note, "# Note").unwrap();
+        let directory = PathBuf::from("unavailable-terminal-mount");
 
         let mut wide = Cell::default();
         wide.c = '你';
@@ -4983,10 +5109,28 @@ mod tests {
             history_size: 0,
         };
 
-        let links = detect_terminal_markdown_links(&snapshot, directory.path());
+        let links = detect_terminal_markdown_links(&snapshot, &directory);
 
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].columns, 3..10);
+    }
+
+    #[test]
+    fn terminal_link_detection_is_lexical_and_only_accepts_markdown_extensions() {
+        let cwd = Path::new("unavailable-terminal-mount");
+        assert_eq!(
+            resolve_terminal_markdown_path("missing.md:7:2", cwd),
+            Some((cwd.join("missing.md"), Some(7), Some(2)))
+        );
+        assert!(resolve_terminal_markdown_path("missing.png", cwd).is_none());
+        assert!(resolve_terminal_markdown_path("missing.rs:7", cwd).is_none());
+    }
+
+    #[test]
+    fn chat_references_preserve_unavailable_absolute_paths_without_canonicalizing() {
+        let root = std::env::temp_dir().join("unavailable-terminal-mount");
+        let note = root.join("note.md");
+        assert_eq!(chat_reference_path(&note, None), note.to_string_lossy());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::markdown::LineDecoration;
+use crate::markdown::{LineDecoration, TableLineInfo};
 
 use super::*;
 
@@ -32,7 +32,37 @@ pub(super) fn visible_table_line_indices(
     Some(visible_lines)
 }
 
-fn table_boundary_offsets(
+/// Share the renderer's source ownership, including real list indentation and
+/// trailing whitespace. Formatting padding and delimiter bytes stay outside.
+pub(super) fn rendered_cell_ranges(info: &TableLineInfo, source: &str) -> Vec<Range<usize>> {
+    (0..info.cell_ranges.len())
+        .map(|column| super::table_cell_render::content_with_range(info, source, column).1)
+        .collect()
+}
+
+fn table_cell_at_offset(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    offset: usize,
+) -> Option<(usize, usize, usize)> {
+    let range = super::table_cell_edit::cell_range_for_selection(
+        buffer,
+        decorations,
+        true,
+        &(offset..offset),
+    )?;
+    let (line, _) = buffer.offset_to_line_col(offset);
+    let info = decorations.get(line)?.table_info.as_ref()?;
+    let line_start = buffer.line_start(line);
+    let column = rendered_cell_ranges(info, buffer.line_content(line))
+        .iter()
+        .position(|cell| {
+            line_start + cell.start == range.start && line_start + cell.end == range.end
+        })?;
+    Some((info.table_start_line, line, column))
+}
+
+pub(super) fn table_boundary_offsets(
     buffer: &Buffer,
     decorations: &[LineDecoration],
     boundary: TableBoundaryCaret,
@@ -66,11 +96,13 @@ fn table_boundary_for_cursor(
     if table_info.is_front_matter {
         return None;
     }
-    let col = cursor_offset.saturating_sub(buffer.line_start(line));
-    if table_info
-        .cell_ranges
-        .iter()
-        .any(|range| (range.start..=range.end).contains(&col))
+    if super::table_cell_edit::cell_range_for_selection(
+        buffer,
+        decorations,
+        true,
+        &(cursor_offset..cursor_offset),
+    )
+    .is_some()
     {
         return None;
     }
@@ -88,6 +120,26 @@ fn table_boundary_for_cursor(
         });
     }
     None
+}
+
+fn table_boundary_after_reparse(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    cursor: Cursor,
+    has_extra_cursors: bool,
+    previous: Option<TableBoundaryCaret>,
+) -> Option<TableBoundaryCaret> {
+    if cursor.has_selection() || has_extra_cursors {
+        return None;
+    }
+    // An explicitly chosen boundary can share its source offset with a cell's
+    // end. Retain that intent only while it still points at the same table edge.
+    previous
+        .filter(|boundary| {
+            table_boundary_offsets(buffer, decorations, *boundary)
+                .is_some_and(|(offset, _)| offset == cursor.offset)
+        })
+        .or_else(|| table_boundary_for_cursor(buffer, decorations, cursor.offset))
 }
 
 impl EditorView {
@@ -117,7 +169,8 @@ impl EditorView {
     ) -> Option<usize> {
         let (_, source_line, column) = self.table_cell_for_offset(offset)?;
         let table_info = self.decorations.get(source_line)?.table_info.as_ref()?;
-        let local_range = table_info.cell_ranges.get(column)?;
+        let ranges = rendered_cell_ranges(table_info, self.buffer.line_content(source_line));
+        let local_range = ranges.get(column)?;
         let line_start = self.buffer.line_start(source_line);
         let cell_range = line_start + local_range.start..line_start + local_range.end;
         if raw_target >= cell_range.start && raw_target <= cell_range.end {
@@ -133,12 +186,13 @@ impl EditorView {
         )
     }
     pub(crate) fn sync_table_boundary_caret_after_reparse(&mut self) {
-        if self.cursor.has_selection() || self.has_extra_cursors() {
-            self.table_boundary_caret = None;
-            return;
-        }
-        self.table_boundary_caret =
-            table_boundary_for_cursor(&self.buffer, &self.decorations, self.cursor.offset);
+        self.table_boundary_caret = table_boundary_after_reparse(
+            &self.buffer,
+            &self.decorations,
+            self.cursor,
+            self.has_extra_cursors(),
+            self.table_boundary_caret,
+        );
     }
 
     fn table_boundary_offset(&self, boundary: TableBoundaryCaret) -> Option<usize> {
@@ -171,11 +225,8 @@ impl EditorView {
         else {
             return false;
         };
-        let edge_range = if first {
-            table_info.cell_ranges.first()
-        } else {
-            table_info.cell_ranges.last()
-        };
+        let ranges = rendered_cell_ranges(table_info, self.buffer.line_content(line));
+        let edge_range = if first { ranges.first() } else { ranges.last() };
         let Some(range) = edge_range else {
             return false;
         };
@@ -197,7 +248,11 @@ impl EditorView {
             .decorations
             .get(source_line)
             .and_then(|decoration| decoration.table_info.as_ref())
-            .and_then(|table_info| table_info.cell_ranges.get(column))
+            .and_then(|table_info| {
+                rendered_cell_ranges(table_info, self.buffer.line_content(source_line))
+                    .get(column)
+                    .cloned()
+            })
         else {
             return false;
         };
@@ -322,11 +377,11 @@ impl EditorView {
             let Some(last_column) = target_info.cell_ranges.len().checked_sub(1) else {
                 return false;
             };
-            let cell_len = target_info.cell_ranges[last_column].end
-                - target_info.cell_ranges[last_column].start;
+            let ranges = rendered_cell_ranges(target_info, self.buffer.line_content(target_line));
+            let cell_len = ranges[last_column].len();
             return self.move_to_table_cell_offset(target_line, last_column, cell_len);
         }
-        let ranges = table_info.cell_ranges.clone();
+        let ranges = rendered_cell_ranges(table_info, self.buffer.line_content(line));
         let col = self
             .cursor
             .offset
@@ -391,8 +446,9 @@ impl EditorView {
             let Some(previous_info) = self.decorations[previous_line].table_info.as_ref() else {
                 return false;
             };
-            let cell_len = previous_info.cell_ranges[last_column].end
-                - previous_info.cell_ranges[last_column].start;
+            let ranges =
+                rendered_cell_ranges(previous_info, self.buffer.line_content(previous_line));
+            let cell_len = ranges[last_column].len();
             return self.move_to_table_cell_offset(previous_line, last_column, cell_len);
         }
 
@@ -454,13 +510,12 @@ impl EditorView {
             .cursor
             .offset
             .saturating_sub(self.buffer.line_start(line));
-        let Some(column) = table_info
-            .cell_ranges
+        let ranges = rendered_cell_ranges(table_info, self.buffer.line_content(line));
+        let Some(column) = ranges
             .iter()
             .position(|range| (range.start..=range.end).contains(&col))
             .or_else(|| {
-                table_info
-                    .cell_ranges
+                ranges
                     .iter()
                     .enumerate()
                     .min_by_key(|(_, range)| col.clamp(range.start, range.end).abs_diff(col))
@@ -596,28 +651,16 @@ impl EditorView {
     }
 
     pub(crate) fn table_cell_for_offset(&self, offset: usize) -> Option<(usize, usize, usize)> {
-        let (line, col) = self.buffer.offset_to_line_col(offset);
-        let table_info = self.decorations.get(line)?.table_info.as_ref()?;
-        if table_info.is_separator || table_info.is_front_matter {
-            return None;
-        }
-        let col = col.min(self.buffer.line_content(line).len());
-        let index = table_info
-            .cell_ranges
-            .iter()
-            .position(|range| (range.start..=range.end).contains(&col))?;
-        Some((table_info.table_start_line, line, index))
+        table_cell_at_offset(&self.buffer, &self.decorations, offset)
     }
 
     pub(crate) fn table_cursor_cell_range(&self) -> Option<std::ops::Range<usize>> {
-        let (_, line, column) = self.table_cursor_cell()?;
-        let range = self.decorations[line]
-            .table_info
-            .as_ref()?
-            .cell_ranges
-            .get(column)?;
-        let line_start = self.buffer.line_start(line);
-        Some(line_start + range.start..line_start + range.end)
+        super::table_cell_edit::cell_range_for_selection(
+            &self.buffer,
+            &self.decorations,
+            true,
+            &(self.cursor.offset..self.cursor.offset),
+        )
     }
 
     pub(crate) fn table_visible_horizontal_target(
@@ -635,44 +678,29 @@ impl EditorView {
         let row = rows.iter().position(|candidate| *candidate == line)?;
         let line_start = self.buffer.line_start(line);
 
-        if let Some(cell) = table_info
-            .cell_ranges
+        let ranges = rendered_cell_ranges(table_info, self.buffer.line_content(line));
+        if let Some(cell) = ranges
             .iter()
             .position(|range| (range.start..=range.end).contains(&column))
         {
-            let range = &table_info.cell_ranges[cell];
+            let range = &ranges[cell];
             let absolute_range = line_start + range.start..line_start + range.end;
-            if forward && offset < absolute_range.end {
-                if let Some(tag) =
-                    super::adjacent_html_break_range(self.buffer.text(), offset, false)
-                    && tag.end <= absolute_range.end
-                {
-                    return Some(tag.end);
-                }
-                return Some(
-                    self.buffer
-                        .next_grapheme_boundary(offset)
-                        .min(absolute_range.end),
+            if (forward && offset < absolute_range.end)
+                || (!forward && offset > absolute_range.start)
+            {
+                return super::table_cell_interaction::cell_horizontal_target(
+                    &self.buffer,
+                    &self.decorations,
+                    self.table_source.is_none(),
+                    offset,
+                    forward,
                 );
             }
-            if !forward && offset > absolute_range.start {
-                if let Some(tag) =
-                    super::adjacent_html_break_range(self.buffer.text(), offset, true)
-                    && tag.start >= absolute_range.start
-                {
-                    return Some(tag.start);
-                }
-                return Some(
-                    self.buffer
-                        .prev_grapheme_boundary(offset)
-                        .max(absolute_range.start),
-                );
-            }
-            if forward && cell + 1 < table_info.cell_ranges.len() {
-                return Some(line_start + table_info.cell_ranges[cell + 1].start);
+            if forward && cell + 1 < ranges.len() {
+                return Some(line_start + ranges[cell + 1].start);
             }
             if !forward && cell > 0 {
-                return Some(line_start + table_info.cell_ranges[cell - 1].end);
+                return Some(line_start + ranges[cell - 1].end);
             }
         }
 
@@ -683,10 +711,11 @@ impl EditorView {
                 .and_then(|index| rows.get(index).copied())
         }?;
         let target_info = self.decorations.get(target_line)?.table_info.as_ref()?;
+        let ranges = rendered_cell_ranges(target_info, self.buffer.line_content(target_line));
         let range = if forward {
-            target_info.cell_ranges.first()?
+            ranges.first()?
         } else {
-            target_info.cell_ranges.last()?
+            ranges.last()?
         };
         Some(self.buffer.line_start(target_line) + if forward { range.start } else { range.end })
     }
@@ -731,10 +760,11 @@ impl EditorView {
             let Some(info) = self.decorations[target_visible_line].table_info.as_ref() else {
                 return target;
             };
+            let ranges = rendered_cell_ranges(info, self.buffer.line_content(target_visible_line));
             let Some(range) = (if forward {
-                info.cell_ranges.first()
+                ranges.first()
             } else {
-                info.cell_ranges.last()
+                ranges.last()
             }) else {
                 return target;
             };
@@ -743,39 +773,74 @@ impl EditorView {
         }
 
         let line_start = self.buffer.line_start(target_line);
-        if target_info
-            .cell_ranges
+        let ranges = rendered_cell_ranges(target_info, self.buffer.line_content(target_line));
+        if ranges
             .iter()
             .any(|range| (range.start..=range.end).contains(&target_column))
         {
             return target;
         }
         if forward {
-            target_info
-                .cell_ranges
+            ranges
                 .iter()
                 .find(|range| range.start > target_column)
-                .or_else(|| target_info.cell_ranges.last())
+                .or_else(|| ranges.last())
                 .map_or(target, |range| line_start + range.start)
         } else {
-            target_info
-                .cell_ranges
+            ranges
                 .iter()
                 .rev()
                 .find(|range| range.end < target_column)
-                .or_else(|| target_info.cell_ranges.first())
+                .or_else(|| ranges.first())
                 .map_or(target, |range| line_start + range.end)
         }
     }
 
-    pub(crate) fn move_table_cursor_to_cell_edge(&mut self, start: bool) -> bool {
-        let Some(range) = self.table_cursor_cell_range() else {
+    pub(crate) fn move_table_cursors_to_cell_edge(&mut self, start: bool, select: bool) -> bool {
+        let rendered_markdown = self.active_tab_is_markdown() && self.table_source.is_none();
+        if !std::iter::once(&self.cursor)
+            .chain(&self.extra_cursors)
+            .any(|cursor| {
+                super::table_cell_interaction::cell_edge_target(
+                    &self.buffer,
+                    &self.decorations,
+                    rendered_markdown,
+                    cursor.offset,
+                    start,
+                )
+                .is_some()
+            })
+        {
             return false;
-        };
-        self.cursor
-            .move_to(if start { range.start } else { range.end }, &self.buffer);
+        }
+        for cursor in std::iter::once(&mut self.cursor).chain(&mut self.extra_cursors) {
+            super::table_cell_interaction::move_cursor_to_edge(
+                &self.buffer,
+                &self.decorations,
+                rendered_markdown,
+                cursor,
+                start,
+                select,
+            );
+        }
         self.reset_cursor_visual_targeting();
+        self.dedup_cursors();
         true
+    }
+
+    pub(super) fn table_block_format_allowed(&self, cell_local_list: bool) -> bool {
+        let rendered_markdown = self.active_tab_is_markdown() && self.table_source.is_none();
+        self.all_cursor_ranges()
+            .into_iter()
+            .all(|(offset, anchor)| {
+                super::table_cell_interaction::block_format_allowed(
+                    &self.buffer,
+                    &self.decorations,
+                    rendered_markdown,
+                    &(offset.min(anchor)..offset.max(anchor)),
+                    cell_local_list,
+                )
+            })
     }
 
     /// Selects the whole text of `column` on `source_line`.
@@ -784,7 +849,11 @@ impl EditorView {
             .decorations
             .get(source_line)
             .and_then(|decoration| decoration.table_info.as_ref())
-            .and_then(|table_info| table_info.cell_ranges.get(column).cloned())
+            .and_then(|table_info| {
+                rendered_cell_ranges(table_info, self.buffer.line_content(source_line))
+                    .get(column)
+                    .cloned()
+            })
         else {
             return false;
         };
@@ -855,7 +924,8 @@ impl EditorView {
 #[cfg(test)]
 mod tests {
     use super::{
-        nearest_boundary_index, table_boundary_for_cursor, table_boundary_offsets,
+        nearest_boundary_index, rendered_cell_ranges, table_boundary_after_reparse,
+        table_boundary_for_cursor, table_boundary_offsets, table_cell_at_offset,
         visible_table_line_indices,
     };
     use crate::buffer::Buffer;
@@ -953,6 +1023,296 @@ mod tests {
         );
         assert_eq!(
             table_boundary_for_cursor(&buffer, &decorations, buffer.line_start(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn indented_first_fragment_lookup_shares_rendered_ranges_for_navigation_and_ime() {
+        for row in [
+            "|   - 中文 words<br>  - next | plain |",
+            "|    1. ordered words | plain |",
+            "|   - [x] task words | plain |",
+            "|\t- tab words | plain |",
+            "| plain |   - second column |",
+            "| - ordinary padding | plain |",
+        ] {
+            let text = format!("before\n\n| A | B |\n| --- | --- |\n{row}");
+            let buffer = Buffer::from_text(&text);
+            let decorations = crate::markdown::parse_decorations(&text);
+            let info = decorations[4].table_info.as_ref().unwrap();
+            let start = buffer.line_start(4);
+            let ranges = rendered_cell_ranges(info, row);
+            for (column, range) in ranges.iter().enumerate() {
+                for local in range.start..=range.end {
+                    if row.is_char_boundary(local) {
+                        assert_eq!(
+                            table_cell_at_offset(&buffer, &decorations, start + local),
+                            Some((2, 4, column)),
+                            "{row:?} at {local}"
+                        );
+                    }
+                }
+                if range.start > 0 {
+                    assert_eq!(
+                        table_cell_at_offset(&buffer, &decorations, start + range.start - 1),
+                        None,
+                        "formatting padding/pipe must stay outside: {row:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rendered_cell_lookup_owns_only_real_trailing_whitespace_and_before_pipe() {
+        for closing_pipe in [false, true] {
+            let text = format!(
+                "| Neighbor | Input |\n| --- | --- |\n| 隣🙂 | first<br>-  \t{}",
+                if closing_pipe { "|" } else { "" }
+            );
+            let buffer = Buffer::from_text(&text);
+            let decorations = crate::markdown::parse_decorations(&text);
+            let info = decorations[2].table_info.as_ref().unwrap();
+            let line_start = buffer.line_start(2);
+            let ranges = rendered_cell_ranges(info, buffer.line_content(2));
+            assert_eq!(ranges[1].start, info.cell_ranges[1].start);
+            assert!(ranges[1].end > info.cell_ranges[1].end);
+            assert_eq!(&buffer.line_content(2)[ranges[1].clone()], "first<br>-  \t");
+            for col in info.cell_ranges[1].end..=ranges[1].end {
+                let offset = line_start + col;
+                assert_eq!(
+                    table_cell_at_offset(&buffer, &decorations, offset),
+                    Some((0, 2, 1))
+                );
+                assert_eq!(
+                    crate::editor::table_cell_edit::cell_range_for_selection(
+                        &buffer,
+                        &decorations,
+                        true,
+                        &(offset..offset)
+                    ),
+                    Some(line_start + ranges[1].start..line_start + ranges[1].end)
+                );
+            }
+            // Do not expand the semantic start into the leading pipe/padding.
+            for col in 0..info.cell_ranges[0].start {
+                assert_eq!(
+                    table_cell_at_offset(&buffer, &decorations, line_start + col),
+                    None
+                );
+            }
+            let leading = line_start + ranges[1].start - 1;
+            assert_eq!(table_cell_at_offset(&buffer, &decorations, leading), None);
+            let mid_utf8 = line_start + ranges[0].start + 1;
+            assert_eq!(table_cell_at_offset(&buffer, &decorations, mid_utf8), None);
+            let separator = buffer.line_start(1) + 2;
+            assert_eq!(table_cell_at_offset(&buffer, &decorations, separator), None);
+            if closing_pipe {
+                assert_eq!(
+                    table_cell_at_offset(&buffer, &decorations, buffer.len()),
+                    None
+                );
+            }
+        }
+        let text = "---\ntitle: value  \n---";
+        let buffer = Buffer::from_text(text);
+        let decorations = crate::markdown::parse_decorations(text);
+        assert_eq!(
+            table_cell_at_offset(&buffer, &decorations, buffer.line_end(1)),
+            None
+        );
+    }
+
+    #[test]
+    fn restored_pipe_less_eof_is_owned_by_last_fragment_including_padding() {
+        for content in [
+            "last",
+            "last  \t",
+            "first<br>",
+            "first<br> \t",
+            "first<br>- ",
+            "first<br>1. ",
+            "first<br>- [ ] ",
+            "先🙂<br>末尾  ",
+        ] {
+            let text = format!("| Neighbor | Input |\n| --- | --- |\n| 隣🙂 | {content}");
+            let buffer = Buffer::from_text(&text);
+            let decorations = crate::markdown::parse_decorations(&text);
+            let cursor = crate::cursor::Cursor {
+                anchor: buffer.len(),
+                offset: buffer.len(),
+            };
+            assert_eq!(
+                table_cell_at_offset(&buffer, &decorations, cursor.offset),
+                Some((0, 2, 1))
+            );
+            assert_eq!(
+                table_boundary_for_cursor(&buffer, &decorations, cursor.offset),
+                None,
+                "{content:?}"
+            );
+            assert_eq!(
+                table_boundary_after_reparse(&buffer, &decorations, cursor, false, None),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_below_boundary_survives_reparse_at_shared_pipe_less_eof() {
+        let below = TableBoundaryCaret {
+            table_start_line: 0,
+            side: TableBoundarySide::Below,
+        };
+        for content in ["last", "first<br>  \t", "first<br>- [ ] ", "先🙂<br>- "] {
+            let text = format!("| A | B |\n| --- | --- |\n| 隣🙂 | {content}");
+            let mut buffer = Buffer::from_text(&text);
+            let decorations = crate::markdown::parse_decorations(&text);
+            let (offset, _) = table_boundary_offsets(&buffer, &decorations, below).unwrap();
+            let cursor = crate::cursor::Cursor {
+                offset,
+                anchor: offset,
+            };
+            // The source offset is intentionally ambiguous; existing visual
+            // intent must win over automatic cell/boundary reconstruction.
+            assert!(table_cell_at_offset(&buffer, &decorations, offset).is_some());
+            assert_eq!(
+                table_boundary_after_reparse(&buffer, &decorations, cursor, false, Some(below)),
+                Some(below)
+            );
+            let (insert_at, caret) = table_boundary_offsets(&buffer, &decorations, below).unwrap();
+            buffer.insert(insert_at, "\n");
+            assert_eq!(buffer.line_content(2), text.lines().last().unwrap());
+            assert_eq!(buffer.line_content(3), "");
+            assert_eq!(caret, buffer.line_start(3));
+        }
+    }
+
+    #[test]
+    fn closed_final_pipe_and_padding_after_it_restore_below_boundary() {
+        let below = TableBoundaryCaret {
+            table_start_line: 0,
+            side: TableBoundarySide::Below,
+        };
+        for tail in ["|", "|  \t"] {
+            let text = format!("| A | B |\n| --- | --- |\n| 隣🙂 | first<br>-  \t{tail}");
+            let buffer = Buffer::from_text(&text);
+            let decorations = crate::markdown::parse_decorations(&text);
+            let cursor = crate::cursor::Cursor {
+                anchor: buffer.len(),
+                offset: buffer.len(),
+            };
+            assert_eq!(
+                table_cell_at_offset(&buffer, &decorations, cursor.offset),
+                None
+            );
+            assert_eq!(
+                table_boundary_after_reparse(&buffer, &decorations, cursor, false, None),
+                Some(below)
+            );
+            let pipe = buffer.line_start(2) + buffer.line_content(2).rfind('|').unwrap();
+            assert_eq!(
+                table_cell_at_offset(&buffer, &decorations, pipe),
+                Some((0, 2, 1))
+            );
+            assert_eq!(table_boundary_for_cursor(&buffer, &decorations, pipe), None);
+        }
+    }
+
+    #[test]
+    fn reparse_preserves_only_valid_single_caret_boundary_intent() {
+        let text = "A | B\n--- | ---\nC | D  \t";
+        let buffer = Buffer::from_text(text);
+        let decorations = crate::markdown::parse_decorations(text);
+        let below = TableBoundaryCaret {
+            table_start_line: 0,
+            side: TableBoundarySide::Below,
+        };
+        let above = TableBoundaryCaret {
+            table_start_line: 0,
+            side: TableBoundarySide::Above,
+        };
+        let eof = crate::cursor::Cursor {
+            anchor: buffer.len(),
+            offset: buffer.len(),
+        };
+        let start = crate::cursor::Cursor {
+            anchor: 0,
+            offset: 0,
+        };
+        assert_eq!(table_boundary_for_cursor(&buffer, &decorations, 0), None);
+        assert_eq!(
+            table_boundary_after_reparse(&buffer, &decorations, start, false, Some(above)),
+            Some(above)
+        );
+        assert_eq!(
+            table_boundary_after_reparse(&buffer, &decorations, eof, true, Some(below)),
+            None
+        );
+        let selection = crate::cursor::Cursor {
+            anchor: buffer.len() - 1,
+            ..eof
+        };
+        assert_eq!(
+            table_boundary_after_reparse(&buffer, &decorations, selection, false, Some(below)),
+            None
+        );
+        let moved = crate::cursor::Cursor {
+            offset: buffer.len() - 1,
+            anchor: buffer.len() - 1,
+        };
+        assert_eq!(
+            table_boundary_after_reparse(&buffer, &decorations, moved, false, Some(below)),
+            None
+        );
+        let wrong_table = TableBoundaryCaret {
+            table_start_line: 2,
+            ..below
+        };
+        assert_eq!(
+            table_boundary_after_reparse(&buffer, &decorations, eof, false, Some(wrong_table)),
+            None
+        );
+        let front = Buffer::from_text("---\ntitle: value\n---");
+        let front_decorations = crate::markdown::parse_decorations(front.text());
+        let front_eof = crate::cursor::Cursor {
+            offset: front.len(),
+            anchor: front.len(),
+        };
+        assert_eq!(
+            table_boundary_after_reparse(&front, &front_decorations, front_eof, false, Some(below)),
+            None
+        );
+    }
+
+    #[test]
+    fn offset_only_snapshot_restoration_prefers_cell_without_inheriting_boundary() {
+        let text = "| A | B |\n| --- | --- |\n| 隣🙂 | first<br>- ";
+        let buffer = Buffer::from_text(text);
+        let decorations = crate::markdown::parse_decorations(text);
+        let snapshot = crate::editor::EditorSnapshot {
+            text: text.to_owned(),
+            cursor_offset: text.len(),
+            cursor_anchor: text.len(),
+            ..Default::default()
+        };
+        let restored = crate::cursor::Cursor {
+            offset: snapshot.cursor_offset,
+            anchor: snapshot.cursor_anchor,
+        };
+        let below = TableBoundaryCaret {
+            table_start_line: 0,
+            side: TableBoundarySide::Below,
+        };
+        assert_eq!(
+            table_boundary_after_reparse(&buffer, &decorations, restored, false, Some(below)),
+            Some(below)
+        );
+        // Undo/tab restoration clears live intent: these offset-only snapshots
+        // cannot distinguish an EOF cell caret from a deliberately chosen edge.
+        assert_eq!(
+            table_boundary_after_reparse(&buffer, &decorations, restored, false, None),
             None
         );
     }

@@ -1,8 +1,10 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::mem::size_of;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::SystemTime;
 
 use gpui::{
@@ -53,6 +55,44 @@ impl ExportFormat {
             Self::Pdf => "pdf",
             Self::Png => "png",
         }
+    }
+}
+
+const EXPORT_PAGE_MARGIN_PX: f64 = 51.0;
+const CSS_PX_TO_PDF_PT: f64 = 72.0 / 96.0;
+
+/// Export at the configured content width, independent of pane size and zoom.
+/// Pages grow with that width instead of squeezing the content into fixed A4.
+#[derive(Clone, Copy, Debug)]
+struct ExportLayout {
+    content_width_px: f64,
+    page_width_px: f64,
+    page_height_px: f64,
+}
+
+impl ExportLayout {
+    fn from_settings(settings: &AppSettings) -> Self {
+        let content_width_px = f64::from(if settings.editor_content_width.is_finite() {
+            settings.effective_editor_content_width()
+        } else {
+            AppSettings::default().effective_editor_content_width()
+        });
+        let page_width_px = content_width_px + 2.0 * EXPORT_PAGE_MARGIN_PX;
+        Self {
+            content_width_px,
+            page_width_px,
+            page_height_px: page_width_px * 297.0 / 210.0,
+        }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn content_height_px(self) -> f64 {
+        self.page_height_px - 2.0 * EXPORT_PAGE_MARGIN_PX
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn png_snapshot_width_pt(self, backing_scale: f64) -> f64 {
+        self.page_width_px * 2.0 / backing_scale.max(1.0)
     }
 }
 
@@ -169,8 +209,7 @@ fn html_escape(text: &str) -> String {
 }
 
 fn percent_encode_file_url_path(path: &Path) -> String {
-    let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let path_text = absolute.to_string_lossy();
+    let path_text = path.to_string_lossy();
     let mut encoded = String::with_capacity(path_text.len() + 8);
 
     for byte in path_text.as_bytes() {
@@ -427,6 +466,7 @@ fn protected_export_source_ranges(markdown: &str, options: Options) -> Vec<Range
         Link(usize, bool),
         Image(usize),
         Html(String, usize),
+        HtmlBlock(usize),
     }
 
     let mut ranges = Vec::new();
@@ -434,6 +474,16 @@ fn protected_export_source_ranges(markdown: &str, options: Options) -> Vec<Range
     for (event, source_range) in Parser::new_ext(markdown, options).into_offset_iter() {
         match event {
             Event::Start(Tag::CodeBlock(_)) => open.push(OpenSource::CodeBlock(source_range.start)),
+            Event::Start(Tag::HtmlBlock) => open.push(OpenSource::HtmlBlock(source_range.start)),
+            Event::End(TagEnd::HtmlBlock) => {
+                if let Some(position) = open
+                    .iter()
+                    .rposition(|item| matches!(item, OpenSource::HtmlBlock(_)))
+                    && let OpenSource::HtmlBlock(start) = open.remove(position)
+                {
+                    ranges.push(start..source_range.end);
+                }
+            }
             Event::Start(Tag::Link { link_type, .. }) => open.push(OpenSource::Link(
                 source_range.start,
                 matches!(link_type, LinkType::WikiLink { .. }),
@@ -482,7 +532,9 @@ fn protected_export_source_ranges(markdown: &str, options: Options) -> Vec<Range
                     ranges.push(start..source_range.end);
                 }
             }
-            Event::Code(_) | Event::InlineMath(_) | Event::Html(_) => ranges.push(source_range),
+            Event::Code(_) | Event::InlineMath(_) | Event::DisplayMath(_) | Event::Html(_) => {
+                ranges.push(source_range);
+            }
             Event::InlineHtml(source) => {
                 if let Some((tag, closing, self_closing)) =
                     crate::markdown::protected_inline_html_tag(source.as_ref())
@@ -832,11 +884,91 @@ fn render_markdown_for_export(markdown: &str) -> String {
     options.remove(Options::ENABLE_SUPERSCRIPT);
     options.remove(Options::ENABLE_STRIKETHROUGH);
     let markdown = markdown_with_explicit_table_boundaries(markdown);
+    let markdown = markdown_with_export_math_blocks(&markdown, options);
     let masked = mask_escaped_custom_syntax(&markdown, options);
-    let parser = Parser::new_ext(&masked, options);
+    let inline_source = crate::markdown::CjkInlineSource::new(&masked, || {
+        Parser::new_ext(&masked, options).into_offset_iter()
+    });
+    let parser = Parser::new_with_broken_link_callback(
+        inline_source.as_str(),
+        options,
+        Some(|link: pulldown_cmark::BrokenLink<'_>| inline_source.resolve_reference(&link)),
+    )
+    .into_offset_iter()
+    .map(|(event, range)| inline_source.restore_event(event, range));
     let mut html = String::new();
     push_html(&mut html, transform_export_events(parser).into_iter());
     html
+}
+
+/// Pulldown handles native dollar math, but not the editor's bracket syntax or
+/// dollar blocks interrupted by blank paragraphs. Adapt only editor-owned
+/// preview ranges into fenced math, keeping TeX opaque to Markdown and masking.
+fn markdown_with_export_math_blocks(markdown: &str, options: Options) -> std::borrow::Cow<'_, str> {
+    let decorations = crate::markdown::parse_decorations(markdown);
+    let protected = protected_export_source_ranges(markdown, options);
+    let mut output = String::new();
+    let mut cursor = 0;
+    for preview in decorations
+        .iter()
+        .filter_map(|decoration| decoration.block_preview.as_ref())
+    {
+        if !preview.is_anchor || preview.kind != crate::markdown::BlockPreviewKind::Math {
+            continue;
+        }
+        let range = &preview.source_range;
+        let Some(source) = markdown.get(range.clone()) else {
+            continue;
+        };
+        if range.start < cursor
+            || !(source.starts_with("\\[") || source.starts_with("$$"))
+            || protected
+                .iter()
+                .any(|protected| protected.start <= range.start && range.start < protected.end)
+        {
+            continue;
+        }
+        let line_start = markdown[..range.start]
+            .rfind('\n')
+            .map_or(0, |newline| newline + 1);
+        let indent = &markdown[line_start..range.start];
+        if !indent.chars().all(|ch| matches!(ch, ' ' | '\t')) {
+            continue;
+        }
+        output.push_str(&markdown[cursor..line_start]);
+        if !output.is_empty() && !output.ends_with("\n\n") {
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push('\n');
+        }
+        let fence_length = preview
+            .source_text
+            .split(|ch| ch != '~')
+            .map(str::len)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let fence = "~".repeat(fence_length.max(3));
+        output.push_str(indent);
+        output.push_str(&fence);
+        output.push_str("math\n");
+        for line in preview.source_text.split('\n') {
+            output.push_str(indent);
+            output.push_str(line);
+            output.push('\n');
+        }
+        output.push_str(indent);
+        output.push_str(&fence);
+        output.push('\n');
+        cursor = range.end;
+    }
+    if cursor == 0 {
+        std::borrow::Cow::Borrowed(markdown)
+    } else {
+        output.push_str(&markdown[cursor..]);
+        std::borrow::Cow::Owned(output)
+    }
 }
 
 fn markdown_with_explicit_table_boundaries(markdown: &str) -> std::borrow::Cow<'_, str> {
@@ -869,7 +1001,12 @@ fn markdown_with_explicit_table_boundaries(markdown: &str) -> std::borrow::Cow<'
     }
 }
 
-fn build_html_document(title: &str, markdown: &str, source_file_path: Option<&Path>) -> String {
+fn build_html_document(
+    title: &str,
+    markdown: &str,
+    source_file_path: Option<&Path>,
+    layout: ExportLayout,
+) -> String {
     let html = render_markdown_for_export(markdown);
 
     let escaped_title = html_escape(title);
@@ -878,7 +1015,7 @@ fn build_html_document(title: &str, markdown: &str, source_file_path: Option<&Pa
         .unwrap_or_default();
 
     let github_markdown_css = concat!(
-        ".markdown-body{box-sizing:border-box;min-width:200px;max-width:980px;margin:0 auto;padding:45px;color:#1f2328;background:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif,'Apple Color Emoji','Segoe UI Emoji';font-size:16px;line-height:1.5;word-wrap:break-word;}",
+        "html,body{margin:0;padding:0;}.markdown-body{box-sizing:border-box;min-width:0;width:100%;max-width:var(--export-page-width);margin:0 auto;padding:var(--export-page-margin);color:#1f2328;background:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif,'Apple Color Emoji','Segoe UI Emoji';font-size:16px;line-height:1.5;word-wrap:break-word;}",
         ".markdown-body h1,.markdown-body h2{padding-bottom:.3em;border-bottom:1px solid #d8dee4;}",
         ".markdown-body h1{margin:.67em 0 16px;font-size:2em;}",
         ".markdown-body h2{margin:24px 0 16px;font-size:1.5em;}",
@@ -923,13 +1060,22 @@ fn build_html_document(title: &str, markdown: &str, source_file_path: Option<&Pa
             "<title>{}</title>",
             "{}",
             "<style>",
+            ":root{{--export-content-width:{content_width}px;--export-page-width:{page_width}px;--export-page-margin:{page_margin}px;}}",
             "{}",
-            "@media(max-width:767px){{.markdown-body{{padding:15px;}}}}",
-            "@page{{size:A4;margin:18mm;}}",
+            "@media(max-width:{responsive_width}px){{.markdown-body{{padding:15px;}}}}",
+            "@page{{size:{page_width}px {page_height}px;margin:{page_margin}px;}}",
             "@media print{{html,body{{background:#fff;}}body{{margin:0;}}.markdown-body{{max-width:none;padding:0;font-size:12pt;line-height:1.55;}}.markdown-body a{{color:inherit;text-decoration:none;}}.markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4,.markdown-body h5,.markdown-body h6{{break-after:avoid-page;page-break-after:avoid;}}.markdown-body pre,.markdown-body blockquote,.markdown-body table,.markdown-body img,.markdown-body svg,.export-preview{{break-inside:avoid;page-break-inside:avoid;}}.markdown-body pre{{white-space:pre-wrap;word-break:break-word;}}.markdown-body table{{display:table;width:100%;overflow:visible;}}.markdown-body table th,.markdown-body table td{{word-break:break-word;}}.markdown-body tr{{break-inside:avoid;page-break-inside:avoid;}}.markdown-body p{{orphans:3;widows:3;}}}}",
             "</style></head><body><article class=\"markdown-body\">{}</article></body></html>"
         ),
-        escaped_title, base_href, github_markdown_css, html
+        escaped_title,
+        base_href,
+        github_markdown_css,
+        html,
+        content_width = layout.content_width_px,
+        page_width = layout.page_width_px,
+        page_height = layout.page_height_px,
+        page_margin = EXPORT_PAGE_MARGIN_PX,
+        responsive_width = layout.page_width_px - 1.0,
     )
 }
 
@@ -1012,6 +1158,7 @@ mod cg_pdf {
         pub fn CGPDFPageGetBoxRect(page: CGPDFPageRef, box_type: i32) -> CGRect;
         pub fn CGContextDrawPDFPage(context: CGContextRef, page: CGPDFPageRef);
         pub fn CGContextTranslateCTM(context: CGContextRef, tx: f64, ty: f64);
+        pub fn CGContextScaleCTM(context: CGContextRef, sx: f64, sy: f64);
         pub fn CGContextSaveGState(context: CGContextRef);
         pub fn CGContextRestoreGState(context: CGContextRef);
         pub fn CGContextRelease(context: CGContextRef);
@@ -1020,14 +1167,6 @@ mod cg_pdf {
         pub fn CGPDFDocumentRelease(document: CGPDFDocumentRef);
     }
 }
-
-/// A4 at 72dpi, with the page margins the export CSS used to describe itself.
-#[cfg(target_os = "macos")]
-const PDF_PAGE_WIDTH_PT: f64 = 595.0;
-#[cfg(target_os = "macos")]
-const PDF_PAGE_HEIGHT_PT: f64 = 842.0;
-#[cfg(target_os = "macos")]
-const PDF_PAGE_MARGIN_PT: f64 = 51.0;
 
 /// Reports every offset a page may end at: the bottom of each block element and
 /// of each line box, skipping content that must not be split.
@@ -1080,7 +1219,7 @@ fn pdf_page_slices(total: f64, breaks: &[f64], page_height: f64) -> Vec<(f64, f6
 }
 
 /// Lays the export CSS out for a bare page box; the margins come from the
-/// surrounding A4 page instead of `.markdown-body` padding.
+/// surrounding PDF page instead of `.markdown-body` padding.
 #[cfg(target_os = "macos")]
 fn pdf_page_html(html: &str) -> String {
     const OVERRIDE: &str = concat!(
@@ -1116,15 +1255,16 @@ unsafe fn nsstring_to_string(value: *mut objc::runtime::Object) -> Option<String
 async fn build_pdf_document_from_html_macos(
     html: &str,
     source_file_path: Option<&Path>,
+    layout: ExportLayout,
     cx: &mut gpui::AsyncApp,
 ) -> anyhow::Result<Vec<u8>> {
-    let content_width = PDF_PAGE_WIDTH_PT - 2.0 * PDF_PAGE_MARGIN_PT;
-    let content_height = PDF_PAGE_HEIGHT_PT - 2.0 * PDF_PAGE_MARGIN_PT;
+    let content_width = layout.content_width_px;
+    let content_height = layout.content_height_px();
     let html = pdf_page_html(html);
 
     unsafe {
         // Lay out at the printable width so the measured line boxes match the
-        // slices that are later composed onto A4 pages.
+        // slices that are later composed onto the configured-width pages.
         let frame = NSRect {
             origin: NSPoint { x: 0.0, y: 0.0 },
             size: NSSize {
@@ -1305,14 +1445,14 @@ async fn build_pdf_document_from_html_macos(
         if pages.is_empty() {
             anyhow::bail!("WKWebView produced no PDF pages");
         }
-        compose_a4_pdf(&pages)
+        compose_pdf_pages(&pages, layout)
     }
 }
 
-/// Places each rendered slice at the top of its own A4 page, inset by the page
-/// margins.
+/// Places rendered CSS-pixel slices on configured-width pages, converting
+/// pixels to PDF points so font sizes match the HTML print stylesheet.
 #[cfg(target_os = "macos")]
-fn compose_a4_pdf(pages: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
+fn compose_pdf_pages(pages: &[Vec<u8>], layout: ExportLayout) -> anyhow::Result<Vec<u8>> {
     use cg_pdf::*;
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 
@@ -1324,7 +1464,10 @@ fn compose_a4_pdf(pages: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
         }
         let media_box = CGRect::new(
             &CGPoint::new(0.0, 0.0),
-            &CGSize::new(PDF_PAGE_WIDTH_PT, PDF_PAGE_HEIGHT_PT),
+            &CGSize::new(
+                layout.page_width_px * CSS_PX_TO_PDF_PT,
+                layout.page_height_px * CSS_PX_TO_PDF_PT,
+            ),
         );
         let context = CGPDFContextCreate(consumer, &media_box, std::ptr::null());
         CGDataConsumerRelease(consumer);
@@ -1354,9 +1497,11 @@ fn compose_a4_pdf(pages: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
                 CGContextSaveGState(context);
                 CGContextTranslateCTM(
                     context,
-                    PDF_PAGE_MARGIN_PT,
-                    PDF_PAGE_HEIGHT_PT - PDF_PAGE_MARGIN_PT - box_rect.size.height,
+                    EXPORT_PAGE_MARGIN_PX * CSS_PX_TO_PDF_PT,
+                    (layout.page_height_px - EXPORT_PAGE_MARGIN_PX - box_rect.size.height)
+                        * CSS_PX_TO_PDF_PT,
                 );
+                CGContextScaleCTM(context, CSS_PX_TO_PDF_PT, CSS_PX_TO_PDF_PT);
                 CGContextDrawPDFPage(context, pdf_page);
                 CGContextRestoreGState(context);
                 CGPDFContextEndPage(context);
@@ -1381,17 +1526,18 @@ fn compose_a4_pdf(pages: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
 async fn build_png_document_from_html_macos(
     html: &str,
     source_file_path: Option<&Path>,
+    layout: ExportLayout,
     cx: &mut gpui::AsyncApp,
 ) -> anyhow::Result<Vec<u8>> {
     unsafe {
-        // Same A4 content width as the PDF export so padding and line breaks
-        // match; the height grows to fit the whole document.
-        let page_width = 595.0_f64;
+        // The outer width includes margins; the article's usable width is
+        // exactly the setting. The height grows to fit the whole document.
+        let page_width = layout.page_width_px;
         let mut frame = NSRect {
             origin: NSPoint { x: 0.0, y: 0.0 },
             size: NSSize {
                 width: page_width,
-                height: 842.0,
+                height: layout.page_height_px,
             },
         };
         let nil = std::ptr::null_mut::<objc::runtime::Object>();
@@ -1531,9 +1677,13 @@ async fn build_png_document_from_html_macos(
         let snapshot_config: *mut objc::runtime::Object =
             msg_send![class!(WKSnapshotConfiguration), new];
         let () = msg_send![snapshot_config, setRect: frame];
-        // 2x for a crisp export regardless of the current display scale.
-        let snapshot_width: *mut objc::runtime::Object =
-            msg_send![class!(NSNumber), numberWithDouble: page_width * 2.0];
+        // snapshotWidth is in points, and the bitmap also carries the window's
+        // backing scale. Avoid accidentally producing 4x images on Retina.
+        let backing_scale: f64 = msg_send![host_window, backingScaleFactor];
+        let snapshot_width: *mut objc::runtime::Object = msg_send![
+            class!(NSNumber),
+            numberWithDouble: layout.png_snapshot_width_pt(backing_scale)
+        ];
         let () = msg_send![snapshot_config, setSnapshotWidth: snapshot_width];
         let () = msg_send![
             web_view,
@@ -1717,15 +1867,21 @@ fn wrap_text_for_pdf(text: &str, max_units: usize) -> Vec<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn build_pdf_document_with_printpdf(title: &str, markdown: &str) -> anyhow::Result<Vec<u8>> {
+fn build_pdf_document_with_printpdf(
+    title: &str,
+    markdown: &str,
+    layout: ExportLayout,
+) -> anyhow::Result<Vec<u8>> {
+    let px_to_mm = CSS_PX_TO_PDF_PT as f32 * 25.4 / 72.0;
+    let page_width_mm = layout.page_width_px as f32 * px_to_mm;
+    let page_height_mm = layout.page_height_px as f32 * px_to_mm;
     let (document, first_page, first_layer) =
-        PdfDocument::new(title, Mm(210.0), Mm(297.0), "Layer 1");
+        PdfDocument::new(title, Mm(page_width_mm), Mm(page_height_mm), "Layer 1");
 
     // Existing on disk is not enough: collections and variable fonts parse
     // only on some backends, so keep trying until one actually loads.
     let font = crate::platform::fonts::pdf_font_candidates()
         .into_iter()
-        .filter(|path| path.exists())
         .find_map(|path| {
             fs::File::open(&path)
                 .ok()
@@ -1733,13 +1889,14 @@ fn build_pdf_document_with_printpdf(title: &str, markdown: &str) -> anyhow::Resu
         })
         .ok_or_else(|| anyhow::anyhow!("could not find a usable system font for PDF export"))?;
 
-    let page_width_mm = 210.0;
-    let page_height_mm = 297.0;
-    let margin_x_mm = 18.0;
-    let margin_y_mm = 18.0;
+    let margin_x_mm = EXPORT_PAGE_MARGIN_PX as f32 * px_to_mm;
+    let margin_y_mm = margin_x_mm;
     let line_height_mm = 6.0;
     let font_size_pt = 11.0;
-    let max_units = 60usize;
+    let unit_width_px = font_size_pt / CSS_PX_TO_PDF_PT as f32 * 0.6;
+    let max_units = (layout.content_width_px as f32 / unit_width_px)
+        .floor()
+        .max(1.0) as usize;
 
     let rendered_text = rendered_plain_text_for_export(markdown);
     let lines = wrap_text_for_pdf(&rendered_text, max_units);
@@ -1833,8 +1990,9 @@ fn build_pdf_document(
     title: &str,
     markdown: &str,
     _source_file_path: Option<&Path>,
+    layout: ExportLayout,
 ) -> anyhow::Result<Vec<u8>> {
-    build_pdf_document_with_printpdf(title, markdown)
+    build_pdf_document_with_printpdf(title, markdown, layout)
 }
 
 pub(super) fn git_show_file_at_revision(
@@ -2230,6 +2388,131 @@ fn estimate_line_display_cache(lines: &[Option<Box<LineDisplayInfo>>]) -> (usize
     (cached, bytes)
 }
 
+#[derive(Default)]
+struct LatestDiffRequests {
+    requests: HashMap<String, Weak<()>>,
+}
+
+impl LatestDiffRequests {
+    fn begin(&mut self, key: String) -> Arc<()> {
+        self.requests
+            .retain(|_, request| request.strong_count() > 0);
+        let request = Arc::new(());
+        self.requests.insert(key, Arc::downgrade(&request));
+        request
+    }
+
+    fn is_current(&self, key: &str, request: &Arc<()>) -> bool {
+        self.requests
+            .get(key)
+            .is_some_and(|current| current.ptr_eq(&Arc::downgrade(request)))
+    }
+}
+
+thread_local! {
+    static DIFF_REQUESTS: RefCell<LatestDiffRequests> = RefCell::default();
+}
+
+fn begin_diff_request(key: &str) -> Arc<()> {
+    DIFF_REQUESTS.with_borrow_mut(|requests| requests.begin(key.to_string()))
+}
+
+fn diff_request_is_current(key: &str, request: &Arc<()>) -> bool {
+    DIFF_REQUESTS.with_borrow(|requests| requests.is_current(key, request))
+}
+
+// Only called on the bounded filesystem workers, never from a render/update callback.
+fn load_git_diff_state(
+    language: crate::i18n::UiLanguage,
+    path: &Path,
+    source: GitDiffSource,
+    worktree_text: Option<String>,
+) -> std::io::Result<GitDiffState> {
+    let context = git_repo_context_for_file(path).ok_or_else(|| {
+        std::io::Error::other(format!(
+            "could not resolve Git repository for {}",
+            path.display()
+        ))
+    })?;
+    let t = |key| crate::i18n::translate(language, key).to_string();
+    let (source_label, target_label, base_text, target_text) = match &source {
+        GitDiffSource::IndexToWorktree => {
+            let base = git_show_file_at_revision(&context.repo_root, ":0", &context.relative_path);
+            let target = match worktree_text {
+                Some(text) => text,
+                None => match fs::read_to_string(&context.file_path) {
+                    Ok(text) => text,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                    Err(error) => return Err(error),
+                },
+            };
+            (
+                if base.is_empty() {
+                    t(crate::i18n::TextKey::EmptyFile)
+                } else {
+                    t(crate::i18n::TextKey::GitStagedLabel)
+                },
+                t(crate::i18n::TextKey::WorkingTree),
+                base,
+                target,
+            )
+        }
+        GitDiffSource::HeadToIndex => {
+            let base =
+                git_show_file_at_revision(&context.repo_root, "HEAD", &context.relative_path);
+            let target =
+                git_show_file_at_revision(&context.repo_root, ":0", &context.relative_path);
+            (
+                if base.is_empty() {
+                    t(crate::i18n::TextKey::EmptyFile)
+                } else {
+                    "HEAD".to_string()
+                },
+                t(crate::i18n::TextKey::GitStagedLabel),
+                base,
+                target,
+            )
+        }
+        GitDiffSource::Commit {
+            commit_hash,
+            short_hash,
+        } => {
+            let base = git_show_file_at_revision(
+                &context.repo_root,
+                &format!("{commit_hash}^"),
+                &context.relative_path,
+            );
+            let target =
+                git_show_file_at_revision(&context.repo_root, commit_hash, &context.relative_path);
+            (format!("{short_hash}^"), short_hash.clone(), base, target)
+        }
+    };
+    let file_kind = super::classify_file_kind_for_bytes(path, target_text.as_bytes());
+    let is_markdown = matches!(file_kind, FileKind::Markdown);
+    let code_language = match &file_kind {
+        FileKind::Code { language } => Some(language.clone()),
+        _ => None,
+    };
+    let all_rows = build_git_diff_rows(
+        language,
+        &base_text,
+        &target_text,
+        is_markdown,
+        code_language,
+    );
+    Ok(GitDiffState {
+        source,
+        source_label,
+        target_label,
+        rows: visible_git_diff_rows(&all_rows, false),
+        all_rows,
+        show_only_changes: false,
+        hunks: compute_git_diff_hunks(&base_text, &target_text),
+        base_text,
+        target_text,
+    })
+}
+
 impl EditorView {
     pub(crate) fn runtime_profile_diagnostics(&self) -> super::profiler::RuntimeProfileDiagnostics {
         let (line_display_cached, line_display_estimated_bytes) =
@@ -2327,9 +2610,7 @@ impl EditorView {
             );
             self.info_panel_cache_result =
                 Some(self.collect_info_panel_data(!defer_expensive).map(Arc::new));
-            if defer_expensive {
-                self.schedule_info_panel_word_count(current_tab_id, cx);
-            }
+            self.schedule_info_panel_refresh(current_tab_id, defer_expensive, cx);
         }
 
         self.info_panel_cache_result
@@ -2337,24 +2618,77 @@ impl EditorView {
             .and_then(|result| result.as_ref().cloned())
     }
 
-    fn schedule_info_panel_word_count(&mut self, tab_id: Option<String>, cx: &mut Context<Self>) {
-        let text = self.buffer.text().to_string();
+    fn schedule_info_panel_refresh(
+        &mut self,
+        tab_id: Option<String>,
+        count_words: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let text = count_words.then(|| self.buffer.text().to_string());
+        let path = self.current_file_path.clone();
         let epoch = self.info_panel_refresh_epoch;
         self.info_panel_refresh_task = Some(cx.spawn(async move |this, cx| {
-            let word_count = cx
-                .background_executor()
-                .spawn(async move { count_document_words(&text) })
-                .await;
+            let word_count = match text {
+                Some(text) => Some(
+                    cx.background_executor()
+                        .spawn(async move { count_document_words(&text) })
+                        .await,
+                ),
+                None => None,
+            };
+            let metadata = match path {
+                Some(path) => crate::platform::fs_task::run(
+                    "read file information",
+                    path.clone(),
+                    move || fs::metadata(path),
+                )
+                .await
+                .map(Some),
+                None => Ok(None),
+            };
             this.update(cx, |editor, cx| {
                 if editor.info_panel_refresh_epoch != epoch
                     || editor.info_panel_cache_tab_id != tab_id
                 {
                     return;
                 }
-                if let Some(Some(data)) = editor.info_panel_cache_result.as_mut()
-                    && let Some(row) = Arc::make_mut(data).primary_rows.get_mut(4)
-                {
-                    row.value = word_count.to_string();
+                let metadata_rows = metadata
+                    .as_ref()
+                    .ok()
+                    .and_then(|metadata| metadata.as_ref())
+                    .map(|metadata| {
+                        let created = metadata.created().or_else(|_| metadata.modified()).ok();
+                        let modified = metadata.modified().ok();
+                        let time_row = |time: Option<SystemTime>, key| {
+                            (
+                                time.map(|time| {
+                                    crate::i18n::format_relative_time(editor.ui_language, time)
+                                })
+                                .unwrap_or_else(|| {
+                                    editor.t(crate::i18n::TextKey::Unavailable).to_string()
+                                }),
+                                time.map(|time| editor.detailed_time_label(key, time)),
+                            )
+                        };
+                        (
+                            time_row(created, crate::i18n::TextKey::InfoCreated),
+                            time_row(modified, crate::i18n::TextKey::InfoModified),
+                            format_file_size(metadata.len()),
+                        )
+                    });
+                if let Some(Some(data)) = editor.info_panel_cache_result.as_mut() {
+                    let data = Arc::make_mut(data);
+                    if let Some(word_count) = word_count {
+                        data.primary_rows[4].value = word_count.to_string();
+                    }
+                    if let Some((created, modified, size)) = metadata_rows {
+                        (data.primary_rows[1].value, data.primary_rows[1].tooltip) = created;
+                        (data.primary_rows[2].value, data.primary_rows[2].tooltip) = modified;
+                        data.primary_rows[3].value = size;
+                    }
+                }
+                if let Err(error) = metadata {
+                    editor.notify_error(error.to_string(), cx);
                 }
                 editor.info_panel_refresh_task = None;
                 cx.notify();
@@ -2388,12 +2722,12 @@ impl EditorView {
                 cx.background_executor().timer(delay).await;
             }
 
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    collect_git_history_items(language, &background_file_path, scope, 0)
-                })
-                .await;
+            let result = crate::platform::fs_task::run_value(
+                "load Git history",
+                background_file_path.clone(),
+                move || collect_git_history_items(language, &background_file_path, scope, 0),
+            )
+            .await;
 
             this.update(cx, |this, cx| {
                 this.git_history_refresh_task = None;
@@ -2407,6 +2741,15 @@ impl EditorView {
                     return;
                 }
 
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        this.git_history_cache_scanned_at = Some(SystemTime::now());
+                        this.git_history_cache_dirty = false;
+                        this.notify_error(error.to_string(), cx);
+                        return;
+                    }
+                };
                 let (items, has_more) = result.unzip();
                 this.git_history_cache_result = Some(items);
                 this.git_history_has_more = has_more.unwrap_or(false);
@@ -2443,12 +2786,12 @@ impl EditorView {
         let scope = self.git_history_scope;
         let background_file_path = requested_file_path.clone();
         self.git_history_refresh_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    collect_git_history_items(language, &background_file_path, scope, skip)
-                })
-                .await;
+            let result = crate::platform::fs_task::run_value(
+                "load Git history page",
+                background_file_path.clone(),
+                move || collect_git_history_items(language, &background_file_path, scope, skip),
+            )
+            .await;
             this.update(cx, |this, cx| {
                 this.git_history_refresh_task = None;
                 if this.git_history_cache_path.as_ref() != Some(&requested_file_path)
@@ -2456,6 +2799,13 @@ impl EditorView {
                 {
                     return;
                 }
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        this.notify_error(error.to_string(), cx);
+                        None
+                    }
+                };
                 let Some((next_items, has_more)) = result else {
                     this.git_history_has_more = false;
                     return;
@@ -2477,7 +2827,16 @@ impl EditorView {
     fn git_history_request_path(&self) -> Option<PathBuf> {
         match self.git_history_scope {
             GitHistoryScope::CurrentFile => self.current_file_path.clone(),
-            GitHistoryScope::Repository => self.git_panel_base_dir(),
+            GitHistoryScope::Repository => {
+                if !self.sidebar_root.as_os_str().is_empty() {
+                    Some(self.sidebar_root.clone())
+                } else {
+                    self.current_file_path
+                        .as_deref()
+                        .and_then(Path::parent)
+                        .map(Path::to_path_buf)
+                }
+            }
         }
     }
 
@@ -2503,136 +2862,123 @@ impl EditorView {
         self.git_history_cache_result.clone().flatten()
     }
 
-    fn git_repo_context_for_path(&self, file_path: &Path) -> Option<GitRepoContext> {
-        git_repo_context_for_file(file_path)
-    }
-
-    pub(super) fn git_repo_context(&self) -> Option<GitRepoContext> {
-        let file_path = self.current_file_path.clone()?;
-        self.git_repo_context_for_path(&file_path)
-    }
-
-    pub(super) fn build_git_diff_state_for_source(
-        &self,
-        path: &Path,
-        source: GitDiffSource,
-    ) -> Option<GitDiffState> {
-        let context = self.git_repo_context_for_path(path)?;
-        let (source_label, target_label, base_text, target_text) = match &source {
-            GitDiffSource::IndexToWorktree => {
-                let base_text =
-                    git_show_file_at_revision(&context.repo_root, ":0", &context.relative_path);
-                let target_text = self.current_file_text_for_git_diff(&context.file_path);
-                (
-                    if base_text.is_empty() {
-                        self.t(crate::i18n::TextKey::EmptyFile).to_string()
-                    } else {
-                        self.t(crate::i18n::TextKey::GitStagedLabel).to_string()
-                    },
-                    self.t(crate::i18n::TextKey::WorkingTree).to_string(),
-                    base_text,
-                    target_text,
-                )
-            }
-            GitDiffSource::HeadToIndex => {
-                let base_text =
-                    git_show_file_at_revision(&context.repo_root, "HEAD", &context.relative_path);
-                let target_text =
-                    git_show_file_at_revision(&context.repo_root, ":0", &context.relative_path);
-                (
-                    if base_text.is_empty() {
-                        self.t(crate::i18n::TextKey::EmptyFile).to_string()
-                    } else {
-                        "HEAD".to_string()
-                    },
-                    self.t(crate::i18n::TextKey::GitStagedLabel).to_string(),
-                    base_text,
-                    target_text,
-                )
-            }
-            GitDiffSource::Commit {
-                commit_hash,
-                short_hash,
-            } => {
-                let parent_revision = format!("{commit_hash}^");
-                let base_text = git_show_file_at_revision(
-                    &context.repo_root,
-                    &parent_revision,
-                    &context.relative_path,
-                );
-                let target_text = git_show_file_at_revision(
-                    &context.repo_root,
-                    commit_hash,
-                    &context.relative_path,
-                );
-                (
-                    format!("{short_hash}^"),
-                    short_hash.clone(),
-                    base_text,
-                    target_text,
-                )
-            }
-        };
-
-        let file_kind = super::classify_file_kind_for_bytes(path, target_text.as_bytes());
-        let is_markdown = matches!(file_kind, FileKind::Markdown);
-        let code_language = match &file_kind {
-            FileKind::Code { language } => Some(language.clone()),
-            _ => None,
-        };
-
-        Some(GitDiffState {
-            source,
-            source_label,
-            target_label,
-            all_rows: build_git_diff_rows(
-                self.ui_language,
-                &base_text,
-                &target_text,
-                is_markdown,
-                code_language,
-            ),
-            rows: Vec::new(),
-            show_only_changes: false,
-            hunks: compute_git_diff_hunks(&base_text, &target_text),
-            base_text,
-            target_text,
-        })
-        .map(|mut diff| {
-            diff.rows = visible_git_diff_rows(&diff.all_rows, diff.show_only_changes);
-            diff
-        })
-    }
-
-    pub(crate) fn refresh_git_diff_tab(&mut self, tab_index: usize) -> bool {
-        let Some(tab) = self.tabs.get(tab_index) else {
-            return false;
-        };
-        if tab.kind != TabKind::Diff {
-            return false;
+    fn git_diff_worktree_text(&self, path: &Path) -> Option<String> {
+        if self.current_file_path.as_deref() == Some(path) && !self.active_tab_is_diff() {
+            return Some(self.buffer.text().to_string());
         }
-        let Some(path) = tab.path.clone() else {
-            return false;
-        };
-        let Some((source, show_only_changes)) = tab
-            .git_diff
-            .as_ref()
-            .map(|diff| (diff.source.clone(), diff.show_only_changes))
+        None
+    }
+
+    pub(super) fn open_git_diff_for_source(
+        &mut self,
+        title: String,
+        path: PathBuf,
+        source: GitDiffSource,
+        cx: &mut Context<Self>,
+    ) {
+        let language = self.ui_language;
+        let worktree_text = self.git_diff_worktree_text(&path);
+        let pane_id = self.current_pane_id();
+        let active_tab_id = self.active_tab_id.clone();
+        let key = format!("{:?}:{pane_id}:open", cx.entity_id());
+        let request = begin_diff_request(&key);
+        cx.spawn(async move |this, cx| {
+            let read_path = path.clone();
+            let result = crate::platform::fs_task::run("load Git diff", path.clone(), move || {
+                load_git_diff_state(language, &read_path, source, worktree_text)
+            })
+            .await;
+            this.update(cx, |editor, cx| {
+                if !diff_request_is_current(&key, &request) {
+                    return;
+                }
+                editor.with_pane_if_alive(pane_id, |editor| {
+                    if editor.active_tab_id != active_tab_id || editor.focused_pane_id != pane_id {
+                        return;
+                    }
+                    match result {
+                        Ok(diff) => editor.open_git_diff_tab(title, path, diff, cx),
+                        Err(error) => editor.notify_error(error.to_string(), cx),
+                    }
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Schedules a refresh; the snapshot is installed only by the latest request
+    /// for this pane/tab/path/source, and reloaded on completion if still active.
+    pub(crate) fn refresh_git_diff_tab(
+        &mut self,
+        tab_index: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab) = self
+            .tabs
+            .get(tab_index)
+            .filter(|tab| tab.kind == TabKind::Diff)
         else {
             return false;
         };
-        let Some(mut diff) = self.build_git_diff_state_for_source(&path, source) else {
+        let Some(path) = tab.path.clone() else {
             return false;
         };
-        diff.show_only_changes = show_only_changes;
-        diff.rows = visible_git_diff_rows(&diff.all_rows, diff.show_only_changes);
-
-        let snapshot_text = build_git_diff_snapshot_text(&diff.rows);
-        let tab = &mut self.tabs[tab_index];
-        tab.snapshot.text = snapshot_text;
-        tab.snapshot.cursor_offset = tab.snapshot.cursor_offset.min(tab.snapshot.text.len());
-        tab.snapshot.cursor_anchor = tab.snapshot.cursor_anchor.min(tab.snapshot.text.len());
-        tab.git_diff = Some(diff);
+        let Some(source) = tab.git_diff.as_ref().map(|diff| diff.source.clone()) else {
+            return false;
+        };
+        let tab_id = tab.id.clone();
+        let pane_id = self.current_pane_id();
+        let language = self.ui_language;
+        let worktree_text = self.git_diff_worktree_text(&path);
+        let expected_source = source.clone();
+        let key = format!("{:?}:{pane_id}:{tab_id}", cx.entity_id());
+        let request = begin_diff_request(&key);
+        cx.spawn(async move |this, cx| {
+            let read_path = path.clone();
+            let result =
+                crate::platform::fs_task::run("refresh Git diff", path.clone(), move || {
+                    load_git_diff_state(language, &read_path, source, worktree_text)
+                })
+                .await;
+            this.update(cx, |editor, cx| {
+                if !diff_request_is_current(&key, &request) {
+                    return;
+                }
+                editor.with_pane_if_alive(pane_id, |editor| {
+                    let Some(index) = editor.tabs.iter().position(|tab| {
+                        tab.id == tab_id
+                            && tab.kind == TabKind::Diff
+                            && tab.path.as_ref() == Some(&path)
+                            && tab
+                                .git_diff
+                                .as_ref()
+                                .is_some_and(|diff| diff.source == expected_source)
+                    }) else {
+                        return;
+                    };
+                    match result {
+                        Ok(mut diff) => {
+                            diff.show_only_changes = editor.tabs[index]
+                                .git_diff
+                                .as_ref()
+                                .is_some_and(|diff| diff.show_only_changes);
+                            diff.rows =
+                                visible_git_diff_rows(&diff.all_rows, diff.show_only_changes);
+                            editor.tabs[index].git_diff = Some(diff);
+                            editor.sync_git_diff_tab_snapshot(index);
+                            if editor.active_tab_id.as_deref() == Some(&tab_id) {
+                                editor.reload_active_git_diff_snapshot();
+                            }
+                            cx.notify();
+                        }
+                        Err(error) => editor.notify_error(error.to_string(), cx),
+                    }
+                });
+            })
+            .ok();
+        })
+        .detach();
         true
     }
 
@@ -2937,27 +3283,29 @@ impl EditorView {
         let save = file_ops::DocumentSave::new(path.clone());
         cx.spawn(async move |this, cx| {
             let read_path = path.clone();
-            let outcome = cx
-                .background_executor()
-                .spawn(async move {
+            let outcome = crate::platform::fs_task::run(
+                "revert Git diff hunk",
+                read_path.clone(),
+                move || {
                     let on_disk = fs::read_to_string(&read_path)?;
                     if on_disk != target_text {
-                        return Ok(None);
+                        return Ok((None, String::new()));
                     }
-                    save.write(new_text.as_bytes()).map(Some)
-                })
-                .await;
+                    let relative_path = git_repo_context_for_file(&read_path)
+                        .map(|context| context.relative_path)
+                        .unwrap_or_default();
+                    save.write(new_text.as_bytes())
+                        .map(|saved| (Some(saved), relative_path))
+                },
+            )
+            .await;
             this.update(cx, |editor, cx| {
                 editor.with_pane_if_alive(pane_id, |editor| {
                     let Some(index) = editor.tabs.iter().position(|tab| tab.id == tab_id) else {
                         return;
                     };
                     match outcome {
-                        Ok(Some(true)) => {
-                            let rel_path = editor
-                                .git_repo_context_for_path(&path)
-                                .map(|context| context.relative_path)
-                                .unwrap_or_default();
+                        Ok((Some(true), rel_path)) => {
                             editor.invalidate_after_git_mutation(
                                 &GitOperation::DiscardPaths {
                                     tracked: vec![rel_path],
@@ -2966,13 +3314,9 @@ impl EditorView {
                                 cx,
                             );
                         }
-                        Ok(Some(false)) => {}
-                        Ok(None) => {
-                            editor.refresh_git_diff_tab(index);
-                            if editor.active_tab_id.as_deref() == Some(&tab_id) {
-                                editor.reload_active_git_diff_snapshot();
-                            }
-                            cx.notify();
+                        Ok((Some(false), _)) => {}
+                        Ok((None, _)) => {
+                            editor.refresh_git_diff_tab(index, cx);
                         }
                         Err(error) => {
                             let message = format!(
@@ -2987,14 +3331,6 @@ impl EditorView {
             .ok();
         })
         .detach();
-    }
-
-    fn current_file_text_for_git_diff(&self, path: &Path) -> String {
-        if self.current_file_path.as_deref() == Some(path) && !self.active_tab_is_diff() {
-            return self.buffer.text().to_string();
-        }
-
-        fs::read_to_string(path).unwrap_or_default()
     }
 
     pub(super) fn open_git_diff_tab(
@@ -3013,6 +3349,13 @@ impl EditorView {
         };
         let file_kind = super::classify_file_kind_for_bytes(&path, snapshot.text.as_bytes());
         if let Some(index) = self.tabs.iter().position(|tab| tab.kind == TabKind::Diff) {
+            let key = format!(
+                "{:?}:{}:{}",
+                cx.entity_id(),
+                self.current_pane_id(),
+                self.tabs[index].id
+            );
+            begin_diff_request(&key);
             self.tabs[index].title = diff_title;
             self.tabs[index].path = Some(path);
             self.tabs[index].file_kind = Some(file_kind);
@@ -3060,30 +3403,20 @@ impl EditorView {
         item: GitHistoryItem,
         cx: &mut Context<Self>,
     ) {
-        let Some(context) = self.git_repo_context() else {
+        let Some(path) = self.current_file_path.clone() else {
             return;
         };
-
-        // Working-tree changes are shown in place in the editor via the inline
-        // diff (gutter indicators, expandable hunks, per-hunk revert), so just
-        // focus the file instead of opening a read-only diff tab. Historical
-        // commits still open the dedicated read-only diff tab.
+        // Worktree changes use the editor's inline diff instead of a read-only tab.
         if item.is_working_tree {
-            self.open_path_in_preview_tab(context.file_path, true, cx);
+            self.open_path_in_preview_tab(path, true, cx);
             return;
         }
-
-        let diff_title = Self::title_for_path(&context.file_path);
+        let title = Self::title_for_path(&path);
         let source = GitDiffSource::Commit {
             commit_hash: item.commit_hash.clone().unwrap_or_default(),
             short_hash: item.short_hash.clone(),
         };
-
-        let Some(diff) = self.build_git_diff_state_for_source(&context.file_path, source) else {
-            return;
-        };
-
-        self.open_git_diff_tab(diff_title, context.file_path, diff, cx);
+        self.open_git_diff_for_source(title, path, source, cx);
     }
 
     fn resolve_info_panel_reference_path(&self, raw: &str) -> Option<PathBuf> {
@@ -3107,28 +3440,14 @@ impl EditorView {
             .as_ref()
             .and_then(|path| path.parent())
         {
-            let candidate = file_dir.join(&expanded);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-
-        for root in &self.workspaces {
-            let candidate = root.join(&expanded);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-
-        if let Some(file_dir) = self
-            .current_file_path
-            .as_ref()
-            .and_then(|path| path.parent())
-        {
             return Some(file_dir.join(expanded));
         }
 
-        Some(expanded)
+        Some(
+            self.workspaces
+                .first()
+                .map_or(expanded.clone(), |root| root.join(&expanded)),
+        )
     }
 
     fn classify_info_panel_reference_target(&self, raw: &str) -> Option<InfoPanelReferenceTarget> {
@@ -3156,23 +3475,42 @@ impl EditorView {
             .map(InfoPanelReferenceTarget::LocalPath)
     }
 
-    fn reveal_panel_reference_in_file_manager(&self, path: &Path) {
-        if path.exists() {
-            self.reveal_in_file_manager(path);
-            return;
-        }
-
-        if let Some(parent) = path.parent().filter(|parent| parent.exists()) {
-            if let Err(error) = crate::platform::shell::open_path(parent) {
-                log_error!("failed to open parent folder {}: {error}", parent.display());
+    fn reveal_panel_reference_in_file_manager(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let result = crate::platform::fs_task::run_anyhow(
+                "reveal referenced file",
+                path.clone(),
+                move || {
+                    match fs::metadata(&path) {
+                        Ok(_) => crate::platform::shell::reveal(&path)?,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            let parent = path.parent().ok_or(error)?;
+                            fs::metadata(parent)?;
+                            crate::platform::shell::open_path(parent)?;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                    Ok(())
+                },
+            )
+            .await;
+            if let Err(error) = result {
+                this.update(cx, |editor, cx| editor.notify_error(error.to_string(), cx))
+                    .ok();
             }
-        }
+        })
+        .detach();
     }
 
-    fn trigger_info_panel_share_action(&self, action: &InfoPanelShareAction) {
+    fn trigger_info_panel_share_action(
+        &mut self,
+        action: &InfoPanelShareAction,
+        cx: &mut Context<Self>,
+    ) {
         match action {
             InfoPanelShareAction::RevealPath(path) => {
-                self.reveal_panel_reference_in_file_manager(path)
+                self.reveal_panel_reference_in_file_manager(path, cx)
             }
             InfoPanelShareAction::OpenUrl(url) => {
                 if let Err(error) = crate::platform::shell::open_url(url) {
@@ -3297,12 +3635,10 @@ impl EditorView {
 
         for (line, decoration) in self.decorations.iter().enumerate() {
             for wiki_link in &decoration.wiki_links {
-                let resolved_path =
-                    resolve_wiki_link_target_path(&self.sidebar_root, &wiki_link.target_path)
-                        .or_else(|| Some(self.sidebar_root.join(&wiki_link.target_path)));
-                let Some(resolved_path) = resolved_path else {
-                    continue;
-                };
+                // Display the lexical target; resolving a wiki name must not walk
+                // an unavailable workspace from the render path.
+                let (path, _) = split_markdown_target(&wiki_link.target_path);
+                let resolved_path = self.sidebar_root.join(path);
 
                 let target = InfoPanelReferenceTarget::LocalPath(resolved_path.clone());
 
@@ -3335,17 +3671,7 @@ impl EditorView {
             .and_then(|path| self.relative_path_for_path(path))
             .or_else(|| path.map(|path| path.to_string_lossy().into_owned()))
             .unwrap_or_else(|| self.t(crate::i18n::TextKey::Unsaved).to_string());
-        let metadata = path.and_then(|path| fs::metadata(path).ok());
-        let created_time = metadata
-            .as_ref()
-            .and_then(|meta| meta.created().or_else(|_| meta.modified()).ok());
-        let created_at = created_time
-            .map(|time| crate::i18n::format_relative_time(self.ui_language, time))
-            .unwrap_or_else(|| self.t(crate::i18n::TextKey::Unavailable).to_string());
-        let modified_time = metadata.as_ref().and_then(|meta| meta.modified().ok());
-        let modified_at = modified_time
-            .map(|time| crate::i18n::format_relative_time(self.ui_language, time))
-            .unwrap_or_else(|| self.t(crate::i18n::TextKey::Unavailable).to_string());
+        let unavailable = self.t(crate::i18n::TextKey::Unavailable).to_string();
 
         let supports_text_export = tab
             .file_kind
@@ -3357,10 +3683,7 @@ impl EditorView {
             ""
         };
 
-        let file_size = metadata
-            .as_ref()
-            .map(|meta| meta.len())
-            .unwrap_or_else(|| text.len() as u64);
+        let file_size = text.len() as u64;
 
         let word_count = if !supports_text_export {
             Some(0)
@@ -3396,17 +3719,13 @@ impl EditorView {
                 },
                 InfoPanelRow {
                     label: self.t(crate::i18n::TextKey::InfoCreated).to_string(),
-                    value: created_at,
-                    tooltip: created_time.map(|time| {
-                        self.detailed_time_label(crate::i18n::TextKey::InfoCreated, time)
-                    }),
+                    value: unavailable.clone(),
+                    tooltip: None,
                 },
                 InfoPanelRow {
                     label: self.t(crate::i18n::TextKey::InfoModified).to_string(),
-                    value: modified_at,
-                    tooltip: modified_time.map(|time| {
-                        self.detailed_time_label(crate::i18n::TextKey::InfoModified, time)
-                    }),
+                    value: unavailable,
+                    tooltip: None,
                 },
                 InfoPanelRow {
                     label: self.t(crate::i18n::TextKey::InfoSize).to_string(),
@@ -3482,9 +3801,10 @@ impl EditorView {
 
         cx.spawn(async move |this, cx| {
             let read_path = path.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { fs::read_to_string(&read_path) })
+            let result =
+                crate::platform::fs_task::run("read export source", read_path.clone(), move || {
+                    fs::read_to_string(read_path)
+                })
                 .await;
             this.update(cx, |editor, cx| {
                 editor.finish_loading_export_path(path, format, result, cx);
@@ -3548,11 +3868,13 @@ impl EditorView {
             self.export_default_name_for_path(source_file_path.as_deref(), format.extension());
         #[cfg(not(target_os = "macos"))]
         let ui_language = self.ui_language;
+        let layout = ExportLayout::from_settings(&self.app_settings);
         let immediate_bytes = match format {
             ExportFormat::Markdown => Some(text.as_bytes().to_vec()),
-            ExportFormat::Html => {
-                Some(build_html_document(&title, &text, source_file_path.as_deref()).into_bytes())
-            }
+            ExportFormat::Html => Some(
+                build_html_document(&title, &text, source_file_path.as_deref(), layout)
+                    .into_bytes(),
+            ),
             ExportFormat::Pdf | ExportFormat::Png => None,
         };
 
@@ -3582,20 +3904,23 @@ impl EditorView {
 
             let export_error = if let Some(bytes) = immediate_bytes {
                 let write_path = path.clone();
-                cx.background_executor()
-                    .spawn(async move { fs::write(write_path, bytes) })
-                    .await
-                    .err()
-                    .map(|error| error.to_string())
+                crate::platform::fs_task::run("write export", write_path.clone(), move || {
+                    fs::write(write_path, bytes)
+                })
+                .await
+                .err()
+                .map(|error| error.to_string())
             } else {
                 #[cfg(target_os = "macos")]
                 let export_result = {
-                    let html = build_html_document(&title, &text, source_file_path.as_deref());
+                    let html =
+                        build_html_document(&title, &text, source_file_path.as_deref(), layout);
                     match format {
                         ExportFormat::Png => {
                             build_png_document_from_html_macos(
                                 &html,
                                 source_file_path.as_deref(),
+                                layout,
                                 cx,
                             )
                             .await
@@ -3604,6 +3929,7 @@ impl EditorView {
                             build_pdf_document_from_html_macos(
                                 &html,
                                 source_file_path.as_deref(),
+                                layout,
                                 cx,
                             )
                             .await
@@ -3615,21 +3941,27 @@ impl EditorView {
                 let export_result = if matches!(format, ExportFormat::Png) {
                     Err(anyhow::anyhow!("PNG export is only available on macOS"))
                 } else {
-                    cx.background_executor()
-                        .spawn(async move {
-                            build_pdf_document(&title, &text, source_file_path.as_deref())
-                        })
-                        .await
+                    crate::platform::fs_task::run_anyhow(
+                        "build PDF export",
+                        source_file_path.clone().unwrap_or_default(),
+                        move || {
+                            build_pdf_document(&title, &text, source_file_path.as_deref(), layout)
+                        },
+                    )
+                    .await
                 };
 
                 match export_result {
                     Ok(bytes) => {
                         let write_path = path.clone();
-                        cx.background_executor()
-                            .spawn(async move { fs::write(write_path, bytes) })
-                            .await
-                            .err()
-                            .map(|error| error.to_string())
+                        crate::platform::fs_task::run(
+                            "write export",
+                            write_path.clone(),
+                            move || fs::write(write_path, bytes),
+                        )
+                        .await
+                        .err()
+                        .map(|error| error.to_string())
                     }
                     Err(error) => Some(error.to_string()),
                 }
@@ -3835,7 +4167,7 @@ impl EditorView {
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
-                            this.trigger_info_panel_share_action(&share_action);
+                            this.trigger_info_panel_share_action(&share_action, cx);
                         }),
                     )
                     .child(
@@ -4123,6 +4455,36 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn git_diff_worker_payload_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::GitDiffState>();
+    }
+
+    #[test]
+    fn git_diff_requests_reject_out_of_order_completions_and_prune_finished_requests() {
+        let mut requests = super::LatestDiffRequests::default();
+        let first = requests.begin("pane:tab".into());
+        let second = requests.begin("pane:tab".into());
+        assert!(!requests.is_current("pane:tab", &first));
+        assert!(requests.is_current("pane:tab", &second));
+        let other = requests.begin("other-pane:tab".into());
+        assert!(requests.is_current("pane:tab", &second));
+        assert!(requests.is_current("other-pane:tab", &other));
+        drop(second);
+        let _next = requests.begin("another-tab".into());
+        assert!(!requests.requests.contains_key("pane:tab"));
+    }
+
+    #[test]
+    fn export_file_url_encoding_does_not_require_an_existing_path() {
+        let path = PathBuf::from("unavailable mount/note #1.md");
+        assert_eq!(
+            super::percent_encode_file_url_path(&path),
+            "unavailable%20mount/note%20%231.md/"
+        );
+    }
+
+    #[test]
     fn pdf_plain_text_projection_removes_markdown_source_markers() {
         let rendered = rendered_plain_text_for_export(
             "# Heading\n\nThis is **bold** and [linked](https://example.com).\n\n- item\n\n![diagram](chart.png)\n\n```rust\nlet answer = 42;\n```\n\n$$x + y$$\n",
@@ -4168,7 +4530,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn composed_slices_become_a4_pages() {
+    fn composed_slices_use_the_configured_content_width() {
         use super::cg_pdf::*;
         use core_graphics::geometry::{CGPoint, CGRect, CGSize};
         use objc::{class, msg_send, sel, sel_impl};
@@ -4191,8 +4553,17 @@ mod tests {
             }
         }
 
-        let composed =
-            super::compose_a4_pdf(&[slice_pdf(493.0, 700.0), slice_pdf(493.0, 200.0)]).unwrap();
+        let mut settings = super::AppSettings::default();
+        settings.editor_content_width = 1200.0;
+        let layout = super::ExportLayout::from_settings(&settings);
+        let composed = super::compose_pdf_pages(
+            &[
+                slice_pdf(layout.content_width_px, 700.0),
+                slice_pdf(layout.content_width_px, 200.0),
+            ],
+            layout,
+        )
+        .unwrap();
 
         unsafe {
             let data: *mut objc::runtime::Object = msg_send![
@@ -4206,8 +4577,14 @@ mod tests {
             assert_eq!(CGPDFDocumentGetNumberOfPages(document), 2);
             for index in 1..=2 {
                 let bounds = CGPDFPageGetBoxRect(CGPDFDocumentGetPage(document, index), 0);
-                assert_eq!(bounds.size.width, super::PDF_PAGE_WIDTH_PT);
-                assert_eq!(bounds.size.height, super::PDF_PAGE_HEIGHT_PT);
+                assert!(
+                    (bounds.size.width - layout.page_width_px * super::CSS_PX_TO_PDF_PT).abs()
+                        < 0.01
+                );
+                assert!(
+                    (bounds.size.height - layout.page_height_px * super::CSS_PX_TO_PDF_PT).abs()
+                        < 0.01
+                );
             }
             CGPDFDocumentRelease(document);
         }
@@ -4220,6 +4597,142 @@ mod tests {
             super::pdf_page_html("<html><head><style>a{}</style></head><body></body></html>");
         assert!(page.contains(".markdown-body{max-width:none!important;padding:0!important;"));
         assert_eq!(page.matches("</head>").count(), 1);
+    }
+
+    #[test]
+    fn export_layout_tracks_content_width_and_separates_page_margins() {
+        for width in [320.0, 700.0, 1200.0, 1600.0] {
+            let mut settings = super::AppSettings::default();
+            settings.editor_content_width = width;
+            let layout = super::ExportLayout::from_settings(&settings);
+            assert_eq!(layout.content_width_px, f64::from(width));
+            assert_eq!(
+                layout.page_width_px - 2.0 * super::EXPORT_PAGE_MARGIN_PX,
+                layout.content_width_px
+            );
+            assert!(layout.content_height_px() > 0.0);
+            let html = build_html_document("Note", "body", None, layout);
+            assert!(html.contains(&format!("--export-content-width:{width}px;")));
+            assert!(html.contains(&format!("--export-page-width:{}px;", layout.page_width_px)));
+            assert!(html.contains("max-width:var(--export-page-width)"));
+            assert!(!html.contains("max-width:980px"));
+            assert!(!html.contains("size:A4"));
+            assert!(html.contains(&format!("@page{{size:{}px ", layout.page_width_px)));
+            // PNG captures exactly this outer width, so the responsive rule
+            // cannot reduce padding and silently widen the content at small settings.
+            assert!(html.contains(&format!(
+                "@media(max-width:{}px)",
+                layout.page_width_px - 1.0
+            )));
+        }
+        let mut settings = super::AppSettings::default();
+        settings.editor_content_width = f32::NAN;
+        assert_eq!(
+            super::ExportLayout::from_settings(&settings).content_width_px,
+            700.0
+        );
+    }
+
+    #[test]
+    fn png_export_pixel_width_is_independent_of_backing_scale() {
+        let layout = super::ExportLayout::from_settings(&super::AppSettings::default());
+        for scale in [1.0, 1.5, 2.0] {
+            assert_eq!(layout.png_snapshot_width_pt(scale) * scale, 1604.0);
+        }
+    }
+
+    #[test]
+    fn export_math_never_rewrites_multiline_html_literals() {
+        for wrapper in [
+            ("<pre>", "</pre>"),
+            ("<!--", "-->"),
+            ("<script>", "</script>"),
+        ] {
+            for delimiters in [("\\[", "\\]"), ("$$", "$$")] {
+                let markdown = format!(
+                    "{}\n{}\nx+y\n{}\n{}\n",
+                    wrapper.0, delimiters.0, delimiters.1, wrapper.1
+                );
+                assert_eq!(
+                    super::markdown_with_export_math_blocks(&markdown, Options::all()),
+                    markdown
+                );
+                let html = super::render_markdown_for_export(&markdown);
+                assert!(!html.contains("export-preview-math"));
+                assert!(!html.contains("~~~math"));
+                assert!(html.contains("x+y"));
+            }
+        }
+    }
+
+    #[test]
+    fn export_renders_editor_block_math_syntax_without_source_or_error_fallback() {
+        for markdown in [
+            "$$\n\\frac{a}{b}\n$$\n",
+            "$$\nx +\n\ny\n$$\n",
+            "\\[\\frac{a}{b}\\]\n",
+            "\\[\n\\frac{a}{b}\n\\]\n",
+            "$$x\\:y$$",
+            "```math\n\\frac{a}{b}\n```\n",
+            "```latex\n\\frac{a}{b}\n```\n",
+            "```tex\n\\frac{a}{b}\n```\n",
+            "$$\n\\operatorname*{arg\\,min}_{\\theta \\in \\mathbb{R}^n}\n\\left[\\frac{1}{m}\\sum_{i=1}^{m}\\left\\lVert f_\\theta(x_i)-y_i \\right\\rVert_2^2 + \\lambda \\left\\lVert \\theta \\right\\rVert_2^2\\right]\n$$\n",
+        ] {
+            let html = super::render_markdown_for_export(markdown);
+            assert_eq!(
+                html.matches("class=\"export-preview export-preview-math\"")
+                    .count(),
+                1,
+                "{markdown:?}: {html}"
+            );
+            assert!(html.contains("<svg"), "{markdown:?}: {html}");
+            assert!(html.contains("<path"), "{markdown:?}: {html}");
+            assert!(
+                !html.contains("LaTeX preview failed"),
+                "{markdown:?}: {html}"
+            );
+            assert!(!html.contains("$$"), "{markdown:?}: {html}");
+            assert!(
+                !html
+                    .chars()
+                    .any(|ch| ('\u{e000}'..='\u{e004}').contains(&ch)),
+                "{markdown:?}: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_math_keeps_tex_commands_opaque_to_escape_masking() {
+        for markdown in ["$$x\\:y$$", "$x\\:y$", "```math\nx\\:y\n```"] {
+            assert_eq!(
+                super::mask_escaped_custom_syntax(markdown, Options::all()),
+                markdown
+            );
+        }
+    }
+
+    #[test]
+    fn export_math_preserves_adjacent_prose_quotes_and_literal_contexts() {
+        let html = super::render_markdown_for_export("before\n\\[\\frac{a}{b}\\]\nafter\n");
+        assert!(html.contains("<p>before</p>"));
+        assert!(html.contains("<p>after</p>"));
+        assert_eq!(html.matches("export-preview-math").count(), 1);
+        let html = super::render_markdown_for_export("> [!NOTE]\n> $$\n> x+y\n> $$\n");
+        assert!(html.contains("callout-note"));
+        assert!(html.contains("export-preview-math"));
+        for markdown in [
+            "`\\[x\\]`",
+            "```text\n\\[x\\]\n$$\nx\n$$\n```",
+            "[x]",
+            "$$\nx + y\n",
+            "\\[\nx+y\n",
+        ] {
+            let html = super::render_markdown_for_export(markdown);
+            assert!(
+                !html.contains("export-preview-math"),
+                "{markdown:?}: {html}"
+            );
+        }
     }
 
     #[test]
@@ -4239,7 +4752,12 @@ mod tests {
             "code highlighting: {html}"
         );
 
-        let doc = super::build_html_document("T", md, None);
+        let doc = super::build_html_document(
+            "T",
+            md,
+            None,
+            super::ExportLayout::from_settings(&super::AppSettings::default()),
+        );
         assert!(
             doc.contains(
                 ".markdown-body table{display:block;width:max-content;max-width:100%;overflow:auto"
@@ -4295,6 +4813,152 @@ mod tests {
                 "| A | B |\n| --- | --- |\n| first<br>second | value |\n"
             )
             .contains("first\nsecond")
+        );
+    }
+
+    #[test]
+    fn export_cjk_reference_labels_unknown_sentinel_keys_stay_unlinked() {
+        for (delimiter, tag, masked_label) in [
+            ("**", "strong", "前**你好。**⸀"),
+            ("*", "em", "前*你好。*⸀"),
+            ("__", "strong", "⸀__⸀好。__⸀"),
+            ("_", "em", "⸀_⸀好。_⸀"),
+        ] {
+            let label = format!("前{delimiter}你好。{delimiter}后");
+            for suffix in ["", "[]", "[known]"] {
+                for known in [false, true] {
+                    let usage = format!("[{label}]{suffix}");
+                    let original_definition = if known {
+                        format!("[{label}]: /right\n")
+                    } else {
+                        String::new()
+                    };
+                    let definitions =
+                        format!("[{masked_label}]: /wrong\n[known]: /known\n{original_definition}");
+                    let target = if suffix == "[known]" {
+                        Some("/known")
+                    } else if known {
+                        Some("/right")
+                    } else {
+                        None
+                    };
+                    for source in [
+                        format!("{usage}\n\n{definitions}"),
+                        format!("| Value |\n| --- |\n| {usage} |\n\n{definitions}"),
+                    ] {
+                        let html = super::render_markdown_for_export(&source);
+                        assert!(!html.contains("href=\"/wrong\""), "{source}: {html}");
+                        assert!(
+                            html.contains(&format!("前<{tag}>你好。</{tag}>后")),
+                            "{source}: {html}"
+                        );
+                        if let Some(target) = target {
+                            assert!(
+                                html.contains(&format!("href=\"{target}\"")),
+                                "{source}: {html}"
+                            );
+                        } else {
+                            assert!(!html.contains("<a "), "{source}: {html}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn export_cjk_reference_labels_preserve_links_titles_and_visible_characters() {
+        for (delimiter, tag) in [("**", "strong"), ("__", "strong"), ("*", "em"), ("_", "em")] {
+            for suffix in ["", "[]"] {
+                let label = format!("前{delimiter}你好。{delimiter}后");
+                let usage = format!("[{label}]{suffix}");
+                let definition = format!("[{label}]: /target \"original title\"\n");
+                let expected = format!(
+                    "<a href=\"/target\" title=\"original title\">前<{tag}>你好。</{tag}>后</a>"
+                );
+                let source = format!("{usage}\n\n{definition}");
+                let html = super::render_markdown_for_export(&source);
+                assert_eq!(html.matches(&expected).count(), 1, "{source}: {html}");
+                let table = format!("| {usage} |\n| --- |\n| {usage} |\n\n{definition}");
+                let html = super::render_markdown_for_export(&table);
+                assert_eq!(html.matches(&expected).count(), 2, "{table}: {html}");
+            }
+        }
+    }
+
+    #[test]
+    fn export_cjk_inline_punctuation_matches_editor_and_preserves_text() {
+        for (delimiter, tag) in [
+            ("**", "strong"),
+            ("__", "strong"),
+            ("*", "em"),
+            ("_", "em"),
+            ("~~", "del"),
+            ("==", "mark"),
+            ("++", "u"),
+            ("^", "sup"),
+            ("~", "sub"),
+        ] {
+            for inner in ["你好。", "「你好」", "你好!", "你好🙂", "𠮷。"] {
+                let source = format!("前{delimiter}{inner}{delimiter}后");
+                let expected = format!("前<{tag}>{inner}</{tag}>后");
+                let html = super::render_markdown_for_export(&source);
+                assert!(html.contains(&expected), "{source}: {html}");
+                let table = format!("| {source} |\n| --- |\n| {source} |\n");
+                let html = super::render_markdown_for_export(&table);
+                assert_eq!(html.matches(&expected).count(), 2, "{table}: {html}");
+            }
+        }
+        for (source, expected) in [
+            ("前***你好。***后", "前<em><strong>你好。</strong></em>后"),
+            (
+                "前**==你好。==**后",
+                "前<strong><mark>你好。</mark></strong>后",
+            ),
+            (
+                "甲**你好。**乙*「世界」*丙",
+                "甲<strong>你好。</strong>乙<em>「世界」</em>丙",
+            ),
+            ("𠮷**你好。**𠮷", "𠮷<strong>你好。</strong>𠮷"),
+            (
+                "&#x2e00; 前**你好。**后 &amp; &#x10100;",
+                "⸀ 前<strong>你好。</strong>后 &amp; 𐄀",
+            ),
+        ] {
+            let html = super::render_markdown_for_export(source);
+            assert!(html.contains(expected), "{source}: {html}");
+        }
+    }
+
+    #[test]
+    fn export_cjk_inline_punctuation_preserves_protected_source_and_western_rules() {
+        for source in [
+            r"前\**你好。\**后",
+            "`前**你好。**后`",
+            "$前**你好。**后$",
+            "<code>前**你好。**后</code>",
+            "<!-- 前**你好。**后 -->",
+            "[label](前**你好。**后)",
+            "https://host/前**你好。**后",
+            "foo_bar_baz",
+            "foo__bar__baz",
+            "a__你好__b",
+        ] {
+            let html = super::render_markdown_for_export(source);
+            assert!(!html.contains("<strong>"), "{source}: {html}");
+            assert!(!html.contains("<em>"), "{source}: {html}");
+        }
+        let html = super::render_markdown_for_export(
+            "[前**你好。**后](path_你好_字) [[target|前**你好。**后]]",
+        );
+        assert_eq!(
+            html.matches("前<strong>你好。</strong>后").count(),
+            2,
+            "{html}"
+        );
+        assert!(
+            html.contains("href=\"path_%E4%BD%A0%E5%A5%BD_%E5%AD%97\""),
+            "{html}"
         );
     }
 
@@ -4503,9 +5167,11 @@ mod tests {
             "Note",
             "![img](./assets/pic.png)",
             Some(&PathBuf::from("/tmp/demo/note.md")),
+            super::ExportLayout::from_settings(&super::AppSettings::default()),
         );
 
-        assert!(html.contains("@page{size:A4;margin:18mm;}"));
+        assert!(html.contains("@page{size:802px "));
+        assert!(html.contains("margin:51px;}"));
         assert!(html.contains("<base href=\"file:///tmp/demo/\">"));
     }
 

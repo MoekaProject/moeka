@@ -13,6 +13,68 @@ use crate::markdown::{BlockType, InlineKind, LineDecoration, raw_wiki_link_range
 use super::shortcut::{ShortcutRenderStyle, render_shortcut};
 use super::*;
 
+// Menu construction must not probe mounts just to decide which actions to show.
+fn lexical_menu_image_path(
+    raw: &str,
+    file_dir: Option<&Path>,
+    root: Option<&Path>,
+) -> Option<PathBuf> {
+    if raw.is_empty() || helpers::is_remote_image_url(raw) {
+        return None;
+    }
+    if crate::platform::paths::is_file_url(raw) {
+        return crate::platform::paths::path_from_file_url(raw);
+    }
+    let decoded = percent_encoding::percent_decode_str(raw).decode_utf8_lossy();
+    let path = crate::platform::paths::expand_tilde(&decoded)?;
+    Some(if path.is_absolute() {
+        path
+    } else if let Some(base) = file_dir.or(root) {
+        base.join(path)
+    } else {
+        path
+    })
+}
+
+#[cfg(test)]
+mod filesystem_free_menu_tests {
+    use super::lexical_menu_image_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn image_paths_are_lexical_even_when_the_mount_is_unavailable() {
+        let base = Path::new("unavailable-image-mount");
+        assert_eq!(
+            lexical_menu_image_path("images/missing%20image.png", Some(base), None),
+            Some(base.join("images/missing image.png"))
+        );
+        assert_eq!(
+            lexical_menu_image_path("missing.png", None, Some(base)),
+            Some(base.join("missing.png"))
+        );
+        assert_eq!(
+            lexical_menu_image_path("missing.png", None, None),
+            Some(PathBuf::from("missing.png"))
+        );
+    }
+
+    #[test]
+    fn remote_images_do_not_become_local_menu_paths() {
+        assert!(lexical_menu_image_path("https://example.test/image.png", None, None).is_none());
+        assert!(lexical_menu_image_path("", None, None).is_none());
+    }
+
+    #[test]
+    fn file_urls_are_decoded_without_probing_the_target() {
+        let expected =
+            crate::platform::paths::path_from_file_url("file:///unavailable/image%20one.png");
+        assert_eq!(
+            lexical_menu_image_path("file:///unavailable/image%20one.png", None, None),
+            expected
+        );
+    }
+}
+
 fn wrapped_menu_anchor(
     wrapped: &WrappedLine,
     position: Point<Pixels>,
@@ -70,6 +132,75 @@ fn current_raw_wiki_link_range(
 
 fn menu_icon_column_metrics(icon_size_px: f32, check_size_px: f32, gap_px: f32) -> (f32, f32) {
     (check_size_px.max(icon_size_px), gap_px)
+}
+
+fn front_matter_type_label_key(ty: front_matter::FrontMatterType) -> &'static str {
+    use front_matter::FrontMatterType::*;
+    match ty {
+        Text => "text",
+        MultilineText => "multiline_text",
+        Checkbox => "checkbox",
+        Date => "date",
+        DateTime => "date_time",
+        List => "list",
+        Number => "number",
+        Empty => "empty",
+        Object => "object",
+        Raw => "raw",
+    }
+}
+
+fn front_matter_type_menu_matches(
+    current_pane: PaneId,
+    current_tab: Option<&str>,
+    current_source: &str,
+    pane: PaneId,
+    tab: Option<&str>,
+    source: &str,
+) -> bool {
+    current_pane == pane && current_tab == tab && current_source == source
+}
+
+fn front_matter_type_choice_enabled(
+    current: Option<front_matter::FrontMatterType>,
+    target: front_matter::FrontMatterType,
+    read_only: bool,
+    can_convert: impl FnOnce() -> bool,
+) -> bool {
+    current.is_some()
+        && target != front_matter::FrontMatterType::Raw
+        && !read_only
+        // The planner validates the property span and may reset incompatible values.
+        && (current == Some(target) || can_convert())
+}
+
+// Global icon tooltips are suppressed while menus are open. Menu explanations
+// use GPUI's item tooltip instead, with the same theme and wrapping behavior.
+struct FrontMatterTypeMenuTooltip {
+    editor: gpui::Entity<EditorView>,
+    text: SharedString,
+}
+
+impl gpui::Render for FrontMatterTypeMenuTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let editor = self.editor.read(cx);
+        let styles = &editor.styles.tooltip;
+        let font_size = editor.scaled(styles.tooltip_title_font_size_px);
+        div()
+            .max_w(px(editor.scaled(styles.tooltip_max_width_px)))
+            .px(px(editor.scaled(styles.tooltip_padding_x_px)))
+            .py(px(editor.scaled(styles.tooltip_padding_y_px)))
+            .font_family(SharedString::from(editor.styles.ui_font_family))
+            .text_size(px(font_size))
+            .line_height(px(font_size * 1.3))
+            .text_color(styles.tooltip_title_text_color)
+            .whitespace_normal()
+            .bg(styles.tooltip_bg)
+            .border(px(editor.scaled(styles.tooltip_border_width_px)))
+            .border_color(styles.tooltip_border_color)
+            .rounded(px(editor.scaled(styles.tooltip_radius_px)))
+            .child(self.text.clone())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1081,12 +1212,32 @@ impl EditorView {
     }
 
     fn copy_image_path_to_clipboard(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let path = path.to_path_buf();
+        self.copy_local_image_source_to_clipboard(path.to_string_lossy().into_owned(), cx);
+    }
+
+    fn copy_local_image_source_to_clipboard(&mut self, source: String, cx: &mut Context<Self>) {
+        let path = PathBuf::from(&source);
+        let file_dir = self
+            .current_file_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
+        let mut roots = self.workspaces.clone();
+        if !self.sidebar_root.as_os_str().is_empty() && !roots.contains(&self.sidebar_root) {
+            roots.push(self.sidebar_root.clone());
+        }
         self.context_menu = None;
         cx.spawn(async move |this, cx| {
-            let image = cx
-                .background_executor()
-                .spawn(async move {
+            let read_path = path.clone();
+            let image =
+                crate::platform::fs_task::run("copy image to clipboard", path.clone(), move || {
+                    let path = helpers::resolve_image_to_path(&source, file_dir.as_ref(), &roots)
+                        .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("could not resolve image path: {}", read_path.display()),
+                        )
+                    })?;
                     let ext = path
                         .extension()
                         .and_then(|ext| ext.to_str())
@@ -1101,24 +1252,27 @@ impl EditorView {
                         Some("tif" | "tiff") => Some(ImageFormat::Tiff),
                         _ => None,
                     };
-                    let bytes = std::fs::read(&path).ok();
-                    let image = bytes.as_ref().and_then(|bytes| {
-                        if let Some(format) = format {
-                            return Some(Image::from_bytes(format, bytes.clone()));
-                        }
-                        let decoded = image::load_from_memory(bytes).ok()?;
+                    let bytes = std::fs::read(&path)?;
+                    let image = if let Some(format) = format {
+                        Image::from_bytes(format, bytes)
+                    } else {
+                        let decoded =
+                            image::load_from_memory(&bytes).map_err(std::io::Error::other)?;
                         let mut png = Cursor::new(Vec::new());
-                        decoded.write_to(&mut png, image::ImageFormat::Png).ok()?;
-                        Some(Image::from_bytes(ImageFormat::Png, png.into_inner()))
-                    });
-                    (image, path)
+                        decoded
+                            .write_to(&mut png, image::ImageFormat::Png)
+                            .map_err(std::io::Error::other)?;
+                        Image::from_bytes(ImageFormat::Png, png.into_inner())
+                    };
+                    Ok(image)
                 })
                 .await;
             this.update(cx, |editor, cx| {
                 match image {
-                    (Some(image), _) => cx.write_to_clipboard(ClipboardItem::new_image(&image)),
-                    (None, path) => {
-                        editor.copy_text_to_clipboard(path.to_string_lossy().into_owned(), cx)
+                    Ok(image) => cx.write_to_clipboard(ClipboardItem::new_image(&image)),
+                    Err(error) => {
+                        editor.copy_text_to_clipboard(path.to_string_lossy().into_owned(), cx);
+                        editor.notify_error(error.to_string(), cx);
                     }
                 }
                 cx.notify();
@@ -1133,15 +1287,13 @@ impl EditorView {
         if helpers::is_remote_image_url(raw_path) {
             return None;
         }
-        let file_dir = self
-            .current_file_path
-            .as_ref()
-            .and_then(|path| path.parent().map(Path::to_path_buf));
-        let mut roots = self.workspaces.clone();
-        if !self.sidebar_root.as_os_str().is_empty() && !roots.contains(&self.sidebar_root) {
-            roots.push(self.sidebar_root.clone());
-        }
-        helpers::resolve_image_to_path(raw_path, file_dir.as_ref(), &roots)
+        lexical_menu_image_path(
+            raw_path,
+            self.current_file_path.as_deref().and_then(Path::parent),
+            self.workspaces.first().map(PathBuf::as_path).or_else(|| {
+                (!self.sidebar_root.as_os_str().is_empty()).then_some(self.sidebar_root.as_path())
+            }),
+        )
     }
 
     fn current_markdown_image_source(&self) -> Option<&str> {
@@ -1151,11 +1303,7 @@ impl EditorView {
 
     fn copy_markdown_image_to_clipboard(&mut self, source: String, cx: &mut Context<Self>) {
         if !helpers::is_remote_image_url(&source) {
-            if let Some(path) = self.current_markdown_image_path() {
-                self.copy_image_path_to_clipboard(&path, cx);
-            } else {
-                self.copy_text_to_clipboard(source, cx);
-            }
+            self.copy_local_image_source_to_clipboard(source, cx);
             return;
         }
 
@@ -1414,12 +1562,12 @@ impl EditorView {
                 };
                 let destination_path = document_dir.join(file_name);
                 if path != destination_path {
-                    let result = cx
-                        .background_executor()
-                        .spawn(
-                            async move { file_ops::copy_file_data(&path, &destination_path, true) },
-                        )
-                        .await;
+                    let result = crate::platform::fs_task::run(
+                        "copy selected image",
+                        destination_path.clone(),
+                        move || file_ops::copy_file_data(&path, &destination_path, true),
+                    )
+                    .await;
                     if let Err(error) = result {
                         this.update(cx, |editor, cx| {
                             let message = format!(
@@ -2022,22 +2170,37 @@ impl EditorView {
         self.wiki_link_search_results.clear();
 
         let root = self.sidebar_root.clone();
-        if !root.exists() {
+        if root.as_os_str().is_empty() {
             self.wiki_link_recent_results.clear();
             cx.notify();
             return;
         }
 
+        let requested_root = root.clone();
         let task = cx.spawn(async move |this, cx| {
-            let results = cx
-                .background_executor()
-                .spawn(async move {
-                    crate::editor::quick_open::collect_wiki_link_recent_files(&root, 10)
-                })
-                .await;
+            let results = crate::platform::fs_task::run(
+                "search recent wiki links",
+                root.clone(),
+                move || {
+                    std::fs::read_dir(&root)?;
+                    Ok(crate::editor::quick_open::collect_wiki_link_recent_files(
+                        &root, 10,
+                    ))
+                },
+            )
+            .await;
 
             this.update(cx, |this, cx| {
-                this.wiki_link_recent_results = results;
+                if this.sidebar_root != requested_root || !this.wiki_link_query.trim().is_empty() {
+                    return;
+                }
+                match results {
+                    Ok(results) => this.wiki_link_recent_results = results,
+                    Err(error) => {
+                        this.wiki_link_recent_results.clear();
+                        this.notify_error(error.to_string(), cx);
+                    }
+                }
                 this.wiki_link_recent_task = None;
                 cx.notify();
             })
@@ -2052,25 +2215,39 @@ impl EditorView {
         // can only be written by the latest query. This avoids the per-keystroke
         // results -> "Searching" -> results flicker.
         self.wiki_link_search_task = None;
+        self.wiki_link_recent_task = None;
 
         let root = self.sidebar_root.clone();
         let query = self.wiki_link_query.clone();
-        if !root.exists() || query.trim().is_empty() {
+        if root.as_os_str().is_empty() || query.trim().is_empty() {
             self.wiki_link_search_results.clear();
             cx.notify();
             return;
         }
 
+        let requested_root = root.clone();
+        let requested_query = query.clone();
         let task = cx.spawn(async move |this, cx| {
-            let results = cx
-                .background_executor()
-                .spawn(async move {
-                    crate::editor::quick_open::collect_wiki_link_search_results(&root, &query, 10)
+            let results =
+                crate::platform::fs_task::run("search wiki links", root.clone(), move || {
+                    std::fs::read_dir(&root)?;
+                    Ok(crate::editor::quick_open::collect_wiki_link_search_results(
+                        &root, &query, 10,
+                    ))
                 })
                 .await;
 
             this.update(cx, |this, cx| {
-                this.wiki_link_search_results = results;
+                if this.sidebar_root != requested_root || this.wiki_link_query != requested_query {
+                    return;
+                }
+                match results {
+                    Ok(results) => this.wiki_link_search_results = results,
+                    Err(error) => {
+                        this.wiki_link_search_results.clear();
+                        this.notify_error(error.to_string(), cx);
+                    }
+                }
                 this.wiki_link_search_task = None;
                 cx.notify();
             })
@@ -2211,9 +2388,11 @@ impl EditorView {
         let mut policy = self.app_settings.workspace_link_policy();
         policy.link_syntax = super::attachments::AttachmentLinkSyntax::WikiLink;
         cx.spawn(async move |this, cx| {
-            let target = cx
-                .background_executor()
-                .spawn(async move {
+            let target: anyhow::Result<String> = crate::platform::fs_task::run_anyhow(
+                "resolve wiki link target",
+                root.clone(),
+                move || {
+                    std::fs::read_dir(&root)?;
                     let index =
                         if policy.path_style == super::attachments::AttachmentPathStyle::Shortest {
                             Some(super::attachments::WorkspaceLinkIndex::build(&root))
@@ -2221,9 +2400,9 @@ impl EditorView {
                             None
                         };
                     policy.target_for(&root, &source, &path, index.as_ref())
-                })
-                .await;
-            let Ok(target) = target else { return };
+                },
+            )
+            .await;
             this.update(cx, |editor, cx| {
                 editor.with_pane_if_alive(pane_id, |editor| {
                     if editor.active_tab_id != tab_id
@@ -2233,6 +2412,13 @@ impl EditorView {
                     {
                         return;
                     }
+                    let target = match target {
+                        Ok(target) => target,
+                        Err(error) => {
+                            editor.notify_error(error.to_string(), cx);
+                            return;
+                        }
+                    };
                     let replace_start = start + 2;
                     editor.buffer.replace(replace_start..query_end, &target);
                     editor
@@ -3033,6 +3219,105 @@ impl EditorView {
             .into_any_element()
     }
 
+    fn render_front_matter_type_choice_item(
+        &self,
+        target: front_matter::FrontMatterType,
+        is_active: bool,
+        disabled_reason: Option<&'static str>,
+        cx: &mut Context<Self>,
+        handler: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let ms = &self.styles.context_menu;
+        let wss = &self.styles.workspace_switcher;
+        let enabled = disabled_reason.is_none();
+        let icon_size = self.scaled(ms.menu_format_icon_size_px);
+        let check_size = self.scaled(wss.ws_menu_item_check_size_px);
+        let (icon_col_w, gap) = menu_icon_column_metrics(
+            ms.menu_format_icon_size_px,
+            wss.ws_menu_item_check_size_px,
+            wss.ws_menu_item_action_icon_gap_px,
+        );
+        let item = div()
+            .id(SharedString::from(format!("front-matter-type-{target:?}")))
+            .w_full()
+            .h(px(self.scaled(ms.menu_item_height_px)))
+            .px(px(self.scaled(ms.menu_item_padding_x_px)))
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(gap)))
+            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
+            .text_color(ms.menu_item_primary_text_color)
+            .when(enabled, |this| this.hover(|s| s.bg(ms.menu_item_hover_bg)))
+            .cursor(CursorStyle::Arrow)
+            .child(
+                div()
+                    .w(px(self.scaled(icon_col_w)))
+                    .h(px(icon_size))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .opacity(if enabled { 1.0 } else { 0.4 })
+                    .child(
+                        svg()
+                            .path(front_matter_type_icon(target))
+                            .size(px(icon_size))
+                            .text_color(wss.ws_menu_item_action_icon_color),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .opacity(if enabled { 1.0 } else { 0.4 })
+                    .child(crate::i18n::front_matter_type_label(
+                        self.ui_language,
+                        front_matter_type_label_key(target),
+                    )),
+            )
+            .child(
+                div()
+                    .size(px(check_size))
+                    .flex_none()
+                    .when(is_active, |this| {
+                        this.child(
+                            svg()
+                                .path(CHECK_SVG_PATH)
+                                .size(px(check_size))
+                                .text_color(wss.ws_menu_item_check_color),
+                        )
+                    }),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
+                    if enabled {
+                        this.close_context_menu(cx);
+                        handler(this, cx);
+                    }
+                }),
+            );
+        if let Some(reason) = disabled_reason {
+            let editor = cx.entity().clone();
+            item.tooltip(move |_, cx| {
+                cx.new(|_| FrontMatterTypeMenuTooltip {
+                    editor: editor.clone(),
+                    text: reason.into(),
+                })
+                .into()
+            })
+            .into_any_element()
+        } else {
+            item.into_any_element()
+        }
+    }
+
     fn render_format_context_menu_item(
         &self,
         label: &str,
@@ -3438,8 +3723,8 @@ impl EditorView {
                     self.t(crate::i18n::TextKey::RevealInFinder),
                     false,
                     cx,
-                    move |this, _, _cx| {
-                        this.reveal_in_file_manager(&p);
+                    move |this, _, cx| {
+                        this.reveal_in_file_manager(&p, cx);
                     },
                 ));
             }
@@ -3498,7 +3783,13 @@ impl EditorView {
             }
             let starred_paths: Vec<PathBuf> = context_paths
                 .iter()
-                .filter(|path| path.is_file())
+                .filter(|candidate| {
+                    *candidate == &path
+                        || self
+                            .sidebar_items_cache
+                            .iter()
+                            .any(|item| item.path == **candidate && !item.is_dir)
+                })
                 .cloned()
                 .collect();
             let is_starred = starred_paths
@@ -3677,8 +3968,8 @@ impl EditorView {
                 self.t(crate::i18n::TextKey::RevealInFinder),
                 false,
                 cx,
-                move |this, _, _cx| {
-                    this.reveal_in_file_manager(&p);
+                move |this, _, cx| {
+                    this.reveal_in_file_manager(&p, cx);
                 },
             ));
         }
@@ -3847,8 +4138,8 @@ impl EditorView {
                 self.t(crate::i18n::TextKey::RevealInFinder),
                 false,
                 cx,
-                move |this, _, _cx| {
-                    this.reveal_paths_in_file_manager(&reveal_paths);
+                move |this, _, cx| {
+                    this.reveal_paths_in_file_manager(&reveal_paths, cx);
                 },
             ));
         }
@@ -3975,7 +4266,7 @@ impl EditorView {
                 cx,
                 move |this, _, cx| {
                     this.close_context_menu(cx);
-                    this.reveal_in_file_manager(&reveal_path);
+                    this.reveal_in_file_manager(&reveal_path, cx);
                 },
             ));
         }
@@ -4089,7 +4380,7 @@ impl EditorView {
                     cx,
                     move |this, _, cx| {
                         this.context_menu = None;
-                        this.reveal_in_file_manager(&reveal_path);
+                        this.reveal_in_file_manager(&reveal_path, cx);
                         cx.notify();
                     },
                 ));
@@ -5987,6 +6278,109 @@ impl EditorView {
                 self.render_format_context_menu(cx),
                 self.scaled(self.styles.context_menu.menu_format_width_px),
             ),
+            ContextMenuKind::FrontMatterType {
+                line,
+                pane_id,
+                tab_id,
+                source,
+            } => {
+                let context_matches = front_matter_type_menu_matches(
+                    self.current_pane_id(),
+                    self.active_tab_id.as_deref(),
+                    self.buffer.text(),
+                    *pane_id,
+                    tab_id.as_deref(),
+                    source.as_ref(),
+                );
+                let current = if context_matches {
+                    front_matter::property_type(&self.buffer, &self.decorations, *line)
+                } else {
+                    None
+                };
+                let read_only = self.active_tab_is_read_only();
+                let label = |key| crate::i18n::front_matter_type_label(self.ui_language, key);
+
+                let ms = &self.styles.context_menu;
+                let wss = &self.styles.workspace_switcher;
+                let text_width = front_matter::TYPES
+                    .iter()
+                    .map(|ty| {
+                        shortcut::estimate_text_width(
+                            label(front_matter_type_label_key(*ty)),
+                            self.scaled(ms.menu_item_font_size_px),
+                        )
+                    })
+                    .fold(0.0, f32::max);
+                let (icon_col_w, gap) = menu_icon_column_metrics(
+                    ms.menu_format_icon_size_px,
+                    wss.ws_menu_item_check_size_px,
+                    wss.ws_menu_item_action_icon_gap_px,
+                );
+                let width = (text_width
+                    + self.scaled(
+                        2.0 * ms.menu_border_width_px
+                            + 2.0 * ms.menu_item_padding_x_px
+                            + icon_col_w
+                            + 2.0 * gap
+                            + wss.ws_menu_item_check_size_px,
+                    ))
+                .ceil();
+                let mut items = Vec::with_capacity(front_matter::TYPES.len());
+                for target in front_matter::TYPES {
+                    let enabled =
+                        front_matter_type_choice_enabled(current, target, read_only, || {
+                            front_matter::type_change_edit(
+                                &self.buffer,
+                                &self.decorations,
+                                *line,
+                                target,
+                            )
+                            .is_some()
+                        });
+                    let disabled_reason = if enabled {
+                        None
+                    } else if !context_matches || current.is_none() {
+                        Some(label("changed"))
+                    } else if read_only {
+                        Some(label("read_only"))
+                    } else {
+                        Some(label("changed"))
+                    };
+                    let line = *line;
+                    let pane_id = *pane_id;
+                    let tab_id = tab_id.clone();
+                    let source = source.clone();
+                    items.push(self.render_front_matter_type_choice_item(
+                        target,
+                        current == Some(target),
+                        disabled_reason,
+                        cx,
+                        move |this, cx| {
+                            if !front_matter_type_menu_matches(
+                                this.current_pane_id(),
+                                this.active_tab_id.as_deref(),
+                                this.buffer.text(),
+                                pane_id,
+                                tab_id.as_deref(),
+                                source.as_ref(),
+                            ) || this.active_tab_is_read_only()
+                            {
+                                return;
+                            }
+                            let Some(current) =
+                                front_matter::property_type(&this.buffer, &this.decorations, line)
+                            else {
+                                return;
+                            };
+                            if current == target {
+                                return;
+                            }
+                            this.change_front_matter_type(line, target, cx);
+                        },
+                    ));
+                }
+                (items, width)
+            }
             ContextMenuKind::Image => {
                 let mut items = Vec::new();
                 items.push(self.render_context_menu_item_with_icon(
@@ -6005,7 +6399,7 @@ impl EditorView {
                     cx,
                     |this, _, cx| {
                         if let Some(path) = this.current_file_path.clone() {
-                            this.reveal_in_file_manager(&path);
+                            this.reveal_in_file_manager(&path, cx);
                         }
                         this.close_context_menu(cx);
                     },
@@ -6308,7 +6702,7 @@ impl EditorView {
                                 cx,
                                 move |this, _, cx| {
                                     this.close_context_menu(cx);
-                                    this.reveal_in_file_manager(&reveal_path);
+                                    this.reveal_in_file_manager(&reveal_path, cx);
                                 },
                             ));
                         }
@@ -6997,6 +7391,228 @@ fn line_format_action(block_type: &BlockType) -> FormatMenuAction {
         BlockType::HorizontalRule => FormatMenuAction::HorizontalRule,
         BlockType::Table => FormatMenuAction::Table,
         BlockType::Normal | BlockType::Heading(_) => FormatMenuAction::Paragraph,
+    }
+}
+
+#[cfg(test)]
+mod front_matter_type_menu_tests {
+    use super::{
+        front_matter, front_matter_type_choice_enabled, front_matter_type_label_key,
+        front_matter_type_menu_matches,
+    };
+    use front_matter::FrontMatterType as Type;
+
+    #[test]
+    fn type_menu_requires_the_same_pane_tab_and_entire_source() {
+        let source = "---\nvalue: hello\n---\nbody\n";
+        assert!(front_matter_type_menu_matches(
+            1,
+            Some("tab"),
+            source,
+            1,
+            Some("tab"),
+            source,
+        ));
+        assert!(front_matter_type_menu_matches(
+            1, None, source, 1, None, source
+        ));
+        assert!(!front_matter_type_menu_matches(
+            2,
+            Some("tab"),
+            source,
+            1,
+            Some("tab"),
+            source,
+        ));
+        assert!(!front_matter_type_menu_matches(
+            1,
+            Some("other"),
+            source,
+            1,
+            Some("tab"),
+            source,
+        ));
+        assert!(!front_matter_type_menu_matches(
+            1,
+            None,
+            source,
+            1,
+            Some("tab"),
+            source,
+        ));
+        assert!(!front_matter_type_menu_matches(
+            1,
+            Some("tab"),
+            "---\nvalue: hello\n---\nchanged body\n",
+            1,
+            Some("tab"),
+            source,
+        ));
+    }
+
+    #[test]
+    fn stale_context_disables_all_choices_without_planning() {
+        let source = "---\nvalue: !custom hello\n---\nbody\n";
+        let buffer = crate::buffer::Buffer::from_text(source);
+        let decorations = crate::markdown::parse_decorations(source);
+        for (pane, tab, current_source) in [
+            (2, Some("tab"), source),
+            (1, Some("other"), source),
+            (1, None, source),
+            (
+                1,
+                Some("tab"),
+                "---\nvalue: !custom hello\n---\nchanged body\n",
+            ),
+            (1, Some("tab"), "---\nvalue: changed\n---\nbody\n"),
+        ] {
+            let context_matches =
+                front_matter_type_menu_matches(pane, tab, current_source, 1, Some("tab"), source);
+            let current = if context_matches {
+                front_matter::property_type(&buffer, &decorations, 1)
+            } else {
+                None
+            };
+            assert!(!context_matches);
+            for target in front_matter::TYPES {
+                assert!(!front_matter_type_choice_enabled(
+                    current,
+                    target,
+                    false,
+                    || panic!("stale contexts must not plan edits"),
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_and_current_choices_skip_conversion_planning() {
+        let must_not_plan = || panic!("conversion planning should be skipped");
+        for target in front_matter::TYPES {
+            assert!(!front_matter_type_choice_enabled(
+                None,
+                target,
+                false,
+                must_not_plan,
+            ));
+            assert!(front_matter_type_choice_enabled(
+                Some(target),
+                target,
+                false,
+                must_not_plan,
+            ));
+            for current in front_matter::TYPES.into_iter().chain([Type::Raw]) {
+                assert!(!front_matter_type_choice_enabled(
+                    Some(current),
+                    target,
+                    true,
+                    must_not_plan,
+                ));
+            }
+        }
+        assert!(!front_matter_type_choice_enabled(
+            Some(Type::Text),
+            Type::Raw,
+            false,
+            must_not_plan,
+        ));
+    }
+
+    #[test]
+    fn every_source_type_can_choose_every_selectable_type() {
+        for current in front_matter::TYPES.into_iter().chain([Type::Raw]) {
+            for target in front_matter::TYPES {
+                assert!(front_matter_type_choice_enabled(
+                    Some(current),
+                    target,
+                    false,
+                    || true,
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn choices_still_require_a_lexically_valid_edit_plan() {
+        for current in front_matter::TYPES.into_iter().chain([Type::Raw]) {
+            for target in front_matter::TYPES {
+                assert_eq!(
+                    front_matter_type_choice_enabled(Some(current), target, false, || false),
+                    current == target,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lossy_raw_and_collection_choices_follow_the_reset_capable_plan() {
+        for source in [
+            "---\nvalue: hello\n---\n",
+            "---\nvalue: |-\n  hello\n  world\n---\n",
+            "---\nvalue: true\n---\n",
+            "---\nvalue: 2026-10-13\n---\n",
+            "---\nvalue: 2026-10-13T12:30:00\n---\n",
+            "---\nvalue: [hello, world]\n---\n",
+            "---\nvalue: 42\n---\n",
+            "---\nvalue: null\n---\n",
+            "---\nvalue: {nested: value}\n---\n",
+            "---\nvalue: !custom hello\n---\n",
+            "---\nvalue: &anchor hello\n---\n",
+            "---\nvalue: *anchor\n---\n",
+            "---\nvalue:\n  nested: value\n  # child comment\n---\n",
+        ] {
+            let buffer = crate::buffer::Buffer::from_text(source);
+            let decorations = crate::markdown::parse_decorations(source);
+            let current = front_matter::property_type(&buffer, &decorations, 1);
+            assert!(current.is_some(), "{source}");
+            for target in front_matter::TYPES {
+                assert!(
+                    front_matter_type_choice_enabled(current, target, false, || {
+                        front_matter::type_change_edit(&buffer, &decorations, 1, target).is_some()
+                    }),
+                    "{current:?} -> {target:?}: {source}",
+                );
+                assert_eq!(buffer.text(), source);
+            }
+        }
+    }
+
+    #[test]
+    fn non_property_contexts_disable_all_choices_without_planning() {
+        let source = "---\n# comment\nvalue:\n  - child\n---\nbody\n";
+        let buffer = crate::buffer::Buffer::from_text(source);
+        let decorations = crate::markdown::parse_decorations(source);
+        for line in [0, 1, 3, 4, 5, buffer.line_count()] {
+            let current = front_matter::property_type(&buffer, &decorations, line);
+            assert_eq!(current, None, "line {line}");
+            for target in front_matter::TYPES {
+                assert!(!front_matter_type_choice_enabled(
+                    current,
+                    target,
+                    false,
+                    || panic!("non-property contexts must not plan edits"),
+                ));
+                assert!(
+                    front_matter::type_change_edit(&buffer, &decorations, line, target).is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exactly_nine_distinct_types_are_selectable_and_raw_is_not_one() {
+        let keys: std::collections::HashSet<_> = front_matter::TYPES
+            .iter()
+            .copied()
+            .map(front_matter_type_label_key)
+            .collect();
+        assert_eq!(keys.len(), 9);
+        assert!(!keys.contains(front_matter_type_label_key(Type::Raw)));
+        for &language in crate::i18n::UiLanguage::supported() {
+            for key in &keys {
+                assert!(!crate::i18n::front_matter_type_label(language, key).is_empty());
+            }
+        }
     }
 }
 

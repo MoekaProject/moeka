@@ -8,6 +8,7 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::*;
+use crate::platform::fs_task;
 
 /// Documents larger than this keep no text in the reopen list; they are read
 /// back from disk. Smaller ones stay resident so reopening is instant.
@@ -294,7 +295,8 @@ impl EditorView {
             tab.kind == TabKind::Editor
                 && tab
                     .path
-                    .as_ref()
+                    .as_deref()
+                    .or_else(|| session_store::restoring_path(self, &tab.id))
                     .is_some_and(|tab_path| crate::platform::paths::same_file_path(tab_path, path))
         })
     }
@@ -551,7 +553,13 @@ impl EditorView {
         )
     }
 
-    fn build_file_tab(&mut self, path: &Path, bytes: &[u8], is_preview: bool) -> OpenTab {
+    fn build_file_tab(
+        id: String,
+        path: &Path,
+        bytes: &[u8],
+        is_preview: bool,
+        default_left_align: bool,
+    ) -> OpenTab {
         let (snapshot, file_kind) = Self::load_editor_tab_state_for_bytes(path, bytes);
         let whiteboard = if matches!(file_kind, FileKind::Whiteboard) {
             Some(WhiteboardTabState::new(
@@ -560,11 +568,9 @@ impl EditorView {
         } else {
             None
         };
-        let id = self.next_tab_identity();
         let mut history = history_store::load_tab_history(&id, Some(path), &snapshot);
         history.saved_text = Some(snapshot.text.clone());
-        let initial_left_aligned =
-            matches!(file_kind, FileKind::Markdown) && self.app_settings.default_left_align;
+        let initial_left_aligned = matches!(file_kind, FileKind::Markdown) && default_left_align;
         OpenTab {
             id,
             title: Self::title_for_path(path),
@@ -590,7 +596,12 @@ impl EditorView {
     /// When `path` is already open in another pane, moves focus there so the
     /// existing tab is reused instead of opening a duplicate.
     fn focus_pane_containing_editor_path(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if let Some(owner) = self.pane_id_for_editor_path(path)
+        let owner = self.pane_id_for_editor_path(path).or_else(|| {
+            self.all_tabs()
+                .find(|tab| session_store::restoring_path(self, &tab.id) == Some(path))
+                .and_then(|tab| self.pane_id_for_tab(&tab.id))
+        });
+        if let Some(owner) = owner
             && owner != self.focused_pane_id
         {
             self.focus_pane(owner, cx);
@@ -614,18 +625,36 @@ impl EditorView {
         }
         let epoch = self.preview_open_epoch;
         let pane_id = self.current_pane_id();
+        let tab_id = self.next_tab_identity();
+        let default_left_align = self.app_settings.default_left_align;
         cx.spawn(async move |this, cx| {
             let read_path = path.clone();
-            let bytes = cx
-                .background_executor()
-                .spawn(async move { std::fs::read(read_path) })
-                .await;
+            let loaded = fs_task::run("Open preview tab", path.clone(), move || {
+                let bytes = std::fs::read(&read_path)?;
+                Ok(Self::build_file_tab(
+                    tab_id,
+                    &read_path,
+                    &bytes,
+                    true,
+                    default_left_align,
+                ))
+            })
+            .await;
             this.update(cx, |editor, cx| {
                 editor.with_pane_if_alive(pane_id, |editor| {
                     if editor.preview_open_epoch != epoch || editor.focused_pane_id != pane_id {
                         return;
                     }
-                    let Ok(bytes) = bytes else { return };
+                    let mut tab = match loaded {
+                        Ok(tab) => tab,
+                        Err(error) => {
+                            editor.notify_error(
+                                format!("{}: {error}", editor.t(TextKey::OpenFailed)),
+                                cx,
+                            );
+                            return;
+                        }
+                    };
                     if let Some(index) = editor.editor_tab_index_for_path(&path) {
                         editor.activate_tab_by_index(index, cx);
                     } else {
@@ -634,10 +663,11 @@ impl EditorView {
                         {
                             editor.tabs[index].is_preview = false;
                         }
-                        let mut tab = editor.build_file_tab(&path, &bytes, true);
                         editor.persist_active_tab_state();
                         if let Some(index) = editor.preview_tab_index() {
-                            tab.id = editor.tabs[index].id.clone();
+                            let replaced_id = editor.tabs[index].id.clone();
+                            session_store::forget_restoring_tab(editor, &replaced_id);
+                            tab.id = replaced_id;
                             editor.tabs[index] = tab;
                             editor.activate_tab_by_index_without_persist(index, cx);
                         } else {
@@ -674,15 +704,33 @@ impl EditorView {
         }
         let epoch = self.preview_open_epoch;
         let pane_id = self.current_pane_id();
+        let tab_id = self.next_tab_identity();
+        let default_left_align = self.app_settings.default_left_align;
         cx.spawn(async move |this, cx| {
             let read_path = path.clone();
-            let bytes = cx
-                .background_executor()
-                .spawn(async move { std::fs::read(read_path) })
-                .await;
+            let loaded = fs_task::run("Open tab", path.clone(), move || {
+                let bytes = std::fs::read(&read_path)?;
+                Ok(Self::build_file_tab(
+                    tab_id,
+                    &read_path,
+                    &bytes,
+                    false,
+                    default_left_align,
+                ))
+            })
+            .await;
             this.update(cx, |editor, cx| {
                 editor.with_pane_if_alive(pane_id, |editor| {
-                    let Ok(bytes) = bytes else { return };
+                    let tab = match loaded {
+                        Ok(tab) => tab,
+                        Err(error) => {
+                            editor.notify_error(
+                                format!("{}: {error}", editor.t(TextKey::OpenFailed)),
+                                cx,
+                            );
+                            return;
+                        }
+                    };
                     let latest =
                         editor.preview_open_epoch == epoch && editor.focused_pane_id == pane_id;
                     if let Some(index) = editor.editor_tab_index_for_path(&path) {
@@ -691,7 +739,6 @@ impl EditorView {
                             editor.activate_tab_by_index(index, cx);
                         }
                     } else {
-                        let tab = editor.build_file_tab(&path, &bytes, false);
                         if latest {
                             editor.persist_active_tab_state();
                         }
@@ -716,11 +763,8 @@ impl EditorView {
         paths: &[PathBuf],
         cx: &mut Context<Self>,
     ) {
-        let file_paths: Vec<PathBuf> = paths
-            .iter()
-            .filter(|path| path.is_file())
-            .cloned()
-            .collect();
+        // The bounded read reports directories and inaccessible paths, without a UI-thread stat.
+        let file_paths = paths.to_vec();
         let last_index = file_paths.len().saturating_sub(1);
 
         for (index, path) in file_paths.into_iter().enumerate() {
@@ -739,7 +783,8 @@ impl EditorView {
         !tab.is_dirty
             && !tab.is_deleted
             && tab.snapshot.text.len() > RECENTLY_CLOSED_RESIDENT_TEXT_LIMIT
-            && tab.path.as_ref().is_some_and(|path| path.is_file())
+            && tab.path.is_some()
+            && tab.history.saved_text.as_deref() == Some(tab.snapshot.text.as_str())
     }
 
     pub(crate) fn persist_active_tab_state(&mut self) {
@@ -805,6 +850,7 @@ impl EditorView {
         self.active_tab_id = Some(tab_id.clone());
         self.active_tab_index_cache.set(Some(index));
         self.active_file_kind_cache = tab_file_kind.clone();
+        session_store::schedule_tab_restore(self, &tab_id, cx);
         self.current_file_path = tab_path.clone();
         self.editor_left_aligned = tab_left_aligned;
         self.reading_mode = tab_reading_mode;
@@ -895,6 +941,7 @@ impl EditorView {
             self.process_pending_close_queue(cx);
             return;
         };
+        session_store::forget_restoring_tab(self, tab_id);
         let was_active = self.active_tab_id.as_deref() == Some(tab_id);
         // Save to recently closed (keep up to 20)
         let mut removed = self.tabs.remove(index);
@@ -3318,6 +3365,23 @@ mod tests {
     }
 
     #[test]
+    fn building_a_tab_uses_supplied_contents_without_reopening_its_source() {
+        let tab = EditorView::build_file_tab(
+            "test-tab".into(),
+            Path::new("/unavailable-share/script"),
+            b"#!/usr/bin/env python3\nprint('loaded bytes')\n",
+            false,
+            false,
+        );
+        assert!(matches!(tab.file_kind, Some(FileKind::Code { .. })));
+        assert!(tab.snapshot.text.contains("loaded bytes"));
+        assert_eq!(
+            tab.history.saved_text.as_deref(),
+            Some(tab.snapshot.text.as_str())
+        );
+    }
+
+    #[test]
     fn duplicate_tab_names_use_the_shortest_unique_parent_suffix() {
         let paths = [
             PathBuf::from("/workspace/alpha/notes/readme.md"),
@@ -3358,13 +3422,14 @@ mod tests {
     #[test]
     fn a_large_saved_document_is_dropped_from_the_reopen_list() {
         let text = "x".repeat(RECENTLY_CLOSED_RESIDENT_TEXT_LIMIT + 1);
-        let tab = closed_editor_tab(&text, Some(PathBuf::from("Cargo.toml")));
+        let mut tab = closed_editor_tab(&text, Some(PathBuf::from("Cargo.toml")));
+        tab.history.saved_text = Some(text);
 
         assert!(EditorView::closed_tab_can_reload_from_disk(&tab));
     }
 
     #[test]
-    fn documents_that_disk_cannot_restore_keep_their_text() {
+    fn documents_without_a_verified_saved_snapshot_keep_their_text() {
         let text = "x".repeat(RECENTLY_CLOSED_RESIDENT_TEXT_LIMIT + 1);
         let path = Some(PathBuf::from("Cargo.toml"));
 

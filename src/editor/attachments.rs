@@ -604,12 +604,21 @@ pub(crate) fn validated_attachment_folder(folder: &str) -> Option<String> {
 }
 
 fn collect_workspace_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    if crate::platform::fs_task::check_deadline().is_err() {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
     for entry in entries.flatten() {
+        if crate::platform::fs_task::check_deadline().is_err() {
+            return;
+        }
         let path = entry.path();
         let is_directory = path.is_dir();
+        if crate::platform::fs_task::check_deadline().is_err() {
+            return;
+        }
         if should_skip_path(&path, is_directory) {
             continue;
         }

@@ -31,6 +31,32 @@ fn is_valid_branch_name(name: &str) -> bool {
             .any(|ch| ch.is_whitespace() || matches!(ch, '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
 }
 
+fn branch_requests()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Weak<()>>> {
+    static REQUESTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Weak<()>>>,
+    > = std::sync::OnceLock::new();
+    REQUESTS.get_or_init(Default::default)
+}
+
+fn begin_branch_request(key: &str) -> std::sync::Arc<()> {
+    let request = std::sync::Arc::new(());
+    let mut requests = branch_requests()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    requests.retain(|_, request| request.strong_count() > 0);
+    requests.insert(key.into(), std::sync::Arc::downgrade(&request));
+    request
+}
+
+fn branch_request_is_current(key: &str, request: &std::sync::Arc<()>) -> bool {
+    branch_requests()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(key)
+        .is_some_and(|current| current.ptr_eq(&std::sync::Arc::downgrade(request)))
+}
+
 impl EditorView {
     pub(crate) fn open_branch_picker(
         &mut self,
@@ -41,13 +67,42 @@ impl EditorView {
         let Some(base_dir) = self.git_panel_base_dir() else {
             return;
         };
-        if self.git_operation_running() {
+        if self.git_operation_running()
+            || file_watch::operation_suppressed("List Git branches", &base_dir)
+        {
             return;
         }
 
-        let branches = git_repo_root(&base_dir)
-            .map(|repo_root| collect_local_branches(&repo_root))
-            .unwrap_or_default();
+        let key = format!("{:?}", cx.entity_id());
+        let request = begin_branch_request(&key);
+        cx.spawn(async move |this, cx| {
+            let read_dir = base_dir.clone();
+            let branches =
+                crate::platform::fs_task::run("List Git branches", base_dir.clone(), move || {
+                    let repo_root = git_repo_root_result(&read_dir)
+                        .map_err(std::io::Error::other)?
+                        .ok_or_else(|| std::io::Error::other("Not a Git repository"))?;
+                    collect_local_branches(&repo_root).map_err(std::io::Error::other)
+                })
+                .await;
+            this.update(cx, |editor, cx| {
+                if !branch_request_is_current(&key, &request)
+                    || !editor.branch_picker_visible
+                    || editor.git_panel_base_dir().as_ref() != Some(&base_dir)
+                {
+                    return;
+                }
+                match branches {
+                    Ok(branches) => {
+                        editor.branch_picker_all = branches;
+                        editor.update_branch_picker_results(cx);
+                    }
+                    Err(error) => editor.notify_fs_error("List Git branches", &base_dir, error, cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
         self.branch_picker_visible = true;
         self.branch_picker_anchor = [
             self.status_bar_branch_button_bounds.get(),
@@ -67,7 +122,7 @@ impl EditorView {
         });
         self.branch_picker_query.clear();
         self.branch_picker_selected_index = 0;
-        self.branch_picker_all = branches;
+        self.branch_picker_all.clear();
         self.branch_picker_current = self
             .git_panel_repo_status()
             .map(|status| status.branch_label());
@@ -121,6 +176,7 @@ impl EditorView {
     }
 
     pub(crate) fn close_branch_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        begin_branch_request(&format!("{:?}", cx.entity_id()));
         self.branch_picker_visible = false;
         self.branch_picker_anchor = None;
         window.focus(&self.focus_handle(cx));
@@ -172,6 +228,7 @@ impl EditorView {
     }
 
     fn confirm_branch_picker(&mut self, cx: &mut Context<Self>) {
+        begin_branch_request(&format!("{:?}", cx.entity_id()));
         let Some(item) = self
             .branch_picker_items
             .get(self.branch_picker_selected_index)
@@ -270,6 +327,17 @@ mod tests {
         assert!(!is_valid_branch_name("-leading-dash"));
         assert!(!is_valid_branch_name("trailing/"));
         assert!(!is_valid_branch_name("wild*card"));
+    }
+
+    #[test]
+    fn superseded_branch_requests_cannot_install_results() {
+        let key = "branch-picker-test";
+        let first = begin_branch_request(key);
+        let second = begin_branch_request(key);
+        assert!(!branch_request_is_current(key, &first));
+        assert!(branch_request_is_current(key, &second));
+        begin_branch_request(key);
+        assert!(!branch_request_is_current(key, &second));
     }
 
     #[test]

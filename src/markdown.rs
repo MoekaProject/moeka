@@ -1,9 +1,14 @@
+use crate::front_matter::{self, FrontMatterLineInfo};
 use emojis::get_by_shortcode;
-use pulldown_cmark::{CodeBlockKind, Event, LinkType, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{BrokenLink, CodeBlockKind, Event, LinkType, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+
+#[path = "inline_syntax.rs"]
+mod inline_syntax;
+pub(crate) use inline_syntax::CjkInlineSource;
 
 fn cell_display_width(s: &str) -> usize {
     s.chars()
@@ -124,6 +129,14 @@ pub struct DisplayReplacement {
     pub trigger_range: Range<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TableCellFragment {
+    pub range: Range<usize>,
+    pub block_type: BlockType,
+    /// Complete source prefix, including indentation; zero keeps it literal.
+    pub prefix_len: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockPreviewKind {
     Math,
@@ -162,7 +175,7 @@ fn merge_byte_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
     merged
 }
 
-fn inline_span_source_range(
+pub(crate) fn inline_span_source_range(
     decoration: &LineDecoration,
     span: &InlineSpan,
 ) -> Option<Range<usize>> {
@@ -170,7 +183,17 @@ fn inline_span_source_range(
         .syntax_ranges
         .iter()
         .filter(|syntax_range| {
-            syntax_range.trigger_range.start <= span.range.start
+            let table_conceal = decoration.table_info.as_ref().is_some_and(|table| {
+                !table.is_front_matter
+                    && syntax_range.range.start == 0
+                    && syntax_range.range == syntax_range.trigger_range
+                    && table
+                        .cell_ranges
+                        .last()
+                        .is_some_and(|cell| syntax_range.range.end >= cell.end)
+            });
+            !table_conceal
+                && syntax_range.trigger_range.start <= span.range.start
                 && syntax_range.trigger_range.end >= span.range.end
         })
         .map(|syntax_range| syntax_range.trigger_range.clone())
@@ -583,6 +606,8 @@ pub struct LineDecorationPayload {
     pub diff_removed_spans: Vec<Range<usize>>,
     pub syntax_ranges: Vec<SyntaxRange>,
     pub display_replacements: Vec<DisplayReplacement>,
+    pub(crate) table_cell_fragments: Vec<TableCellFragment>,
+    pub(crate) table_reference_definitions: Option<Arc<str>>,
     pub block_preview: Option<BlockPreview>,
     pub highlight_spans: Vec<Range<usize>>,
     pub superscript_spans: Vec<Range<usize>>,
@@ -591,6 +616,7 @@ pub struct LineDecorationPayload {
     pub footnote_references: Vec<FootnoteReferenceSpan>,
     pub footnote_definition_label: Option<String>,
     pub table_info: Option<TableLineInfo>,
+    pub front_matter: Option<FrontMatterLineInfo>,
     pub code_language: Option<String>,
     /// For image lines, the local file path from `![alt](path)`.
     pub image_path: Option<String>,
@@ -607,6 +633,8 @@ impl LineDecorationPayload {
             && self.diff_removed_spans.is_empty()
             && self.syntax_ranges.is_empty()
             && self.display_replacements.is_empty()
+            && self.table_cell_fragments.is_empty()
+            && self.table_reference_definitions.is_none()
             && self.block_preview.is_none()
             && self.highlight_spans.is_empty()
             && self.superscript_spans.is_empty()
@@ -615,6 +643,7 @@ impl LineDecorationPayload {
             && self.footnote_references.is_empty()
             && self.footnote_definition_label.is_none()
             && self.table_info.is_none()
+            && self.front_matter.is_none()
             && self.code_language.is_none()
             && self.image_path.is_none()
     }
@@ -674,21 +703,38 @@ impl Default for LineDecoration {
 }
 
 pub fn parse_decorations(text: &str) -> Vec<LineDecoration> {
-    parse_decorations_with_options(text, true, None)
+    parse_decorations_with_options(text, true, None, None, false)
 }
 
 pub(crate) fn parse_decorations_fragment(text: &str) -> Vec<LineDecoration> {
-    parse_decorations_with_options(text, false, None)
+    parse_decorations_with_options(text, false, None, None, false)
 }
 
 pub(crate) fn parse_decorations_with_pending_fence(text: &str, line: usize) -> Vec<LineDecoration> {
-    parse_decorations_with_options(text, true, Some(line))
+    parse_decorations_with_options(text, true, Some(line), None, false)
+}
+
+pub(crate) fn parse_table_cell_decorations(
+    text: &str,
+    row: &LineDecoration,
+) -> Vec<LineDecoration> {
+    parse_decorations_with_options(
+        text,
+        true,
+        None,
+        row.table_reference_definitions.as_deref(),
+        row.table_info
+            .as_ref()
+            .is_some_and(|table| !table.is_front_matter),
+    )
 }
 
 fn parse_decorations_with_options(
     text: &str,
     detect_document_front_matter: bool,
     pending_fence_line: Option<usize>,
+    reference_definitions: Option<&str>,
+    table_cell_math: bool,
 ) -> Vec<LineDecoration> {
     let line_count = text.lines().count().max(1);
     let line_count = if text.ends_with('\n') {
@@ -756,7 +802,66 @@ fn parse_decorations_with_options(
     {
         parser_source.replace_range(span.clone(), &"x".repeat(span.len()));
     }
-    let parser = Parser::new_ext(&parser_source, opts);
+    // Resolve external references before custom inline detection, so identifiers
+    // never become emoji, scripts, or highlights in an isolated cell parse.
+    let reference_context = reference_definitions.map(|source| Parser::new_ext(source, opts));
+    let resolve_reference = |link: BrokenLink<'_>| {
+        let definition = reference_context
+            .as_ref()?
+            .reference_definitions()
+            .get(link.reference.as_ref())?;
+        Some((
+            definition.dest.clone().into_static(),
+            definition
+                .title
+                .clone()
+                .unwrap_or_else(|| "".into())
+                .into_static(),
+        ))
+    };
+    let parser_source = CjkInlineSource::new(&parser_source, || {
+        Parser::new_with_broken_link_callback(&parser_source, opts, Some(resolve_reference))
+            .into_offset_iter()
+    });
+    let parser = Parser::new_with_broken_link_callback(
+        parser_source.as_str(),
+        opts,
+        Some(|link: BrokenLink<'_>| {
+            parser_source.resolve_reference(&link).or_else(|| {
+                if parser_source.reference_allows_fallback(&link) {
+                    resolve_reference(link)
+                } else {
+                    None
+                }
+            })
+        }),
+    );
+    // Share only resolved declarations, not the entire document, with table
+    // rows. Re-parsing these retains pulldown's Unicode label matching rules.
+    let mut definitions = parser.reference_definitions().iter().collect::<Vec<_>>();
+    definitions.sort_by_key(|(label, _)| *label);
+    let table_reference_definitions = (!definitions.is_empty()).then(|| {
+        let mut source = String::new();
+        for (label, definition) in definitions {
+            source.push('[');
+            source.push_str(label);
+            source.push_str("]: <");
+            for ch in definition.dest.chars() {
+                // Entities may resolve to line breaks or other controls, which
+                // cannot be written literally in an angle-bracket destination.
+                if ch.is_ascii_control() {
+                    source.push_str(&format!("&#{};", ch as u32));
+                } else {
+                    if matches!(ch, '\\' | '<' | '>' | '&') {
+                        source.push('\\');
+                    }
+                    source.push(ch);
+                }
+            }
+            source.push_str(">\n");
+        }
+        Arc::<str>::from(source)
+    });
 
     let mut in_code_block = false;
     let mut in_fenced_code_block = false;
@@ -787,6 +892,7 @@ fn parse_decorations_with_options(
     let mut protected_html_stack: Vec<(String, usize)> = Vec::new();
     let mut list_stack: Vec<BlockContext> = Vec::new();
     let mut open_mermaid_block: Option<OpenMermaidBlock> = None;
+    let mut display_math_ranges = Vec::new();
 
     for (event, source_range) in parser.into_offset_iter() {
         match event {
@@ -956,6 +1062,18 @@ fn parse_decorations_with_options(
                 in_fenced_code_block = false;
             }
             Event::DisplayMath(content) => {
+                if table_cell_math {
+                    add_inline_math_span(
+                        &mut decorations,
+                        &line_starts,
+                        &offset_to_line_col,
+                        source_range.start,
+                        source_range.end,
+                        text,
+                    );
+                    continue;
+                }
+                display_math_ranges.push(source_range.clone());
                 let start_line = offset_to_line(source_range.start);
                 let end_line = offset_to_line(source_range.end.saturating_sub(1));
                 assign_block_preview(
@@ -1428,6 +1546,41 @@ fn parse_decorations_with_options(
 
     // Second pass: detect table lines
     detect_tables(&mut decorations, text, &line_starts);
+    for source_range in display_math_ranges {
+        let line = offset_to_line(source_range.start);
+        let relative = source_range.start - line_starts[line]..source_range.end - line_starts[line];
+        if decorations[line].table_info.as_ref().is_some_and(|table| {
+            !table.is_front_matter
+                && table
+                    .cell_ranges
+                    .iter()
+                    .any(|cell| relative.start >= cell.start && relative.end <= cell.end)
+        }) {
+            decorations[line].block_preview = None;
+            decorations[line].code_language = None;
+            decorations[line]
+                .syntax_ranges
+                .retain(|syntax| syntax.range != relative);
+            add_inline_math_span(
+                &mut decorations,
+                &line_starts,
+                &offset_to_line_col,
+                source_range.start,
+                source_range.end,
+                text,
+            );
+        }
+    }
+    for decoration in &mut decorations {
+        if decoration
+            .table_info
+            .as_ref()
+            .is_some_and(|table| !table.is_front_matter && !table.is_separator)
+        {
+            decoration.table_reference_definitions = table_reference_definitions.clone();
+            recover_table_cell_links(decoration);
+        }
+    }
 
     detect_raw_wiki_links(&mut decorations, text, &line_starts);
     detect_raw_footnote_references(&mut decorations, text, &line_starts);
@@ -1530,6 +1683,14 @@ fn parse_decorations_with_options(
     // Recover that physical-line pattern at any nesting depth (and inside a
     // blockquote) without changing ordinary `Title\n-` / `Title\n---` headings.
     for line in 0..decorations.len().saturating_sub(1) {
+        if decorations[line..=line + 1].iter().any(|decoration| {
+            decoration
+                .table_info
+                .as_ref()
+                .is_some_and(|table| table.is_front_matter)
+        }) {
+            continue;
+        }
         let content = get_line_content(text, &line_starts, line, decoration_count);
         let Some((first_marker_start, first_prefix_len)) = physical_unordered_list_prefix(content)
         else {
@@ -1626,6 +1787,91 @@ fn parse_decorations_with_options(
         }
     }
     decorations
+}
+
+fn recover_table_cell_links(row: &mut LineDecoration) {
+    let recovered_kind = |kind: &InlineKind| {
+        matches!(
+            kind,
+            InlineKind::Link | InlineKind::Image | InlineKind::InlineCode
+        )
+    };
+    // GFM splits protected pipes differently from semantic table cells. Drop
+    // its link/code metadata first, including false links inside split code.
+    let old_sources = row
+        .inline_spans
+        .iter()
+        .filter(|span| recovered_kind(&span.kind))
+        .filter_map(|span| inline_span_source_range(row, span))
+        .collect::<Vec<_>>();
+    row.syntax_ranges
+        .retain(|syntax| !old_sources.contains(&syntax.trigger_range));
+    row.inline_spans.retain(|span| !recovered_kind(&span.kind));
+    row.protected_ranges.clear();
+    let cell_count = row.table_info.as_ref().map_or(0, |table| table.cells.len());
+    for index in 0..cell_count {
+        let table = row.table_info.as_ref().unwrap();
+        let cell = &table.cells[index];
+        let cell_start = table.cell_ranges[index].start;
+        let cell_len = cell.len();
+        // Use the semantic cell rather than pulldown's GFM columns: unescaped
+        // pipes in code and Wiki aliases belong to the cell in this editor.
+        let parsed = parse_table_cell_decorations(&format!("x {cell}"), row)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let project = |range: &Range<usize>| {
+            (range.start >= 2 && range.end <= cell_len + 2)
+                .then(|| cell_start + range.start - 2..cell_start + range.end - 2)
+        };
+        // In particular, math after a protected pipe may have no native GFM
+        // event. Preserve its opacity for the row's later Wiki/custom scans.
+        row.protected_ranges
+            .extend(parsed.protected_ranges.iter().filter_map(&project));
+        for span in parsed
+            .inline_spans
+            .iter()
+            .filter(|span| recovered_kind(&span.kind))
+        {
+            let Some(range) = project(&span.range) else {
+                continue;
+            };
+            if !row.inline_spans.iter().any(|existing| {
+                existing.kind == span.kind
+                    && existing.range == range
+                    && existing.target == span.target
+            }) {
+                row.inline_spans.push(InlineSpan {
+                    range,
+                    ..span.clone()
+                });
+            }
+            let Some(source) = inline_span_source_range(&parsed, span) else {
+                continue;
+            };
+            for syntax in parsed
+                .syntax_ranges
+                .iter()
+                .filter(|syntax| syntax.trigger_range == source)
+            {
+                let (Some(range), Some(trigger_range)) = (
+                    project(&syntax.range),
+                    project(&(syntax.trigger_range.start.max(2)..syntax.trigger_range.end)),
+                ) else {
+                    continue;
+                };
+                if !row.syntax_ranges.iter().any(|existing| {
+                    existing.range == range && existing.trigger_range == trigger_range
+                }) {
+                    row.syntax_ranges.push(SyntaxRange {
+                        range,
+                        trigger_range,
+                    });
+                }
+            }
+        }
+    }
+    row.inline_spans.sort_by_key(|span| span.range.start);
 }
 
 fn decorate_math_block_previews_as_code_blocks(
@@ -1799,44 +2045,6 @@ fn assign_fenced_math_block_previews(
     }
 }
 
-fn parse_front_matter_entry(content: &str) -> (Vec<String>, Vec<Range<usize>>) {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return (vec![String::new(), String::new()], vec![0..0, 0..0]);
-    }
-
-    if let Some(colon) = content.find(':') {
-        let key_end = content[..colon].trim_end().len();
-        let value_start = content[colon + 1..]
-            .find(|ch: char| !ch.is_whitespace())
-            .map(|offset| colon + 1 + offset)
-            .unwrap_or(content.len());
-        let key = content[..colon].trim().to_string();
-        let value = content[value_start..].trim_end().to_string();
-        (
-            vec![key, value],
-            vec![0..key_end, value_start..content.len()],
-        )
-    } else {
-        (
-            vec![content.trim().to_string(), String::new()],
-            vec![0..content.trim_end().len(), content.len()..content.len()],
-        )
-    }
-}
-
-fn looks_like_front_matter_mapping_entry(content: &str) -> bool {
-    let content = content.trim_start();
-    let Some(colon) = content.find(':') else {
-        return false;
-    };
-    !content[..colon].trim().is_empty()
-        && content[colon + 1..]
-            .chars()
-            .next()
-            .is_none_or(char::is_whitespace)
-}
-
 fn detect_front_matter(decorations: &mut [LineDecoration], text: &str, line_starts: &[usize]) {
     let line_count = decorations.len();
     if line_count < 2 {
@@ -1853,7 +2061,8 @@ fn detect_front_matter(decorations: &mut [LineDecoration], text: &str, line_star
     };
 
     let Some(closing_line) = (1..line_count).find(|&line| {
-        let candidate = get_line_content(text, line_starts, line, line_count).trim();
+        // Indented delimiters can be literal scalar content or sequence items.
+        let candidate = get_line_content(text, line_starts, line, line_count).trim_end();
         if compact_delimiter {
             candidate == "-"
         } else {
@@ -1876,13 +2085,14 @@ fn detect_front_matter(decorations: &mut [LineDecoration], text: &str, line_star
         .unwrap_or(false);
     let has_mapping_entry = metadata_lines
         .iter()
-        .any(|line| looks_like_front_matter_mapping_entry(line));
+        .any(|line| front_matter::has_mapping_key(line));
     if !valid_mapping && !has_mapping_entry {
         return;
     }
 
     let table_start = 0;
     let table_end = closing_line + 1;
+    let line_infos = front_matter::parse_lines(&metadata_lines);
     let mut parsed_rows: Vec<(Vec<String>, Vec<Range<usize>>, bool)> = Vec::new();
     let mut key_width = 3usize;
     let mut value_width = 3usize;
@@ -1894,21 +2104,35 @@ fn detect_front_matter(decorations: &mut [LineDecoration], text: &str, line_star
             continue;
         }
 
-        let (cells, ranges) = parse_front_matter_entry(content);
-        key_width = key_width.max(cell_display_width(
-            cells.first().map(|cell| cell.trim()).unwrap_or(""),
-        ));
-        value_width = value_width.max(cell_display_width(
-            cells.get(1).map(|cell| cell.trim()).unwrap_or(""),
-        ));
-        parsed_rows.push((cells, ranges, false));
+        let info = &line_infos[line - 1];
+        let key_range = info.key_range.clone().unwrap_or(0..0);
+        let value_range = info.value_range.clone();
+        let key = content[key_range.clone()].to_string();
+        let value = content[value_range.clone()].to_string();
+        key_width = key_width.max(cell_display_width(&key));
+        value_width = value_width.max(cell_display_width(&value));
+        parsed_rows.push((vec![key, value], vec![key_range, value_range], false));
     }
 
     let column_widths = vec![key_width, value_width];
     for (row_index, line) in (table_start..table_end).enumerate() {
         let content = get_line_content(text, line_starts, line, line_count);
         let (cells, cell_ranges, is_separator) = &parsed_rows[row_index];
+        // Markdown has already parsed these rows. YAML owns their presentation,
+        // but diff annotations remain independent of the syntax being displayed.
+        if let Some(payload) = decorations[line].payload_mut() {
+            *payload = LineDecorationPayload {
+                diff_added_spans: std::mem::take(&mut payload.diff_added_spans),
+                diff_removed_spans: std::mem::take(&mut payload.diff_removed_spans),
+                ..LineDecorationPayload::default()
+            };
+        }
         decorations[line].block_type = BlockType::Table;
+        decorations[line].front_matter = if *is_separator {
+            None
+        } else {
+            Some(line_infos[line - 1].clone())
+        };
         decorations[line].table_info = Some(TableLineInfo {
             cells: cells.clone(),
             cell_ranges: cell_ranges.clone(),
@@ -2148,7 +2372,17 @@ fn add_inline_span(
     let line_len = text[line_starts[start_line]..]
         .find('\n')
         .unwrap_or(text.len() - line_starts[start_line]);
-    let full_trigger = start_col.saturating_sub(1)..(end_col + 1).min(line_len);
+    let line_content = &text[line_starts[start_line]..line_starts[start_line] + line_len];
+    let trigger_start = line_content[..start_col]
+        .char_indices()
+        .next_back()
+        .map_or(0, |(offset, _)| offset);
+    let trigger_end = end_col
+        + line_content[end_col..]
+            .chars()
+            .next()
+            .map_or(0, char::len_utf8);
+    let full_trigger = trigger_start..trigger_end;
 
     match &kind {
         InlineKind::Bold | InlineKind::Italic | InlineKind::Strikethrough => {
@@ -2823,21 +3057,40 @@ pub fn parse_table_cells_with_ranges(content: &str) -> Vec<(String, Range<usize>
     cells
 }
 
+fn table_row_has_cell_math(decoration: &LineDecoration, content: &str, line_start: usize) -> bool {
+    let Some(preview) = decoration.block_preview.as_ref() else {
+        return false;
+    };
+    if preview.kind != BlockPreviewKind::Math || preview.start_line != preview.end_line {
+        return false;
+    }
+    parse_table_cells_with_ranges(content)
+        .iter()
+        .any(|(_, cell)| {
+            preview.source_range.start >= line_start + cell.start
+                && preview.source_range.end <= line_start + cell.end
+        })
+}
+
 fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[usize]) {
     let line_count = decorations.len();
     let mut line_idx = 0;
 
     while line_idx < line_count {
+        let content = get_line_content(text, line_starts, line_idx, line_count);
         if decorations[line_idx].table_info.is_some()
-            || matches!(
+            || (matches!(
                 decorations[line_idx].block_type,
                 BlockType::CodeBlock | BlockType::CodeBlockFence
-            )
+            ) && !table_row_has_cell_math(
+                &decorations[line_idx],
+                content,
+                line_starts[line_idx],
+            ))
         {
             line_idx += 1;
             continue;
         }
-        let content = get_line_content(text, line_starts, line_idx, line_count);
         let header_cells = parse_table_cells_with_ranges(content);
         let separator_cells = (line_idx + 1 < line_count).then(|| {
             parse_table_cells_with_ranges(get_line_content(
@@ -2863,13 +3116,14 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
             let table_column_count = header_cells.len();
             line_idx += 2;
             while line_idx < line_count {
+                let c = get_line_content(text, line_starts, line_idx, line_count);
                 if !matches!(
                     decorations[line_idx].block_type,
                     BlockType::Normal | BlockType::Blockquote
-                ) {
+                ) && !table_row_has_cell_math(&decorations[line_idx], c, line_starts[line_idx])
+                {
                     break;
                 }
-                let c = get_line_content(text, line_starts, line_idx, line_count);
                 if !is_table_line(c) || parse_table_cells_with_ranges(c).len() != table_column_count
                 {
                     break;
@@ -3124,11 +3378,10 @@ fn detect_bare_urls(decorations: &mut [LineDecoration], text: &str, line_starts:
         if matches!(
             decoration.block_type,
             BlockType::CodeBlock | BlockType::CodeBlockFence
-        ) || decoration
-            .table_info
-            .as_ref()
-            .is_some_and(|table| table.is_front_matter)
+        ) || decoration.table_info.is_some()
         {
+            // Markdown-table URLs were recovered from individual cells, so a
+            // bare URL cannot consume a delimiter or neighboring cell text.
             continue;
         }
 
@@ -3909,6 +4162,377 @@ mod tests {
         raw_wiki_link_ranges, split_continuation_prefix, unclosed_code_fence_marker,
     };
 
+    fn assert_cjk_inline(source: &str, decoration: &LineDecoration, delimiter: &str, inner: &str) {
+        let expected_kind = match delimiter {
+            "**" | "__" => Some(InlineKind::Bold),
+            "*" | "_" => Some(InlineKind::Italic),
+            "~~" => Some(InlineKind::Strikethrough),
+            "++" => Some(InlineKind::Underline),
+            _ => None,
+        };
+        let ranges = if let Some(kind) = expected_kind {
+            decoration
+                .inline_spans
+                .iter()
+                .filter(|span| span.kind == kind)
+                .map(|span| span.range.clone())
+                .collect::<Vec<_>>()
+        } else {
+            match delimiter {
+                "==" => decoration.highlight_spans.clone(),
+                "^" => decoration.superscript_spans.clone(),
+                "~" => decoration.subscript_spans.clone(),
+                _ => unreachable!(),
+            }
+        };
+        let start = source
+            .find(&format!("{delimiter}{inner}{delimiter}"))
+            .unwrap();
+        let visible = start + delimiter.len()..start + delimiter.len() + inner.len();
+        assert!(
+            ranges.contains(&visible),
+            "{source}: {delimiter} {ranges:?}, expected {visible:?}"
+        );
+        for syntax in &decoration.syntax_ranges {
+            assert!(
+                source.get(syntax.range.clone()).is_some(),
+                "{source}: {syntax:?}"
+            );
+            assert!(
+                source.get(syntax.trigger_range.clone()).is_some(),
+                "{source}: {syntax:?}"
+            );
+        }
+        for marker in [
+            start..visible.start,
+            visible.end..visible.end + delimiter.len(),
+        ] {
+            assert!(
+                decoration
+                    .syntax_ranges
+                    .iter()
+                    .any(|syntax| syntax.range == marker),
+                "missing marker {marker:?} in {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn cjk_inline_punctuation_document_table_and_cell_pipeline() {
+        for delimiter in ["**", "__", "*", "_", "~~", "==", "++", "^", "~"] {
+            for inner in [
+                "你好。",
+                "「你好」",
+                "（你好）",
+                "你好！",
+                "你好!",
+                "你好🙂",
+                "“你好”",
+                "你好、世界",
+                "。",
+                "𠮷。",
+                "日本語。",
+                "한글。",
+            ] {
+                for (before, after) in [
+                    ("", ""),
+                    ("前", "后"),
+                    ("前", ""),
+                    ("", "后"),
+                    ("前，", "。后"),
+                ] {
+                    let source = format!("{before}{delimiter}{inner}{delimiter}{after}");
+                    let ordinary = parse_decorations(&source);
+                    assert_cjk_inline(&source, &ordinary[0], delimiter, inner);
+                    let row_source = format!("| {source} |");
+                    let table_source = format!("{row_source}\n| --- |\n{row_source}\n");
+                    let table = parse_decorations(&table_source);
+                    for row in [0, 2] {
+                        assert_cjk_inline(&row_source, &table[row], delimiter, inner);
+                        let cell = super::parse_table_cell_decorations(&source, &table[row]);
+                        assert_cjk_inline(&source, &cell[0], delimiter, inner);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cjk_inline_punctuation_is_a_commonmark_flanking_extension() {
+        use pulldown_cmark::{Event, Parser, Tag};
+        assert!(Parser::new("**你好。**").any(|event| matches!(event, Event::Start(Tag::Strong))));
+        assert!(
+            !Parser::new("前**你好。**后").any(|event| matches!(event, Event::Start(Tag::Strong)))
+        );
+        for source in [
+            "foo_bar_baz",
+            "foo__bar__baz",
+            "a_你好_b",
+            "a__你好__b",
+            "foo_!_bar",
+            "é__mot!__é",
+        ] {
+            assert!(
+                parse_decorations(source)[0].inline_spans.is_empty(),
+                "{source}"
+            );
+        }
+        for source in ["前_你好_后", "前__你好__后"] {
+            assert!(
+                !parse_decorations(source)[0].inline_spans.is_empty(),
+                "{source}"
+            );
+        }
+        for source in [
+            "前** 你好。**后",
+            "前**你好。 **后",
+            "前**你好。后",
+            "前*你好。后",
+        ] {
+            assert!(
+                parse_decorations(source)[0].inline_spans.is_empty(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn cjk_inline_punctuation_preserves_nested_delimiter_runs_and_source_bytes() {
+        for source in [
+            "前***你好。***后",
+            "前**外*你好。*内。**后",
+            "前*外**你好。**内。*后",
+            "前**==++你好。++==**后",
+            "前~~H~2~O。~~后",
+        ] {
+            let decoration = &parse_decorations(source)[0];
+            assert!(!decoration.inline_spans.is_empty(), "{source}");
+            for span in &decoration.inline_spans {
+                assert!(
+                    source.get(span.range.clone()).is_some(),
+                    "{source}: {span:?}"
+                );
+            }
+            for syntax in &decoration.syntax_ranges {
+                assert!(source.get(syntax.range.clone()).is_some());
+                assert!(source.get(syntax.trigger_range.clone()).is_some());
+            }
+        }
+        for (source, outer_delimiter, inner_delimiter) in [
+            ("前**外*你好。*内。**后", "**", "*"),
+            ("前*外**你好。**内。*后", "*", "**"),
+        ] {
+            let decoration = &parse_decorations(source)[0];
+            assert_cjk_inline(source, decoration, inner_delimiter, "你好。");
+            let outer_content = format!("外{inner_delimiter}你好。{inner_delimiter}内。");
+            assert_cjk_inline(source, decoration, outer_delimiter, &outer_content);
+        }
+        let source = "前~~H~2~O。~~后";
+        let decoration = &parse_decorations(source)[0];
+        assert_cjk_inline(source, decoration, "~~", "H~2~O。");
+        assert_cjk_inline(source, decoration, "~", "2");
+        let source = "前***你好。***后";
+        let decoration = &parse_decorations(source)[0];
+        assert!(
+            decoration
+                .inline_spans
+                .iter()
+                .any(|span| span.kind == InlineKind::Bold)
+        );
+        assert!(
+            decoration
+                .inline_spans
+                .iter()
+                .any(|span| span.kind == InlineKind::Italic)
+        );
+        for prefix in ["# ", "> ", "- ", "1. ", "- [ ] ", "😀 "] {
+            let source = format!("{prefix}前**你好。**后");
+            assert_cjk_inline(&source, &parse_decorations(&source)[0], "**", "你好。");
+        }
+        let source = "前**你好。\n世界。**后";
+        let decorations = parse_decorations(source);
+        assert!(decorations.iter().all(|line| {
+            line.inline_spans
+                .iter()
+                .any(|span| span.kind == InlineKind::Bold)
+        }));
+    }
+
+    #[test]
+    fn cjk_reference_labels_survive_document_and_inherited_table_parsing() {
+        for delimiter in ["**", "__", "*", "_"] {
+            for suffix in ["", "[]"] {
+                let label = format!("前{delimiter}你好。{delimiter}后");
+                let usage = format!("[{label}]{suffix}");
+                let definition = format!("[{label}]: /target \"original title\"\n");
+                let document = format!("{usage}\n\n{definition}");
+                let decorations = parse_decorations(&document);
+                let assert_link = |source: &str, decoration: &LineDecoration| {
+                    let links = decoration
+                        .inline_spans
+                        .iter()
+                        .filter(|span| span.kind == InlineKind::Link)
+                        .collect::<Vec<_>>();
+                    assert_eq!(links.len(), 1, "{source}: {decoration:?}");
+                    assert_eq!(links[0].target.as_deref(), Some("/target"), "{source}");
+                    assert_eq!(&source[links[0].range.clone()], label, "{source}");
+                    assert_cjk_inline(source, decoration, delimiter, "你好。");
+                };
+                assert_link(&usage, &decorations[0]);
+                let row_source = format!("| {usage} |");
+                let table_source = format!("{row_source}\n| --- |\n{row_source}\n\n{definition}");
+                let table = parse_decorations(&table_source);
+                for row in [0, 2] {
+                    assert_link(&row_source, &table[row]);
+                    let cell = super::parse_table_cell_decorations(&usage, &table[row]);
+                    assert_link(&usage, &cell[0]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cjk_reference_labels_unknown_inherited_keys_never_bind_masked_spelling() {
+        for (delimiter, masked_label) in [
+            ("**", "前**你好。**⸀"),
+            ("*", "前*你好。*⸀"),
+            ("__", "⸀__⸀好。__⸀"),
+            ("_", "⸀_⸀好。_⸀"),
+        ] {
+            let label = format!("前{delimiter}你好。{delimiter}后");
+            for suffix in ["", "[]", "[known]"] {
+                for known in [false, true] {
+                    let usage = format!("[{label}]{suffix}");
+                    let original_definition = if known {
+                        format!("[{label}]: /right\n")
+                    } else {
+                        String::new()
+                    };
+                    let document = format!(
+                        "| Value |\n| --- |\n| {usage} |\n\n[{masked_label}]: /wrong\n[known]: /known\n{original_definition}"
+                    );
+                    let table = parse_decorations(&document);
+                    let cell = super::parse_table_cell_decorations(&usage, &table[2]);
+                    let expected = if suffix == "[known]" {
+                        Some("/known")
+                    } else if known {
+                        Some("/right")
+                    } else {
+                        None
+                    };
+                    for decoration in [&table[2], &cell[0]] {
+                        let targets = decoration
+                            .inline_spans
+                            .iter()
+                            .filter(|span| span.kind == InlineKind::Link)
+                            .map(|span| span.target.as_deref())
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            targets,
+                            expected.into_iter().map(Some).collect::<Vec<_>>(),
+                            "{document}: {decoration:?}"
+                        );
+                    }
+                    assert_cjk_inline(&usage, &cell[0], delimiter, "你好。");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cjk_reference_labels_prefer_original_inherited_target_over_masked_key() {
+        // In a cell the marker is absent from source, but may exist in inherited
+        // definitions. Resolving its masked spelling first would pick /wrong.
+        let usage = "[前**你好。**后][]";
+        let document = format!(
+            "| Value |\n| --- |\n| {usage} |\n\n[前**你好。**后]: /right\n[前**你好。**⸀]: /wrong\n"
+        );
+        let table = parse_decorations(&document);
+        let cell = super::parse_table_cell_decorations(usage, &table[2]);
+        for decoration in [&table[2], &cell[0]] {
+            let links = decoration
+                .inline_spans
+                .iter()
+                .filter(|span| span.kind == InlineKind::Link)
+                .collect::<Vec<_>>();
+            assert_eq!(links.len(), 1, "{decoration:?}");
+            assert_eq!(links[0].target.as_deref(), Some("/right"));
+        }
+        assert_cjk_inline(usage, &cell[0], "**", "你好。");
+    }
+
+    #[test]
+    fn cjk_inline_punctuation_preserves_reference_context_and_nested_opaque_content() {
+        let cell_source = "[前**你好。**后][前__文。__后]";
+        let row_source = format!("| {cell_source} |");
+        let document = format!(
+            "| Value |\n| --- |\n{row_source}\n\n[前__文。__后]: <doc_前_后.md> \"前__标题__后\"\n"
+        );
+        let decorations = parse_decorations(&document);
+        assert_cjk_inline(&row_source, &decorations[2], "**", "你好。");
+        let cell = super::parse_table_cell_decorations(cell_source, &decorations[2]);
+        assert_cjk_inline(cell_source, &cell[0], "**", "你好。");
+        for decoration in [&decorations[2], &cell[0]] {
+            assert!(
+                decoration
+                    .inline_spans
+                    .iter()
+                    .any(|span| span.kind == InlineKind::Link
+                        && span.target.as_deref() == Some("doc_前_后.md"))
+            );
+        }
+        for inner in [
+            "「`_代码_`」",
+            "「$x_y$」",
+            "「<code>前__代码。__后</code>」",
+        ] {
+            let source = format!("前**{inner}**后");
+            assert_cjk_inline(&source, &parse_decorations(&source)[0], "**", inner);
+        }
+    }
+
+    #[test]
+    fn cjk_inline_punctuation_does_not_adapt_opaque_sources() {
+        use pulldown_cmark::{Options, Parser};
+        for source in [
+            r"前\**你好。\**后",
+            "`前**你好。**后`",
+            "```\n前**你好。**后\n```",
+            "    前**你好。**后",
+            "$前**你好。**后$",
+            "$$前**你好。**后$$",
+            "\\[前**你好。**后\\]",
+            "\\[\n前**你好。**后\n\\]",
+            "<code>前**你好。**后</code>",
+            "<pre>前**你好。**后</pre>",
+            "<span title=\"前**你好。**后\">text</span>",
+            "<!-- 前**你好。**后 -->",
+            "[label](前**你好。**后)",
+            "![前**你好。**后](image.png)",
+            "https://host/前**你好。**后",
+            "custom:前**你好。**后",
+            "<https://host/前**你好。**后>",
+            "[[前**你好。**后]]",
+            "[[前**你好。**后|label]]",
+            "[前**你好。**后]: /path\n\n[label][前**你好。**后]",
+        ] {
+            let adapted = super::CjkInlineSource::new(source, || {
+                Parser::new_ext(source, Options::all()).into_offset_iter()
+            });
+            assert_eq!(adapted.as_str(), source, "{source}");
+        }
+        let source = "[前**你好。**后](path_你好_字)";
+        let decoration = &parse_decorations(source)[0];
+        assert_cjk_inline(source, decoration, "**", "你好。");
+        assert!(
+            decoration
+                .inline_spans
+                .iter()
+                .any(|span| span.kind == InlineKind::Link
+                    && span.target.as_deref() == Some("path_你好_字"))
+        );
+    }
+
     #[test]
     fn lone_pipe_row_parses_without_panic() {
         // A row consisting of a single `|` counts as both the leading and
@@ -4351,6 +4975,118 @@ mod tests {
                 .any(|span| span.kind == InlineKind::Underline)
         );
         assert_eq!(decorations[7].display_replacements.len(), 1);
+    }
+
+    fn assert_front_matter_presentation_is_yaml_only(text: &str) {
+        let decorations = parse_decorations(text);
+        let table_end = decorations[0].table_info.as_ref().unwrap().table_end_line;
+        for (line, (source, decoration)) in
+            text.lines().zip(&decorations).take(table_end).enumerate()
+        {
+            let expected = super::LineDecorationPayload {
+                table_info: decoration.table_info.clone(),
+                front_matter: decoration.front_matter.clone(),
+                syntax_ranges: vec![super::SyntaxRange {
+                    range: 0..source.len(),
+                    trigger_range: 0..source.len(),
+                }],
+                protected_ranges: if source.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![0..source.len()]
+                },
+                ..super::LineDecorationPayload::default()
+            };
+            assert_eq!(
+                decoration.block_type,
+                BlockType::Table,
+                "row {line}: {text}"
+            );
+            assert_eq!(&**decoration, &expected, "row {line}: {text}");
+        }
+    }
+
+    #[test]
+    fn front_matter_literal_and_raw_rows_discard_markdown_previews_and_syntax() {
+        for (kind, content) in [
+            ("math", "\\[\nx^2\n\\]"),
+            ("math", "$$\nx^2\n$$"),
+            ("image", "![caption](literal.png)"),
+            ("code", "```rust\nlet x = 1;\n```"),
+            ("math", "```mermaid\ngraph TD; A-->B\n```"),
+            (
+                "list",
+                "- [ ] literal\n  - child\n  - \n\n1. ordered\n\n> [!NOTE]\n> literal",
+            ),
+            (
+                "inline",
+                "**bold** *italic* ~~strike~~ `code` $x$ [link](literal.md)\n\n[^note]: literal\n\n[^note]",
+            ),
+        ] {
+            let indented = content
+                .lines()
+                .map(|line| format!("  {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let literal = format!("---\ndescription: |-\n\n{indented}\n\n---\n\nBody\n");
+            let raw = format!("---\ndescription: [unfinished\n\n{content}\n\n---\n\nBody\n");
+            for (text, is_raw) in [(&literal, false), (&raw, true)] {
+                // Confirm the fixtures exercise state created before YAML conversion.
+                let markdown = super::parse_decorations_fragment(text);
+                let has_presentation = markdown.iter().any(|decoration| match kind {
+                    "math" => decoration.block_preview.is_some(),
+                    "image" => decoration.image_path.is_some(),
+                    "code" => decoration.code_language.is_some(),
+                    "list" => !decoration.block_contexts.is_empty(),
+                    _ => !decoration.inline_spans.is_empty(),
+                });
+                assert!(has_presentation, "fixture must exercise {kind}: {text}");
+                assert_front_matter_presentation_is_yaml_only(text);
+                let decorations = parse_decorations(text);
+                let value = &decorations[3].front_matter.as_ref().unwrap().value;
+                if is_raw {
+                    assert_eq!(value, &crate::front_matter::FrontMatterValue::Raw);
+                } else {
+                    assert_eq!(
+                        value,
+                        &crate::front_matter::FrontMatterValue::Text(
+                            content.lines().next().unwrap().to_string()
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn front_matter_conversion_preserves_diff_metadata_only() {
+        let text = "---\nimage: '![literal](image.png)'\n---\n\nBody\n";
+        let mut decorations = super::parse_decorations_fragment(text);
+        assert_eq!(decorations[1].image_path.as_deref(), Some("image.png"));
+        for decoration in &mut decorations[..3] {
+            decoration.diff_added_spans = vec![0..1];
+            decoration.diff_removed_spans = vec![1..2];
+        }
+        let line_starts = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(offset, _)| offset + 1))
+            .collect::<Vec<_>>();
+        super::detect_front_matter(&mut decorations, text, &line_starts);
+        for (source, decoration) in text.lines().zip(&decorations).take(3) {
+            let expected = super::LineDecorationPayload {
+                table_info: decoration.table_info.clone(),
+                front_matter: decoration.front_matter.clone(),
+                syntax_ranges: vec![super::SyntaxRange {
+                    range: 0..source.len(),
+                    trigger_range: 0..source.len(),
+                }],
+                protected_ranges: vec![0..source.len()],
+                diff_added_spans: vec![0..1],
+                diff_removed_spans: vec![1..2],
+                ..super::LineDecorationPayload::default()
+            };
+            assert_eq!(decoration.block_type, BlockType::Table);
+            assert_eq!(&**decoration, &expected);
+        }
     }
 
     #[test]

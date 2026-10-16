@@ -24,10 +24,8 @@ impl EditorView {
         if !self.tabs[index].is_dirty {
             return;
         }
-        if self.active_tab_uses_auto_save() {
-            return;
-        }
 
+        // Recovery must not depend on a remote auto-save completing successfully.
         let tab_id = self.tabs[index].id.clone();
         let task_tab_id = tab_id.clone();
         let epoch = self
@@ -73,7 +71,13 @@ impl EditorView {
             self.tabs[index].snapshot.clone()
         };
         self.tabs[index].snapshot = snapshot.clone();
-        self.tabs[index].recovery.text = Some(snapshot.text);
+        self.tabs[index].recovery.text = Some(
+            self.tabs[index]
+                .whiteboard
+                .as_ref()
+                .map(|state| state.document.to_json_string())
+                .unwrap_or(snapshot.text),
+        );
         self.tabs[index].recovery.source_path = self.tabs[index].path.clone();
         self.tabs[index].recovery.source_content_hash = self.tabs[index]
             .history

@@ -460,6 +460,51 @@ pub(crate) fn table_paste_label(language: UiLanguage, overwrite: bool) -> &'stat
     }
 }
 
+pub(crate) fn front_matter_fold_summary(language: UiLanguage, count: usize) -> String {
+    match language {
+        UiLanguage::ChineseSimplified => format!("笔记属性：{count} 个条目"),
+        UiLanguage::ChineseTraditional => format!("筆記屬性：{count} 個條目"),
+        UiLanguage::Japanese => format!("ノートのプロパティ：{count} 項目"),
+        UiLanguage::Korean => format!("노트 속성: {count}개 항목"),
+        UiLanguage::French => format!("Propriétés de la note : {count} entrées"),
+        UiLanguage::German => format!("Notizeigenschaften: {count} Einträge"),
+        UiLanguage::Spanish => format!("Propiedades de la nota: {count} entradas"),
+        UiLanguage::Portuguese => format!("Propriedades da nota: {count} entradas"),
+        UiLanguage::Russian => format!("Свойства заметки: {count} записей"),
+        UiLanguage::Arabic => format!("خصائص الملاحظة: {count} عناصر"),
+        UiLanguage::Hindi => format!("नोट के गुण: {count} प्रविष्टियाँ"),
+        UiLanguage::English => format!(
+            "Note properties: {count} {}",
+            if count == 1 { "entry" } else { "entries" }
+        ),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_summary_is_localized_and_handles_zero_and_plural_counts() {
+    assert_eq!(
+        front_matter_fold_summary(UiLanguage::ChineseSimplified, 0),
+        "笔记属性：0 个条目"
+    );
+    assert_eq!(
+        front_matter_fold_summary(UiLanguage::ChineseSimplified, 12),
+        "笔记属性：12 个条目"
+    );
+    assert_eq!(
+        front_matter_fold_summary(UiLanguage::ChineseTraditional, 2),
+        "筆記屬性：2 個條目"
+    );
+    assert_eq!(
+        front_matter_fold_summary(UiLanguage::English, 1),
+        "Note properties: 1 entry"
+    );
+    assert_eq!(
+        front_matter_fold_summary(UiLanguage::English, 2),
+        "Note properties: 2 entries"
+    );
+}
+
 pub(crate) fn table_clear_cells_label(language: UiLanguage) -> &'static str {
     match language {
         UiLanguage::ChineseSimplified => "清空单元格内容",
@@ -2794,6 +2839,232 @@ pub(crate) fn preview_action_label(language: UiLanguage, key: &str) -> &'static 
         (_, "zoom_in") => "Zoom In",
         (_, "zoom_out") => "Zoom Out",
         (_, "edit_code") => "Edit Code",
+        _ => "",
+    }
+}
+
+pub(crate) fn front_matter_type_label(language: UiLanguage, key: &str) -> &'static str {
+    match (language, key) {
+        (UiLanguage::ChineseSimplified, "value_type") => "值类型",
+        (UiLanguage::ChineseSimplified, "text") => "文本",
+        (UiLanguage::ChineseSimplified, "multiline_text") => "多行文本",
+        (UiLanguage::ChineseSimplified, "checkbox") => "复选框",
+        (UiLanguage::ChineseSimplified, "date") => "日期",
+        (UiLanguage::ChineseSimplified, "date_time") => "日期和时间",
+        (UiLanguage::ChineseSimplified, "list") => "列表",
+        (UiLanguage::ChineseSimplified, "number") => "数字",
+        (UiLanguage::ChineseSimplified, "empty") => "空值",
+        (UiLanguage::ChineseSimplified, "object") => "对象",
+        (UiLanguage::ChineseSimplified, "raw") => "YAML／原始值",
+        (UiLanguage::ChineseSimplified, "unsafe_conversion") => "无法在不丢失数据的情况下转换此值",
+        (UiLanguage::ChineseSimplified, "read_only") => "此文档为只读，无法更改值类型",
+        (UiLanguage::ChineseSimplified, "changed") => {
+            "此属性或当前文档已更改，请重新打开类型选择菜单"
+        }
+        (UiLanguage::ChineseTraditional, "value_type") => "值類型",
+        (UiLanguage::ChineseTraditional, "text") => "文字",
+        (UiLanguage::ChineseTraditional, "multiline_text") => "多行文字",
+        (UiLanguage::ChineseTraditional, "checkbox") => "核取方塊",
+        (UiLanguage::ChineseTraditional, "date") => "日期",
+        (UiLanguage::ChineseTraditional, "date_time") => "日期與時間",
+        (UiLanguage::ChineseTraditional, "list") => "清單",
+        (UiLanguage::ChineseTraditional, "number") => "數字",
+        (UiLanguage::ChineseTraditional, "empty") => "空值",
+        (UiLanguage::ChineseTraditional, "object") => "物件",
+        (UiLanguage::ChineseTraditional, "raw") => "YAML／原始值",
+        (UiLanguage::ChineseTraditional, "unsafe_conversion") => "無法在不遺失資料的情況下轉換此值",
+        (UiLanguage::ChineseTraditional, "read_only") => "此文件為唯讀，無法變更值類型",
+        (UiLanguage::ChineseTraditional, "changed") => {
+            "此屬性或目前文件已變更，請重新開啟類型選擇選單"
+        }
+        (UiLanguage::Japanese, "value_type") => "値の種類",
+        (UiLanguage::Japanese, "text") => "テキスト",
+        (UiLanguage::Japanese, "multiline_text") => "複数行テキスト",
+        (UiLanguage::Japanese, "checkbox") => "チェックボックス",
+        (UiLanguage::Japanese, "date") => "日付",
+        (UiLanguage::Japanese, "date_time") => "日時",
+        (UiLanguage::Japanese, "list") => "リスト",
+        (UiLanguage::Japanese, "number") => "数値",
+        (UiLanguage::Japanese, "empty") => "空の値",
+        (UiLanguage::Japanese, "object") => "オブジェクト",
+        (UiLanguage::Japanese, "raw") => "YAML／未加工の値",
+        (UiLanguage::Japanese, "unsafe_conversion") => {
+            "データを失わずにこの値を変換することはできません"
+        }
+        (UiLanguage::Japanese, "read_only") => {
+            "この文書は読み取り専用のため、値の種類を変更できません"
+        }
+        (UiLanguage::Japanese, "changed") => {
+            "プロパティまたは現在の文書が変更されました。種類の選択メニューを開き直してください"
+        }
+        (UiLanguage::Korean, "value_type") => "값 유형",
+        (UiLanguage::Korean, "text") => "텍스트",
+        (UiLanguage::Korean, "multiline_text") => "여러 줄 텍스트",
+        (UiLanguage::Korean, "checkbox") => "체크박스",
+        (UiLanguage::Korean, "date") => "날짜",
+        (UiLanguage::Korean, "date_time") => "날짜 및 시간",
+        (UiLanguage::Korean, "list") => "목록",
+        (UiLanguage::Korean, "number") => "숫자",
+        (UiLanguage::Korean, "empty") => "빈 값",
+        (UiLanguage::Korean, "object") => "객체",
+        (UiLanguage::Korean, "raw") => "YAML / 원시 값",
+        (UiLanguage::Korean, "unsafe_conversion") => "데이터 손실 없이 이 값을 변환할 수 없습니다",
+        (UiLanguage::Korean, "read_only") => {
+            "이 문서는 읽기 전용이므로 값 유형을 변경할 수 없습니다"
+        }
+        (UiLanguage::Korean, "changed") => {
+            "속성 또는 현재 문서가 변경되었습니다. 유형 선택 메뉴를 다시 여세요"
+        }
+        (UiLanguage::French, "value_type") => "Type de valeur",
+        (UiLanguage::French, "text") => "Texte",
+        (UiLanguage::French, "multiline_text") => "Texte multiligne",
+        (UiLanguage::French, "checkbox") => "Case à cocher",
+        (UiLanguage::French, "date") => "Date",
+        (UiLanguage::French, "date_time") => "Date et heure",
+        (UiLanguage::French, "list") => "Liste",
+        (UiLanguage::French, "number") => "Nombre",
+        (UiLanguage::French, "empty") => "Valeur vide",
+        (UiLanguage::French, "object") => "Objet",
+        (UiLanguage::French, "raw") => "YAML / valeur brute",
+        (UiLanguage::French, "unsafe_conversion") => {
+            "Impossible de convertir cette valeur sans perdre de données"
+        }
+        (UiLanguage::French, "read_only") => {
+            "Ce document est en lecture seule. Le type de valeur ne peut pas être modifié"
+        }
+        (UiLanguage::French, "changed") => {
+            "La propriété ou le document actuel a changé. Rouvrez le sélecteur de type"
+        }
+        (UiLanguage::German, "value_type") => "Werttyp",
+        (UiLanguage::German, "text") => "Text",
+        (UiLanguage::German, "multiline_text") => "Mehrzeiliger Text",
+        (UiLanguage::German, "checkbox") => "Kontrollkästchen",
+        (UiLanguage::German, "date") => "Datum",
+        (UiLanguage::German, "date_time") => "Datum und Uhrzeit",
+        (UiLanguage::German, "list") => "Liste",
+        (UiLanguage::German, "number") => "Zahl",
+        (UiLanguage::German, "empty") => "Leerer Wert",
+        (UiLanguage::German, "object") => "Objekt",
+        (UiLanguage::German, "raw") => "YAML / Rohwert",
+        (UiLanguage::German, "unsafe_conversion") => {
+            "Dieser Wert kann nicht ohne Datenverlust umgewandelt werden"
+        }
+        (UiLanguage::German, "read_only") => {
+            "Dieses Dokument ist schreibgeschützt. Der Werttyp kann nicht geändert werden"
+        }
+        (UiLanguage::German, "changed") => {
+            "Die Eigenschaft oder das aktuelle Dokument wurde geändert. Öffnen Sie die Typauswahl erneut"
+        }
+        (UiLanguage::Spanish, "value_type") => "Tipo de valor",
+        (UiLanguage::Spanish, "text") => "Texto",
+        (UiLanguage::Spanish, "multiline_text") => "Texto multilínea",
+        (UiLanguage::Spanish, "checkbox") => "Casilla de verificación",
+        (UiLanguage::Spanish, "date") => "Fecha",
+        (UiLanguage::Spanish, "date_time") => "Fecha y hora",
+        (UiLanguage::Spanish, "list") => "Lista",
+        (UiLanguage::Spanish, "number") => "Número",
+        (UiLanguage::Spanish, "empty") => "Valor vacío",
+        (UiLanguage::Spanish, "object") => "Objeto",
+        (UiLanguage::Spanish, "raw") => "YAML / valor sin procesar",
+        (UiLanguage::Spanish, "unsafe_conversion") => {
+            "No se puede convertir este valor sin perder datos"
+        }
+        (UiLanguage::Spanish, "read_only") => {
+            "Este documento es de solo lectura. No se puede cambiar el tipo de valor"
+        }
+        (UiLanguage::Spanish, "changed") => {
+            "La propiedad o el documento actual ha cambiado. Vuelva a abrir el selector de tipo"
+        }
+        (UiLanguage::Portuguese, "value_type") => "Tipo de valor",
+        (UiLanguage::Portuguese, "text") => "Texto",
+        (UiLanguage::Portuguese, "multiline_text") => "Texto multilinha",
+        (UiLanguage::Portuguese, "checkbox") => "Caixa de seleção",
+        (UiLanguage::Portuguese, "date") => "Data",
+        (UiLanguage::Portuguese, "date_time") => "Data e hora",
+        (UiLanguage::Portuguese, "list") => "Lista",
+        (UiLanguage::Portuguese, "number") => "Número",
+        (UiLanguage::Portuguese, "empty") => "Valor vazio",
+        (UiLanguage::Portuguese, "object") => "Objeto",
+        (UiLanguage::Portuguese, "raw") => "YAML / valor bruto",
+        (UiLanguage::Portuguese, "unsafe_conversion") => {
+            "Não é possível converter este valor sem perder dados"
+        }
+        (UiLanguage::Portuguese, "read_only") => {
+            "Este documento é somente leitura. Não é possível alterar o tipo de valor"
+        }
+        (UiLanguage::Portuguese, "changed") => {
+            "A propriedade ou o documento atual foi alterado. Abra o seletor de tipo novamente"
+        }
+        (UiLanguage::Russian, "value_type") => "Тип значения",
+        (UiLanguage::Russian, "text") => "Текст",
+        (UiLanguage::Russian, "multiline_text") => "Многострочный текст",
+        (UiLanguage::Russian, "checkbox") => "Флажок",
+        (UiLanguage::Russian, "date") => "Дата",
+        (UiLanguage::Russian, "date_time") => "Дата и время",
+        (UiLanguage::Russian, "list") => "Список",
+        (UiLanguage::Russian, "number") => "Число",
+        (UiLanguage::Russian, "empty") => "Пустое значение",
+        (UiLanguage::Russian, "object") => "Объект",
+        (UiLanguage::Russian, "raw") => "YAML / исходное значение",
+        (UiLanguage::Russian, "unsafe_conversion") => {
+            "Невозможно преобразовать это значение без потери данных"
+        }
+        (UiLanguage::Russian, "read_only") => {
+            "Этот документ доступен только для чтения. Тип значения нельзя изменить"
+        }
+        (UiLanguage::Russian, "changed") => {
+            "Свойство или текущий документ изменились. Откройте меню выбора типа заново"
+        }
+        (UiLanguage::Arabic, "value_type") => "نوع القيمة",
+        (UiLanguage::Arabic, "text") => "نص",
+        (UiLanguage::Arabic, "multiline_text") => "نص متعدد الأسطر",
+        (UiLanguage::Arabic, "checkbox") => "مربع اختيار",
+        (UiLanguage::Arabic, "date") => "تاريخ",
+        (UiLanguage::Arabic, "date_time") => "تاريخ ووقت",
+        (UiLanguage::Arabic, "list") => "قائمة",
+        (UiLanguage::Arabic, "number") => "رقم",
+        (UiLanguage::Arabic, "empty") => "قيمة فارغة",
+        (UiLanguage::Arabic, "object") => "كائن",
+        (UiLanguage::Arabic, "raw") => "YAML / قيمة خام",
+        (UiLanguage::Arabic, "unsafe_conversion") => "لا يمكن تحويل هذه القيمة دون فقدان البيانات",
+        (UiLanguage::Arabic, "read_only") => "هذا المستند للقراءة فقط. لا يمكن تغيير نوع القيمة",
+        (UiLanguage::Arabic, "changed") => {
+            "تغيّرت الخاصية أو المستند الحالي. أعد فتح قائمة اختيار النوع"
+        }
+        (UiLanguage::Hindi, "value_type") => "मान का प्रकार",
+        (UiLanguage::Hindi, "text") => "पाठ",
+        (UiLanguage::Hindi, "multiline_text") => "बहुपंक्तीय पाठ",
+        (UiLanguage::Hindi, "checkbox") => "चेकबॉक्स",
+        (UiLanguage::Hindi, "date") => "तारीख",
+        (UiLanguage::Hindi, "date_time") => "तारीख और समय",
+        (UiLanguage::Hindi, "list") => "सूची",
+        (UiLanguage::Hindi, "number") => "संख्या",
+        (UiLanguage::Hindi, "empty") => "खाली मान",
+        (UiLanguage::Hindi, "object") => "ऑब्जेक्ट",
+        (UiLanguage::Hindi, "raw") => "YAML / मूल मान",
+        (UiLanguage::Hindi, "unsafe_conversion") => {
+            "डेटा खोए बिना इस मान को परिवर्तित नहीं किया जा सकता"
+        }
+        (UiLanguage::Hindi, "read_only") => {
+            "यह दस्तावेज़ केवल पढ़ने के लिए है। मान का प्रकार नहीं बदला जा सकता"
+        }
+        (UiLanguage::Hindi, "changed") => {
+            "यह गुण या वर्तमान दस्तावेज़ बदल गया है। प्रकार चयन मेनू फिर से खोलें"
+        }
+        (_, "value_type") => "Value type",
+        (_, "text") => "Text",
+        (_, "multiline_text") => "Multiline text",
+        (_, "checkbox") => "Checkbox",
+        (_, "date") => "Date",
+        (_, "date_time") => "Date and time",
+        (_, "list") => "List",
+        (_, "number") => "Number",
+        (_, "empty") => "Empty",
+        (_, "object") => "Object",
+        (_, "raw") => "YAML / Raw",
+        (_, "unsafe_conversion") => "Cannot convert this value without losing data",
+        (_, "read_only") => "This document is read-only. The value type cannot be changed",
+        (_, "changed") => "The property or current document has changed. Reopen the type picker",
         _ => "",
     }
 }
@@ -6435,9 +6706,48 @@ pub(crate) fn git_create_branch_label(language: UiLanguage, name: &str) -> Strin
 #[cfg(test)]
 mod action_label_tests {
     use super::{
-        UiLanguage, open_terminal_window_label, outline_action_label,
+        UiLanguage, front_matter_type_label, open_terminal_window_label, outline_action_label,
         sidebar_visibility_action_label, terminal_settings_label, theme_action_label,
     };
+
+    #[test]
+    fn front_matter_type_labels_cover_every_language_without_duplicates() {
+        let type_keys = [
+            "text",
+            "multiline_text",
+            "checkbox",
+            "date",
+            "date_time",
+            "list",
+            "number",
+            "empty",
+            "object",
+            "raw",
+        ];
+        for &language in UiLanguage::supported() {
+            let mut labels = std::collections::HashSet::new();
+            for key in type_keys {
+                let label = front_matter_type_label(language, key);
+                assert!(!label.is_empty(), "missing {language:?} {key}");
+                assert!(labels.insert(label), "duplicate {language:?} {label}");
+            }
+            for key in ["value_type", "unsafe_conversion", "read_only", "changed"] {
+                assert!(
+                    !front_matter_type_label(language, key).is_empty(),
+                    "missing {language:?} {key}",
+                );
+            }
+        }
+        assert_eq!(front_matter_type_label(UiLanguage::English, "text"), "Text");
+        assert_eq!(
+            front_matter_type_label(UiLanguage::ChineseSimplified, "unsafe_conversion"),
+            "无法在不丢失数据的情况下转换此值",
+        );
+        assert_eq!(
+            front_matter_type_label(UiLanguage::ChineseTraditional, "checkbox"),
+            "核取方塊",
+        );
+    }
 
     #[test]
     fn simplified_chinese_visibility_labels_are_explicit_actions() {

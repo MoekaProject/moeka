@@ -869,50 +869,70 @@ pub fn parse_front_matter_block(lines: &[String]) -> Vec<FrontMatterEntry> {
         .collect()
 }
 
-pub fn serialize_front_matter(entries: &[FrontMatterEntry]) -> Vec<String> {
-    let mut result = Vec::with_capacity(entries.len() + 2);
-    result.push("---".to_string());
-    let normalized = if entries.is_empty() {
-        vec![FrontMatterEntry::default()]
-    } else {
-        entries.to_vec()
-    };
-    for entry in normalized {
-        result.push(format!("{}: {}", entry.key, entry.value));
+fn supports_front_matter_row_ops(lines: &[String]) -> bool {
+    if lines.len() < 3
+        || lines.first().is_none_or(|line| line != "---")
+        || lines.last().is_none_or(|line| line != "---")
+    {
+        return false;
     }
-    result.push("---".to_string());
-    result
+    lines[1..lines.len() - 1].iter().all(|line| {
+        // Preserve the editable placeholder used by existing row insertion.
+        if line == ": " {
+            return true;
+        }
+        if line.chars().next().is_none_or(char::is_whitespace) {
+            return false;
+        }
+        // Parse rows independently so an empty-key placeholder does not make
+        // otherwise simple scalar rows opaque. Nested/multiline rows are refused.
+        let rows = crate::front_matter::parse_lines(&[line.as_str()]);
+        let info = &rows[0];
+        info.key_range.is_some()
+            && info.indent_columns == 0
+            && info.display_prefix.is_empty()
+            && (matches!(
+                info.value,
+                crate::front_matter::FrontMatterValue::Text(_)
+                    | crate::front_matter::FrontMatterValue::Boolean(_)
+                    | crate::front_matter::FrontMatterValue::DateTime(_)
+            ) || line[info.value_range.clone()].is_empty())
+    })
 }
 
 pub fn insert_front_matter_row(lines: &[String], insert_at: usize) -> Vec<String> {
-    let mut entries = parse_front_matter_block(lines);
-    let clamped = insert_at.min(entries.len());
-    entries.insert(clamped, FrontMatterEntry::default());
-    serialize_front_matter(&entries)
+    let mut updated = lines.to_vec();
+    if supports_front_matter_row_ops(lines) {
+        updated.insert(insert_at.min(lines.len() - 2) + 1, ": ".to_string());
+    }
+    updated
 }
 
 pub fn delete_front_matter_row(lines: &[String], row_index: usize) -> Vec<String> {
-    let mut entries = parse_front_matter_block(lines);
-    if row_index < entries.len() {
-        if entries.len() == 1 {
-            entries[0] = FrontMatterEntry::default();
+    let mut updated = lines.to_vec();
+    if supports_front_matter_row_ops(lines) && row_index < lines.len() - 2 {
+        if lines.len() == 3 {
+            updated[1] = ": ".to_string();
         } else {
-            entries.remove(row_index);
+            updated.remove(row_index + 1);
         }
     }
-    serialize_front_matter(&entries)
+    updated
 }
 
 pub fn move_front_matter_row(lines: &[String], from: usize, to: usize) -> Vec<String> {
-    let mut entries = parse_front_matter_block(lines);
-    if from >= entries.len() || to > entries.len() || from == to {
-        return serialize_front_matter(&entries);
+    let mut updated = lines.to_vec();
+    if !supports_front_matter_row_ops(lines)
+        || from >= lines.len() - 2
+        || to > lines.len() - 2
+        || from == to
+    {
+        return updated;
     }
-
-    let row = entries.remove(from);
-    let adjusted_to = if to > from { to.saturating_sub(1) } else { to };
-    entries.insert(adjusted_to.min(entries.len()), row);
-    serialize_front_matter(&entries)
+    let row = updated.remove(from + 1);
+    let adjusted_to = if to > from { to - 1 } else { to };
+    updated.insert(adjusted_to + 1, row);
+    updated
 }
 
 #[cfg(test)]
@@ -1117,6 +1137,59 @@ mod tests {
         let input = lines(&["---", "title: Hello", "tags: Rust", "---"]);
         let result = move_front_matter_row(&input, 0, 2);
         assert_eq!(result, lines(&["---", "tags: Rust", "title: Hello", "---"]));
+    }
+
+    #[test]
+    fn test_front_matter_row_ops_preserve_simple_source_verbatim() {
+        let input = lines(&[
+            "---",
+            "title  :   'Hello: world'  # keep",
+            "enabled: TRUE   ",
+            "---",
+        ]);
+        assert_eq!(
+            insert_front_matter_row(&input, 1),
+            lines(&["---", &input[1], ": ", &input[2], "---"])
+        );
+        assert_eq!(
+            delete_front_matter_row(&input, 0),
+            lines(&["---", &input[2], "---"])
+        );
+        assert_eq!(
+            move_front_matter_row(&input, 0, 2),
+            lines(&["---", &input[2], &input[1], "---"])
+        );
+        assert_eq!(move_front_matter_row(&input, 0, 0), input);
+        assert_eq!(move_front_matter_row(&input, 99, 0), input);
+        assert_eq!(delete_front_matter_row(&input, 99), input);
+        let inserted = insert_front_matter_row(&input, 1);
+        assert_eq!(delete_front_matter_row(&inserted, 1), input);
+    }
+
+    #[test]
+    fn test_front_matter_row_ops_reject_unsupported_yaml_without_changes() {
+        for input in [
+            lines(&["---", "description: |", "  first", "", "  second", "---"]),
+            lines(&["---", "description: >-", "  first", "  second", "---"]),
+            lines(&["---", "items:", "  - first", "  - true", "---"]),
+            lines(&["---", "config:", "  enabled: true", "---"]),
+            lines(&["---", "title: Hello", "# comment", "---"]),
+            lines(&["---", "title: Hello", "", "enabled: true", "---"]),
+            lines(&["---", "title: first", "  second", "---"]),
+            lines(&["---", "title: \"first", "second\"", "---"]),
+            lines(&["---", "items: [first, second]", "---"]),
+            lines(&["---", "title: &shared Hello", "copy: *shared", "---"]),
+            lines(&["\u{feff}---", "title: Hello", "---"]),
+            lines(&["-", "title: Hello", "-"]),
+            lines(&["---", "title: Hello", "..."]),
+        ] {
+            for row in 0..input.len() {
+                assert_eq!(insert_front_matter_row(&input, row), input);
+                assert_eq!(delete_front_matter_row(&input, row), input);
+                assert_eq!(move_front_matter_row(&input, row, 0), input);
+                assert_eq!(move_front_matter_row(&input, 0, row), input);
+            }
+        }
     }
 
     #[test]

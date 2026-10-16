@@ -14,6 +14,7 @@ use super::*;
 pub(super) struct TableCellDisplayInfo {
     pub(super) wrapped_lines: Vec<WrappedLine>,
     pub(super) hard_line_ranges: Vec<Range<usize>>,
+    pub(super) hanging_wraps: Vec<super::table_cell_render::HangingWrap>,
     pub(super) alignment: crate::markdown::TableAlign,
     pub(super) display_text: String,
     pub(super) display_to_buffer: Vec<usize>,
@@ -56,6 +57,42 @@ fn nearest_table_cell_in_row(
             distance(left).total_cmp(&distance(right))
         })
         .copied()
+}
+
+fn table_cell_footnote_label_for_click(
+    decoration: &crate::markdown::LineDecoration,
+    column: usize,
+) -> Option<&str> {
+    decoration.footnote_references.iter().find_map(|reference| {
+        (reference.full_range.start <= column && column <= reference.full_range.end)
+            .then_some(reference.label.as_str())
+    })
+}
+
+fn table_cell_buffer_column_for_hit(
+    info: &TableCellDisplayInfo,
+    source: &str,
+    hard_line_start: usize,
+    soft_row: usize,
+    local_x: f32,
+    display_index: usize,
+) -> usize {
+    if soft_row == 0 && local_x <= 0.0 {
+        // Left padding belongs before a collapsed opening marker, not to the
+        // first visible glyph. Invert the map so accepted hard breaks work too.
+        if let Some(source_start) = info
+            .buffer_to_display
+            .iter()
+            .position(|&index| index == hard_line_start)
+            && let Some(tail) = source.get(source_start..)
+        {
+            return source_start + tail.len() - tail.trim_start_matches([' ', '\t']).len();
+        }
+    }
+    info.display_to_buffer
+        .get(display_index)
+        .copied()
+        .unwrap_or(info.cell_content_len)
 }
 
 fn table_cell_visual_line_count(info: &TableCellDisplayInfo) -> usize {
@@ -117,15 +154,18 @@ fn table_cell_position(
     let range = info.hard_line_ranges.get(hard_line_index)?;
     let wrapped = info.wrapped_lines.get(hard_line_index)?;
     let local_index = display_index.saturating_sub(range.start).min(range.len());
-    let position = EditorView::visual_position_for_wrapped_display(
-        wrapped,
-        info.display_text.get(range.clone())?,
-        local_index,
-        line_height,
-        0.0,
-        &HashMap::new(),
-        affinity,
-    )?;
+    let position = info
+        .hanging_wraps
+        .get(hard_line_index)
+        .copied()
+        .unwrap_or_default()
+        .position(
+            wrapped,
+            info.display_text.get(range.clone())?,
+            local_index,
+            line_height,
+            affinity,
+        );
     Some((hard_line_index, position))
 }
 
@@ -172,7 +212,12 @@ fn table_cell_offset_for_visual_line(
 ) -> Option<(usize, Option<WrapBoundaryAffinityKind>)> {
     let line_height = info.line_height;
     let mut first_visual_line = 0usize;
-    for (wrapped, range) in info.wrapped_lines.iter().zip(&info.hard_line_ranges) {
+    for (hard_line, (wrapped, range)) in info
+        .wrapped_lines
+        .iter()
+        .zip(&info.hard_line_ranges)
+        .enumerate()
+    {
         let hard_text = info.display_text.get(range.clone()).unwrap_or("");
         let line_count = helpers::wrap_boundary_byte_indices(wrapped, hard_text).len() + 1;
         if target_visual_line < first_visual_line + line_count {
@@ -182,11 +227,16 @@ fn table_cell_offset_for_visual_line(
                 inner_width,
                 f32::from(wrapped.unwrapped_layout.width),
             );
-            let local_x = (goal_x - content_offset).max(0.0);
             let target_y = wrapped.row_top(soft_line, px(line_height))
                 + wrapped.row_height(soft_line, px(line_height)) * 0.5;
+            let local_x = info
+                .hanging_wraps
+                .get(hard_line)
+                .copied()
+                .unwrap_or_default()
+                .hit_x(wrapped, goal_x - content_offset, target_y, line_height);
             let local_display_index = match wrapped
-                .closest_index_for_position(point(px(local_x), target_y), px(line_height))
+                .closest_index_for_position(point(local_x, target_y), px(line_height))
             {
                 Ok(index) | Err(index) => index.min(range.len()),
             };
@@ -211,8 +261,36 @@ fn table_cell_offset_for_visual_line(
     None
 }
 
+#[derive(Clone)]
+pub(crate) struct FrontMatterTextHit {
+    pub bounds: Bounds<Pixels>,
+    pub origin: Point<Pixels>,
+    pub shaped: WrappedLine,
+    pub line_height: f32,
+    pub source_map: Vec<usize>,
+}
+
+impl FrontMatterTextHit {
+    pub fn offset_for_position(&self, position: Point<Pixels>) -> usize {
+        let local = point((position.x - self.origin.x).max(px(0.0)), px(0.0));
+        let index = match self
+            .shaped
+            .closest_index_for_position(local, px(self.line_height))
+        {
+            Ok(index) | Err(index) => index,
+        };
+        self.source_map
+            .get(index)
+            .copied()
+            .or_else(|| self.source_map.last().copied())
+            .unwrap_or(0)
+    }
+}
+
 pub(super) struct InlineLineDisplayInfo {
     pub(super) display_text: String,
+    pub(super) display_to_buffer: Vec<usize>,
+    pub(super) base_runs: Vec<TextRun>,
     pub(super) buffer_to_display: Vec<usize>,
     pub(super) font_size: f32,
     pub(super) line_height: f32,
@@ -369,9 +447,22 @@ impl EditorView {
         }
 
         self.selection_drag_scroll_task = Some(cx.spawn(async move |this, cx| {
+            // EditorView is the window root. Resolve its own window after the
+            // mouse event releases it, never the app's potentially different active window.
+            let Ok(Some(window_handle)) = cx.update(|cx| {
+                cx.windows()
+                    .into_iter()
+                    .filter_map(|window| window.downcast::<Self>())
+                    .find(|window| window.entity(cx).is_ok_and(|entity| entity == this))
+            }) else {
+                return;
+            };
             loop {
-                let did_scroll = this
-                    .update(cx, |editor, cx| {
+                let did_scroll = window_handle
+                    .update(cx, |editor, window, cx| {
+                        if cx.weak_entity() != this {
+                            return None;
+                        }
                         editor.selection_drag_scroll_task.as_ref()?;
                         let position = editor.selection_drag_position?;
                         let delta = editor.selection_drag_scroll_delta_for_position(position)?;
@@ -384,9 +475,13 @@ impl EditorView {
                         if editor.table_cell_selection.is_none()
                             && !editor.update_table_boundary_drag_selection(position)
                         {
-                            let offset = editor.offset_for_position(position);
+                            let offset =
+                                editor.selection_drag_offset_for_position(window, position);
                             editor.update_wrap_boundary_affinity_for_position(offset, position);
                             editor.cursor.select_to(offset, &editor.buffer);
+                            if editor.cursor.has_selection() {
+                                editor.suppress_fold_for_empty_selection_drag = false;
+                            }
                         }
                         cx.notify();
                         Some(())
@@ -404,6 +499,41 @@ impl EditorView {
                     .await;
             }
         }));
+    }
+
+    fn selection_drag_offset_for_position(
+        &mut self,
+        window: &mut Window,
+        position: Point<Pixels>,
+    ) -> usize {
+        if self.layout_dirty {
+            return self.offset_for_position(position);
+        }
+        let cell = self
+            .table_click_areas
+            .iter()
+            .find(|(bounds, _, _, _)| bounds.contains(&position))
+            .copied()
+            .or_else(|| {
+                let (table, anchor_line, _) = self.table_cell_for_offset(self.cursor.anchor)?;
+                let row = self.table_visual_row_for_source_line(table, anchor_line)?;
+                nearest_table_cell_in_row(&self.table_click_areas, table, row, position)
+            });
+        let offset = cell
+            .and_then(|(bounds, table, row, column)| {
+                let hit_position =
+                    point(position.x.clamp(bounds.left(), bounds.right()), position.y);
+                self.table_cell_offset_for_position(
+                    window,
+                    table,
+                    row,
+                    column,
+                    &bounds,
+                    hit_position,
+                )
+            })
+            .unwrap_or_else(|| self.offset_for_position(position));
+        self.table_visible_selection_target(self.cursor.anchor, offset)
     }
 
     fn update_table_boundary_drag_selection(&mut self, position: Point<Pixels>) -> bool {
@@ -471,7 +601,91 @@ impl EditorView {
 
     // Mouse handlers
 
+    pub(super) fn remove_front_matter_list_item_for_position(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.layout_dirty
+            || self.active_tab_is_read_only()
+            || self.context_menu.is_some()
+            || self.preview_overlay.is_some()
+        {
+            return false;
+        }
+        let Some((_, header, item)) = self
+            .front_matter_delete_areas
+            .iter()
+            .find(|(bounds, _, _)| bounds.contains(&position))
+            .copied()
+        else {
+            return false;
+        };
+        if !self.front_matter_group_plan().iter().any(|plan| {
+            plan.group.header_line == header
+                && !plan.active
+                && !plan.source_visible
+                && item < plan.group.items.len()
+        }) {
+            return false;
+        }
+        self.is_selecting = false;
+        self.selection_drag_position = None;
+        self.selection_drag_scroll_task = None;
+        self.suppress_next_editor_mouse_up = true;
+        self.remove_front_matter_list_item(header, item, cx);
+        true
+    }
+
+    pub(super) fn open_front_matter_type_menu_for_position(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.context_menu.is_some() || self.preview_overlay.is_some() {
+            return false;
+        }
+        let Some((bounds, line)) = self
+            .front_matter_type_areas
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&position))
+            .copied()
+        else {
+            return false;
+        };
+        if super::front_matter::property_type(&self.buffer, &self.decorations, line).is_none() {
+            return false;
+        }
+        let menu = ContextMenu {
+            position: point(bounds.left(), bounds.bottom()),
+            kind: ContextMenuKind::FrontMatterType {
+                line,
+                pane_id: self.current_pane_id(),
+                tab_id: self.active_tab_id.clone(),
+                source: Arc::from(self.buffer.text()),
+            },
+        };
+        self.is_selecting = false;
+        self.selection_drag_position = None;
+        self.selection_drag_scroll_task = None;
+        self.last_mouse_down_target = None;
+        self.suppress_next_editor_mouse_up = true;
+        self.open_context_menu(menu, false, cx);
+        true
+    }
+
     pub(crate) fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh_front_matter_input_geometry(window, self.front_matter_input_viewport_bounds());
+        self.on_mouse_down_inner(event, window, cx);
+        self.refresh_front_matter_input_geometry(window, self.front_matter_input_viewport_bounds());
+    }
+
+    fn on_mouse_down_inner(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
@@ -491,6 +705,39 @@ impl EditorView {
             return;
         }
         self.last_mouse_down_target = None;
+
+        if event.button == MouseButton::Left
+            && let Some(range) = self.collapsed_front_matter_range()
+            && let Some(summary) = self.front_matter_summary_line()
+            && let Some((_, top, bottom)) = self
+                .visible_line_geometry
+                .iter()
+                .find(|(line, _, _)| *line == summary)
+            && event.position.y >= px(*top)
+            && event.position.y < px(*bottom)
+            && event.position.x >= px(self.last_content_left)
+        {
+            self.toggle_fold(range.start - 1, cx);
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
+
+        if event.button == MouseButton::Left
+            && self.remove_front_matter_list_item_for_position(event.position, cx)
+        {
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
+
+        if event.button == MouseButton::Left
+            && self.open_front_matter_type_menu_for_position(event.position, cx)
+        {
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
 
         if event.button == MouseButton::Left {
             if let Some(&(_, start_line, action)) = self
@@ -883,6 +1130,19 @@ impl EditorView {
                     self.last_mouse_down_target = Some((event.position, offset));
                     if event.modifiers.secondary() {
                         let (line, column) = self.buffer.offset_to_line_col(offset);
+                        let footnote_label = self
+                            .decorations
+                            .get(line)
+                            .and_then(|decoration| {
+                                table_cell_footnote_label_for_click(decoration, column)
+                            })
+                            .map(str::to_string);
+                        if let Some(label) = footnote_label
+                            && self.navigate_to_footnote_label(&label, cx)
+                        {
+                            self.is_selecting = false;
+                            return;
+                        }
                         let link_target = self
                             .decorations
                             .get(line)
@@ -1356,6 +1616,7 @@ impl EditorView {
     /// anchor intentionally mutates `scroll_offset` after syntax fold/expand,
     /// which reads as view jitter during keyboard navigation.
     pub(crate) fn navigate_scroll_to_cursor(&mut self) {
+        self.sync_front_matter_group_focus();
         self.scroll_to_cursor();
     }
 
@@ -1423,12 +1684,81 @@ impl EditorView {
         )
     }
 
+    pub(super) fn skip_front_matter_caret_navigation(&mut self, previous: &[Cursor]) {
+        self.skip_front_matter_navigation(previous, false);
+    }
+
+    pub(super) fn skip_folded_front_matter_selection_navigation(&mut self, previous: &[Cursor]) {
+        self.skip_front_matter_navigation(previous, true);
+    }
+
+    fn skip_front_matter_navigation(&mut self, previous: &[Cursor], selecting: bool) {
+        let range = self.collapsed_front_matter_range();
+        let hidden: Vec<_> = if range.is_none() && !self.markdown_syntax_expansion_allowed() {
+            self.decorations
+                .first()
+                .and_then(|d| d.table_info.as_ref())
+                .filter(|table| table.is_front_matter)
+                .map(|table| {
+                    (table.table_start_line..table.table_end_line)
+                        .filter(|&line| self.front_matter_navigation_skips_line(line))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut changed = false;
+        for (cursor, previous) in std::iter::once(&mut self.cursor)
+            .chain(&mut self.extra_cursors)
+            .zip(previous)
+        {
+            changed |= super::fold::skip_front_matter_navigation_head(
+                &self.buffer,
+                range.as_ref(),
+                |line| hidden.contains(&line),
+                previous.offset,
+                cursor,
+                selecting,
+            );
+        }
+        if changed {
+            self.reset_cursor_visual_targeting();
+        }
+    }
+
     pub(crate) fn maybe_auto_select_link_url(
         &mut self,
         prev_offset: usize,
         also_select_desc: bool,
         cx: &mut Context<Self>,
     ) {
+        // Arrow navigation reaches this hook before syntax focus is updated.
+        // Skip folded metadata in the actual movement direction, without unfolding it.
+        if let Some(range) = self.collapsed_front_matter_range()
+            && let Some(offset) = super::fold::front_matter_fold_navigation_offset(
+                &self.buffer,
+                &range,
+                prev_offset,
+                self.cursor.offset,
+            )
+        {
+            self.cursor.move_to(offset, &self.buffer);
+            self.reset_cursor_visual_targeting();
+            return;
+        }
+        if !self.markdown_syntax_expansion_allowed()
+            && let Some(offset) = super::fold::front_matter_hidden_navigation_offset(
+                &self.buffer,
+                prev_offset,
+                self.cursor.offset,
+                |line| self.front_matter_navigation_skips_line(line),
+            )
+        {
+            self.cursor.move_to(offset, &self.buffer);
+            self.reset_cursor_visual_targeting();
+            return;
+        }
         let new_offset = self.cursor.offset;
         let (line, _) = self.buffer.offset_to_line_col(new_offset);
         let line_start = self.buffer.line_start(line);
@@ -1729,6 +2059,16 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.on_mouse_up_inner(event, window, cx);
+        self.refresh_front_matter_input_geometry(window, self.front_matter_input_viewport_bounds());
+    }
+
+    fn on_mouse_up_inner(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.preview_overlay.is_some() {
             self.on_preview_overlay_mouse_up(event, true, cx);
             cx.stop_propagation();
@@ -1876,6 +2216,34 @@ impl EditorView {
     }
 
     pub(crate) fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before: Vec<_> = self
+            .all_cursor_ranges()
+            .into_iter()
+            .map(|(head, anchor)| head.min(anchor)..head.max(anchor))
+            .chain(self.marked_ranges().cloned())
+            .collect();
+        self.refresh_front_matter_input_geometry(window, self.front_matter_input_viewport_bounds());
+        self.on_mouse_move_inner(event, window, cx);
+        let after: Vec<_> = self
+            .all_cursor_ranges()
+            .into_iter()
+            .map(|(head, anchor)| head.min(anchor)..head.max(anchor))
+            .chain(self.marked_ranges().cloned())
+            .collect();
+        if before != after {
+            self.refresh_front_matter_input_geometry(
+                window,
+                self.front_matter_input_viewport_bounds(),
+            );
+        }
+    }
+
+    fn on_mouse_move_inner(
         &mut self,
         event: &MouseMoveEvent,
         window: &mut Window,
@@ -2254,7 +2622,8 @@ impl EditorView {
                 );
                 expanded.contains(&event.position)
             })
-            .map(|(_, table_start, _, _)| *table_start);
+            .map(|(_, table_start, _, _)| *table_start)
+            .filter(|_| !self.active_tab_is_read_only());
         if hovering_table != self.hovering_table_start {
             self.hovering_table_start = hovering_table;
             cx.notify();
@@ -2270,7 +2639,8 @@ impl EditorView {
                     .iter()
                     .find(|(bounds, _, _)| bounds.contains(&event.position))
                     .map(|(_, tsl, row)| (*tsl, false, *row))
-            });
+            })
+            .filter(|_| !self.active_tab_is_read_only());
         if hovering_handle != self.hovering_handle {
             self.hovering_handle = hovering_handle;
             cx.notify();
@@ -2406,28 +2776,19 @@ impl EditorView {
     ) -> Option<TableCellDisplayInfo> {
         let dec = self.decorations.get(source_line)?;
         let ti = dec.table_info.as_ref()?;
-        let cell_content = ti.cells.get(col).cloned().unwrap_or_default();
-        let cell_range = ti.cell_ranges.get(col).cloned().unwrap_or(0..0);
+        let (cell_content, cell_range) = super::table_cell_render::content_with_range(
+            ti,
+            self.buffer.line_content(source_line),
+            col,
+        );
         let line_start = self.buffer.line_start(source_line);
-        let cursor_offsets = std::iter::once(self.cursor.offset)
-            .chain(self.extra_cursors.iter().map(|cursor| cursor.offset))
-            .collect::<Vec<_>>();
-        let syntax_expansion_allowed = self.markdown_syntax_expansion_allowed();
-        let cell_active_ranges = helpers::active_table_cell_ranges(
+        let mut cell_decoration = helpers::table_cell_decoration(dec, &cell_content, &cell_range);
+        let mut cell_active_ranges = helpers::table_cell_active_ranges(
             line_start,
             &cell_range,
-            if syntax_expansion_allowed {
-                &cursor_offsets
-            } else {
-                &[]
-            },
-            if syntax_expansion_allowed {
-                self.marked_range.as_ref()
-            } else {
-                None
-            },
+            &self.table_cell_syntax_focus(),
+            &cell_decoration,
         );
-        let mut cell_decoration = helpers::table_cell_decoration(dec, &cell_content, &cell_range);
 
         let text_style = window.text_style();
         let editor_styles = &self.styles.editor;
@@ -2522,114 +2883,108 @@ impl EditorView {
             body_space_width,
         );
         let line_height = font_size * self.styles.editor.editor_paragraph_line_height_factor;
-        let (folded_raw, d2b_raw, b2d_raw, prefix_collapsed) = helpers::build_display_text(
-            &cell_content,
-            &cell_decoration,
-            &cell_active_ranges,
-            false,
-            None,
-            3,
-            3,
-            2,
-            0,
-            0,
-            self.styles.editor.editor_superscript_scale_factor,
-            self.styles.editor.editor_subscript_scale_factor,
-            self.styles.editor.editor_superscript_scale_factor,
-        );
-        let trimmed_range = helpers::table_cell_trimmed_display_range(&folded_raw);
-        let trim_start = trimmed_range.start;
-        let trimmed_len = trimmed_range.len();
-        let display_text = folded_raw[trimmed_range.clone()].to_string();
-        let display_to_buffer = d2b_raw[trimmed_range].to_vec();
-        let buffer_to_display = b2d_raw
-            .iter()
-            .map(|&display_index| display_index.saturating_sub(trim_start).min(trimmed_len))
-            .collect::<Vec<_>>();
-
-        let mut cell_runs = helpers::build_text_runs_for_display(
-            &display_text,
-            &cell_content,
-            &display_to_buffer,
-            &cell_decoration,
-            &cell_active_ranges,
-            false,
-            prefix_collapsed,
-            &body_font,
-            &body_cjk_font,
-            &monospace_font,
-            &heading_font,
-            &heading_cjk_font,
-            &italic_font,
-            &italic_cjk_font,
-            0,
-            font_size,
-            &self.theme,
-            self.styles.selection.selection_diff_added_inline_bg,
-            self.styles.selection.selection_diff_removed_inline_bg,
-            self.styles.wiki_link.wiki_link_text_color,
-            self.styles.wiki_link.wiki_link_text_weight,
-            self.styles.editor.editor_list_marker_text_color,
-            self.styles.editor.editor_list_marker_font_weight,
-            self.styles.editor.editor_heading_marker_text_color,
-            None,
-            false,
-        );
-        if ti.is_header {
-            for run in &mut cell_runs {
-                run.font.weight = gpui::FontWeight::BOLD;
-            }
-        }
-
-        let cell_text: SharedString = if display_text.is_empty() {
-            " ".into()
-        } else {
-            display_text.clone().into()
-        };
         let letter_spacing = self.styles.editor.editor_letter_spacing_px;
-        let shape_width = cell_inner_width.max(base_char_width);
-        let mut wrapped_lines = window
-            .text_system()
-            .shape_text(
-                cell_text,
-                px(font_size),
-                &cell_runs,
-                Some(px(shape_width)),
+        let task_prefix_columns = super::table_cell_render::task_prefix_columns(
+            base_char_width + letter_spacing,
+            font_size * self.styles.checkbox.checkbox_size_factor + letter_spacing.max(0.0),
+            self.scaled(self.styles.checkbox.checkbox_text_gap_px),
+        );
+
+        let build_cell = |active: &[Range<usize>]| {
+            let (folded_raw, d2b_raw, b2d_raw, prefix_collapsed) = helpers::build_display_text(
+                &cell_content,
+                &cell_decoration,
+                active,
+                false,
                 None,
+                0,
+                task_prefix_columns,
+                task_prefix_columns,
+                self.styles.checkbox.checkbox_parent_prefix_chars as usize,
+                0,
+                self.styles.editor.editor_superscript_scale_factor,
+                self.styles.editor.editor_subscript_scale_factor,
+                self.styles.editor.editor_superscript_scale_factor,
+            );
+            let trimmed_range = helpers::table_cell_display_range(
+                &folded_raw,
+                &cell_content,
+                &cell_decoration,
+                &b2d_raw,
+            );
+            let trim_start = trimmed_range.start;
+            let trimmed_len = trimmed_range.len();
+            let display_text = folded_raw[trimmed_range.clone()].to_string();
+            let display_to_buffer = d2b_raw[trimmed_range].to_vec();
+            let buffer_to_display = b2d_raw
+                .iter()
+                .map(|&display_index| display_index.saturating_sub(trim_start).min(trimmed_len))
+                .collect::<Vec<_>>();
+
+            let mut cell_runs = helpers::build_text_runs_for_display(
+                &display_text,
+                &cell_content,
+                &display_to_buffer,
+                &cell_decoration,
+                active,
+                false,
+                prefix_collapsed,
+                &body_font,
+                &body_cjk_font,
+                &monospace_font,
+                &heading_font,
+                &heading_cjk_font,
+                &italic_font,
+                &italic_cjk_font,
+                0,
+                font_size,
+                &self.theme,
+                self.styles.selection.selection_diff_added_inline_bg,
+                self.styles.selection.selection_diff_removed_inline_bg,
+                self.styles.wiki_link.wiki_link_text_color,
+                self.styles.wiki_link.wiki_link_text_weight,
+                self.styles.editor.editor_list_marker_text_color,
+                self.styles.editor.editor_list_marker_font_weight,
+                self.styles.editor.editor_heading_marker_text_color,
+                None,
+                false,
+            );
+            if ti.is_header {
+                for run in &mut cell_runs {
+                    run.font.weight = gpui::FontWeight::BOLD;
+                }
+            }
+
+            (
+                display_text,
+                display_to_buffer,
+                buffer_to_display,
+                prefix_collapsed,
+                cell_runs,
             )
-            .ok()?
-            .into_iter()
-            .collect::<Vec<_>>();
-        let hard_line_ranges = helpers::hard_line_byte_ranges(&display_text);
-        for (wrapped, range) in wrapped_lines.iter_mut().zip(&hard_line_ranges) {
-            helpers::apply_letter_spacing(wrapped, letter_spacing);
-            helpers::keep_inline_math_placeholders_unwrapped(
-                wrapped,
-                &cell_decoration,
-                &cell_content,
-                &buffer_to_display,
-                &cell_active_ranges,
-                &self.image_cache,
-                range.start,
-            );
-            helpers::apply_inline_math_row_heights(
-                wrapped,
-                &cell_decoration,
-                &cell_content,
-                &buffer_to_display,
-                &cell_active_ranges,
-                &self.image_cache,
-                line_height,
-                range.start,
-            );
-        }
-        if wrapped_lines.len() != hard_line_ranges.len() {
+        };
+        let prepared = super::table_cell_render::prepare_cell(
+            window,
+            &cell_content,
+            &cell_decoration,
+            &mut cell_active_ranges,
+            cell_inner_width,
+            font_size,
+            letter_spacing,
+            line_height,
+            &self.image_cache,
+            build_cell,
+        )
+        .ok()?;
+        let (display_text, display_to_buffer, buffer_to_display, _, _) = prepared.display;
+        if prepared.lines.len() != prepared.hard_ranges.len() {
             return None;
         }
 
         Some(TableCellDisplayInfo {
-            wrapped_lines,
-            hard_line_ranges,
+            wrapped_lines: prepared.lines,
+            hard_line_ranges: prepared.hard_ranges,
+            hanging_wraps: prepared.wraps,
             alignment: ti
                 .column_alignments
                 .get(col)
@@ -2662,8 +3017,7 @@ impl EditorView {
             })
             .map(|(bounds, _, _, _)| *bounds)?;
         let padding_x = self.scaled(self.styles.table.table_cell_padding_px);
-        let inner_width =
-            (f32::from(bounds.size.width) - padding_x * 2.0).max(self.base_font_size() * 0.5);
+        let inner_width = (f32::from(bounds.size.width) - padding_x * 2.0).max(1.0);
         let info = self.table_cell_display_info(window, source_line, column, inner_width)?;
         Some((info, inner_width))
     }
@@ -2842,14 +3196,291 @@ impl EditorView {
         ))
     }
 
+    pub(super) fn front_matter_input_viewport_bounds(&self) -> Bounds<Pixels> {
+        Bounds::new(
+            self.content_origin,
+            size(px(self.last_viewport_width), px(self.last_viewport_height)),
+        )
+    }
+
+    /// Input callbacks can precede prepaint. Shape the small metadata region
+    /// synchronously so hits, caret scrolling, and native IME share current rows.
+    pub(super) fn refresh_front_matter_input_geometry(
+        &mut self,
+        window: &mut Window,
+        bounds: Bounds<Pixels>,
+    ) {
+        let columns = self.measure_front_matter_columns(window);
+        if self.front_matter_columns != columns {
+            self.front_matter_columns = columns;
+            self.front_matter_group_geometry_dirty = true;
+            self.last_stable_input_bounds = None;
+            self.pending_input_bounds = None;
+            if let Some(table) = self
+                .decorations
+                .first()
+                .and_then(|d| d.table_info.as_ref())
+                .filter(|table| table.is_front_matter)
+            {
+                let rows = table.table_start_line..table.table_end_line;
+                for line in rows.clone() {
+                    if let Some(info) = self.line_display_info.get_mut(line) {
+                        *info = None;
+                    }
+                }
+                self.clear_sparse_line_geometry_range(rows);
+                self.invalidate_line_geometry_cache();
+            }
+        }
+        let width = f32::from(bounds.size.width);
+        if width > 0.0
+            && (self.last_viewport_width - width).abs() > 0.5
+            && let Some(table) = self
+                .decorations
+                .first()
+                .and_then(|d| d.table_info.as_ref())
+                .filter(|table| table.is_front_matter)
+        {
+            let rows = table.table_start_line..table.table_end_line;
+            self.last_viewport_width = width;
+            self.front_matter_group_geometry_dirty = true;
+            self.last_stable_input_bounds = None;
+            self.pending_input_bounds = None;
+            for line in rows.clone() {
+                if let Some(info) = self.line_display_info.get_mut(line) {
+                    *info = None;
+                }
+            }
+            self.clear_sparse_line_geometry_range(rows);
+            self.invalidate_line_geometry_cache();
+        }
+        self.sync_front_matter_group_focus_for_width(width);
+        if !self.front_matter_group_geometry_dirty || bounds.size.width <= px(0.0) {
+            return;
+        }
+        let Some(table) = self
+            .decorations
+            .first()
+            .and_then(|d| d.table_info.as_ref())
+            .filter(|table| table.is_front_matter)
+        else {
+            return;
+        };
+        let rows = table.table_start_line..table.table_end_line;
+        let plans = self.front_matter_group_plan_for_width(f32::from(bounds.size.width));
+        let hidden = |line| {
+            self.front_matter_line_is_hidden(line)
+                || (self.front_matter_summary_line() != Some(line)
+                    && plans.iter().any(|plan| plan.hides_line(line)))
+        };
+        if rows.clone().all(|line| {
+            hidden(line)
+                || self
+                    .line_display_info
+                    .get(line)
+                    .and_then(|info| info.as_ref())
+                    .is_some_and(|info| info.visual_line_count > 0)
+        }) {
+            return;
+        }
+        let mut updates = Vec::new();
+        for line in rows.clone() {
+            let info = self.inline_line_display_info_with_group_plan(window, line, bounds, &plans);
+            let padding = self.block_padding_for_line(line);
+            updates.push((
+                line,
+                info.map(|info| LineDisplayInfo {
+                    visual_line_count: info.wrapped_line.wrap_boundaries().len() + 1,
+                    wrap_width_px: info.wrapped_line.wrap_width.map(f32::from),
+                    unwrapped_width_px: f32::from(info.wrapped_line.unwrapped_layout.width),
+                    display_text: info.display_text,
+                    display_to_buffer: info.display_to_buffer,
+                    buffer_to_display: info.buffer_to_display,
+                    base_runs: info.base_runs,
+                    font_size: info.font_size,
+                    line_height: info.line_height,
+                    wrapped_line: info.wrapped_line,
+                    wrap_boundary_upstream_xs: info.wrap_boundary_upstream_xs,
+                    extra_height: padding.0 + padding.1,
+                    indent_px: info.indent_px,
+                    content_x: info.content_x,
+                    horizontal_clip_right_x: None,
+                    selection_padding_left_px: 0.0,
+                }),
+            ));
+        }
+        self.apply_line_display_info_updates(self.buffer.line_count(), updates);
+        self.invalidate_line_geometry_cache();
+        let mut type_areas = Vec::new();
+        let mut fold_areas = Vec::new();
+        let fold_line = super::fold::front_matter_fold_control_line(
+            &self.decorations,
+            &plans,
+            self.collapsed_front_matter_range().is_some(),
+        );
+        let viewport = bounds.intersect(&window.content_mask().bounds);
+        let slot_size = self.scaled(super::element::LINE_FORMAT_ICON_SIZE_PX);
+        let (column_inset, _) =
+            super::element::front_matter_content_geometry(true, 0.0, 1.0, self.scaled(1.0));
+        for line in rows {
+            let Some(info) = self
+                .line_display_info
+                .get(line)
+                .and_then(|info| info.as_ref())
+            else {
+                continue;
+            };
+            let separator = self.decorations[line]
+                .table_info
+                .as_ref()
+                .is_some_and(|table| table.is_separator);
+            let summary = self.front_matter_summary_line() == Some(line);
+            let left = info.content_x
+                - if separator && !summary {
+                    0.0
+                } else {
+                    column_inset
+                };
+            let top =
+                f32::from(bounds.origin.y) + self.text_y_offset_for_line(line) - self.scroll_offset;
+            let property_line = plans
+                .iter()
+                .find(|plan| plan.label_line() == line)
+                .map_or(line, |plan| plan.group.header_line);
+            if !summary
+                && super::front_matter::property_type(
+                    &self.buffer,
+                    &self.decorations,
+                    property_line,
+                )
+                .is_some()
+                && let Some(hit) = super::element::front_matter_type_hit_bounds(
+                    Bounds::new(
+                        point(px(left), px(top + (info.line_height - slot_size) * 0.5)),
+                        size(px(slot_size), px(slot_size)),
+                    ),
+                    viewport,
+                )
+            {
+                type_areas.push((hit, property_line));
+            }
+            if fold_line == Some(line) {
+                let icon_size = self.scaled(self.styles.gutter.gutter_fold_icon_size_px);
+                let hit = super::element::front_matter_fold_hit_bounds(
+                    left - icon_size - self.scaled(super::element::LINE_FORMAT_CONTENT_GAP_PX),
+                    left,
+                    top,
+                    info.total_height(),
+                    viewport,
+                );
+                if hit.size.width > px(0.0) && hit.size.height > px(0.0) {
+                    fold_areas.push((hit, 0, false));
+                }
+            }
+        }
+        self.front_matter_type_areas = type_areas;
+        self.gutter_fold_areas = fold_areas;
+        let mut hits = Vec::new();
+        let mut deletes = Vec::new();
+        let mut scroll_areas = Vec::new();
+        for plan in plans
+            .iter()
+            .filter(|plan| !plan.active && !plan.source_visible)
+        {
+            let line = plan.label_line();
+            let Some(info) = self
+                .line_display_info
+                .get(line)
+                .and_then(|info| info.as_ref())
+            else {
+                continue;
+            };
+            let Some(mut font) = info.base_runs.first().map(|run| run.font.clone()) else {
+                continue;
+            };
+            font.weight = gpui::FontWeight::NORMAL;
+            let mut decoration = self.decorations[line].clone();
+            helpers::apply_front_matter_group_display(
+                &mut decoration,
+                line,
+                Some(plan),
+                self.buffer.line_content(line),
+            );
+            let start = decoration
+                .front_matter
+                .as_ref()
+                .and_then(|fm| info.buffer_to_display.get(fm.value_range.start))
+                .copied()
+                .unwrap_or(0);
+            let width = if self.editor_uses_expanded_layout() {
+                f32::from(bounds.size.width)
+            } else {
+                f32::from(bounds.size.width).min(self.max_editor_width())
+            };
+            let (_, width) = super::element::front_matter_content_geometry(
+                true,
+                0.0,
+                (width - self.padding_left() - self.padding_right()).max(self.scaled(120.0)),
+                self.scaled(1.0),
+            );
+            super::element::push_front_matter_group_paint(
+                self,
+                plan,
+                window,
+                bounds,
+                &info.wrapped_line,
+                start,
+                info.content_x,
+                f32::from(bounds.origin.y) + self.text_y_offset_for_line(line) - self.scroll_offset,
+                info.line_height,
+                info.font_size,
+                width,
+                &font,
+                &mut Vec::new(),
+                &mut hits,
+                &mut deletes,
+                &mut scroll_areas,
+                &mut Vec::new(),
+            );
+        }
+        self.front_matter_text_areas = hits;
+        self.front_matter_delete_areas = deletes;
+        self.front_matter_list_scroll_areas = scroll_areas;
+    }
+
     pub(super) fn inline_line_display_info(
         &self,
         window: &mut Window,
         line_idx: usize,
         bounds: Bounds<Pixels>,
     ) -> Option<InlineLineDisplayInfo> {
+        let group_plans = self.front_matter_group_plan_for_width(f32::from(bounds.size.width));
+        self.inline_line_display_info_with_group_plan(window, line_idx, bounds, &group_plans)
+    }
+
+    pub(super) fn inline_line_display_info_with_group_plan(
+        &self,
+        window: &mut Window,
+        line_idx: usize,
+        bounds: Bounds<Pixels>,
+        group_plans: &[helpers::FrontMatterGroupPlan],
+    ) -> Option<InlineLineDisplayInfo> {
         let mut decoration = self.decorations.get(line_idx)?.clone();
-        if matches!(decoration.block_type, BlockType::Table) {
+        let group_plan = group_plans
+            .iter()
+            .find(|plan| plan.group.source_lines.contains(&line_idx));
+        let front_matter_summary = self.front_matter_fold_summary(line_idx);
+        if self.front_matter_line_is_hidden(line_idx)
+            || (front_matter_summary.is_none()
+                && group_plan.is_some_and(|plan| plan.hides_line(line_idx)))
+        {
+            return None;
+        }
+        let is_front_matter_line = decoration
+            .table_info
+            .as_ref()
+            .is_some_and(|table_info| table_info.is_front_matter);
+        if matches!(decoration.block_type, BlockType::Table) && !is_front_matter_line {
             return None;
         }
 
@@ -2869,7 +3500,17 @@ impl EditorView {
         };
         let text_width =
             (editor_width - self.padding_left() - self.padding_right()).max(self.scaled(120.0));
-        let wrap_width = text_width;
+        let (front_matter_content_left, wrap_width) = super::element::front_matter_content_geometry(
+            front_matter_summary.is_some()
+                || (is_front_matter_line
+                    && !decoration
+                        .table_info
+                        .as_ref()
+                        .is_some_and(|table| table.is_separator)),
+            editor_left + self.padding_left(),
+            text_width,
+            self.scaled(1.0),
+        );
 
         let text_style = window.text_style();
         let editor_styles = &self.styles.editor;
@@ -3011,17 +3652,6 @@ impl EditorView {
         } else {
             None
         };
-        let active_front_matter_group = self
-            .decorations
-            .get(self.cursor_line())
-            .and_then(|decoration| decoration.table_info.as_ref())
-            .filter(|table_info| table_info.is_front_matter)
-            .map(|table_info| {
-                (
-                    table_info.table_start_line,
-                    table_info.table_end_line.saturating_sub(1),
-                )
-            });
 
         let line_content = self.buffer.line_content(line_idx);
         let line_start_offset = self.buffer.line_start(line_idx);
@@ -3185,10 +3815,32 @@ impl EditorView {
             active_ranges.push(col.min(line_content.len())..col.min(line_content.len()));
         }
 
-        let code_block_syntax_active = active_code_fence_group
-            .is_some_and(|(start, end)| line_idx >= start && line_idx <= end)
-            || active_front_matter_group
-                .is_some_and(|(start, end)| line_idx >= start && line_idx <= end);
+        self.append_search_reveal_range(line_idx, &mut active_ranges);
+        if group_plan.is_some_and(|plan| plan.active) {
+            active_ranges.push(0..line_content.len());
+        }
+        helpers::apply_front_matter_group_display(
+            &mut decoration,
+            line_idx,
+            group_plan,
+            line_content,
+        );
+
+        let front_matter_row_active = is_front_matter_line
+            && helpers::front_matter_row_is_active(&active_ranges, line_content.len());
+        let code_block_syntax_active = if decoration
+            .table_info
+            .as_ref()
+            .is_some_and(|table| table.is_front_matter && table.is_separator)
+        {
+            self.front_matter_delimiters_are_visible()
+        } else {
+            (syntax_expansion_allowed
+                && active_code_fence_group
+                    .is_some_and(|(start, end)| line_idx >= start && line_idx <= end))
+                || self.search_reveals_code_fence_group(line_idx)
+                || front_matter_row_active
+        };
         let placeholder_unit_width =
             body_space_width * (font_size / self.base_font_size()).max(0.1);
         helpers::add_inline_math_display_replacements(
@@ -3198,22 +3850,30 @@ impl EditorView {
             placeholder_unit_width,
         );
         let line_height = base_line_height;
-        let (mut display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
-            helpers::build_display_text(
-                line_content,
-                &decoration,
-                &active_ranges,
-                code_block_syntax_active,
-                None,
-                table_cell_padding_chars,
-                collapsed_task_prefix_display_columns,
-                checkbox_indent_step_display_columns,
-                self.styles.checkbox.checkbox_parent_prefix_chars as usize,
-                0,
-                self.styles.editor.editor_superscript_scale_factor,
-                self.styles.editor.editor_subscript_scale_factor,
-                self.styles.editor.editor_superscript_scale_factor,
-            );
+        super::front_matter::apply_date_time_format(
+            &mut decoration,
+            self.app_settings.date_time_format(),
+        );
+        let (mut display_text, mut display_to_buffer, buffer_to_display, prefix_collapsed) =
+            if let Some(summary) = front_matter_summary.as_deref() {
+                helpers::build_front_matter_fold_display(line_content, summary)
+            } else {
+                helpers::build_display_text(
+                    line_content,
+                    &decoration,
+                    &active_ranges,
+                    code_block_syntax_active,
+                    None,
+                    table_cell_padding_chars,
+                    collapsed_task_prefix_display_columns,
+                    checkbox_indent_step_display_columns,
+                    self.styles.checkbox.checkbox_parent_prefix_chars as usize,
+                    0,
+                    self.styles.editor.editor_superscript_scale_factor,
+                    self.styles.editor.editor_subscript_scale_factor,
+                    self.styles.editor.editor_superscript_scale_factor,
+                )
+            };
         self.apply_list_display_styles(
             line_content,
             &decoration,
@@ -3221,7 +3881,7 @@ impl EditorView {
             prefix_collapsed,
         );
 
-        let runs = helpers::build_text_runs_for_display_with_language(
+        let mut runs = helpers::build_text_runs_for_display_with_language(
             &display_text,
             line_content,
             &display_to_buffer,
@@ -3254,6 +3914,11 @@ impl EditorView {
             },
         );
 
+        if front_matter_summary.is_some() {
+            for run in &mut runs {
+                run.color = self.theme.syntax_marker;
+            }
+        }
         let display_shared: SharedString = if display_text.is_empty() {
             " ".into()
         } else {
@@ -3264,7 +3929,16 @@ impl EditorView {
             decoration.block_type,
             BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_)
         );
-        let prefix_bytes = if is_list_type {
+        let prefix_bytes = if front_matter_summary.is_some() {
+            0
+        } else if is_front_matter_line {
+            decoration
+                .front_matter
+                .as_ref()
+                .and_then(|info| buffer_to_display.get(info.value_range.start))
+                .copied()
+                .unwrap_or(0)
+        } else if is_list_type {
             helpers::compute_display_prefix_bytes(
                 &display_text,
                 &decoration.block_type,
@@ -3273,6 +3947,25 @@ impl EditorView {
             )
         } else {
             0
+        };
+        let wrap_indent_px = if prefix_bytes > 0 && prefix_bytes <= display_text.len() {
+            let prefix_text = &display_text[..prefix_bytes];
+            let prefix_runs = helpers::extract_runs_for_range(&runs, 0, prefix_bytes);
+            window
+                .text_system()
+                .shape_text(
+                    prefix_text.to_string().into(),
+                    px(font_size),
+                    &prefix_runs,
+                    None,
+                    None,
+                )
+                .ok()
+                .and_then(|lines| lines.into_iter().next())
+                .map(|line| f32::from(line.width()))
+                .unwrap_or(0.0)
+        } else {
+            0.0
         };
         let letter_spacing = editor_styles.editor_letter_spacing_px;
         let base_wrap_width = if matches!(
@@ -3289,8 +3982,15 @@ impl EditorView {
         } else {
             wrap_width
         };
+        let effective_wrap_width = if is_front_matter_line {
+            base_wrap_width
+        } else if wrap_indent_px > 0.0 {
+            (base_wrap_width - wrap_indent_px).max(base_wrap_width * 0.3)
+        } else {
+            base_wrap_width
+        };
         let wrap_width_param = if self.editor_wraps_to_available_width() {
-            Some(px(base_wrap_width))
+            Some(px(effective_wrap_width))
         } else {
             None
         };
@@ -3331,15 +4031,51 @@ impl EditorView {
             line_height,
             0,
         );
-        let indent_px = if is_list_type && prefix_bytes > 0 && prefix_bytes <= display_text.len() {
-            wrapped_line
-                .position_for_index(prefix_bytes, px(line_height))
-                .map(|pos| f32::from(pos.x))
-                .unwrap_or(0.0)
+        let metadata_indent = if is_front_matter_line {
+            self.front_matter_columns
+                .or_else(|| self.measure_front_matter_columns(window))
+                .and_then(|columns| {
+                    super::front_matter_layout::align_and_wrap(
+                        &mut wrapped_line,
+                        &decoration,
+                        &buffer_to_display,
+                        helpers::front_matter_row_is_active(&active_ranges, line_content.len()),
+                        columns,
+                        wrap_width_param.map(|_| base_wrap_width),
+                        font_size * self.styles.checkbox.checkbox_size_factor,
+                    )
+                })
+        } else {
+            None
+        };
+        if metadata_indent.is_some() {
+            super::front_matter_layout::align_stacked_padding_hits(
+                &wrapped_line,
+                &decoration,
+                &buffer_to_display,
+                &mut display_to_buffer,
+            );
+        }
+        let indent_px = if let Some(indent) = metadata_indent {
+            indent
+        } else if prefix_bytes > 0 && prefix_bytes <= display_text.len() {
+            if is_front_matter_line {
+                super::front_matter::wrap_indent(
+                    f32::from(wrapped_line.unwrapped_layout.x_for_index(prefix_bytes)),
+                    wrap_width_param.map(|_| base_wrap_width),
+                )
+            } else {
+                wrapped_line
+                    .position_for_index(prefix_bytes, px(line_height))
+                    .map(|position| f32::from(position.x))
+                    .unwrap_or(0.0)
+            }
         } else {
             0.0
         };
-        let base_content_x = if matches!(
+        let base_content_x = if is_front_matter_line {
+            front_matter_content_left
+        } else if matches!(
             decoration.block_type,
             BlockType::CodeBlock | BlockType::CodeBlockFence
         ) {
@@ -3362,18 +4098,24 @@ impl EditorView {
             } else {
                 base_content_x
             };
-        let wrap_boundary_upstream_xs = compute_inline_wrap_boundary_upstream_xs(
-            window,
-            &wrapped_line,
-            &display_text,
-            &runs,
-            font_size,
-            line_height,
-            letter_spacing,
-        );
+        let wrap_boundary_upstream_xs = if metadata_indent.is_some() {
+            super::front_matter_layout::wrap_boundary_upstream_xs(&wrapped_line)
+        } else {
+            compute_inline_wrap_boundary_upstream_xs(
+                window,
+                &wrapped_line,
+                &display_text,
+                &runs,
+                font_size,
+                line_height,
+                letter_spacing,
+            )
+        };
 
         Some(InlineLineDisplayInfo {
             display_text,
+            display_to_buffer,
+            base_runs: runs,
             buffer_to_display,
             font_size,
             line_height,
@@ -3417,8 +4159,7 @@ impl EditorView {
         let line_start = self.buffer.line_start(source_line);
         let padding_x = self.scaled(self.styles.table.table_cell_padding_px);
         let padding_y = self.scaled(self.styles.table.table_cell_padding_px) * 0.6;
-        let inner_width =
-            (f32::from(bounds.size.width) - padding_x * 2.0).max(self.base_font_size() * 0.5);
+        let inner_width = (f32::from(bounds.size.width) - padding_x * 2.0).max(1.0);
         let info = self.table_cell_display_info(window, source_line, col, inner_width)?;
         let line_height = info.line_height;
         let local_y = (f32::from(position.y) - f32::from(bounds.origin.y) - padding_y).max(0.0);
@@ -3433,20 +4174,46 @@ impl EditorView {
         let local_x =
             (f32::from(position.x) - f32::from(bounds.origin.x) - padding_x - content_offset)
                 .max(0.0);
-        let local_display_index = match wrapped
-            .closest_index_for_position(point(px(local_x), px(hit_y)), px(line_height))
-        {
-            Ok(index) | Err(index) => index,
-        };
+        let hit_x = info
+            .hanging_wraps
+            .get(selected_line)
+            .copied()
+            .unwrap_or_default()
+            .hit_x(wrapped, local_x, px(hit_y), line_height);
+        let local_display_index =
+            match wrapped.closest_index_for_position(point(hit_x, px(hit_y)), px(line_height)) {
+                Ok(index) | Err(index) => index,
+            };
         let mut display_index = (hard_range.start + local_display_index.min(hard_range.len()))
             .min(info.display_text.len());
         while display_index > 0 && !info.display_text.is_char_boundary(display_index) {
             display_index -= 1;
         }
-        let buffer_col = if display_index < info.display_to_buffer.len() {
-            info.display_to_buffer[display_index]
+        let soft_row = wrapped.row_for_y(px(hit_y), px(line_height));
+        let source = self
+            .decorations
+            .get(source_line)
+            .and_then(|decoration| decoration.table_info.as_ref())
+            .filter(|table| !table.is_front_matter)
+            .and_then(|_| {
+                self.buffer
+                    .line_content(source_line)
+                    .get(info.cell_range.clone())
+            });
+        let buffer_col = if let Some(source) = source {
+            table_cell_buffer_column_for_hit(
+                &info,
+                source,
+                hard_range.start,
+                soft_row,
+                local_x,
+                display_index,
+            )
         } else {
-            info.cell_content_len
+            info.display_to_buffer
+                .get(display_index)
+                .copied()
+                .unwrap_or(info.cell_content_len)
         };
         Some((
             line_start + info.cell_range.start + buffer_col,
@@ -3454,7 +4221,7 @@ impl EditorView {
                 wrapped,
                 info.display_text.get(hard_range.clone())?,
                 display_index - hard_range.start,
-                wrapped.row_for_y(px(hit_y), px(line_height)),
+                soft_row,
             ),
         ))
     }
@@ -3466,6 +4233,29 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let delta = event.delta.pixel_delta(px(40.0));
+        if !event.modifiers.platform
+            && !event.modifiers.control
+            && (delta.x != px(0.0) || event.modifiers.shift)
+            && let Some((_, header, max_offset)) = self
+                .front_matter_list_scroll_areas
+                .iter()
+                .find(|(bounds, _, _)| bounds.contains(&event.position))
+                .copied()
+        {
+            let dx = if delta.x != px(0.0) {
+                f32::from(delta.x)
+            } else {
+                f32::from(delta.y)
+            };
+            let offset = self
+                .front_matter_list_scroll_offsets
+                .entry(header)
+                .or_default();
+            *offset = (*offset - dx).clamp(0.0, max_offset);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if delta.x != px(0.0) || delta.y != px(0.0) {
             self.hide_line_format_toolbar_for_scroll(cx);
         }
@@ -3645,6 +4435,14 @@ impl EditorView {
     }
 
     pub(crate) fn offset_for_position(&self, position: Point<Pixels>) -> usize {
+        if !self.layout_dirty
+            && let Some(hit) = self
+                .front_matter_text_areas
+                .iter()
+                .find(|hit| hit.bounds.contains(&position))
+        {
+            return hit.offset_for_position(position).min(self.buffer.len());
+        }
         let pos_y: f32 = position.y.into();
         let pos_x: f32 = position.x.into();
         let origin_y: f32 = self.content_origin.y.into();
@@ -3655,10 +4453,18 @@ impl EditorView {
         let y = (pos_y - origin_y) + self.scroll_offset;
         let content_bottom = self.total_content_height() - self.padding_bottom();
         if y >= content_bottom {
-            let last_line = self.buffer.line_count().saturating_sub(1);
+            let last_line = (0..self.buffer.line_count())
+                .rev()
+                .find(|&line| self.visual_height_for_line(line) > 0.0)
+                .unwrap_or(0);
             return self.buffer.line_end(last_line).min(self.buffer.len());
         }
-        let visible_line_geometry = visible_line_hit(&self.visible_line_geometry, pos_y);
+        let visible_line_geometry = if self.front_matter_group_geometry_dirty {
+            None
+        } else {
+            visible_line_hit(&self.visible_line_geometry, pos_y)
+                .filter(|(line, _)| !self.front_matter_presentation_line_is_hidden(*line))
+        };
         let line = visible_line_geometry
             .map(|(line, _)| line)
             .unwrap_or_else(|| self.line_at_y(y));
@@ -3813,6 +4619,192 @@ impl EditorView {
 }
 
 #[cfg(test)]
+mod table_cell_pointer_tests {
+    use super::{
+        TableCellDisplayInfo, helpers, table_cell_buffer_column_for_hit,
+        table_cell_footnote_label_for_click,
+    };
+    use crate::markdown::{self, LineDecoration, TableAlign};
+    use std::ops::Range;
+
+    fn display_info(source: &str, active_ranges: &[Range<usize>]) -> TableCellDisplayInfo {
+        let decoration =
+            helpers::table_cell_decoration(&LineDecoration::default(), source, &(0..source.len()));
+        let (raw, d2b, b2d, _) = helpers::build_display_text(
+            source,
+            &decoration,
+            active_ranges,
+            false,
+            None,
+            0,
+            3,
+            3,
+            2,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let range = helpers::table_cell_display_range(&raw, source, &decoration, &b2d);
+        let display_text = raw[range.clone()].to_string();
+        TableCellDisplayInfo {
+            wrapped_lines: Vec::new(),
+            hanging_wraps: Vec::new(),
+            hard_line_ranges: helpers::hard_line_byte_ranges(&display_text),
+            alignment: TableAlign::Left,
+            display_to_buffer: d2b[range.clone()].to_vec(),
+            buffer_to_display: b2d
+                .iter()
+                .map(|index| index.saturating_sub(range.start).min(range.len()))
+                .collect(),
+            cell_range: 0..source.len(),
+            cell_content_len: source.len(),
+            display_text,
+            line_height: 24.0,
+        }
+    }
+
+    #[test]
+    fn left_padding_maps_before_collapsed_opening_markers_not_first_visible_glyph() {
+        for source in ["**é🙂**", "`é🙂`", "~~é🙂~~", "[é🙂](https://example.com)"] {
+            let info = display_info(source, &[]);
+            let first_visible = info.display_to_buffer[0];
+            assert!(first_visible > 0, "{source:?}");
+            assert_eq!(
+                table_cell_buffer_column_for_hit(&info, source, 0, 0, 0.0, 0),
+                0,
+                "{source:?}",
+            );
+            assert_eq!(
+                table_cell_buffer_column_for_hit(&info, source, 0, 0, 0.1, 0),
+                first_visible,
+                "{source:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn left_padding_skips_only_real_leading_source_whitespace() {
+        let source = "  **é🙂**  ";
+        let info = display_info(source, &[]);
+        assert_eq!(
+            table_cell_buffer_column_for_hit(&info, source, 0, 0, 0.0, 0),
+            2,
+        );
+        assert_eq!(
+            table_cell_buffer_column_for_hit(&info, source, 0, 0, 1.0, 0),
+            4,
+        );
+    }
+
+    #[test]
+    fn soft_wrap_left_edge_keeps_its_own_source_position() {
+        let source = "**alpha beta**";
+        let info = display_info(source, &[]);
+        assert_eq!(info.display_text, "alpha beta");
+        assert_eq!(
+            table_cell_buffer_column_for_hit(&info, source, 0, 1, 0.0, 6),
+            source.find("beta").unwrap(),
+        );
+    }
+
+    #[test]
+    fn later_hard_line_left_padding_maps_after_accepted_break_before_opening_marker() {
+        for (source, marker) in [
+            ("first<br>**é🙂**", "**"),
+            ("first<BR/>[é🙂](https://example.com)", "["),
+            ("first<Br   />`é🙂`", "`"),
+        ] {
+            let info = display_info(source, &[]);
+            let start = info.hard_line_ranges[1].start;
+            assert_eq!(
+                table_cell_buffer_column_for_hit(&info, source, start, 0, 0.0, start),
+                source.find(marker).unwrap(),
+                "{source:?}",
+            );
+            assert_eq!(
+                table_cell_buffer_column_for_hit(&info, source, start, 0, 0.1, start),
+                info.display_to_buffer[start],
+                "{source:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn expanded_source_keeps_literal_marker_hit_positions() {
+        let source = "**é🙂**";
+        let info = display_info(source, &[0..source.len()]);
+        assert_eq!(info.display_text, source);
+        for (index, _) in source.char_indices() {
+            assert_eq!(
+                table_cell_buffer_column_for_hit(&info, source, 0, 0, 1.0, index),
+                index,
+            );
+        }
+        assert_eq!(
+            table_cell_buffer_column_for_hit(&info, source, 0, 0, 0.0, 0),
+            0,
+        );
+    }
+
+    #[test]
+    fn footnote_click_target_matches_ordinary_inclusive_source_range_in_cells() {
+        let source = "See [^note].\n\n| Other | Reference |\n| --- | --- |\n| 隣🙂 | See [^note]. |\n\n[^note]: Footnote";
+        let decorations = markdown::parse_decorations(source);
+        for line in [0, 4] {
+            let decoration = &decorations[line];
+            let reference = &decoration.footnote_references[0];
+            for column in reference.full_range.start..=reference.full_range.end {
+                assert_eq!(
+                    table_cell_footnote_label_for_click(decoration, column),
+                    Some("note"),
+                );
+            }
+            for column in [reference.full_range.start - 1, reference.full_range.end + 1] {
+                assert_eq!(
+                    table_cell_footnote_label_for_click(decoration, column),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mapped_collapsed_footnote_click_resolves_label_without_stealing_link_targets() {
+        let source = "| Reference |\n| --- |\n| [^note] [web](https://example.com) [[page.md]] |\n\n[^note]: Footnote";
+        let decorations = markdown::parse_decorations(source);
+        let row = &decorations[2];
+        let table = row.table_info.as_ref().unwrap();
+        let content = &table.cells[0];
+        let info = display_info(content, &[]);
+        for display_index in 0..info.display_text.len() {
+            let column = table.cell_ranges[0].start + info.display_to_buffer[display_index];
+            if row.footnote_references[0].full_range.contains(&column) {
+                assert_eq!(
+                    table_cell_footnote_label_for_click(row, column),
+                    Some("note")
+                );
+            }
+        }
+        for target in ["https://example.com", "page.md"] {
+            let column = source.lines().nth(2).unwrap().find(target).unwrap();
+            assert_eq!(table_cell_footnote_label_for_click(row, column), None);
+            assert_eq!(markdown::link_target_at_column(row, column), Some(target));
+        }
+    }
+
+    #[test]
+    fn inline_code_footnote_text_is_not_a_navigation_target() {
+        let source = "| Reference |\n| --- |\n| `[^note]` |\n\n[^note]: Footnote";
+        let decorations = markdown::parse_decorations(source);
+        let row = &decorations[2];
+        for column in 0..source.lines().nth(2).unwrap().len() {
+            assert_eq!(table_cell_footnote_label_for_click(row, column), None);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::super::input_wrap::test_wrapped_line;
     use super::{
@@ -3822,6 +4814,117 @@ mod tests {
         visible_line_hit,
     };
 
+    #[test]
+    fn front_matter_scrolled_hits_use_unclipped_origin_and_exact_scalar_byte_map() {
+        use super::super::helpers::front_matter_item_source_map;
+        use super::FrontMatterTextHit;
+        use gpui::{Bounds, WrappedLineLayout, size};
+        use std::sync::Arc;
+
+        let mut shaped = test_wrapped_line(&[24.0]);
+        let layout: &mut Arc<WrappedLineLayout> = &mut *shaped;
+        Arc::make_mut(layout).wrap_boundaries.clear();
+        Arc::make_mut(layout).wrap_width = None;
+        let token = "\"a\\u0062cdef\"";
+        let hit = FrontMatterTextHit {
+            bounds: Bounds::new(point(px(100.0), px(50.0)), size(px(30.0), px(24.0))),
+            origin: point(px(70.0), px(50.0)),
+            shaped,
+            line_height: 24.0,
+            source_map: front_matter_item_source_map(token, "abcdef", 200),
+        };
+        assert_eq!(
+            hit.offset_for_position(point(px(100.0), px(60.0))),
+            200 + token.find('d').unwrap()
+        );
+        assert_eq!(
+            hit.offset_for_position(point(px(110.0), px(60.0))),
+            200 + token.find('e').unwrap()
+        );
+        assert_eq!(
+            hit.offset_for_position(point(px(130.0), px(60.0))),
+            200 + token.len()
+        );
+        assert!(!hit.bounds.contains(&point(px(99.0), px(60.0))));
+        assert!(!hit.bounds.contains(&point(px(110.0), px(80.0))));
+    }
+
+    #[test]
+    fn front_matter_key_and_continuation_rows_share_the_input_inset() {
+        use super::super::{element::front_matter_content_geometry, front_matter};
+        use crate::buffer::Buffer;
+
+        let source = "---\nobject:\n  title: '你好🌸'\nitems:\n  - first\n  - second\nbody: |\n  key: literal\n  another line\n---\nordinary: mapping";
+        let buffer = Buffer::from_text(source);
+        let decorations = crate::markdown::parse_decorations(source);
+        let mut keyed_rows = Vec::new();
+        for (line, decoration) in decorations.iter().enumerate() {
+            let has_type_column = decoration
+                .table_info
+                .as_ref()
+                .is_some_and(|table| table.is_front_matter && !table.is_separator);
+            let geometry = front_matter_content_geometry(has_type_column, 100.0, 300.0, 1.0);
+            assert_eq!(
+                geometry,
+                if (1..9).contains(&line) {
+                    (124.0, 276.0)
+                } else {
+                    (100.0, 300.0)
+                }
+            );
+            if front_matter::property_type(&buffer, &decorations, line).is_some() {
+                keyed_rows.push(line);
+            }
+        }
+        assert_eq!(keyed_rows, vec![1, 2, 3, 6]);
+        assert_eq!(buffer.text(), source);
+    }
+
+    #[test]
+    fn front_matter_column_keeps_active_utf8_and_ime_offsets_source_relative() {
+        use super::super::{element::front_matter_content_geometry, helpers};
+
+        let source = "  title: '你好🌸'";
+        let document = format!("---\nobject:\n{source}\n---");
+        let decorations = crate::markdown::parse_decorations(&document);
+        let decoration = &decorations[2];
+        let marked_start = source.find('你').unwrap();
+        let active_ranges = [marked_start..marked_start + "你好🌸".len()];
+        let (display, display_to_buffer, buffer_to_display, _) = helpers::build_display_text(
+            source,
+            decoration,
+            &active_ranges,
+            true,
+            None,
+            0,
+            3,
+            3,
+            2,
+            0,
+            0.7,
+            0.7,
+            0.7,
+        );
+        assert!(display.starts_with("  title:"));
+        let (content_x, wrap_width) = front_matter_content_geometry(true, 100.0, 300.0, 1.0);
+        assert_eq!((content_x, wrap_width), (124.0, 276.0));
+        for col in marked_start..=source.len() {
+            if !source.is_char_boundary(col) {
+                continue;
+            }
+            let display_col = buffer_to_display[col];
+            assert!(display.is_char_boundary(display_col));
+            assert_eq!(
+                display_index_to_buffer_col(&display, &display_to_buffer, display_col),
+                col,
+            );
+        }
+        assert_eq!(
+            &display[buffer_to_display[marked_start]..],
+            &source[marked_start..]
+        );
+    }
+
     fn test_table_cell() -> TableCellDisplayInfo {
         let display_text = "abcdef\nabcdef".to_string();
         TableCellDisplayInfo {
@@ -3830,6 +4933,7 @@ mod tests {
                 test_wrapped_line(&[24.0, 24.0, 80.0]),
             ],
             hard_line_ranges: vec![0..6, 7..13],
+            hanging_wraps: Vec::new(),
             alignment: crate::markdown::TableAlign::Left,
             display_to_buffer: (0..display_text.len()).collect(),
             buffer_to_display: (0..display_text.len()).collect(),
@@ -3912,6 +5016,51 @@ mod tests {
             assert_eq!(info.hard_line_top(line) + f32::from(pos.y), expected_y);
             assert_eq!(pos.x, px(0.0));
         }
+    }
+
+    #[test]
+    fn table_hanging_navigation_and_ime_positions_share_fragment_indents_and_tall_rows() {
+        let mut info = test_table_cell();
+        info.hanging_wraps = vec![
+            super::super::table_cell_render::HangingWrap { indent: 13.5 },
+            super::super::table_cell_render::HangingWrap { indent: 37.25 },
+        ];
+        for (row, offset, indent, y) in [
+            (0, 0, 0.0, 0.0),
+            (1, 2, 13.5, 24.0),
+            (2, 4, 13.5, 84.0),
+            (3, 7, 0.0, 108.0),
+            (4, 9, 37.25, 132.0),
+            (5, 11, 37.25, 156.0),
+        ] {
+            let target = table_cell_offset_for_visual_line(&info, row, indent, 100.0).unwrap();
+            assert_eq!(target.0, offset);
+            assert_eq!(
+                table_cell_visual_position(&info, offset, 100.0, target.1),
+                Some((row, indent))
+            );
+            let (hard_line, ime) = table_cell_position(&info, offset, target.1).unwrap();
+            assert_eq!(f32::from(ime.x), indent);
+            assert_eq!(info.hard_line_top(hard_line) + f32::from(ime.y), y);
+        }
+        assert_eq!(
+            table_cell_visual_position(
+                &info,
+                4,
+                100.0,
+                Some(super::WrapBoundaryAffinityKind::Upstream)
+            ),
+            Some((1, 33.5))
+        );
+        assert_eq!(
+            table_cell_visual_position(
+                &info,
+                4,
+                100.0,
+                Some(super::WrapBoundaryAffinityKind::Downstream)
+            ),
+            Some((2, 13.5))
+        );
     }
 
     #[test]

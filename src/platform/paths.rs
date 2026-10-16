@@ -6,7 +6,7 @@ pub(crate) fn same_file_path(left: &Path, right: &Path) -> bool {
     #[cfg(windows)]
     {
         fn identity(path: &Path) -> String {
-            let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            // Tab/path comparisons run on the UI thread; never resolve mounts here.
             let normalized = path.to_string_lossy().replace('/', "\\");
             normalized
                 .strip_prefix(r"\\?\UNC\")

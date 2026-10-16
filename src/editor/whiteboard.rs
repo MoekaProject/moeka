@@ -642,15 +642,6 @@ impl WhiteboardTabState {
         }
     }
 
-    /// Load a whiteboard tab from a file path, tolerating missing/empty/invalid
-    /// files by falling back to an empty document.
-    pub(crate) fn load_from_path(path: &Path) -> Self {
-        let document = std::fs::read(path)
-            .map(|bytes| WhiteboardDocument::from_json_bytes(&bytes))
-            .unwrap_or_default();
-        Self::new(document)
-    }
-
     pub(crate) fn selected_elements(&self) -> impl Iterator<Item = &WhiteboardElement> {
         self.document
             .elements

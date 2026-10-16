@@ -369,8 +369,18 @@ pane_state! {
     (marked_range, Option<Range<usize>>, None),
     (extra_marked_ranges, Vec<Range<usize>>, Vec::new()),
     (ime_composition_snapshot, Option<EditorSnapshot>, None),
+    (fold_ime_cancellation, input_entity::FoldImeCancellation, input_entity::FoldImeCancellation::default()),
     // ── Hit areas + hover state (rebuilt each paint) ──
     (checkbox_areas, Vec<(gpui::Bounds<Pixels>, usize)>, Vec::new()),
+    (front_matter_type_areas, Vec<(gpui::Bounds<Pixels>, usize)>, Vec::new()),
+    (front_matter_text_areas, Vec<input::FrontMatterTextHit>, Vec::new()),
+    (front_matter_delete_areas, Vec<(gpui::Bounds<Pixels>, usize, usize)>, Vec::new()),
+    (front_matter_list_scroll_areas, Vec<(gpui::Bounds<Pixels>, usize, f32)>, Vec::new()),
+    (front_matter_list_scroll_offsets, HashMap<usize, f32>, HashMap::new()),
+    (front_matter_group_focus, Vec<(Range<usize>, bool, bool)>, Vec::new()),
+    (front_matter_group_geometry_dirty, bool, false),
+    (front_matter_columns, Option<super::front_matter_layout::Columns>, None),
+
     (hovering_checkbox, bool, false),
     (hovering_checkbox_line, Option<usize>, None),
     (image_click_areas, Vec<(gpui::Bounds<Pixels>, usize)>, Vec::new()),

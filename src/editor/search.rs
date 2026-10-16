@@ -24,6 +24,65 @@ enum SearchScanStep {
     Cancelled,
 }
 
+fn current_search_source_range(
+    text: &str,
+    visible: bool,
+    matches: &[Range<usize>],
+    current: Option<usize>,
+) -> Option<Range<usize>> {
+    let range = matches.get(current?)?;
+    (visible && range.start < range.end && text.get(range.clone()).is_some()).then(|| range.clone())
+}
+
+fn search_match_lines(buffer: &Buffer, range: &Range<usize>) -> Range<usize> {
+    let start = buffer.offset_to_line_col(range.start).0;
+    let end = buffer.offset_to_line_col(range.end.saturating_sub(1)).0 + 1;
+    start..end
+}
+
+fn search_reveal_range_on_line(
+    buffer: &Buffer,
+    range: &Range<usize>,
+    line: usize,
+) -> Option<Range<usize>> {
+    if line >= buffer.line_count() || !search_match_lines(buffer, range).contains(&line) {
+        return None;
+    }
+    let start = buffer.line_start(line);
+    let len = buffer.line_content(line).len();
+    Some(range.start.saturating_sub(start).min(len)..range.end.saturating_sub(start).min(len))
+}
+
+fn search_reveals_code_fence_group(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    range: &Range<usize>,
+    line: usize,
+) -> bool {
+    let is_code = |line: usize| {
+        decorations.get(line).is_some_and(|decoration| {
+            matches!(
+                decoration.block_type,
+                BlockType::CodeBlock | BlockType::CodeBlockFence
+            )
+        })
+    };
+    if !is_code(line) {
+        return false;
+    }
+    let lines = search_match_lines(buffer, range);
+    if lines.contains(&line) {
+        return true;
+    }
+    // Walk only toward the match, stopping at the first non-code row. Avoid
+    // scanning a huge fence to both ends for every visible source line.
+    if line < lines.start {
+        (line + 1..=lines.start).all(is_code)
+    } else {
+        (lines.end - 1..line).rev().all(is_code)
+    }
+}
+
 fn search_replacements(
     text: &str,
     query: &str,
@@ -114,6 +173,54 @@ fn search_slice_matches(
 }
 
 impl EditorView {
+    /// Search owns a presentation range, not a selection or permission to edit.
+    pub(super) fn current_search_source_range(&self) -> Option<Range<usize>> {
+        current_search_source_range(
+            self.buffer.text(),
+            self.search_visible,
+            &self.search_matches,
+            self.search_current_index,
+        )
+    }
+
+    pub(super) fn append_search_reveal_range(&self, line: usize, active: &mut Vec<Range<usize>>) {
+        if let Some(range) = self.current_search_source_range()
+            && let Some(local) = search_reveal_range_on_line(&self.buffer, &range, line)
+        {
+            active.push(local);
+        }
+    }
+
+    pub(super) fn search_reveals_line(&self, line: usize) -> bool {
+        self.current_search_source_range()
+            .is_some_and(|range| search_match_lines(&self.buffer, &range).contains(&line))
+    }
+
+    pub(super) fn search_reveals_source_range(&self, source: &Range<usize>) -> bool {
+        self.current_search_source_range()
+            .is_some_and(|range| range.start < source.end && source.start < range.end)
+    }
+
+    pub(super) fn search_reveals_code_fence_group(&self, line: usize) -> bool {
+        self.current_search_source_range().is_some_and(|range| {
+            search_reveals_code_fence_group(&self.buffer, &self.decorations, &range, line)
+        })
+    }
+
+    pub(super) fn cancel_search_scan(&mut self) {
+        self.search_scan_epoch = self.search_scan_epoch.wrapping_add(1);
+        self.search_scan_task = None;
+        self.search_scan_complete = true;
+    }
+
+    pub(super) fn invalidate_search_presentation(&mut self) {
+        self.clear_active_tab_layout_cache();
+        self.visible_line_geometry.clear();
+        self.table_cursor_paint_bounds = None;
+        self.last_stable_input_bounds = None;
+        self.pending_input_bounds = None;
+    }
+
     fn search_can_replace(&self) -> bool {
         self.active_tab_supports_text_search()
             && self.active_tab_can_start_content_edit()
@@ -370,11 +477,11 @@ impl EditorView {
 
     pub(crate) fn dismiss_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_visible = false;
-        self.search_scan_epoch = self.search_scan_epoch.wrapping_add(1);
-        self.search_scan_task = None;
-        self.search_scan_complete = true;
+        self.cancel_search_scan();
         self.search_matches.clear();
         self.search_current_index = None;
+        self.cancel_outline_navigation();
+        self.invalidate_search_presentation();
         if let Some(tab_id) = self.active_terminal_tab_id() {
             self.clear_terminal_search(&tab_id);
             self.focus_terminal_tab(&tab_id, window);
@@ -391,12 +498,12 @@ impl EditorView {
         }
 
         // Any in-flight scan belongs to the previous query.
-        self.search_scan_epoch = self.search_scan_epoch.wrapping_add(1);
-        self.search_scan_task = None;
+        self.cancel_search_scan();
         self.search_matches.clear();
         self.search_current_index = None;
-        self.search_scan_complete = true;
         self.search_scan_buffer_len = self.buffer.len();
+        self.cancel_outline_navigation();
+        self.invalidate_search_presentation();
 
         if self.search_query.is_empty() {
             cx.notify();
@@ -521,14 +628,45 @@ impl EditorView {
     }
 
     fn reveal_current_search_match(&mut self, cx: &mut Context<Self>) {
+        if self.marked_ranges().next().is_some() || self.ime_composition_snapshot.is_some() {
+            // Delayed native callbacks belong to the old composition, not to
+            // the destination. Reuse the pane-local native cancellation barrier.
+            self.fold_ime_cancellation.arm();
+            self.clear_marked_ranges();
+            self.finish_ime_composition();
+            self.schedule_fold_ime_cancellation(cx);
+            if self.search_current_index.is_none() {
+                self.run_search(cx);
+                return;
+            }
+        }
         let Some(index) = self.search_current_index else {
             return;
         };
-        let Some(range) = self.search_matches.get(index) else {
+        let Some(range) = self.search_matches.get(index).cloned() else {
             return;
         };
+        if range.is_empty() || self.buffer.text().get(range.clone()).is_none() {
+            return;
+        }
+        let lines = search_match_lines(&self.buffer, &range);
+        self.ensure_lazy_markdown_decorations(lines.clone());
+        self.unfold_search_match(lines);
+        self.close_preview_overlay();
+        self.reset_table_handles();
+        self.clear_extra_cursors();
+        self.clear_phantom_selection();
+        self.is_selecting = false;
+        self.selection_drag_has_moved = false;
+        self.suppress_fold_for_empty_selection_drag = false;
         self.cursor.move_to(range.start, &self.buffer);
+        self.reset_cursor_visual_targeting();
         self.table_boundary_caret = None;
+        self.table_boundary_drag_origin = None;
+        self.pending_click_anchor = None;
+        self.pending_typing_scroll_guard = None;
+        self.pending_preview_reveal = None;
+        self.invalidate_search_presentation();
         if self.embedded_editor && self.embedded_read_only {
             self.center_cursor_in_view_immediately(cx);
         } else {
@@ -550,6 +688,9 @@ impl EditorView {
         if let Some(tab_id) = self.active_terminal_tab_id() {
             self.terminal_search_navigate(&tab_id, forward, cx);
             return;
+        }
+        if !self.search_visible && !self.search_query.is_empty() {
+            self.search_visible = true;
         }
         let reran_search = if self.search_matches.is_empty()
             && !self.search_query.is_empty()
@@ -636,14 +777,10 @@ impl EditorView {
         self.reset_cursor_visual_targeting();
         self.reparse();
         self.run_search(cx);
-        if let Some(next) = self
-            .search_current_index
-            .and_then(|index| self.search_matches.get(index))
-        {
-            self.cursor.move_to(next.start, &self.buffer);
-        }
         self.sync_table_boundary_caret_after_reparse();
-        self.scroll_to_cursor();
+        if self.search_current_index.is_none() {
+            self.scroll_to_cursor();
+        }
         self.pause_blinking(cx);
     }
 
@@ -684,7 +821,9 @@ impl EditorView {
         self.reset_cursor_visual_targeting();
         self.reparse();
         self.run_search(cx);
-        self.scroll_to_cursor();
+        if self.search_current_index.is_none() {
+            self.scroll_to_cursor();
+        }
         self.pause_blinking(cx);
     }
 
@@ -1361,6 +1500,164 @@ fn is_word_char(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{find_search_matches, next_search_slice_boundary, search_slice_matches};
+    use crate::{buffer::Buffer, markdown};
+
+    #[test]
+    fn search_source_range_tracks_navigation_dismiss_and_invalid_utf8_or_stale_ranges() {
+        let text = "前🙂 needle 后 needle";
+        let matches = find_search_matches(text, "needle", true, false, false);
+        for (index, expected) in matches.iter().enumerate() {
+            assert_eq!(
+                super::current_search_source_range(text, true, &matches, Some(index)),
+                Some(expected.clone())
+            );
+        }
+        assert_eq!(
+            super::current_search_source_range(text, false, &matches, Some(0)),
+            None
+        );
+        assert_eq!(
+            super::current_search_source_range(text, true, &matches, None),
+            None
+        );
+        assert_eq!(
+            super::current_search_source_range(text, true, &matches, Some(matches.len())),
+            None
+        );
+        for range in [0..0, 1..3, 0..text.len() + 1] {
+            assert_eq!(
+                super::current_search_source_range(text, true, &[range], Some(0)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn search_source_projection_preserves_multiline_utf8_and_half_open_boundaries() {
+        let text = "before\n前🙂 needle\n\nneedle 后\nafter";
+        let buffer = Buffer::from_text(text);
+        let start = text.find("前").unwrap();
+        let end = text.find(" 后").unwrap();
+        let range = start..end;
+        assert_eq!(super::search_match_lines(&buffer, &range), 1..4);
+        assert_eq!(super::search_reveal_range_on_line(&buffer, &range, 0), None);
+        assert_eq!(
+            super::search_reveal_range_on_line(&buffer, &range, 1),
+            Some(0.."前🙂 needle".len())
+        );
+        assert_eq!(
+            super::search_reveal_range_on_line(&buffer, &range, 2),
+            Some(0..0)
+        );
+        assert_eq!(
+            super::search_reveal_range_on_line(&buffer, &range, 3),
+            Some(0..6)
+        );
+        assert_eq!(super::search_reveal_range_on_line(&buffer, &range, 4), None);
+        let ends_at_next_line = start..buffer.line_start(3);
+        assert_eq!(
+            super::search_reveal_range_on_line(&buffer, &ends_at_next_line, 3),
+            None
+        );
+    }
+
+    #[test]
+    fn search_source_code_group_reveals_fences_and_exact_keyword_maps() {
+        for source in [
+            "before\n\n```mermaid\ngraph TD\nA[秘密🙂] --> B\n```\n\nafter",
+            "before\n\n$$\nx + needle\n$$\n\nafter",
+            "before\n\n```math\nx + needle\n```\n\nafter",
+            "before\n\n\\[\nx + needle\n\\]\n\nafter",
+        ] {
+            let buffer = Buffer::from_text(source);
+            let decorations = markdown::parse_decorations(source);
+            let keyword = if source.contains("秘密🙂") {
+                "秘密🙂"
+            } else {
+                "needle"
+            };
+            let range = find_search_matches(source, keyword, true, false, false).remove(0);
+            let line = buffer.offset_to_line_col(range.start).0;
+            let decoration = &decorations[line];
+            let local = super::search_reveal_range_on_line(&buffer, &range, line).unwrap();
+            let group_active =
+                super::search_reveals_code_fence_group(&buffer, &decorations, &range, line);
+            let (display, d2b, b2d, _) = super::helpers::build_display_text(
+                buffer.line_content(line),
+                decoration,
+                &[local.clone()],
+                group_active,
+                None,
+                0,
+                3,
+                3,
+                2,
+                0,
+                0.7,
+                0.7,
+                0.7,
+            );
+            assert_eq!(
+                &display[b2d[local.start]..b2d[local.end]],
+                keyword,
+                "{source}"
+            );
+            for (offset, _) in keyword.char_indices() {
+                assert_eq!(d2b[b2d[local.start + offset]], local.start + offset);
+            }
+            if decoration.code_language.is_some() || source.contains("```") {
+                let first = decorations
+                    .iter()
+                    .position(|d| d.block_type == markdown::BlockType::CodeBlockFence)
+                    .unwrap();
+                assert!(super::search_reveals_code_fence_group(
+                    &buffer,
+                    &decorations,
+                    &range,
+                    first
+                ));
+                assert!(!super::search_reveals_code_fence_group(
+                    &buffer,
+                    &decorations,
+                    &range,
+                    0
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn search_source_fence_info_and_closer_match_reveal_the_entire_group() {
+        let source = "```mermaid\ngraph TD\nA-->B\n```\n\n```rust\nlet x = 1;\n```";
+        let buffer = Buffer::from_text(source);
+        let decorations = markdown::parse_decorations(source);
+        for query in ["mermaid", "A-->B"] {
+            let range = find_search_matches(source, query, true, false, false).remove(0);
+            for line in 0..4 {
+                assert!(super::search_reveals_code_fence_group(
+                    &buffer,
+                    &decorations,
+                    &range,
+                    line
+                ));
+            }
+            for line in 5..8 {
+                assert!(!super::search_reveals_code_fence_group(
+                    &buffer,
+                    &decorations,
+                    &range,
+                    line
+                ));
+            }
+        }
+        let closer = buffer.line_start(3)..buffer.line_end(3);
+        assert!(super::search_reveals_code_fence_group(
+            &buffer,
+            &decorations,
+            &closer,
+            0
+        ));
+    }
 
     #[test]
     fn replacement_uses_full_regex_context_and_captures() {

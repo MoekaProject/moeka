@@ -11,6 +11,63 @@ use super::search::{
 };
 use super::*;
 
+fn search_dates() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, SystemTime>> {
+    static DATES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, SystemTime>>,
+    > = std::sync::OnceLock::new();
+    DATES.get_or_init(Default::default)
+}
+
+fn remember_search_date(path: &std::path::Path, metadata: &std::fs::Metadata) {
+    let date = metadata
+        .created()
+        .or_else(|_| metadata.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut dates = search_dates()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if dates.len() >= 50_000 {
+        dates.clear();
+    }
+    dates.insert(path.to_path_buf(), date);
+}
+
+fn sort_search_results(results: &mut [WorkspaceSearchResult], mode: SidebarSortMode) {
+    // Snapshot observations once: sorting never performs filesystem I/O or
+    // observes changing timestamps while another worker loads dates.
+    let dates = if matches!(
+        mode,
+        SidebarSortMode::CreatedAsc | SidebarSortMode::CreatedDesc
+    ) {
+        let cached = search_dates()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        results
+            .iter()
+            .filter_map(|result| {
+                cached
+                    .get(&result.path)
+                    .map(|date| (result.path.clone(), *date))
+            })
+            .collect::<std::collections::HashMap<_, _>>()
+    } else {
+        Default::default()
+    };
+    results.sort_by(|left, right| {
+        let order = if dates.is_empty() {
+            std::cmp::Ordering::Equal
+        } else {
+            let order = dates.get(&left.path).cmp(&dates.get(&right.path));
+            if mode == SidebarSortMode::CreatedDesc {
+                order.reverse()
+            } else {
+                order
+            }
+        };
+        order.then_with(|| compare_workspace_search_paths(mode, &left.path, &right.path))
+    });
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkspaceSearchStatus {
     Empty,
@@ -72,9 +129,7 @@ impl EditorView {
 
     pub(crate) fn sort_workspace_search_results(&mut self) {
         let sort_mode = self.sidebar_sort_mode;
-        self.workspace_search_results.sort_by(|left, right| {
-            compare_workspace_search_paths(sort_mode, &left.path, &right.path)
-        });
+        sort_search_results(&mut self.workspace_search_results, sort_mode);
     }
 
     pub(crate) fn on_find_in_files(
@@ -180,6 +235,8 @@ impl EditorView {
         self.workspace_search_visible = false;
         self.workspace_search_focus_sub = None;
         self.workspace_search_task = None;
+        self.workspace_search_epoch = self.workspace_search_epoch.wrapping_add(1);
+        self.workspace_search_has_more = false;
         self.workspace_search_blur_sub = None;
         self.workspace_search_input_focused = false;
         self.clear_workspace_search_preview_state();
@@ -344,15 +401,24 @@ impl EditorView {
         let epoch = self.workspace_search_epoch;
         let scan_path = path.clone();
 
-        cx.spawn(async move |this, cx| {
-            let scanned = cx
-                .background_executor()
-                .spawn(async move {
-                    let bytes = std::fs::read(&scan_path).ok()?;
+        if self.workspace_search_task.is_some()
+            || file_watch::operation_suppressed("Continue search", &path)
+        {
+            return;
+        }
+        let root = self.sidebar_root.clone();
+        self.workspace_search_task = Some(cx.spawn(async move |this, cx| {
+            let scanned =
+                crate::platform::fs_task::run("Continue search", path.clone(), move || {
+                    let bytes = std::fs::read(&scan_path)?;
                     let content = String::from_utf8_lossy(&bytes).into_owned();
-                    Some(search_file_window(
+                    let mut offset = resume.next_byte_offset.min(content.len());
+                    while !content.is_char_boundary(offset) {
+                        offset -= 1;
+                    }
+                    Ok(search_file_window(
                         &content,
-                        resume.next_byte_offset.min(content.len()),
+                        offset,
                         &query,
                         case_sensitive,
                         whole_word,
@@ -365,8 +431,17 @@ impl EditorView {
                 if this.workspace_search_epoch != epoch {
                     return;
                 }
-                let Some((matches, next_resume)) = scanned else {
+                this.workspace_search_task = None;
+                if this.sidebar_root != root {
+                    cx.notify();
                     return;
+                }
+                let (matches, next_resume) = match scanned {
+                    Ok(scanned) => scanned,
+                    Err(error) => {
+                        this.notify_fs_error("Continue search", &path, error, cx);
+                        return;
+                    }
                 };
                 let Some(result) = this
                     .workspace_search_results
@@ -386,8 +461,7 @@ impl EditorView {
                 cx.notify();
             })
             .ok();
-        })
-        .detach();
+        }));
     }
 
     fn workspace_search_total_row_count(&self) -> usize {
@@ -452,7 +526,7 @@ impl EditorView {
         }
 
         let root = self.sidebar_root.clone();
-        if !root.exists() {
+        if root.as_os_str().is_empty() {
             self.workspace_search_results.clear();
             self.workspace_search_staging_results.clear();
             self.workspace_search_task = None;
@@ -467,6 +541,15 @@ impl EditorView {
 
         self.workspace_search_epoch = self.workspace_search_epoch.wrapping_add(1);
         self.workspace_search_task = None;
+        if file_watch::operation_suppressed("Search workspace", &root)
+            || file_watch::operation_suppressed("Prepare search", &root)
+        {
+            self.workspace_search_staging_results.clear();
+            self.workspace_search_pending_paths.clear();
+            self.workspace_search_has_more = false;
+            cx.notify();
+            return;
+        }
         begin_workspace_search_staging(
             &mut self.workspace_search_results,
             &mut self.workspace_search_staging_results,
@@ -496,9 +579,19 @@ impl EditorView {
         let epoch = self.workspace_search_epoch;
         let fallback_root = root.clone();
         let task = cx.spawn(async move |this, cx| {
-            let seed = cx
-                .background_executor()
-                .spawn(async move {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(150))
+                .await;
+            if this
+                .read_with(cx, |editor, _| {
+                    editor.workspace_search_epoch != epoch || editor.sidebar_root != fallback_root
+                })
+                .unwrap_or(true)
+            {
+                return;
+            }
+            let seed =
+                crate::platform::fs_task::run_value("Prepare search", root.clone(), move || {
                     let index = index?;
                     let mut candidates = index.candidate_paths(&query, use_regex)?;
                     candidates.extend(dirty_paths);
@@ -517,6 +610,20 @@ impl EditorView {
                     return;
                 }
                 this.workspace_search_task = None;
+                if this.sidebar_root != fallback_root {
+                    this.workspace_search_has_more = false;
+                    cx.notify();
+                    return;
+                }
+                let seed = match seed {
+                    Ok(seed) => seed,
+                    Err(error) => {
+                        this.workspace_search_has_more = false;
+                        this.workspace_search_staging_results.clear();
+                        this.notify_fs_error("Prepare search", &fallback_root, error, cx);
+                        return;
+                    }
+                };
                 this.workspace_search_pending_paths = seed.unwrap_or_else(|| vec![fallback_root]);
                 this.workspace_search_has_more = !this.workspace_search_pending_paths.is_empty();
                 this.schedule_workspace_search_batch(cx);
@@ -527,6 +634,13 @@ impl EditorView {
         self.workspace_search_task = Some(task);
     }
 
+    pub(crate) fn invalidate_workspace_search_index(&mut self) {
+        self.workspace_search_index_epoch = self.workspace_search_index_epoch.wrapping_add(1);
+        self.workspace_search_index_task = None;
+        self.workspace_search_index = None;
+        self.workspace_search_index_dirty_paths.clear();
+    }
+
     /// Build (or rebuild) the workspace search index in the background. A
     /// rebuild is triggered when there is no index for the current workspace
     /// or when enough files changed since the last snapshot.
@@ -534,7 +648,8 @@ impl EditorView {
         const REBUILD_DIRTY_THRESHOLD: usize = 256;
 
         let root = self.sidebar_root.clone();
-        if root.as_os_str().is_empty() || !root.exists() {
+        if root.as_os_str().is_empty() || file_watch::operation_suppressed("Index workspace", &root)
+        {
             return;
         }
         if self.workspace_search_index_task.is_some() {
@@ -561,20 +676,28 @@ impl EditorView {
             .cloned()
             .collect();
         let task = cx.spawn(async move |this, cx| {
-            let built = cx
-                .background_executor()
-                .spawn(async move { super::search_index::WorkspaceSearchIndex::build(&root).ok() })
+            let build_root = root.clone();
+            let built =
+                crate::platform::fs_task::run_anyhow("Index workspace", root.clone(), move || {
+                    super::search_index::WorkspaceSearchIndex::build(&build_root)
+                })
                 .await;
-            this.update(cx, |this, _cx| {
-                this.workspace_search_index_task = None;
+            this.update(cx, |this, cx| {
                 if this.workspace_search_index_epoch != epoch {
                     return;
                 }
-                if let Some(index) = built {
+                this.workspace_search_index_task = None;
+                if this.sidebar_root != root {
+                    this.ensure_workspace_search_index(cx);
+                    return;
+                }
+                if let Ok(index) = built {
                     this.workspace_search_index = Some(std::sync::Arc::new(index));
                     for path in &dirty_snapshot {
                         this.workspace_search_index_dirty_paths.remove(path);
                     }
+                } else if let Err(error) = built {
+                    this.notify_fs_error("Index workspace", &root, error, cx);
                 }
             })
             .ok();
@@ -604,13 +727,21 @@ impl EditorView {
         let case_sensitive = self.workspace_search_case_sensitive;
         let whole_word = self.workspace_search_whole_word;
         let use_regex = self.workspace_search_use_regex;
+        let root = self.sidebar_root.clone();
+        if file_watch::operation_suppressed("Search workspace", &root) {
+            self.workspace_search_has_more = false;
+            self.workspace_search_staging_results.clear();
+            cx.notify();
+            return;
+        }
         let pending_paths = std::mem::take(&mut self.workspace_search_pending_paths);
         let epoch = self.workspace_search_epoch;
         let task = cx.spawn(async move |this, cx| {
-            let batch = cx
-                .background_executor()
-                .spawn(async move {
+            let scan_root = root.clone();
+            let batch =
+                crate::platform::fs_task::run("Search workspace", root.clone(), move || {
                     search_directory_batch(
+                        &scan_root,
                         pending_paths,
                         &query,
                         case_sensitive,
@@ -622,10 +753,32 @@ impl EditorView {
                 .await;
 
             this.update(cx, |this, cx| {
-                this.workspace_search_task = None;
                 if this.workspace_search_epoch != epoch {
+                    // The query may have changed, but a blocked read still
+                    // describes this workspace and must stop replacement work.
+                    if this.sidebar_root == root
+                        && let Err(error) = batch
+                    {
+                        this.notify_fs_error("Search workspace", &root, error, cx);
+                    }
                     return;
                 }
+                this.workspace_search_task = None;
+                if this.sidebar_root != root {
+                    this.workspace_search_has_more = false;
+                    cx.notify();
+                    return;
+                }
+                let batch = match batch {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        this.workspace_search_has_more = false;
+                        this.workspace_search_pending_paths.clear();
+                        this.workspace_search_staging_results.clear();
+                        this.notify_fs_error("Search workspace", &root, error, cx);
+                        return;
+                    }
+                };
                 this.workspace_search_staging_results.extend(batch.results);
                 this.workspace_search_pending_paths = batch.pending_paths;
                 this.workspace_search_has_more = !this.workspace_search_pending_paths.is_empty();
@@ -633,13 +786,7 @@ impl EditorView {
                     this.schedule_workspace_search_batch(cx);
                 } else {
                     let mut results = std::mem::take(&mut this.workspace_search_staging_results);
-                    results.sort_by(|left, right| {
-                        compare_workspace_search_paths(
-                            this.sidebar_sort_mode,
-                            &left.path,
-                            &right.path,
-                        )
-                    });
+                    sort_search_results(&mut results, this.sidebar_sort_mode);
                     this.workspace_search_results = results;
                     this.workspace_search_render_limit =
                         super::list_viewport::SEARCH_LIST_POLICY.initial_count;
@@ -1358,20 +1505,11 @@ fn compare_workspace_search_paths(
                     .to_ascii_lowercase(),
             )
             .then_with(|| file_name(left).cmp(&file_name(right))),
-        SidebarSortMode::CreatedDesc | SidebarSortMode::CreatedAsc => {
-            let created = |path: &std::path::Path| {
-                std::fs::metadata(path)
-                    .and_then(|meta| meta.created().or_else(|_| meta.modified()))
-                    .unwrap_or(SystemTime::UNIX_EPOCH)
-            };
-            let order = created(left).cmp(&created(right));
-            let order = if sort_mode == SidebarSortMode::CreatedDesc {
-                order.reverse()
-            } else {
-                order
-            };
-            order.then_with(|| file_name(left).cmp(&file_name(right)))
-        }
+        // Timestamp ordering comes from sort_search_results' cached worker
+        // observations, with a deterministic fallback for missing dates.
+        SidebarSortMode::CreatedDesc | SidebarSortMode::CreatedAsc => file_name(left)
+            .cmp(&file_name(right))
+            .then_with(|| left.cmp(right)),
     }
 }
 
@@ -1549,30 +1687,82 @@ fn search_file_window(
 }
 
 fn search_directory_batch(
+    workspace_root: &std::path::Path,
     mut pending_paths: Vec<std::path::PathBuf>,
     query: &str,
     case_sensitive: bool,
     whole_word: bool,
     use_regex: bool,
     row_budget: usize,
-) -> WorkspaceSearchBatch {
+) -> std::io::Result<WorkspaceSearchBatch> {
     let mut results = Vec::new();
     let mut loaded_rows = 0usize;
+    let mut scanned_paths = 0usize;
     while let Some(path) = pending_paths.pop() {
-        let is_dir = path.is_dir();
-        if should_skip_path(&path, is_dir) {
+        crate::platform::fs_task::check_deadline()?;
+        if scanned_paths >= 128 {
+            pending_paths.push(path);
+            break;
+        }
+        scanned_paths += 1;
+        let observed = if path == workspace_root {
+            std::fs::metadata(&path)
+        } else {
+            std::fs::symlink_metadata(&path)
+        };
+        let metadata = match observed {
+            Ok(metadata) => metadata,
+            Err(error)
+                if path != workspace_root && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                continue;
+            }
+            Err(error) => {
+                return Err(std::io::Error::new(
+                    error.kind(),
+                    format!("Inspect {}: {error}", path.display()),
+                ));
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let is_dir = metadata.is_dir();
+        if path != workspace_root && should_skip_path(&path, is_dir) {
             continue;
         }
         if is_dir {
-            if let Ok(entries) = std::fs::read_dir(&path) {
-                let mut children = entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .collect::<Vec<_>>();
-                children.sort();
-                pending_paths.extend(children.into_iter().rev());
+            let mut children = Vec::new();
+            let entries = std::fs::read_dir(&path).map_err(|error| {
+                std::io::Error::new(error.kind(), format!("List {}: {error}", path.display()))
+            })?;
+            for entry in entries {
+                crate::platform::fs_task::check_deadline()?;
+                children.push(
+                    entry
+                        .map_err(|error| {
+                            std::io::Error::new(
+                                error.kind(),
+                                format!("List {}: {error}", path.display()),
+                            )
+                        })?
+                        .path(),
+                );
             }
-        } else if let Ok(bytes) = std::fs::read(&path) {
+            children.sort();
+            pending_paths.extend(children.into_iter().rev());
+        } else if metadata.is_file() {
+            remember_search_date(&path, &metadata);
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        format!("Read {}: {error}", path.display()),
+                    ));
+                }
+            };
             let file_kind = classify_file_kind_for_bytes(&path, &bytes);
             if file_kind.supports_text_search() {
                 let content = String::from_utf8_lossy(&bytes).into_owned();
@@ -1593,11 +1783,16 @@ fn search_directory_batch(
                 }
             }
         }
+        // A no-match query must yield too, not just a query with many rows.
+        if scanned_paths >= 128 {
+            break;
+        }
     }
-    WorkspaceSearchBatch {
+    crate::platform::fs_task::check_deadline()?;
+    Ok(WorkspaceSearchBatch {
         results,
         pending_paths,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1640,6 +1835,107 @@ mod tests {
     }
 
     #[test]
+    fn no_match_search_yields_after_a_bounded_number_of_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..300 {
+            fs::write(directory.path().join(format!("{index}.md")), "no match").unwrap();
+        }
+        let batch = search_directory_batch(
+            directory.path(),
+            vec![directory.path().to_path_buf()],
+            "needle",
+            true,
+            false,
+            false,
+            100,
+        )
+        .unwrap();
+        assert!(batch.results.is_empty());
+        assert!(!batch.pending_paths.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_symlink_cycles_do_not_extend_search() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("note.md"), "needle").unwrap();
+        std::os::unix::fs::symlink(directory.path(), directory.path().join("cycle")).unwrap();
+        let batch = search_directory_batch(
+            directory.path(),
+            vec![directory.path().to_path_buf()],
+            "needle",
+            true,
+            false,
+            false,
+            100,
+        )
+        .unwrap();
+        assert_eq!(batch.results.len(), 1);
+        assert!(batch.pending_paths.is_empty());
+    }
+
+    #[test]
+    fn missing_workspace_is_an_error_not_a_successful_empty_search() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("unavailable");
+        assert!(
+            search_directory_batch(&root, vec![root.clone()], "needle", true, false, false, 100)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn selected_root_is_not_subject_to_descendant_exclusions() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in [".workspace", "target"] {
+            let root = directory.path().join(name);
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("note.md"), "needle").unwrap();
+            fs::write(root.join(".hidden.md"), "needle").unwrap();
+            for excluded in [".hidden", "target", "node_modules"] {
+                fs::create_dir(root.join(excluded)).unwrap();
+                fs::write(root.join(excluded).join("ignored.md"), "needle").unwrap();
+            }
+            let batch = search_directory_batch(
+                &root,
+                vec![root.clone()],
+                "needle",
+                true,
+                false,
+                false,
+                100,
+            )
+            .unwrap();
+            assert_eq!(batch.results.len(), 1);
+            assert_eq!(batch.results[0].path, root.join("note.md"));
+            assert!(batch.pending_paths.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicitly_selected_symlink_root_is_searched() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("workspace");
+        let alias = directory.path().join(".alias");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("note.md"), "needle").unwrap();
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let batch = search_directory_batch(
+            &alias,
+            vec![alias.clone()],
+            "needle",
+            true,
+            false,
+            false,
+            100,
+        )
+        .unwrap();
+        assert_eq!(batch.results.len(), 1);
+        assert_eq!(batch.results[0].path, alias.join("note.md"));
+    }
+
+    #[test]
     fn workspace_search_batch_preserves_a_cursor_for_later_results() {
         let root = std::env::temp_dir().join(format!(
             "moeka-search-batch-{}-{}",
@@ -1653,11 +1949,22 @@ mod tests {
         fs::write(root.join("a.md"), "needle").unwrap();
         fs::write(root.join("b.md"), "needle").unwrap();
 
-        let first = search_directory_batch(vec![root.clone()], "needle", true, false, false, 1);
+        let first =
+            search_directory_batch(&root, vec![root.clone()], "needle", true, false, false, 1)
+                .unwrap();
         assert_eq!(first.results.len(), 1);
         assert!(!first.pending_paths.is_empty());
 
-        let second = search_directory_batch(first.pending_paths, "needle", true, false, false, 100);
+        let second = search_directory_batch(
+            &root,
+            first.pending_paths,
+            "needle",
+            true,
+            false,
+            false,
+            100,
+        )
+        .unwrap();
         assert_eq!(second.results.len(), 1);
         assert!(second.pending_paths.is_empty());
         fs::remove_dir_all(root).unwrap();

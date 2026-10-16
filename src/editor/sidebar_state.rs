@@ -1,10 +1,30 @@
 use std::collections::HashMap;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use gpui::{Context, Pixels, px};
 
 use super::*;
+
+#[derive(Default)]
+struct SidebarSettingsWrites {
+    pending: Option<AppSettings>,
+    running: bool,
+}
+
+impl gpui::Global for SidebarSettingsWrites {}
+
+fn visible_starred_paths(root: &Path, stars: &[PathBuf]) -> Vec<PathBuf> {
+    let root = EditorView::normalize_sidebar_path(root);
+    let mut seen = std::collections::HashSet::new();
+    stars
+        .iter()
+        .map(|path| EditorView::normalize_sidebar_path(path))
+        .filter(|path| !root.as_os_str().is_empty() && path.starts_with(&root))
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
 
 fn minimal_scroll_top_for_item(
     scroll_top: f32,
@@ -65,6 +85,119 @@ mod tests {
         }
     }
 
+    fn git_workspace() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        super::sidebar_git_command_output(&root, &["init", "--quiet"]).unwrap();
+        (dir, root)
+    }
+
+    #[test]
+    fn sidebar_git_root_discovery_errors_preserve_cached_statuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let non_repo_root = dir.path().to_path_buf();
+        let non_repo_cached_path = non_repo_root.join("note.md");
+        let mut non_repo_cached = std::collections::HashMap::from([(
+            non_repo_cached_path,
+            super::SidebarGitStatus::Modified,
+        )]);
+        assert_eq!(
+            super::sidebar_git_repo_root_for_path(&non_repo_root).unwrap(),
+            None
+        );
+        super::apply_sidebar_git_statuses(
+            &mut non_repo_cached,
+            super::collect_sidebar_git_statuses_for_root(&non_repo_root),
+        )
+        .unwrap();
+        assert!(non_repo_cached.is_empty());
+
+        let unavailable_root = dir.path().join("unavailable");
+        let cached_path = unavailable_root.join("note.md");
+        let mut cached = std::collections::HashMap::from([(
+            cached_path.clone(),
+            super::SidebarGitStatus::Modified,
+        )]);
+        let error = super::apply_sidebar_git_statuses(
+            &mut cached,
+            super::collect_sidebar_git_statuses_for_root(&unavailable_root),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("rev-parse"));
+        assert!(
+            error
+                .to_string()
+                .contains(&unavailable_root.display().to_string())
+        );
+        assert_eq!(
+            cached.get(&cached_path),
+            Some(&super::SidebarGitStatus::Modified)
+        );
+    }
+
+    #[test]
+    fn sidebar_git_status_command_errors_preserve_cached_statuses() {
+        let (_dir, root) = git_workspace();
+        std::fs::write(root.join(".git/index"), b"invalid index").unwrap();
+        let cached_path = root.join("note.md");
+        let mut cached = std::collections::HashMap::from([(
+            cached_path.clone(),
+            super::SidebarGitStatus::Modified,
+        )]);
+        assert_eq!(
+            super::sidebar_git_repo_root_for_path(&root).unwrap(),
+            Some(root.clone())
+        );
+        let error = super::apply_sidebar_git_statuses(
+            &mut cached,
+            super::collect_sidebar_git_statuses_for_root(&root),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("status --porcelain=v1"));
+        assert!(error.to_string().contains(&root.display().to_string()));
+        assert_eq!(
+            cached.get(&cached_path),
+            Some(&super::SidebarGitStatus::Modified)
+        );
+    }
+
+    #[test]
+    fn sidebar_git_successful_clean_snapshot_clears_cached_statuses() {
+        let (_dir, root) = git_workspace();
+        let mut cached = std::collections::HashMap::from([(
+            root.join("stale.md"),
+            super::SidebarGitStatus::Modified,
+        )]);
+        super::apply_sidebar_git_statuses(
+            &mut cached,
+            super::collect_sidebar_git_statuses_for_root(&root),
+        )
+        .unwrap();
+        assert!(cached.is_empty());
+    }
+
+    #[test]
+    fn sidebar_git_successful_snapshot_includes_files_and_ancestor_badges() {
+        let (_dir, root) = git_workspace();
+        std::fs::create_dir(root.join("notes")).unwrap();
+        let path = root.join("notes/note.md");
+        std::fs::write(&path, "note").unwrap();
+        let statuses = super::collect_sidebar_git_statuses_for_root(&root).unwrap();
+        for path in [&path, &root.join("notes"), &root] {
+            assert_eq!(statuses.get(path), Some(&super::SidebarGitStatus::Added));
+        }
+    }
+
+    #[test]
+    fn offline_starred_rows_remain_visible_and_deduplicated_without_metadata() {
+        let root = PathBuf::from("offline-workspace");
+        let star = root.join("unavailable.md");
+        let stars = vec![star.clone(), star.clone(), PathBuf::from("other/note.md")];
+        assert_eq!(super::visible_starred_paths(&root, &stars), vec![star]);
+        assert!(super::visible_starred_paths(std::path::Path::new(""), &stars).is_empty());
+        assert_eq!(stars.len(), 3);
+    }
+
     #[test]
     fn file_tree_scrolls_only_enough_to_reveal_an_offscreen_item() {
         assert_eq!(
@@ -106,28 +239,65 @@ mod tests {
     }
 }
 
-fn sidebar_git_repo_root_for_path(sidebar_root: &Path) -> Option<PathBuf> {
-    let output = crate::platform::process::headless_command("git")
-        .ok()?
-        .arg("-C")
-        .arg(sidebar_root)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
+fn is_not_git_repository_error(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("not a git repository")
+}
 
-    Some(PathBuf::from(
-        String::from_utf8_lossy(&output.stdout).trim().to_string(),
-    ))
+fn sidebar_git_command_output(path: &Path, args: &[&str]) -> io::Result<std::process::Output> {
+    crate::platform::fs_task::check_deadline()?;
+    let command = format!("git -C '{}' {}", path.display(), args.join(" "));
+    let output = crate::platform::process::headless_command("git")
+        .and_then(|mut git| {
+            git.arg("--no-pager")
+                .arg("--no-optional-locks")
+                .arg("-c")
+                .arg("core.quotepath=false")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("LC_ALL", "C")
+                .env("GIT_EDITOR", "true")
+                .output()
+        })
+        .map_err(|error| io::Error::new(error.kind(), format!("{command}: {error}")))?;
+    crate::platform::fs_task::check_deadline()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "{command} failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )));
+    }
+    Ok(output)
+}
+
+fn sidebar_git_repo_root_for_path(sidebar_root: &Path) -> io::Result<Option<PathBuf>> {
+    let output = match sidebar_git_command_output(sidebar_root, &["rev-parse", "--show-toplevel"]) {
+        Ok(output) => output,
+        Err(error) if is_not_git_repository_error(&error.to_string()) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "git rev-parse returned an empty repository root for '{}'",
+                sidebar_root.display()
+            ),
+        ));
+    }
+    Ok(Some(PathBuf::from(root)))
 }
 
 fn collect_sidebar_git_statuses_for_root(
     sidebar_root: &Path,
-) -> HashMap<PathBuf, SidebarGitStatus> {
-    let Some(repo_root) = sidebar_git_repo_root_for_path(sidebar_root) else {
-        return HashMap::new();
+) -> io::Result<HashMap<PathBuf, SidebarGitStatus>> {
+    let Some(repo_root) = sidebar_git_repo_root_for_path(sidebar_root)? else {
+        return Ok(HashMap::new());
     };
 
     let normalized_sidebar_root = EditorView::normalize_sidebar_path(sidebar_root);
@@ -138,113 +308,125 @@ fn collect_sidebar_git_statuses_for_root(
         .filter(|path| !path.as_os_str().is_empty())
         .map(|path| path.to_string_lossy().replace('\\', "/"));
 
-    let mut args = vec![
-        "status".to_string(),
-        "--porcelain=v1".to_string(),
-        "--untracked-files=all".to_string(),
-    ];
+    let mut args = vec!["status", "--porcelain=v1", "--untracked-files=all"];
     if let Some(relative_root) = relative_root.as_deref() {
-        args.push("--".to_string());
-        args.push(relative_root.to_string());
+        args.push("--");
+        args.push(relative_root);
     }
 
+    let output = match sidebar_git_command_output(&repo_root, &args) {
+        Ok(output) => output,
+        Err(error) if is_not_git_repository_error(&error.to_string()) => {
+            return Ok(HashMap::new());
+        }
+        Err(error) => return Err(error),
+    };
     let mut statuses = HashMap::new();
-    if let Ok(output) = crate::platform::process::headless_command("git").and_then(|mut git| {
-        git.arg("--no-optional-locks")
-            .arg("-c")
-            .arg("core.quotepath=false")
-            .arg("-C")
-            .arg(&repo_root)
-            .args(&args)
-            .output()
-    }) && output.status.success()
-    {
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let Some((relative_path, status)) = EditorView::parse_sidebar_git_status_line(line)
-            else {
-                continue;
-            };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((relative_path, status)) = EditorView::parse_sidebar_git_status_line(line) else {
+            continue;
+        };
 
-            let relative_to_sidebar = if let Some(relative_root) = relative_root.as_deref() {
-                if relative_path == relative_root {
-                    ""
-                } else if let Some(stripped) = relative_path
-                    .strip_prefix(relative_root)
-                    .and_then(|path| path.strip_prefix('/'))
-                {
-                    stripped
-                } else {
-                    continue;
-                }
+        let relative_to_sidebar = if let Some(relative_root) = relative_root.as_deref() {
+            if relative_path == relative_root {
+                ""
+            } else if let Some(stripped) = relative_path
+                .strip_prefix(relative_root)
+                .and_then(|path| path.strip_prefix('/'))
+            {
+                stripped
             } else {
-                relative_path.as_str()
-            };
-
-            let absolute_path = EditorView::normalize_sidebar_path(
-                &normalized_sidebar_root.join(relative_to_sidebar),
-            );
-            if !absolute_path.starts_with(&normalized_sidebar_root) {
                 continue;
             }
+        } else {
+            relative_path.as_str()
+        };
 
-            let mut current = Some(absolute_path);
-            while let Some(path) = current {
-                if !path.starts_with(&normalized_sidebar_root) {
-                    break;
-                }
+        let absolute_path =
+            EditorView::normalize_sidebar_path(&normalized_sidebar_root.join(relative_to_sidebar));
+        if !absolute_path.starts_with(&normalized_sidebar_root) {
+            continue;
+        }
 
-                let merged =
-                    EditorView::merge_sidebar_git_status(statuses.get(&path).copied(), status);
-                statuses.insert(path.clone(), merged);
-
-                if path == normalized_sidebar_root {
-                    break;
-                }
-                current = path.parent().map(Path::to_path_buf);
+        let mut current = Some(absolute_path);
+        while let Some(path) = current {
+            if !path.starts_with(&normalized_sidebar_root) {
+                break;
             }
+
+            let merged = EditorView::merge_sidebar_git_status(statuses.get(&path).copied(), status);
+            statuses.insert(path.clone(), merged);
+
+            if path == normalized_sidebar_root {
+                break;
+            }
+            current = path.parent().map(Path::to_path_buf);
         }
     }
 
-    statuses
+    Ok(statuses)
+}
+
+fn apply_sidebar_git_statuses(
+    cached: &mut HashMap<PathBuf, SidebarGitStatus>,
+    statuses: io::Result<HashMap<PathBuf, SidebarGitStatus>>,
+) -> io::Result<()> {
+    *cached = statuses?;
+    Ok(())
 }
 
 impl EditorView {
+    /// Coalesce scoped settings changes and keep their writes off the UI thread.
+    pub(super) fn save_sidebar_settings(&self, cx: &mut Context<Self>) {
+        let writes = cx.default_global::<SidebarSettingsWrites>();
+        writes.pending = Some(self.app_settings.clone());
+        if writes.running {
+            return;
+        }
+        writes.running = true;
+        let path = config_paths::settings_file_path();
+        cx.spawn(async move |this, cx| {
+            loop {
+                let settings = cx
+                    .update(|cx| {
+                        let writes = cx.global_mut::<SidebarSettingsWrites>();
+                        let pending = writes.pending.take();
+                        if pending.is_none() {
+                            writes.running = false;
+                        }
+                        pending
+                    })
+                    .ok()
+                    .flatten();
+                let Some(settings) = settings else { break };
+                let result = crate::platform::fs_task::run_value(
+                    "Save sidebar settings",
+                    path.clone(),
+                    move || settings.save(),
+                )
+                .await;
+                if let Err(error) = result {
+                    let _ = this.update(cx, |this, cx| {
+                        this.notify_error(
+                            format!("Save settings '{}': {error}", path.display()),
+                            cx,
+                        );
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn sidebar_item_height_px(&self) -> f32 {
         self.scaled(self.styles.sidebar.sidebar_item_height_px)
     }
 
-    pub(super) fn visible_starred_sidebar_files(&mut self) -> Vec<PathBuf> {
-        let mut changed = self.app_settings.prune_missing_starred_files();
-        let root = Self::normalize_sidebar_path(&self.sidebar_root);
-        let mut visible = Vec::new();
-        let mut deduped = Vec::with_capacity(self.app_settings.starred_files.len());
-
-        for path in self.app_settings.starred_files.iter().cloned() {
-            let normalized = Self::normalize_sidebar_path(&path);
-            if deduped.iter().any(|candidate| candidate == &normalized) {
-                changed = true;
-                continue;
-            }
-            if !normalized.exists() || !normalized.is_file() {
-                changed = true;
-                continue;
-            }
-            if !root.as_os_str().is_empty() && normalized.starts_with(&root) {
-                visible.push(normalized.clone());
-            }
-            deduped.push(normalized);
-        }
-
-        if deduped != self.app_settings.starred_files {
-            self.app_settings.starred_files = deduped;
-            changed = true;
-        }
-
-        if changed {
-            self.app_settings.save();
-        }
-
-        visible
+    pub(super) fn visible_starred_sidebar_files(&self) -> Vec<PathBuf> {
+        visible_starred_paths(&self.sidebar_root, &self.app_settings.starred_files)
+            .into_iter()
+            .filter(|path| self.sidebar_cached_path_is_dir(path) != Some(true))
+            .collect()
     }
 
     pub(super) fn sidebar_starred_section_height(&self, has_root: bool) -> f32 {
@@ -261,23 +443,7 @@ impl EditorView {
     }
 
     pub(super) fn sidebar_visible_starred_count(&self) -> usize {
-        let root = Self::normalize_sidebar_path(&self.sidebar_root);
-        let mut visible = std::collections::HashSet::new();
-        self.app_settings
-            .starred_files
-            .iter()
-            .filter_map(|path| {
-                let normalized = Self::normalize_sidebar_path(path);
-                (normalized.exists()
-                    && normalized.is_file()
-                    && !root.as_os_str().is_empty()
-                    && normalized.starts_with(&root))
-                .then_some(normalized)
-            })
-            .for_each(|path| {
-                visible.insert(path);
-            });
-        visible.len()
+        self.visible_starred_sidebar_files().len()
     }
 
     pub(super) fn sidebar_scroll_prefix_height(&self, has_root: bool) -> f32 {
@@ -571,12 +737,12 @@ impl EditorView {
                 cx.background_executor().timer(delay).await;
             }
 
-            let statuses = cx
-                .background_executor()
-                .spawn(
-                    async move { collect_sidebar_git_statuses_for_root(&background_sidebar_root) },
-                )
-                .await;
+            let statuses = crate::platform::fs_task::run(
+                "Read sidebar Git status",
+                requested_sidebar_root.clone(),
+                move || collect_sidebar_git_statuses_for_root(&background_sidebar_root),
+            )
+            .await;
 
             this.update(cx, |this, cx| {
                 this.sidebar_git_statuses_task = None;
@@ -590,7 +756,16 @@ impl EditorView {
                     return;
                 }
 
-                this.sidebar_git_statuses = statuses;
+                if let Err(error) =
+                    apply_sidebar_git_statuses(&mut this.sidebar_git_statuses, statuses)
+                {
+                    this.notify_fs_error(
+                        "Read sidebar Git status",
+                        &requested_sidebar_root,
+                        error,
+                        cx,
+                    );
+                }
                 this.sidebar_git_statuses_dirty = false;
                 this.sidebar_git_statuses_scanned_at = Some(SystemTime::now());
                 cx.notify();

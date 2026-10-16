@@ -16,6 +16,23 @@ use image::{Frame, RgbaImage};
 
 use super::*;
 
+fn effective_file_list_dir(root: &Path, dir: &Path) -> PathBuf {
+    if !dir.as_os_str().is_empty() && dir.starts_with(root) {
+        dir.to_path_buf()
+    } else {
+        root.to_path_buf()
+    }
+}
+
+fn file_list_dir_for_entry(root: &Path, path: &Path, is_dir: bool) -> PathBuf {
+    let dir = if is_dir {
+        path
+    } else {
+        path.parent().unwrap_or(root)
+    };
+    effective_file_list_dir(root, dir)
+}
+
 /// Maximum number of bytes read from a file to extract title/preview.
 const FILE_LIST_READ_LIMIT: usize = 16 * 1024;
 /// Preview length in characters (markdown syntax stripped).
@@ -165,18 +182,21 @@ impl Element for FileListImageElement {
 
 /// Builds a lightweight index of the markdown files directly inside `dir`.
 /// File contents are loaded separately when rows approach the viewport.
-pub(crate) fn load_file_list_items(dir: &Path, sort_mode: SidebarSortMode) -> Vec<FileListItem> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut entries: Vec<std::fs::DirEntry> = entries
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            let path = entry.path();
-            let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-            !is_dir && !should_skip_path(&path, false) && is_markdown_file(&path)
-        })
-        .collect();
+pub(crate) fn load_file_list_items(
+    dir: &Path,
+    sort_mode: SidebarSortMode,
+) -> std::io::Result<Vec<FileListItem>> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_dir()
+            && !should_skip_path(&path, false)
+            && is_markdown_file(&path)
+        {
+            entries.push(entry);
+        }
+    }
     entries.sort_by(|left, right| super::sidebar_tree::compare_dir_entries(sort_mode, left, right));
 
     entries
@@ -184,36 +204,32 @@ pub(crate) fn load_file_list_items(dir: &Path, sort_mode: SidebarSortMode) -> Ve
         .map(|entry| {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            let metadata = entry.metadata().ok();
-            let modified = metadata
-                .as_ref()
-                .and_then(|meta| meta.modified().ok())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            let created = metadata
-                .as_ref()
-                .and_then(|meta| meta.created().ok())
-                .unwrap_or(modified);
-            FileListItem {
+            let metadata = entry.metadata()?;
+            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let created = metadata.created().unwrap_or(modified);
+            Ok(FileListItem {
                 path,
                 name,
                 modified,
                 created,
                 details: None,
-            }
+            })
         })
         .collect()
 }
 
 fn load_file_list_details(
     items: Vec<(PathBuf, SystemTime)>,
-) -> Vec<(PathBuf, SystemTime, FileListDetails)> {
+) -> std::io::Result<Vec<(PathBuf, SystemTime, FileListDetails)>> {
     items
         .into_iter()
         .map(|(path, modified)| {
-            let text = read_file_head(&path);
+            let text = read_file_head(&path).map_err(|error| {
+                std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+            })?;
             let (title, preview) = extract_title_and_preview(&text);
             let image_paths = extract_image_paths(&text);
-            (
+            Ok((
                 path,
                 modified,
                 FileListDetails {
@@ -221,7 +237,7 @@ fn load_file_list_details(
                     preview,
                     image_paths,
                 },
-            )
+            ))
         })
         .collect()
 }
@@ -348,27 +364,30 @@ fn preserve_file_list_details(previous: &[FileListItem], items: &mut [FileListIt
     }
 }
 
+fn apply_file_list_snapshot(
+    cached: &mut Vec<FileListItem>,
+    snapshot: std::io::Result<Vec<FileListItem>>,
+) -> std::io::Result<()> {
+    let mut items = snapshot?;
+    preserve_file_list_details(cached, &mut items);
+    *cached = items;
+    Ok(())
+}
+
 /// Reads up to `FILE_LIST_READ_LIMIT` bytes and converts them lossily; a
 /// trailing replacement char from a split UTF-8 sequence is dropped.
-fn read_file_head(path: &Path) -> String {
+fn read_file_head(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
 
-    let Ok(file) = std::fs::File::open(path) else {
-        return String::new();
-    };
+    let file = std::fs::File::open(path)?;
     let mut buffer = Vec::with_capacity(FILE_LIST_READ_LIMIT.min(4096));
-    if file
-        .take(FILE_LIST_READ_LIMIT as u64)
-        .read_to_end(&mut buffer)
-        .is_err()
-    {
-        return String::new();
-    }
+    file.take(FILE_LIST_READ_LIMIT as u64)
+        .read_to_end(&mut buffer)?;
     let mut text = String::from_utf8_lossy(&buffer).into_owned();
     if text.ends_with('\u{fffd}') {
         text.pop();
     }
-    text
+    Ok(text)
 }
 
 /// Extracts the document title and builds a plain-text preview (markdown
@@ -605,7 +624,7 @@ impl EditorView {
         self.file_list_visible = !self.file_list_visible;
         self.file_list_resizing = false;
         self.app_settings.file_list_visible = self.file_list_visible;
-        self.app_settings.save();
+        self.save_sidebar_settings(cx);
         self.invalidate_sidebar_flattened_items();
         self.reveal_file_list_dir_in_sidebar(&reveal_dir, cx);
         if self.file_list_visible {
@@ -768,20 +787,16 @@ impl EditorView {
         self.file_list_resizing = false;
         self.file_list_resize_grab_offset_x = 0.0;
         self.app_settings.file_list_width = self.file_list_custom_width;
-        self.app_settings.save();
+        self.save_sidebar_settings(cx);
         cx.notify();
     }
 
     // ── Current directory ───────────────────────────────────────────
 
-    /// The directory the FileList shows, validated against the workspace root.
+    /// Lexically constrain selection to the workspace. The asynchronous load
+    /// validates availability; render must not stat a network mount.
     pub(crate) fn file_list_effective_dir(&self) -> PathBuf {
-        let dir = &self.file_list_dir;
-        if !dir.as_os_str().is_empty() && dir.starts_with(&self.sidebar_root) && dir.is_dir() {
-            dir.clone()
-        } else {
-            self.sidebar_root.clone()
-        }
+        effective_file_list_dir(&self.sidebar_root, &self.file_list_dir)
     }
 
     /// Points the FileList at `path` (a directory, or the parent when given a
@@ -789,14 +804,20 @@ impl EditorView {
     /// is a markdown file its FileList item is scrolled into view once the
     /// directory's items are loaded.
     pub(crate) fn set_file_list_dir_for_path(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let dir = if path.is_dir() {
-            path.to_path_buf()
-        } else {
-            path.parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| self.sidebar_root.clone())
-        };
-        if !path.is_dir() && is_markdown_file(path) {
+        // Tab activation supplies a file, even before its parent is indexed.
+        // Directory-row callers can supply the known type explicitly below.
+        let is_dir = self.sidebar_cached_path_is_dir(path).unwrap_or(false);
+        self.set_file_list_dir_for_entry(path, is_dir, cx);
+    }
+
+    pub(crate) fn set_file_list_dir_for_entry(
+        &mut self,
+        path: &Path,
+        is_dir: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let dir = file_list_dir_for_entry(&self.sidebar_root, path, is_dir);
+        if !is_dir && is_markdown_file(path) {
             self.pending_file_list_scroll_top.set(None);
             self.file_list_pending_reveal_path = Some(path.to_path_buf());
         }
@@ -819,7 +840,11 @@ impl EditorView {
         if dir.as_os_str().is_empty() {
             return;
         }
-        if !self.file_list_dirty && self.file_list_loaded_dir.as_deref() == Some(dir.as_path()) {
+        if !self.file_list_dirty
+            && (self.file_list_task.is_some()
+                || self.file_list_loaded_dir.as_deref() == Some(dir.as_path())
+                || self.sidebar_error.is_some())
+        {
             return;
         }
         if self.pending_file_list_scroll_top.get().is_none() {
@@ -833,27 +858,45 @@ impl EditorView {
         let epoch = self.file_list_epoch;
         let sort_mode = self.sidebar_sort_mode;
         let loaded_dir = dir.clone();
+        let root = self.sidebar_root.clone();
         let task = cx.spawn(async move |this, cx| {
             let background_dir = loaded_dir.clone();
-            let items = cx
-                .background_executor()
-                .spawn(async move { load_file_list_items(&background_dir, sort_mode) })
-                .await;
+            let items = crate::platform::fs_task::run(
+                "Read file list directory",
+                loaded_dir.clone(),
+                move || load_file_list_items(&background_dir, sort_mode),
+            )
+            .await;
             this.update(cx, |this, cx| {
-                if this.file_list_epoch != epoch {
+                if this.file_list_epoch != epoch || this.sidebar_root != root {
                     return;
                 }
-                let mut items = items;
-                preserve_file_list_details(&this.file_list_items, &mut items);
-                this.file_list_items = items;
-                if this.file_list_items.is_empty() {
-                    this.pending_file_list_scroll_top.set(None);
-                    let offset = this.file_list_scroll_handle.offset();
-                    this.file_list_scroll_handle
-                        .set_offset(gpui::point(offset.x, px(0.0)));
-                }
-                this.file_list_loaded_dir = Some(loaded_dir);
                 this.file_list_task = None;
+                if this.file_list_effective_dir() != loaded_dir {
+                    this.file_list_dirty = true;
+                    cx.notify();
+                    return;
+                }
+                match apply_file_list_snapshot(&mut this.file_list_items, items) {
+                    Ok(()) => {
+                        this.clear_sidebar_fs_error("Read file list directory", &loaded_dir);
+                        this.file_list_loaded_dir = Some(loaded_dir.clone());
+                        if this.file_list_items.is_empty() {
+                            this.pending_file_list_scroll_top.set(None);
+                            let offset = this.file_list_scroll_handle.offset();
+                            this.file_list_scroll_handle
+                                .set_offset(gpui::point(offset.x, px(0.0)));
+                        }
+                    }
+                    Err(error) => {
+                        this.report_sidebar_fs_error(
+                            "Read file list directory",
+                            &loaded_dir,
+                            error,
+                            cx,
+                        );
+                    }
+                }
                 cx.notify();
             })
             .ok();
@@ -877,26 +920,47 @@ impl EditorView {
         }
 
         let epoch = self.file_list_epoch;
+        let root = self.sidebar_root.clone();
+        let dir = self.file_list_effective_dir();
         self.file_list_detail_task = Some(cx.spawn(async move |this, cx| {
-            let details = cx
-                .background_executor()
-                .spawn(async move {
+            let details = crate::platform::fs_task::run(
+                "Refresh file list previews",
+                dir.clone(),
+                move || {
                     let pending = paths
                         .into_iter()
-                        .filter_map(|path| {
-                            std::fs::metadata(&path)
+                        .map(|path| {
+                            let modified = std::fs::metadata(&path)
                                 .and_then(|metadata| metadata.modified())
-                                .ok()
-                                .map(|modified| (path, modified))
+                                .map_err(|error| {
+                                    std::io::Error::new(
+                                        error.kind(),
+                                        format!("{}: {error}", path.display()),
+                                    )
+                                })?;
+                            Ok((path, modified))
                         })
-                        .collect();
+                        .collect::<std::io::Result<Vec<_>>>()?;
                     load_file_list_details(pending)
-                })
-                .await;
+                },
+            )
+            .await;
             this.update(cx, |this, cx| {
-                if this.file_list_epoch != epoch {
+                if this.file_list_epoch != epoch || this.sidebar_root != root {
                     return;
                 }
+                this.file_list_detail_task = None;
+                let details = match details {
+                    Ok(details) => {
+                        this.clear_sidebar_fs_error("Refresh file list previews", &dir);
+                        details
+                    }
+                    Err(error) => {
+                        this.report_sidebar_fs_error("Refresh file list previews", &dir, error, cx);
+                        cx.notify();
+                        return;
+                    }
+                };
                 for (path, modified, detail) in details {
                     if let Some(item) = this
                         .file_list_items
@@ -919,7 +983,8 @@ impl EditorView {
         range: std::ops::Range<usize>,
         cx: &mut Context<Self>,
     ) {
-        if self.file_list_detail_task.is_some() || range.is_empty() {
+        if self.file_list_detail_task.is_some() || range.is_empty() || self.sidebar_error.is_some()
+        {
             return;
         }
         let pending = self.file_list_items[range]
@@ -932,15 +997,27 @@ impl EditorView {
         }
 
         let epoch = self.file_list_epoch;
+        let root = self.sidebar_root.clone();
+        let dir = self.file_list_effective_dir();
         self.file_list_detail_task = Some(cx.spawn(async move |this, cx| {
-            let details = cx
-                .background_executor()
-                .spawn(async move { load_file_list_details(pending) })
+            let details =
+                crate::platform::fs_task::run("Read file list previews", dir.clone(), move || {
+                    load_file_list_details(pending)
+                })
                 .await;
             this.update(cx, |this, cx| {
-                if this.file_list_epoch != epoch {
+                if this.file_list_epoch != epoch || this.sidebar_root != root {
                     return;
                 }
+                this.file_list_detail_task = None;
+                let details = match details {
+                    Ok(details) => details,
+                    Err(error) => {
+                        this.report_sidebar_fs_error("Read file list previews", &dir, error, cx);
+                        cx.notify();
+                        return;
+                    }
+                };
                 for (path, modified, detail) in details {
                     if let Some(item) = this
                         .file_list_items
@@ -1123,14 +1200,16 @@ impl EditorView {
         let workspaces = self.workspaces.clone();
         cx.spawn(async move |this, cx| {
             let file_dir = markdown_path.parent().map(PathBuf::from);
-            let maybe_image = cx
-                .background_executor()
-                .spawn(async move {
+            let background_markdown_path = markdown_path.clone();
+            let maybe_image = crate::platform::fs_task::run_value(
+                "Read file list thumbnail",
+                markdown_path.clone(),
+                move || {
                     let load_path = if helpers::is_remote_image_url(&image_path) {
                         image_path.clone()
                     } else {
                         attachments::WorkspaceLinkIndex::build(&workspace_root)
-                            .resolve(Some(&markdown_path), &image_path)
+                            .resolve(Some(&background_markdown_path), &image_path)
                             .map(|path| path.to_string_lossy().into_owned())
                             .unwrap_or_else(|| image_path.clone())
                     };
@@ -1138,11 +1217,19 @@ impl EditorView {
                         .ok()
                         .map(square_crop_render_image)
                         .map(Arc::new)
-                })
-                .await;
+                },
+            )
+            .await;
 
             this.update(cx, |this, cx| {
-                this.image_cache.insert(cache_key, maybe_image);
+                match maybe_image {
+                    Ok(image) => {
+                        this.image_cache.insert(cache_key, image);
+                    }
+                    Err(error) => {
+                        this.notify_fs_error("Read file list thumbnail", &markdown_path, error, cx);
+                    }
+                }
                 cx.notify();
             })
             .ok();
@@ -1640,11 +1727,57 @@ mod tests {
     }
 
     #[test]
+    fn file_list_directory_selection_is_lexical_and_uses_the_known_row_type() {
+        let root = std::path::Path::new("offline-workspace");
+        let dir = root.join("notes.md");
+        assert_eq!(super::effective_file_list_dir(root, &dir), dir);
+        assert_eq!(super::file_list_dir_for_entry(root, &dir, true), dir);
+        assert_eq!(super::file_list_dir_for_entry(root, &dir, false), root);
+        assert_eq!(
+            super::file_list_dir_for_entry(root, &dir.join("note"), false),
+            dir
+        );
+        assert_eq!(
+            super::effective_file_list_dir(root, std::path::Path::new("other")),
+            root
+        );
+    }
+
+    #[test]
+    fn file_list_directory_load_failures_are_not_empty_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("unavailable");
+        assert!(load_file_list_items(&missing, SidebarSortMode::NameAsc).is_err());
+        fs::write(dir.path().join("not-a-directory"), "note").unwrap();
+        assert!(
+            load_file_list_items(
+                &dir.path().join("not-a-directory"),
+                SidebarSortMode::NameAsc
+            )
+            .is_err()
+        );
+        assert!(
+            load_file_list_items(dir.path(), SidebarSortMode::NameAsc)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn preview_read_failures_do_not_become_empty_document_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("unavailable.md");
+        let error = super::load_file_list_details(vec![(missing.clone(), SystemTime::UNIX_EPOCH)])
+            .unwrap_err();
+        assert!(error.to_string().contains(&missing.display().to_string()));
+    }
+
+    #[test]
     fn file_list_index_does_not_read_document_details() {
         let dir = temp_dir("file-list-index");
         fs::write(dir.join("note.md"), "# Expensive title\n\nPreview body").unwrap();
 
-        let items = load_file_list_items(&dir, SidebarSortMode::NameAsc);
+        let items = load_file_list_items(&dir, SidebarSortMode::NameAsc).unwrap();
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "note.md");
@@ -1662,6 +1795,28 @@ mod tests {
             scroll_y_to_center_uniform_item(100.0, 200.0, 0.0, 50.0, 6, 20),
             Some(225.0)
         );
+    }
+
+    #[test]
+    fn failed_file_list_refresh_preserves_cached_rows_and_details() {
+        let mut cache = vec![FileListItem {
+            path: std::path::PathBuf::from("offline-workspace/note.md"),
+            name: "note.md".to_string(),
+            modified: SystemTime::UNIX_EPOCH,
+            created: SystemTime::UNIX_EPOCH,
+            details: Some(FileListDetails {
+                title: Some("Cached title".to_string()),
+                preview: "Cached preview".to_string(),
+                image_paths: Vec::new(),
+            }),
+        }];
+        let result =
+            super::apply_file_list_snapshot(&mut cache, Err(std::io::ErrorKind::TimedOut.into()));
+        assert!(result.is_err());
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache[0].details.as_ref().unwrap().preview, "Cached preview");
+        super::apply_file_list_snapshot(&mut cache, Ok(Vec::new())).unwrap();
+        assert!(cache.is_empty());
     }
 
     #[test]

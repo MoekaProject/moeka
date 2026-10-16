@@ -1,6 +1,6 @@
 //! Git operations layer for the Git panel: repo status queries and mutating
 //! commands (stage/unstage/discard/commit/sync/branch), all executed through
-//! the `git` CLI on the background executor.
+//! the `git` CLI on bounded filesystem workers.
 //!
 //! Query results are plain data (`GitPanelSnapshot`) built off the main thread;
 //! mutating commands go through [`GitOperation`] with a single in-flight
@@ -190,13 +190,20 @@ pub(crate) enum GitOpError {
 // ── CLI helpers ────────────────────────────────────────────────────
 
 /// Runs `git -C <repo_root> <args>` capturing stdout and stderr. Network
-/// prompts are disabled so operations fail instead of hanging.
+/// prompts are disabled. Callers must use the filesystem runner: a process
+/// blocked on filesystem I/O cannot be cancelled by dropping its async task.
 pub(super) fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, String> {
+    run_git_raw(repo_root, args).map(|output| output.trim_end().to_string())
+}
+
+pub(super) fn run_git_raw(repo_root: &Path, args: &[&str]) -> Result<String, String> {
+    crate::platform::fs_task::check_deadline().map_err(|error| error.to_string())?;
     let output = crate::platform::process::headless_command("git")
         .map_err(|error| error.to_string())?
         // Without this, `git status` refreshes and rewrites `.git/index`, which
         // the workspace watcher reports back as a git change and re-triggers
         // the very status poll that wrote it.
+        .arg("--no-pager")
         .arg("--no-optional-locks")
         .arg("-c")
         .arg("core.quotepath=false")
@@ -204,12 +211,13 @@ pub(super) fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, String>
         .arg(repo_root)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .env("GIT_EDITOR", "true")
         .output()
         .map_err(|error| error.to_string())?;
+    crate::platform::fs_task::check_deadline().map_err(|error| error.to_string())?;
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string())
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
@@ -220,12 +228,16 @@ pub(super) fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, String>
     }
 }
 
-pub(super) fn git_repo_root(dir: &Path) -> Option<PathBuf> {
-    let output = run_git(dir, &["rev-parse", "--show-toplevel"]).ok()?;
-    if output.is_empty() {
-        return None;
+pub(super) fn git_repo_root_result(dir: &Path) -> Result<Option<PathBuf>, String> {
+    match run_git(dir, &["rev-parse", "--show-toplevel"]) {
+        Ok(output) => Ok((!output.is_empty()).then(|| PathBuf::from(output))),
+        Err(error) if error.to_ascii_lowercase().contains("not a git repository") => Ok(None),
+        Err(error) => Err(error),
     }
-    Some(PathBuf::from(output))
+}
+
+pub(super) fn git_repo_root(dir: &Path) -> Option<PathBuf> {
+    git_repo_root_result(dir).ok().flatten()
 }
 
 pub(super) struct GitRepoContext {
@@ -363,6 +375,7 @@ pub(crate) struct GitCommitFileEntry {
     pub kind: GitChangeKind,
 }
 
+#[cfg(test)]
 pub(super) fn collect_git_commit_files(
     repo_root: &Path,
     commit_hash: &str,
@@ -528,48 +541,58 @@ pub(super) fn parse_git_status_entries(
     (staged, unstaged, conflicted)
 }
 
-/// Builds the full panel snapshot. Runs on the background executor.
-pub(super) fn collect_git_panel_snapshot(base_dir: &Path) -> GitPanelSnapshot {
-    let Some(repo_root) = git_repo_root(base_dir) else {
-        return GitPanelSnapshot::NoRepo {
+/// Builds the full panel snapshot inside the bounded filesystem runner.
+pub(super) fn collect_git_panel_snapshot(base_dir: &Path) -> Result<GitPanelSnapshot, String> {
+    let Some(repo_root) = git_repo_root_result(base_dir)? else {
+        return Ok(GitPanelSnapshot::NoRepo {
             base_dir: base_dir.to_path_buf(),
-        };
+        });
     };
 
-    let branch = run_git(&repo_root, &["branch", "--show-current"])
-        .ok()
-        .filter(|name| !name.is_empty());
-    let has_head = run_git(&repo_root, &["rev-parse", "--verify", "HEAD"]).is_ok();
+    let branch =
+        Some(run_git(&repo_root, &["branch", "--show-current"])?).filter(|name| !name.is_empty());
+    let has_head = match run_git(&repo_root, &["rev-parse", "--verify", "HEAD"]) {
+        Ok(_) => true,
+        Err(error) if error.contains("Needed a single revision") => false,
+        Err(error) => return Err(error),
+    };
     let detached_label = if branch.is_none() && has_head {
-        run_git(&repo_root, &["rev-parse", "--short", "HEAD"]).ok()
+        Some(run_git(&repo_root, &["rev-parse", "--short", "HEAD"])?)
     } else {
         None
     };
-    let has_remote = run_git(&repo_root, &["remote"])
-        .map(|output| !output.trim().is_empty())
-        .unwrap_or(false);
+    let has_remote = !run_git(&repo_root, &["remote"])?.trim().is_empty();
 
-    let (has_upstream, ahead, behind) = match run_git(
-        &repo_root,
-        &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
-    ) {
-        Ok(counts) => {
-            let mut parts = counts.split_whitespace();
-            let ahead = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-            let behind = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-            (true, ahead, behind)
+    let (has_upstream, ahead, behind) = if !has_head {
+        (false, 0, 0)
+    } else {
+        match run_git(
+            &repo_root,
+            &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+        ) {
+            Ok(counts) => {
+                let mut parts = counts.split_whitespace();
+                let ahead = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                let behind = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                (true, ahead, behind)
+            }
+            Err(error)
+                if error.contains("no upstream configured")
+                    || error.contains("HEAD does not point to a branch") =>
+            {
+                (false, 0, 0)
+            }
+            Err(error) => return Err(error),
         }
-        Err(_) => (false, 0, 0),
     };
 
     let status_output = run_git(
         &repo_root,
         &["status", "--porcelain=v1", "--untracked-files=all"],
-    )
-    .unwrap_or_default();
+    )?;
     let (staged, unstaged, conflicted) = parse_git_status_entries(&status_output);
 
-    GitPanelSnapshot::Repo(Box::new(GitPanelStatus {
+    Ok(GitPanelSnapshot::Repo(Box::new(GitPanelStatus {
         repo_root,
         branch,
         detached_label,
@@ -581,12 +604,12 @@ pub(super) fn collect_git_panel_snapshot(base_dir: &Path) -> GitPanelSnapshot {
         staged,
         unstaged,
         conflicted,
-    }))
+    })))
 }
 
-/// Lists local branches, current one first. Runs on the background executor.
-pub(super) fn collect_local_branches(repo_root: &Path) -> Vec<String> {
-    let Ok(output) = run_git(
+/// Lists local branches, current one first, inside the filesystem runner.
+pub(super) fn collect_local_branches(repo_root: &Path) -> Result<Vec<String>, String> {
+    let output = run_git(
         repo_root,
         &[
             "branch",
@@ -594,15 +617,13 @@ pub(super) fn collect_local_branches(repo_root: &Path) -> Vec<String> {
             "--format=%(refname:short)",
             "--sort=-committerdate",
         ],
-    ) else {
-        return Vec::new();
-    };
-    output
+    )?;
+    Ok(output
         .lines()
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(str::to_string)
-        .collect()
+        .collect())
 }
 
 // ── Mutating operations ────────────────────────────────────────────
@@ -796,7 +817,7 @@ impl EditorView {
     /// Base directory the Git panel operates on: the workspace root, falling
     /// back to the active file's directory when no workspace folder matches.
     pub(crate) fn git_panel_base_dir(&self) -> Option<PathBuf> {
-        if self.sidebar_root.is_dir() {
+        if !self.sidebar_root.as_os_str().is_empty() {
             return Some(self.sidebar_root.clone());
         }
         self.current_file_path
@@ -819,7 +840,7 @@ impl EditorView {
 
     /// Called from the Git panel render path; only schedules work when dirty.
     pub(crate) fn refresh_git_panel_status_if_needed(&mut self, cx: &mut Context<Self>) {
-        if !self.git_panel_status_dirty && self.git_panel_snapshot.is_some() {
+        if !self.git_panel_status_dirty {
             return;
         }
         self.schedule_git_panel_status_refresh(cx);
@@ -835,6 +856,9 @@ impl EditorView {
             return;
         };
 
+        if file_watch::operation_suppressed("Refresh Git status", &base_dir) {
+            return;
+        }
         let epoch = self.git_panel_status_epoch;
         let delay = remaining_refresh_delay(
             self.git_panel_status_scanned_at,
@@ -845,21 +869,32 @@ impl EditorView {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
-            let snapshot = cx
-                .background_executor()
-                .spawn(async move { collect_git_panel_snapshot(&background_base_dir) })
+            let snapshot =
+                crate::platform::fs_task::run("Refresh Git status", base_dir.clone(), move || {
+                    collect_git_panel_snapshot(&background_base_dir).map_err(std::io::Error::other)
+                })
                 .await;
             this.update(cx, |this, cx| {
                 this.git_panel_status_task = None;
-                if this.git_panel_status_epoch != epoch {
+                let same_root = this.git_panel_base_dir().as_ref() == Some(&base_dir);
+                if this.git_panel_status_epoch != epoch || !same_root {
+                    if same_root && let Err(error) = snapshot {
+                        this.notify_fs_error("Refresh Git status", &base_dir, error, cx);
+                    }
                     if this.git_panel_status_dirty {
                         this.schedule_git_panel_status_refresh(cx);
                     }
                     return;
                 }
-                this.git_panel_snapshot = Some(snapshot);
                 this.git_panel_status_dirty = false;
                 this.git_panel_status_scanned_at = Some(SystemTime::now());
+                match snapshot {
+                    Ok(snapshot) => this.git_panel_snapshot = Some(snapshot),
+                    Err(error) => {
+                        this.git_panel_status_dirty = true;
+                        this.notify_fs_error("Refresh Git status", &base_dir, error, cx);
+                    }
+                };
                 cx.notify();
             })
             .ok();
@@ -871,39 +906,51 @@ impl EditorView {
         self.git_operation_in_flight.is_some()
     }
 
-    /// Runs one mutating git operation on the background executor. Only one
+    /// Runs one mutating git operation on bounded filesystem workers. Only one
     /// operation may be in flight; extra requests are dropped with a notify so
     /// buttons appear inert while busy.
     pub(crate) fn run_git_operation(&mut self, operation: GitOperation, cx: &mut Context<Self>) {
         if self.git_operation_in_flight.is_some() {
             return;
         }
-        let repo_root = match (&operation, self.git_panel_repo_status()) {
-            (GitOperation::Init { base_dir }, _) => base_dir.clone(),
-            (_, Some(status)) => status.repo_root.clone(),
-            (_, None) => {
-                let Some(base_dir) = self.git_panel_base_dir() else {
-                    return;
-                };
-                let Some(repo_root) = git_repo_root(&base_dir) else {
-                    return;
-                };
-                repo_root
-            }
+        let Some(base_dir) = (match &operation {
+            GitOperation::Init { base_dir } => Some(base_dir.clone()),
+            _ => self.git_panel_base_dir(),
+        }) else {
+            return;
         };
+        if file_watch::operation_suppressed("Git operation", &base_dir) {
+            return;
+        }
+        let cached_root = self
+            .git_panel_repo_status()
+            .filter(|status| base_dir.starts_with(&status.repo_root))
+            .map(|status| status.repo_root.clone());
 
         self.git_operation_in_flight = Some(operation.clone());
         cx.notify();
 
         cx.spawn(async move |this, cx| {
             let background_operation = operation.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { execute_git_operation(&repo_root, &background_operation) })
-                .await;
+            let read_dir = base_dir.clone();
+            let result = crate::platform::fs_task::run_value("Git operation", base_dir.clone(), move || {
+                let repo_root = match &background_operation {
+                    GitOperation::Init { base_dir } => base_dir.clone(),
+                    _ => match cached_root {
+                        Some(root) => root,
+                        None => git_repo_root_result(&read_dir).map_err(GitOpError::Other)?
+                            .ok_or_else(|| GitOpError::Other("Not a Git repository".into()))?,
+                    }
+                };
+                execute_git_operation(&repo_root, &background_operation)
+            }).await;
             this.update(cx, |this, cx| {
                 this.git_operation_in_flight = None;
-                this.handle_git_operation_result(&operation, result, cx);
+                if this.git_panel_base_dir().as_ref() != Some(&base_dir) { cx.notify(); return; }
+                match result {
+                    Ok(result) => this.handle_git_operation_result(&operation, result, cx),
+                    Err(error) => this.notify_fs_error("Git operation", &base_dir, format!("{error}. If the operation started, completion is unknown; do not retry until the filesystem responds."), cx),
+                }
             })
             .ok();
         })
@@ -1018,11 +1065,9 @@ impl EditorView {
             .map(|(index, _)| index)
             .collect();
         for tab_index in diff_tab_indexes {
-            self.refresh_git_diff_tab(tab_index);
+            self.refresh_git_diff_tab(tab_index, cx);
         }
-        if self.active_tab_is_diff() {
-            self.reload_active_git_diff_snapshot();
-        }
+        // Diff refreshes install their snapshots asynchronously.
         // Discard/checkout/sync can rewrite files that are open in tabs; reload
         // the active buffer from disk when it was not touched in the editor.
         if matches!(
@@ -1037,62 +1082,19 @@ impl EditorView {
     /// Re-reads non-dirty text tabs from disk after git rewrote worktree files
     /// (discard/checkout/pull), without waiting for the debounced fs watcher.
     fn reload_clean_tabs_from_disk(&mut self, cx: &mut Context<Self>) {
-        let active_tab_id = self.active_tab_id.clone();
-        let mut active_tab_changed = false;
-        for tab in &mut self.tabs {
-            if tab.kind != TabKind::Editor || tab.is_dirty {
-                continue;
-            }
-            let Some(path) = tab.path.as_ref() else {
-                continue;
-            };
-            if !tab
-                .file_kind
-                .as_ref()
-                .is_some_and(FileKind::supports_text_buffer)
-            {
-                continue;
-            }
-            let exists = path.exists();
-            if tab.is_deleted != !exists {
-                tab.is_deleted = !exists;
-                active_tab_changed |= active_tab_id.as_deref() == Some(tab.id.as_str());
-            }
-            if !exists {
-                continue;
-            }
-            let Ok(bytes) = std::fs::read(path) else {
-                continue;
-            };
-            let new_text = String::from_utf8_lossy(&bytes).into_owned();
-            if new_text != tab.snapshot.text {
-                tab.snapshot.cursor_offset = tab.snapshot.cursor_offset.min(new_text.len());
-                tab.snapshot.cursor_anchor = tab.snapshot.cursor_anchor.min(new_text.len());
-                tab.snapshot.text = new_text;
-                active_tab_changed |= active_tab_id.as_deref() == Some(tab.id.as_str());
-            }
-        }
-
-        if active_tab_changed && !self.active_tab_is_diff() {
-            if let Some(snapshot) = self
-                .active_tab_index()
-                .and_then(|index| self.tabs.get(index))
-                .filter(|tab| !tab.is_deleted)
-                .map(|tab| tab.snapshot.clone())
-            {
-                self.discard_history_transaction();
-                if let Some(index) = self.active_tab_index() {
-                    self.tabs[index].history.clear_entries();
-                }
-                self.buffer = crate::buffer::Buffer::from_text(&snapshot.text);
-                self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
-                self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());
-                self.extra_cursors.clear();
-                self.reset_cursor_visual_targeting();
-                self.reparse();
-            }
-            cx.notify();
-        }
+        let paths = self
+            .all_tabs()
+            .filter(|tab| {
+                tab.kind == TabKind::Editor
+                    && !tab.is_dirty
+                    && tab
+                        .file_kind
+                        .as_ref()
+                        .is_some_and(FileKind::supports_text_buffer)
+            })
+            .filter_map(|tab| tab.path.clone())
+            .collect::<Vec<_>>();
+        self.handle_fs_events(&paths, cx);
     }
 }
 
@@ -1179,6 +1181,32 @@ mod tests {
 
     #[cfg(not(feature = "mas"))]
     #[test]
+    fn inaccessible_repository_is_not_reported_as_no_repository() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        assert!(git_repo_root_result(&missing).is_err());
+        assert!(collect_git_panel_snapshot(&missing).is_err());
+        assert!(matches!(
+            collect_git_panel_snapshot(directory.path()).unwrap(),
+            GitPanelSnapshot::NoRepo { .. }
+        ));
+    }
+
+    #[cfg(not(feature = "mas"))]
+    #[test]
+    fn raw_git_output_preserves_document_newlines() {
+        let directory = tempfile::tempdir().unwrap();
+        run_git(directory.path(), &["init"]).unwrap();
+        std::fs::write(directory.path().join("note.md"), "line\n\n").unwrap();
+        run_git(directory.path(), &["add", "note.md"]).unwrap();
+        assert_eq!(
+            run_git_raw(directory.path(), &["show", ":0:note.md"]).unwrap(),
+            "line\n\n"
+        );
+    }
+
+    #[cfg(not(feature = "mas"))]
+    #[test]
     fn execute_git_operations_full_cycle() {
         let root = std::env::temp_dir().join(format!(
             "moeka-git-ops-cycle-{}-{}",
@@ -1210,7 +1238,7 @@ mod tests {
             &GitOperation::StagePaths(vec!["a.md".to_string()]),
         )
         .unwrap();
-        match collect_git_panel_snapshot(&repo_root) {
+        match collect_git_panel_snapshot(&repo_root).unwrap() {
             GitPanelSnapshot::Repo(status) => {
                 assert_eq!(status.staged.len(), 1);
                 assert_eq!(status.staged[0].rel_path, "a.md");
@@ -1226,7 +1254,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(outcome, GitOpOutcome::Committed));
-        match collect_git_panel_snapshot(&repo_root) {
+        match collect_git_panel_snapshot(&repo_root).unwrap() {
             GitPanelSnapshot::Repo(status) => {
                 assert!(status.is_clean());
                 assert!(status.has_head);
@@ -1237,7 +1265,7 @@ mod tests {
 
         // modify + discard tracked
         std::fs::write(repo_root.join("a.md"), "changed\n").unwrap();
-        match collect_git_panel_snapshot(&repo_root) {
+        match collect_git_panel_snapshot(&repo_root).unwrap() {
             GitPanelSnapshot::Repo(status) => {
                 assert_eq!(status.unstaged.len(), 1);
                 assert_eq!(status.unstaged[0].kind, GitChangeKind::Modified);
@@ -1267,7 +1295,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(outcome, GitOpOutcome::BranchCreated { .. }));
-        let branches = collect_local_branches(&repo_root);
+        let branches = collect_local_branches(&repo_root).unwrap();
         assert!(branches.iter().any(|name| name == "feature/test"));
         let outcome = execute_git_operation(
             &repo_root,

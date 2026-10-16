@@ -43,6 +43,58 @@ fn should_show_git_commit_area(
     tab == GitPanelTab::Changes && staged_count > 0 && conflicted_count == 0
 }
 
+const GIT_COMMIT_FILES_OPERATION: &str = "List Git commit files";
+
+fn parse_git_commit_files(output: &str) -> std::io::Result<Vec<GitCommitFileEntry>> {
+    let malformed = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Git returned an incomplete commit file list",
+        )
+    };
+    let mut fields = output.split_terminator('\0');
+    let mut files = Vec::new();
+    while let Some(status) = fields.next() {
+        crate::platform::fs_task::check_deadline()?;
+        let first_path = fields.next().ok_or_else(malformed)?;
+        let code = status.as_bytes().first().copied().ok_or_else(malformed)?;
+        let path = if matches!(code, b'R' | b'C') {
+            fields.next().ok_or_else(malformed)?
+        } else {
+            first_path
+        };
+        if first_path.is_empty() || path.is_empty() {
+            return Err(malformed());
+        }
+        let kind = match code {
+            b'A' => GitChangeKind::Added,
+            b'D' => GitChangeKind::Deleted,
+            b'R' | b'C' => GitChangeKind::Renamed,
+            _ => GitChangeKind::Modified,
+        };
+        files.push(GitCommitFileEntry {
+            rel_path: path.to_string(),
+            kind,
+        });
+    }
+    Ok(files)
+}
+
+fn load_git_commit_files(
+    base_dir: &std::path::Path,
+    commit_hash: &str,
+) -> std::io::Result<Vec<GitCommitFileEntry>> {
+    let repo_root = git_repo_root_result(base_dir)
+        .map_err(std::io::Error::other)?
+        .ok_or_else(|| std::io::Error::other("Not a Git repository"))?;
+    let output = run_git_raw(
+        &repo_root,
+        &["show", "--format=", "--name-status", "-z", commit_hash],
+    )
+    .map_err(std::io::Error::other)?;
+    parse_git_commit_files(&output)
+}
+
 impl EditorView {
     fn git_change_kind_color(&self, kind: GitChangeKind) -> gpui::Hsla {
         match kind {
@@ -781,11 +833,8 @@ impl EditorView {
         } else {
             GitDiffSource::IndexToWorktree
         };
-        let Some(diff) = self.build_git_diff_state_for_source(&absolute_path, source) else {
-            return;
-        };
         let title = Self::title_for_path(&absolute_path);
-        self.open_git_diff_tab(title, absolute_path, diff, cx);
+        self.open_git_diff_for_source(title, absolute_path, source, cx);
     }
 
     fn request_git_discard_entry(&mut self, entry: &GitChangeEntry, cx: &mut Context<Self>) {
@@ -1006,7 +1055,10 @@ impl EditorView {
                     Some((cached_hash, files)) if cached_hash == hash => {
                         rows.extend(files.iter().cloned().map(GitHistoryRow::CommitFile));
                     }
-                    _ => rows.push(GitHistoryRow::CommitFilesLoading),
+                    _ if self.git_commit_files_task.is_some() => {
+                        rows.push(GitHistoryRow::CommitFilesLoading)
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1367,25 +1419,56 @@ impl EditorView {
     }
 
     fn schedule_git_commit_files_load(&mut self, commit_hash: String, cx: &mut Context<Self>) {
-        let Some(base_dir) = self.git_panel_base_dir() else {
+        let Some(base_dir) = self
+            .git_panel_base_dir()
+            .filter(|path| !path.as_os_str().is_empty())
+        else {
             return;
         };
+        // Replacing a task cannot cancel its blocked process. Complete the one
+        // outstanding request, then pick up the latest expanded commit.
+        if self.git_commit_files_task.is_some()
+            || file_watch::operation_suppressed(GIT_COMMIT_FILES_OPERATION, &base_dir)
+        {
+            return;
+        }
+        let epoch = self.git_history_refresh_epoch;
         let task = cx.spawn(async move |this, cx| {
             let background_hash = commit_hash.clone();
-            let files = cx
-                .background_executor()
-                .spawn(async move {
-                    git_repo_root(&base_dir)
-                        .map(|repo_root| collect_git_commit_files(&repo_root, &background_hash))
-                        .unwrap_or_default()
-                })
-                .await;
+            let background_dir = base_dir.clone();
+            let files = crate::platform::fs_task::run(
+                GIT_COMMIT_FILES_OPERATION,
+                base_dir.clone(),
+                move || load_git_commit_files(&background_dir, &background_hash),
+            )
+            .await;
             this.update(cx, |this, cx| {
                 this.git_commit_files_task = None;
-                if this.git_history_expanded_commit.as_deref() == Some(commit_hash.as_str()) {
-                    this.git_commit_files = Some((commit_hash, files));
-                    cx.notify();
+                let same_root = this.git_panel_base_dir().as_ref() == Some(&base_dir);
+                if same_root && let Err(error) = &files {
+                    this.notify_fs_error(GIT_COMMIT_FILES_OPERATION, &base_dir, error, cx);
                 }
+                if !same_root
+                    || this.git_history_refresh_epoch != epoch
+                    || this.git_history_scope != GitHistoryScope::Repository
+                    || this.git_history_expanded_commit.as_deref() != Some(commit_hash.as_str())
+                {
+                    if this.git_history_scope == GitHistoryScope::Repository
+                        && let Some(hash) = this.git_history_expanded_commit.clone()
+                        && !this
+                            .git_commit_files
+                            .as_ref()
+                            .is_some_and(|(cached, _)| cached == &hash)
+                    {
+                        this.schedule_git_commit_files_load(hash, cx);
+                    }
+                    cx.notify();
+                    return;
+                }
+                if let Ok(files) = files {
+                    this.git_commit_files = Some((commit_hash, files));
+                }
+                cx.notify();
             })
             .ok();
         });
@@ -1405,11 +1488,8 @@ impl EditorView {
             commit_hash: hash,
             short_hash,
         };
-        let Some(diff) = self.build_git_diff_state_for_source(&absolute_path, source) else {
-            return;
-        };
         let title = Self::title_for_path(&absolute_path);
-        self.open_git_diff_tab(title, absolute_path, diff, cx);
+        self.open_git_diff_for_source(title, absolute_path, source, cx);
     }
 
     // ── Remote URL input overlay ───────────────────────────────────
@@ -1559,6 +1639,92 @@ impl EditorView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commit_file_parser_preserves_unusual_names_and_rename_destinations() {
+        let files = parse_git_commit_files(
+            "M\0docs/tab\tname.md\0R100\0old.md\0new\nname.md\0A\0 spaced.md \0",
+        )
+        .unwrap();
+        assert_eq!(
+            files,
+            vec![
+                GitCommitFileEntry {
+                    rel_path: "docs/tab\tname.md".into(),
+                    kind: GitChangeKind::Modified
+                },
+                GitCommitFileEntry {
+                    rel_path: "new\nname.md".into(),
+                    kind: GitChangeKind::Renamed
+                },
+                GitCommitFileEntry {
+                    rel_path: " spaced.md ".into(),
+                    kind: GitChangeKind::Added
+                },
+            ]
+        );
+        assert!(parse_git_commit_files("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn incomplete_commit_file_output_is_an_error_not_an_empty_list() {
+        for output in ["M", "M\0", "R100\0old.md\0", "A\0\0"] {
+            assert_eq!(
+                parse_git_commit_files(output).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[cfg(not(feature = "mas"))]
+    #[test]
+    fn commit_file_loading_propagates_repository_and_revision_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(load_git_commit_files(&directory.path().join("missing"), "HEAD").is_err());
+        assert!(load_git_commit_files(directory.path(), "HEAD").is_err());
+        run_git(directory.path(), &["init", "-q"]).unwrap();
+        assert!(load_git_commit_files(directory.path(), "missing-commit").is_err());
+    }
+
+    #[cfg(not(feature = "mas"))]
+    #[test]
+    fn commit_file_loading_distinguishes_files_from_a_valid_empty_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        run_git(root, &["init", "-q"]).unwrap();
+        std::fs::write(root.join(" spaced.md "), "text\n").unwrap();
+        run_git(root, &["add", "--", " spaced.md "]).unwrap();
+        let commit = |message: &str| {
+            run_git(
+                root,
+                &[
+                    "-c",
+                    "user.name=Moeka Test",
+                    "-c",
+                    "user.email=moeka@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    message,
+                ],
+            )
+            .unwrap();
+        };
+        commit("initial");
+        assert_eq!(
+            load_git_commit_files(root, "HEAD").unwrap(),
+            vec![GitCommitFileEntry {
+                rel_path: " spaced.md ".into(),
+                kind: GitChangeKind::Added
+            },]
+        );
+        commit("empty");
+        assert!(load_git_commit_files(root, "HEAD").unwrap().is_empty());
+    }
 
     #[test]
     fn commit_area_only_appears_for_staged_changes() {

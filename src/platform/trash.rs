@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 
+use crate::platform::fs_task::check_deadline;
+
 pub(crate) fn move_to_trash(path: &Path) -> anyhow::Result<()> {
     delete_with(path, is_network_volume, trash_local)
 }
@@ -16,11 +18,17 @@ fn delete_with(
 ) -> anyhow::Result<()> {
     // Resolve ancestors, not the final component: deleting a symlink must not
     // delete (or select a volume policy based on) its target.
+    check_deadline()?;
     let path = deletion_path(path)?;
+    check_deadline()?;
     let metadata = fs::symlink_metadata(&path)?;
-    if network_volume(&path, &metadata)
-        .with_context(|| format!("cannot determine volume type: {}", path.display()))?
-    {
+    check_deadline()?;
+    let is_network = network_volume(&path, &metadata)
+        .with_context(|| format!("cannot determine volume type: {}", path.display()))?;
+    // A probe can return after the caller has already observed a timeout.
+    // Never let that late result start a destructive phase.
+    check_deadline()?;
+    if is_network {
         remove_permanently(&path).with_context(|| {
             format!(
                 "permanent deletion on network volume failed: {}",
@@ -52,8 +60,10 @@ fn deletion_path(path: &Path) -> anyhow::Result<PathBuf> {
 }
 
 pub(crate) fn remove_permanently(path: &Path) -> std::io::Result<()> {
+    check_deadline()?;
     let metadata = fs::symlink_metadata(path)?;
     let file_type = metadata.file_type();
+    check_deadline()?;
     #[cfg(windows)]
     {
         use std::os::windows::fs::FileTypeExt;
@@ -167,6 +177,7 @@ fn is_network_volume(_path: &Path, _metadata: &fs::Metadata) -> anyhow::Result<b
 }
 
 fn trash_local(path: &Path) -> anyhow::Result<()> {
+    check_deadline()?;
     #[cfg(target_os = "macos")]
     {
         use trash::TrashContext;
@@ -175,6 +186,7 @@ fn trash_local(path: &Path) -> anyhow::Result<()> {
         // No Finder fallback: AppleEvents are forbidden in the App Store sandbox.
         let mut context = TrashContext::new();
         context.set_delete_method(DeleteMethod::NsFileManager);
+        check_deadline()?;
         context.delete(path).map_err(anyhow::Error::from)
     }
     #[cfg(windows)]
@@ -213,6 +225,107 @@ fn run_trash_on_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        future::Future,
+        sync::Arc,
+        task::{Poll, Wake, Waker},
+        time::Duration,
+    };
+
+    struct TestWaker(std::thread::Thread);
+
+    impl Wake for TestWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    fn block_on<T>(future: impl Future<Output = T>) -> T {
+        let waker = Waker::from(Arc::new(TestWaker(std::thread::current())));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let Poll::Ready(result) = future.as_mut().poll(&mut cx) {
+                return result;
+            }
+            std::thread::park_timeout(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn late_volume_probe_cannot_start_trash_or_permanent_deletion() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::platform::fs_task::register_workspace_root(temp.path());
+        for is_network in [true, false] {
+            let file = temp.path().join(format!("note-{is_network}.md"));
+            fs::write(&file, "keep").unwrap();
+            let worker_file = file.clone();
+            let (release, wait) = std::sync::mpsc::channel();
+            let (finished, done) = std::sync::mpsc::channel();
+            let result = block_on(crate::platform::fs_task::run_with_timeout(
+                "test late volume probe",
+                file.clone(),
+                Duration::from_millis(100),
+                move || {
+                    let result = delete_with(
+                        &worker_file,
+                        |_, _| {
+                            wait.recv_timeout(Duration::from_secs(2))?;
+                            Ok(is_network)
+                        },
+                        |_| panic!("late volume probe must not invoke Trash"),
+                    );
+                    finished
+                        .send(result.as_ref().is_err_and(|error| {
+                            error
+                                .downcast_ref::<std::io::Error>()
+                                .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
+                        }))
+                        .unwrap();
+                    Ok(result)
+                },
+            ));
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+            release.send(()).unwrap();
+            assert!(done.recv_timeout(Duration::from_secs(2)).unwrap());
+            assert_eq!(fs::read_to_string(file).unwrap(), "keep");
+        }
+    }
+
+    #[test]
+    fn expired_permanent_deletion_keeps_the_source() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::platform::fs_task::register_workspace_root(temp.path());
+        let file = temp.path().join("note.md");
+        fs::write(&file, "keep").unwrap();
+        let worker_file = file.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (finished, done) = std::sync::mpsc::channel();
+        let result = block_on(crate::platform::fs_task::run_with_timeout(
+            "test expired permanent deletion",
+            file.clone(),
+            Duration::from_millis(100),
+            move || {
+                wait.recv_timeout(Duration::from_secs(2)).unwrap();
+                let result = remove_permanently(&worker_file);
+                finished
+                    .send(result.as_ref().err().map(std::io::Error::kind))
+                    .unwrap();
+                result
+            },
+        ));
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        release.send(()).unwrap();
+        assert_eq!(
+            done.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Some(std::io::ErrorKind::TimedOut)
+        );
+        assert_eq!(fs::read_to_string(file).unwrap(), "keep");
+    }
 
     #[test]
     fn network_files_and_directories_are_removed_without_calling_trash() {

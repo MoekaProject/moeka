@@ -470,9 +470,11 @@ impl EditorView {
                 })
                 .await;
             let Some(path) = path else { return };
-            let result = cx
-                .background_executor()
-                .spawn(async move { std::fs::write(path, bytes) })
+            let result =
+                crate::platform::fs_task::run("Export whiteboard", path.clone(), move || {
+                    crate::platform::fs_task::check_deadline()?;
+                    std::fs::write(path, bytes)
+                })
                 .await;
             if let Err(error) = result {
                 this.update(cx, |editor, cx| {

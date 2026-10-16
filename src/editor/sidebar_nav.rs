@@ -62,7 +62,9 @@ impl EditorView {
             Some(path) => path,
             None => return,
         };
-        if path.is_dir() && self.expanded_dirs.contains(&path) {
+        if self.sidebar_cached_path_is_dir(&path) == Some(true)
+            && self.expanded_dirs.contains(&path)
+        {
             self.expanded_dirs.remove(&path);
             self.invalidate_sidebar_flattened_items();
             cx.notify();
@@ -86,10 +88,14 @@ impl EditorView {
             Some(path) => path,
             None => return,
         };
-        if path.is_dir() {
+        if self.sidebar_cached_path_is_dir(&path) == Some(true) {
             if !self.expanded_dirs.contains(&path) {
                 self.expanded_dirs.insert(path.clone());
-                self.schedule_sidebar_directory_load(path, cx);
+                if self.sidebar_error.is_some() {
+                    self.schedule_sidebar_directory_refresh(path, cx);
+                } else {
+                    self.schedule_sidebar_directory_load(path, cx);
+                }
                 self.invalidate_sidebar_flattened_items();
                 cx.notify();
             } else {
@@ -116,7 +122,7 @@ impl EditorView {
             self.commit_sidebar_edit(cx);
         } else {
             self.sidebar_select_item(&path, false, false);
-            if path.is_dir() {
+            if self.sidebar_cached_path_is_dir(&path) == Some(true) {
                 self.toggle_sidebar_directory(path, cx);
             } else {
                 self.open_sidebar_file(path, cx);

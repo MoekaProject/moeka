@@ -47,7 +47,14 @@ impl EditorView {
             return;
         };
         let tab_id = self.tabs[index].id.clone();
-        self.cancel_pending_temp_save_for_tab(&tab_id);
+        self.schedule_temp_save_for_active_tab(cx);
+        if self.tabs[index]
+            .path
+            .as_deref()
+            .is_some_and(|path| !file_ops::DocumentSave::auto_save_allowed(path))
+        {
+            return;
+        }
         let task_tab_id = tab_id.clone();
         let epoch = self
             .auto_save_epochs
@@ -71,19 +78,34 @@ impl EditorView {
             let save = this.update(cx, |_, _| file_ops::DocumentSave::new(path.clone()));
             let Ok(save) = save else { return };
             let token = save.clone();
-            let (result, snapshot) = cx
-                .background_executor()
-                .spawn(async move {
-                    let result = save.write(snapshot.text.as_bytes());
-                    (result, snapshot)
-                })
-                .await;
+            let text = snapshot.text.clone();
+            let result = match save.reserve_auto_save() {
+                Ok(()) => {
+                    crate::platform::fs_task::run("auto-save", path.clone(), move || {
+                        save.write(text.as_bytes())
+                    })
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            token.observe_result(&result);
+            let confirmed = matches!(result, Ok(true)) && token.is_latest();
 
-            if !token.is_latest() {
-                return;
-            }
             this.update(cx, |editor, cx| {
-                editor.finish_auto_save(&task_tab_id, epoch, path, snapshot, result, cx);
+                if auto_save_epoch_is_current(
+                    editor.auto_save_epochs.get(&task_tab_id).copied(),
+                    epoch,
+                ) {
+                    editor.auto_save_tasks.remove(&task_tab_id);
+                    if token.is_latest() {
+                        editor.finish_auto_save(&task_tab_id, epoch, path, snapshot, result, cx);
+                    }
+                    if confirmed && editor.active_tab_id.as_deref() == Some(&task_tab_id) {
+                        // Edits made while a known-successful write was running
+                        // can be saved next. Uncertain outcomes never reschedule.
+                        editor.schedule_auto_save_for_active_tab(cx);
+                    }
+                }
             })
             .ok();
         });
@@ -116,6 +138,9 @@ impl EditorView {
                 return None;
             }
             let path = tab.path.clone()?;
+            if !file_ops::DocumentSave::auto_save_allowed(&path) {
+                return None;
+            }
             let snapshot = if editor.active_tab_id.as_deref() == Some(tab_id) {
                 editor.current_snapshot()
             } else {
@@ -138,7 +163,12 @@ impl EditorView {
             return;
         }
         if let Err(error) = result {
-            let message = format!("{}: {error}", self.t(crate::i18n::TextKey::SaveFailed));
+            self.persist_recovery_for_tab(tab_id);
+            let message = format!(
+                "{} ({}): {error}",
+                self.t(crate::i18n::TextKey::SaveFailed),
+                path.display()
+            );
             self.notify_error(message, cx);
             return;
         }

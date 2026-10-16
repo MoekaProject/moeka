@@ -514,11 +514,6 @@ impl AppSettings {
         )
     }
 
-    pub(crate) fn attachment_policy_access(&self) -> super::attachments::AttachmentPolicyAccess {
-        self.attachment_policy()
-            .access(&self.attachment_external_folder_bookmark)
-    }
-
     pub(crate) fn load() -> Self {
         config_store::load_settings()
     }
@@ -681,10 +676,13 @@ impl AppSettings {
         self.starred_files.len() != original_len
     }
 
+    /// An unavailable mount is not evidence of deletion. Only remove duplicate
+    /// records here; confirmed deletes/renames use the explicit prefix helpers.
+    #[cfg(test)]
     pub(crate) fn prune_missing_starred_files(&mut self) -> bool {
         let original_len = self.starred_files.len();
-        self.starred_files
-            .retain(|path| path.exists() && path.is_file());
+        let mut seen = std::collections::HashSet::new();
+        self.starred_files.retain(|path| seen.insert(path.clone()));
         self.starred_files.len() != original_len
     }
 
@@ -733,6 +731,17 @@ mod tests {
     use crate::editor::attachments::{AttachmentLinkSyntax, AttachmentPathStyle};
     use crate::editor::{ChatAgentCli, TerminalCursorShape};
     use crate::theme::{EditorThemeMode, ThemeKind};
+
+    #[test]
+    fn starred_pruning_preserves_unknown_offline_paths_and_only_removes_duplicates() {
+        let mut settings = AppSettings::default();
+        let unknown = std::path::PathBuf::from("offline-workspace/unavailable.md");
+        let known = std::path::PathBuf::from("workspace/note.md");
+        settings.starred_files = vec![unknown.clone(), known.clone(), unknown.clone()];
+        assert!(settings.prune_missing_starred_files());
+        assert_eq!(settings.starred_files, vec![unknown, known]);
+        assert!(!settings.prune_missing_starred_files());
+    }
 
     #[test]
     fn default_left_align_is_off_for_existing_settings_and_roundtrips_when_enabled() {

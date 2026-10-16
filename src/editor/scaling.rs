@@ -66,6 +66,44 @@ fn last_soft_row_scroll_limit(content_bottom: f32, last_row_top: f32, viewport_h
     last_row_top.max(content_bottom - viewport_height).max(0.0)
 }
 
+fn cursor_center_layout_target(
+    measured_bounds: Option<(f32, f32)>,
+    estimated_top: f32,
+    estimated_height: f32,
+    viewport_height: f32,
+) -> f32 {
+    let (top, bottom) =
+        measured_bounds.unwrap_or((estimated_top, estimated_top + estimated_height));
+    centered_row_scroll_target(top, bottom, viewport_height)
+}
+
+fn begin_cursor_center_epoch(scroll_epoch: &mut usize, navigation_epoch: &mut Option<usize>) {
+    *scroll_epoch = scroll_epoch.wrapping_add(1);
+    *navigation_epoch = Some(*scroll_epoch);
+}
+
+#[derive(Default)]
+struct CursorCenterConfirmation {
+    previous_target: Option<f32>,
+    settled_frames: u8,
+}
+
+impl CursorCenterConfirmation {
+    fn observe(&mut self, measured_target: Option<f32>, previews_pending: bool) -> bool {
+        let unchanged = self
+            .previous_target
+            .zip(measured_target)
+            .is_some_and(|(previous, current)| (previous - current).abs() <= 0.5);
+        self.settled_frames = if unchanged && !previews_pending {
+            self.settled_frames + 1
+        } else {
+            0
+        };
+        self.previous_target = measured_target;
+        self.settled_frames >= 2
+    }
+}
+
 fn typing_scroll_should_restore(
     same_logical_line: bool,
     _pending_fence_on_same_visual_row: bool,
@@ -83,6 +121,152 @@ fn typing_scroll_should_restore(
                 scroll_before,
                 scroll_before + viewport_height,
             ) == std::cmp::Ordering::Equal)
+}
+
+#[derive(Debug, PartialEq)]
+enum FrontMatterVerticalTarget {
+    Line(usize),
+    Source(usize),
+}
+
+fn front_matter_visible_navigation_line(
+    plans: &[helpers::FrontMatterGroupPlan],
+    line: usize,
+    editable: bool,
+) -> usize {
+    if !editable && let Some(plan) = plans.iter().find(|plan| plan.hides_line(line)) {
+        plan.label_line()
+    } else {
+        line
+    }
+}
+
+fn front_matter_value_endpoint(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    line: usize,
+    downward: bool,
+) -> usize {
+    let col = decorations
+        .get(line)
+        .and_then(|d| d.front_matter.as_ref())
+        .map(|info| {
+            if downward {
+                info.value_range.start
+            } else {
+                info.value_range.end
+            }
+        })
+        .unwrap_or_else(|| {
+            if downward {
+                0
+            } else {
+                buffer.line_content(line).len()
+            }
+        });
+    buffer.clamp_offset(buffer.line_start(line) + col)
+}
+
+fn front_matter_vertical_neighbor(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    plans: &[helpers::FrontMatterGroupPlan],
+    line: usize,
+    downward: bool,
+    editable: bool,
+    delimiters_visible: bool,
+    cache_rows: impl Fn(usize) -> Option<usize>,
+) -> Option<FrontMatterVerticalTarget> {
+    let mut target = if downward {
+        line.checked_add(1)?
+    } else {
+        line.checked_sub(1)?
+    };
+    while target < buffer.line_count() {
+        if !delimiters_visible && decorations.get(target).and_then(|d| d.table_info.as_ref())
+            .is_some_and(|table| table.is_front_matter && table.is_separator)
+            // A metadata-only empty block displays a summary at row zero.
+            && !(target == 0 && super::fold::front_matter_fold_range(decorations, 0)
+                .is_some_and(|range| range.end == 2))
+        {
+            target = if downward {
+                target.checked_add(1)?
+            } else {
+                target.checked_sub(1)?
+            };
+            continue;
+        }
+        let plan = plans
+            .iter()
+            .find(|plan| plan.group.source_lines.contains(&target));
+        if editable {
+            if let Some(plan) = plan
+                && !plan.source_visible
+                && (plan.hides_line(target)
+                    || cache_rows(target).is_none_or(|rows| rows == 0)
+                    || (!plan.active
+                        && target == plan.group.header_line
+                        && matches!(plan.group.kind, super::front_matter_groups::GroupKind::List)))
+            {
+                if matches!(plan.group.kind, super::front_matter_groups::GroupKind::List) {
+                    let item = plan
+                        .group
+                        .items
+                        .iter()
+                        .find(|item| item.source_line == target)
+                        .or_else(|| {
+                            if downward {
+                                plan.group.items.first()
+                            } else {
+                                plan.group.items.last()
+                            }
+                        });
+                    if let Some(item) = item {
+                        return Some(FrontMatterVerticalTarget::Source(if downward {
+                            item.source_range.start
+                        } else {
+                            item.source_range.end
+                        }));
+                    }
+                }
+                let value_line = if downward && plan.hides_line(target) {
+                    plan.label_line()
+                } else {
+                    target
+                };
+                return Some(FrontMatterVerticalTarget::Source(
+                    front_matter_value_endpoint(buffer, decorations, value_line, downward),
+                ));
+            }
+        } else {
+            let front_matter = decorations
+                .get(target)
+                .and_then(|d| d.table_info.as_ref())
+                .is_some_and(|t| t.is_front_matter);
+            if plan.is_some_and(|plan| plan.hides_line(target))
+                || (front_matter && cache_rows(target) == Some(0))
+            {
+                target = if downward {
+                    target.checked_add(1)?
+                } else {
+                    target.checked_sub(1)?
+                };
+                continue;
+            }
+        }
+        if decorations
+            .get(target)
+            .and_then(|d| d.table_info.as_ref())
+            .is_some_and(|table| table.is_front_matter)
+            && cache_rows(target).is_none()
+        {
+            return Some(FrontMatterVerticalTarget::Source(
+                front_matter_value_endpoint(buffer, decorations, target, downward),
+            ));
+        }
+        return Some(FrontMatterVerticalTarget::Line(target));
+    }
+    None
 }
 
 impl EditorView {
@@ -562,7 +746,24 @@ impl EditorView {
     }
 
     fn current_visual_height_for_line(&self, line: usize) -> f32 {
-        if let Some(Some(info)) = self.line_display_info.get(line) {
+        self.visual_height_with_front_matter_visibility(
+            line,
+            self.front_matter_presentation_line_is_hidden(line),
+        )
+    }
+
+    fn visual_height_with_front_matter_visibility(&self, line: usize, hidden: bool) -> f32 {
+        if hidden {
+            return 0.0;
+        }
+        if let Some(Some(info)) = self.line_display_info.get(line)
+            && (info.visual_line_count > 0
+                || !self
+                    .decorations
+                    .get(line)
+                    .and_then(|d| d.table_info.as_ref())
+                    .is_some_and(|table| table.is_front_matter))
+        {
             info.total_height()
         } else {
             if !self.folded_sections.is_empty()
@@ -597,10 +798,25 @@ impl EditorView {
         if self.uses_sparse_line_geometry() {
             let mut cache = self.line_geometry_cache.borrow_mut();
             cache.prefix_y_offsets.clear();
-            cache.sparse.ensure_dimensions(
-                line_count,
-                self.line_height_for_block(&BlockType::Normal) as f64,
-            );
+            let default_height = self.line_height_for_block(&BlockType::Normal) as f64;
+            let dimensions_changed = cache.sparse.line_count != line_count
+                || (cache.sparse.default_height - default_height).abs() > 0.01;
+            cache.sparse.ensure_dimensions(line_count, default_height);
+            if (dimensions_changed || self.line_geometry_cache_dirty.get())
+                && let Some(table) = self
+                    .decorations
+                    .first()
+                    .and_then(|d| d.table_info.as_ref())
+                    .filter(|table| table.is_front_matter)
+            {
+                for line in table.table_start_line..table.table_end_line.min(line_count) {
+                    let hidden = self.front_matter_presentation_line_is_hidden(line);
+                    cache.sparse.set_measured_height(
+                        line,
+                        self.visual_height_with_front_matter_visibility(line, hidden) as f64,
+                    );
+                }
+            }
             self.line_geometry_cache_dirty.set(false);
             return;
         }
@@ -617,7 +833,8 @@ impl EditorView {
         let mut y = self.padding_top();
         cache.prefix_y_offsets.push(y);
         for line in 0..line_count {
-            y += self.current_visual_height_for_line(line);
+            let hidden = self.front_matter_presentation_line_is_hidden(line);
+            y += self.visual_height_with_front_matter_visibility(line, hidden);
             cache.prefix_y_offsets.push(y);
         }
 
@@ -710,11 +927,19 @@ impl EditorView {
 
         if self.uses_sparse_line_geometry() {
             self.ensure_line_geometry_cache();
-            return self
+            let line = self
                 .line_geometry_cache
                 .borrow()
                 .sparse
                 .line_at_y(y as f64, self.padding_top() as f64);
+            return if self.front_matter_presentation_line_is_hidden(line) {
+                (0..line)
+                    .rev()
+                    .find(|&line| self.visual_height_for_line(line) > 0.0)
+                    .unwrap_or(0)
+            } else {
+                line
+            };
         }
 
         self.ensure_line_geometry_cache();
@@ -733,7 +958,15 @@ impl EditorView {
             }
         }
 
-        low.min(line_count.saturating_sub(1))
+        let line = low.min(line_count.saturating_sub(1));
+        if self.front_matter_presentation_line_is_hidden(line) {
+            (0..line)
+                .rev()
+                .find(|&line| self.visual_height_for_line(line) > 0.0)
+                .unwrap_or(0)
+        } else {
+            line
+        }
     }
 
     pub(crate) fn scroll_to_cursor(&mut self) {
@@ -980,101 +1213,176 @@ impl EditorView {
         true
     }
 
-    fn animate_scroll_to(&mut self, target_scroll: f32, cx: &mut Context<Self>) {
+    fn start_cursor_center_navigation(
+        &mut self,
+        target_scroll: f32,
+        animate: bool,
+        cx: &mut Context<Self>,
+    ) {
         let start_scroll = self.scroll_offset;
-        self.scroll_offset = target_scroll;
-        self.clamp_scroll();
-        let final_scroll = self.scroll_offset;
-
-        if (final_scroll - start_scroll).abs() < 1.0 {
-            self.scroll_offset = final_scroll;
-            if final_scroll != start_scroll {
-                self.table_cursor_paint_bounds = None;
-            }
-            cx.notify();
-            return;
+        let animate = animate && (target_scroll - start_scroll).abs() >= 1.0;
+        if !animate {
+            self.scroll_offset = target_scroll;
+            self.clamp_scroll();
+            self.table_cursor_paint_bounds = None;
         }
-
-        self.scroll_anim_epoch += 1;
         let epoch = self.scroll_anim_epoch;
-        self.scroll_offset = start_scroll;
+        let pane_id = self.current_pane_id();
+        let tab_id = self.active_tab_id.clone();
+        let cursor_offset = self.cursor.offset;
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            let total_steps = 14u32;
-            let step_ms = 16u64;
-            for step in 1..=total_steps {
+            let animation_steps = if animate { 14u32 } else { 0 };
+            let mut confirmation = CursorCenterConfirmation::default();
+            // Visible wrapping and asynchronous previews can settle after the
+            // animation. Bound the confirmation just like heading navigation.
+            for step in 1..=animation_steps + 60 {
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(step_ms))
+                    .timer(std::time::Duration::from_millis(16))
                     .await;
-                let done = this
+                let keep = this
                     .update(cx, |this, cx| {
                         if this.scroll_anim_epoch != epoch {
-                            return true;
+                            return false;
                         }
-
-                        let t = step as f32 / total_steps as f32;
-                        let ease = 1.0 - (1.0 - t).powi(3);
-                        this.scroll_offset = start_scroll + (final_scroll - start_scroll) * ease;
-                        this.clamp_scroll();
-                        this.table_cursor_paint_bounds = None;
+                        let keep = this.with_pane_if_alive(pane_id, |editor| {
+                            if editor.active_tab_id != tab_id
+                                || editor.cursor.offset != cursor_offset
+                            {
+                                return false;
+                            }
+                            let measured = (!editor.layout_dirty)
+                                .then(|| editor.cursor_center_scroll_target())
+                                .flatten();
+                            let target = measured
+                                .unwrap_or_else(|| editor.cursor_center_layout_scroll_target());
+                            // Do not animate to the geometry captured before the
+                            // target entered the windowed shaping/preview range.
+                            let progress = if step <= animation_steps {
+                                let t = step as f32 / animation_steps as f32;
+                                1.0 - (1.0 - t).powi(3)
+                            } else {
+                                1.0
+                            };
+                            editor.scroll_offset =
+                                start_scroll + (target - start_scroll) * progress;
+                            editor.clamp_scroll();
+                            editor.table_cursor_paint_bounds = None;
+                            step <= animation_steps
+                                || !confirmation
+                                    .observe(measured, editor.cursor_center_previews_pending())
+                        });
                         cx.notify();
-                        step == total_steps
+                        keep.unwrap_or(false)
                     })
-                    .unwrap_or(true);
-                if done {
-                    return;
+                    .unwrap_or(false);
+                if !keep {
+                    break;
                 }
             }
+            let _ = this.update(cx, |this, _| {
+                if this.outline_navigation_epoch == Some(epoch) {
+                    this.outline_navigation_epoch = None;
+                }
+            });
         })
         .detach();
+    }
+
+    fn prepare_cursor_center_navigation(&mut self) {
+        // Even an unmeasured or subpixel navigation supersedes an older animation
+        // and any scroll restoration captured before this explicit request.
+        // This existing epoch is only a scroll-navigation guard: sharing it
+        // with heading jumps also keeps preview refreshes from cancelling center.
+        begin_cursor_center_epoch(
+            &mut self.scroll_anim_epoch,
+            &mut self.outline_navigation_epoch,
+        );
+        self.pending_preview_reveal = None;
+        self.pending_click_anchor = None;
+        self.pending_typing_scroll_guard = None;
+        self.pending_scroll_to_cursor = false;
+        self.pending_center_cursor_in_view = false;
+        self.pending_center_cursor_in_view_immediately = false;
+        self.center_cursor_confirm_frames = 0;
+    }
+
+    fn cursor_center_layout_scroll_target(&self) -> f32 {
+        let cursor_line = self.cursor_line();
+        // Rendered tables are shaped at their header, not at a hidden data row.
+        let line = self
+            .decorations
+            .get(cursor_line)
+            .and_then(|decoration| decoration.table_info.as_ref())
+            .filter(|table| !table.is_front_matter)
+            .map_or(cursor_line, |table| table.table_start_line);
+        let block = self
+            .decorations
+            .get(line)
+            .map_or(&BlockType::Normal, |decoration| &decoration.block_type);
+        let measured = (!self.layout_dirty)
+            .then(|| self.cursor_vertical_bounds())
+            .flatten();
+        cursor_center_layout_target(
+            measured,
+            self.text_y_offset_for_line(line),
+            self.line_height_for_block(block),
+            self.editor_visible_height(),
+        )
+    }
+
+    fn cursor_center_previews_pending(&self) -> bool {
+        if self.generated_preview_rerender_pending || self.generated_preview_rerender_task.is_some()
+        {
+            return true;
+        }
+        let (start, end) = self.generated_preview_priority_line_range();
+        self.decorations
+            .get(start..=end)
+            .is_some_and(|decorations| {
+                decorations.iter().enumerate().any(|(index, decoration)| {
+                    decoration.block_preview.as_ref().is_some_and(|preview| {
+                        !self.image_cache.contains_key(&preview.cache_key)
+                            || !self
+                                .generated_preview_svg_cache
+                                .contains_key(&preview.cache_key)
+                    }) || decoration.inline_math_spans.iter().any(|range| {
+                        self.buffer
+                            .line_content(start + index)
+                            .get(range.clone())
+                            .is_some_and(|source| {
+                                let key = helpers::inline_math_cache_key(source);
+                                !self.image_cache.contains_key(&key)
+                                    || !self.generated_preview_svg_cache.contains_key(&key)
+                            })
+                    })
+                })
+            })
     }
 
     pub(crate) fn center_cursor_in_view(&mut self, cx: &mut Context<Self>) {
         if self.embedded_editor && self.embedded_read_only {
             self.embedded_stick_to_bottom = false;
         }
-        if self.layout_dirty {
-            self.pending_center_cursor_in_view = true;
-            self.pending_scroll_to_cursor = false;
-            return;
-        }
-
-        let Some(target_scroll) = self.cursor_center_scroll_target() else {
-            self.pending_center_cursor_in_view = true;
-            return;
-        };
-        self.pending_center_cursor_in_view = false;
-        self.pending_scroll_to_cursor = false;
-        self.animate_scroll_to(target_scroll, cx);
+        self.prepare_cursor_center_navigation();
+        let measured = (!self.layout_dirty)
+            .then(|| self.cursor_center_scroll_target())
+            .flatten();
+        // Windowed prepaint cannot measure an offscreen target until its
+        // estimated source position enters the viewport. Bootstrap immediately
+        // instead of waiting on a cache that the old viewport can never fill.
+        let target = self.cursor_center_layout_scroll_target();
+        self.start_cursor_center_navigation(target, measured.is_some(), cx);
     }
 
     pub(crate) fn center_cursor_in_view_immediately(&mut self, cx: &mut Context<Self>) {
         if self.embedded_editor && self.embedded_read_only {
             self.embedded_stick_to_bottom = false;
         }
-        if self.layout_dirty {
-            self.pending_center_cursor_in_view = true;
-            self.pending_center_cursor_in_view_immediately = true;
-            self.pending_scroll_to_cursor = false;
-            return;
-        }
-
-        let Some(target_scroll) = self.cursor_center_scroll_target() else {
-            self.pending_center_cursor_in_view = true;
-            self.pending_center_cursor_in_view_immediately = true;
-            return;
-        };
-        self.pending_center_cursor_in_view = false;
-        self.pending_scroll_to_cursor = false;
-        self.scroll_offset = target_scroll;
-        self.clamp_scroll();
-        self.table_cursor_paint_bounds = None;
-        // Line geometry can still shift while wrap layout and generated
-        // previews settle after a fresh tab activation; re-affirm the
-        // centered target for a couple of frames.
-        self.center_cursor_confirm_frames = self.center_cursor_confirm_frames.max(2);
-        cx.notify();
+        self.prepare_cursor_center_navigation();
+        let target = self.cursor_center_layout_scroll_target();
+        self.start_cursor_center_navigation(target, false, cx);
     }
 
     pub(crate) fn cursor_center_scroll_target(&self) -> Option<f32> {
@@ -1153,10 +1461,118 @@ impl EditorView {
         self.buffer.line_start(line) + buffer_col
     }
 
+    fn front_matter_navigation_origin(
+        &self,
+        offset: usize,
+    ) -> (usize, usize, Vec<helpers::FrontMatterGroupPlan>) {
+        let (line, _) = self.buffer.offset_to_line_col(offset);
+        let plans = self.front_matter_group_plan();
+        let visible = if self.front_matter_navigation_skips_line(line) {
+            let end = self.decorations[line]
+                .table_info
+                .as_ref()
+                .unwrap()
+                .table_end_line;
+            if line == 0 {
+                (1..end - 1).find(|&row| !self.front_matter_presentation_line_is_hidden(row))
+            } else {
+                (1..end - 1)
+                    .rev()
+                    .find(|&row| !self.front_matter_presentation_line_is_hidden(row))
+            }
+            .unwrap_or(line)
+        } else {
+            front_matter_visible_navigation_line(
+                &plans,
+                line,
+                self.markdown_syntax_expansion_allowed(),
+            )
+        };
+        if visible != line {
+            return (
+                visible,
+                front_matter_value_endpoint(&self.buffer, &self.decorations, visible, true),
+                plans,
+            );
+        }
+        (line, offset, plans)
+    }
+
+    fn front_matter_vertical_neighbor(
+        &self,
+        plans: &[helpers::FrontMatterGroupPlan],
+        line: usize,
+        downward: bool,
+    ) -> Option<FrontMatterVerticalTarget> {
+        if let Some(range) = self.collapsed_front_matter_range() {
+            if downward && line < range.end && line + 1 >= range.start {
+                return (range.end < self.buffer.line_count()).then_some(
+                    FrontMatterVerticalTarget::Source(self.buffer.line_start(range.end)),
+                );
+            }
+            if !downward && line > 0 && range.contains(&(line - 1)) {
+                return Some(FrontMatterVerticalTarget::Source(
+                    self.buffer.line_end(range.start - 1),
+                ));
+            }
+        }
+        front_matter_vertical_neighbor(
+            &self.buffer,
+            &self.decorations,
+            plans,
+            line,
+            downward,
+            self.markdown_syntax_expansion_allowed(),
+            self.front_matter_delimiters_are_visible(),
+            |line| {
+                self.line_display_info
+                    .get(line)
+                    .and_then(|info| info.as_ref())
+                    .map(|info| info.visual_line_count)
+            },
+        )
+    }
+
+    fn front_matter_unmeasured_vertical_offset(
+        &self,
+        plans: &[helpers::FrontMatterGroupPlan],
+        line: usize,
+        downward: bool,
+    ) -> Option<usize> {
+        self.front_matter_vertical_neighbor(plans, line, downward)
+            .map(|target| match target {
+                FrontMatterVerticalTarget::Source(offset) => offset,
+                FrontMatterVerticalTarget::Line(line) => {
+                    front_matter_value_endpoint(&self.buffer, &self.decorations, line, downward)
+                }
+            })
+    }
+
     pub(crate) fn offset_for_visual_up(&self, current_offset: usize) -> Option<usize> {
-        let (line, col) = self.buffer.offset_to_line_col(current_offset);
-        let info = self.line_display_info.get(line)?.as_ref()?;
-        let _disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
+        if let Some(range) = self.collapsed_front_matter_range()
+            && self.buffer.offset_to_line_col(current_offset).0 < range.end
+        {
+            return Some(self.buffer.line_start(range.start - 1));
+        }
+        let (line, current_offset, plans) = self.front_matter_navigation_origin(current_offset);
+        let info = self
+            .line_display_info
+            .get(line)
+            .and_then(|info| info.as_ref())
+            .filter(|info| info.visual_line_count > 0);
+        if info.is_none()
+            && self
+                .decorations
+                .get(line)
+                .and_then(|d| d.table_info.as_ref())
+                .is_some_and(|table| table.is_front_matter)
+        {
+            return Some(
+                self.front_matter_unmeasured_vertical_offset(&plans, line, false)
+                    .unwrap_or(current_offset),
+            );
+        }
+        let info = info?;
         let (cur_visual, current_x) = self.cursor_visual_position(current_offset)?;
         let goal_x = self.vertical_move_goal_x.unwrap_or(current_x);
 
@@ -1188,7 +1604,18 @@ impl EditorView {
             };
             Some(self.disp_to_buffer_offset(info, line, new_disp))
         } else if line > 0 {
-            let prev_info = self.line_display_info.get(line - 1)?.as_ref()?;
+            let Some(previous) = self.front_matter_vertical_neighbor(&plans, line, false) else {
+                return Some(current_offset);
+            };
+            let previous_line = match previous {
+                FrontMatterVerticalTarget::Source(offset) => return Some(offset),
+                FrontMatterVerticalTarget::Line(line) => line,
+            };
+            let prev_info = self
+                .line_display_info
+                .get(previous_line)?
+                .as_ref()?
+                .as_ref();
             let last_visual = Self::actual_visual_line_count(prev_info).saturating_sub(1);
             let target_y = prev_info
                 .wrapped_line
@@ -1214,16 +1641,41 @@ impl EditorView {
                     Ok(idx) | Err(idx) => idx,
                 }
             };
-            Some(self.disp_to_buffer_offset(prev_info, line - 1, new_disp))
+            Some(self.disp_to_buffer_offset(prev_info, previous_line, new_disp))
         } else {
             Some(0)
         }
     }
 
     pub(crate) fn offset_for_visual_down(&self, current_offset: usize) -> Option<usize> {
-        let (line, col) = self.buffer.offset_to_line_col(current_offset);
-        let info = self.line_display_info.get(line)?.as_ref()?;
-        let _disp_col = helpers::buffer_to_display_offset(&info.buffer_to_display, col);
+        if let Some(range) = self.collapsed_front_matter_range()
+            && self.buffer.offset_to_line_col(current_offset).0 < range.end
+        {
+            return Some(if range.end < self.buffer.line_count() {
+                self.buffer.line_start(range.end)
+            } else {
+                self.buffer.line_end(range.start - 1)
+            });
+        }
+        let (line, current_offset, plans) = self.front_matter_navigation_origin(current_offset);
+        let info = self
+            .line_display_info
+            .get(line)
+            .and_then(|info| info.as_ref())
+            .filter(|info| info.visual_line_count > 0);
+        if info.is_none()
+            && self
+                .decorations
+                .get(line)
+                .and_then(|d| d.table_info.as_ref())
+                .is_some_and(|table| table.is_front_matter)
+        {
+            return Some(
+                self.front_matter_unmeasured_vertical_offset(&plans, line, true)
+                    .unwrap_or(current_offset),
+            );
+        }
+        let info = info?;
         let (cur_visual, current_x) = self.cursor_visual_position(current_offset)?;
         let goal_x = self.vertical_move_goal_x.unwrap_or(current_x);
 
@@ -1255,7 +1707,12 @@ impl EditorView {
             };
             Some(self.disp_to_buffer_offset(info, line, new_disp))
         } else if line + 1 < self.buffer.line_count() {
-            let next_info = self.line_display_info.get(line + 1)?.as_ref()?;
+            let next = self.front_matter_vertical_neighbor(&plans, line, true)?;
+            let next_line = match next {
+                FrontMatterVerticalTarget::Source(offset) => return Some(offset),
+                FrontMatterVerticalTarget::Line(line) => line,
+            };
+            let next_info = self.line_display_info.get(next_line)?.as_ref()?.as_ref();
             let target_y = next_info
                 .wrapped_line
                 .row_top(0, gpui::px(next_info.line_height))
@@ -1274,7 +1731,7 @@ impl EditorView {
                     Ok(idx) | Err(idx) => idx,
                 }
             };
-            Some(self.disp_to_buffer_offset(next_info, line + 1, new_disp))
+            Some(self.disp_to_buffer_offset(next_info, next_line, new_disp))
         } else {
             Some(self.buffer.len())
         }
@@ -1317,8 +1774,9 @@ impl EditorView {
             self.tabs[index].reading_mode = self.reading_mode;
         }
         if self.reading_mode {
-            self.selected_handle = None;
-            self.table_drag = None;
+            self.reset_table_handles();
+            self.hovering_table_start = None;
+            self.table_border_segment_areas.clear();
             self.code_mode_preview_key = None;
         }
         self.layout_dirty = true;
@@ -1518,6 +1976,270 @@ mod tests {
         caret_vertical_overflow, centered_row_scroll_target, cursor_scroll_viewport,
         cursor_visibility_scroll_delta, last_soft_row_scroll_limit, typing_scroll_should_restore,
     };
+
+    #[test]
+    fn front_matter_vertical_navigation_skips_unfocused_delimiters_without_a_prepaint_cache() {
+        use super::{FrontMatterVerticalTarget as Target, front_matter_vertical_neighbor};
+        let buffer = crate::buffer::Buffer::from_text("---\ntitle: value\n---\nBody");
+        let decorations = crate::markdown::parse_decorations(buffer.text());
+        // A reading-mode caret or an editable body caret must bypass hidden
+        // separators, even if the last frame still measured them as visible.
+        for editable in [false, true] {
+            for stale_cache in [None, Some(0), Some(1)] {
+                let neighbor = |line, downward, visible| {
+                    front_matter_vertical_neighbor(
+                        &buffer,
+                        &decorations,
+                        &[],
+                        line,
+                        downward,
+                        editable,
+                        visible,
+                        |_| stale_cache,
+                    )
+                };
+                let expected = if stale_cache.is_none() || (!editable && stale_cache == Some(0)) {
+                    if !editable && stale_cache == Some(0) {
+                        None
+                    } else {
+                        Some(Target::Source(buffer.line_end(1)))
+                    }
+                } else {
+                    Some(Target::Line(1))
+                };
+                assert_eq!(neighbor(3, false, false), expected);
+                assert_eq!(neighbor(1, true, false), Some(Target::Line(3)));
+                assert_eq!(neighbor(1, false, false), None);
+                if editable && stale_cache == Some(1) {
+                    assert_eq!(neighbor(1, false, true), Some(Target::Line(0)));
+                    assert_eq!(neighbor(1, true, true), Some(Target::Line(2)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn front_matter_vertical_navigation_enters_values_instead_of_hidden_column_zero() {
+        use super::super::helpers::front_matter_group_plan;
+        use super::{FrontMatterVerticalTarget as Target, front_matter_vertical_neighbor};
+        let source = "---\ntags:\n  - 'first'\n  - 二🌸\nnext: scalar\nbody: |-\n  first line\n  second line\n---";
+        let buffer = crate::buffer::Buffer::from_text(source);
+        let decorations = crate::markdown::parse_decorations(source);
+        let plans = front_matter_group_plan(&buffer, &decorations, &[], true);
+        let hidden = |line| Some(if [2, 3, 5].contains(&line) { 0 } else { 1 });
+        let neighbor = |line, downward| {
+            front_matter_vertical_neighbor(
+                &buffer,
+                &decorations,
+                &plans,
+                line,
+                downward,
+                true,
+                true,
+                hidden,
+            )
+        };
+        assert_eq!(
+            neighbor(0, true),
+            Some(Target::Source(plans[0].group.items[0].source_range.start))
+        );
+        assert_eq!(
+            neighbor(1, true),
+            Some(Target::Source(plans[0].group.items[0].source_range.start))
+        );
+        assert_eq!(
+            neighbor(4, false),
+            Some(Target::Source(plans[0].group.items[1].source_range.end))
+        );
+        let body_start = buffer.line_start(6)
+            + decorations[6]
+                .front_matter
+                .as_ref()
+                .unwrap()
+                .value_range
+                .start;
+        assert_eq!(neighbor(4, true), Some(Target::Source(body_start)));
+        // Focus has already changed, but the previous frame still has zero-height item/header caches.
+        let caret = plans[0].group.items[0].source_range.start;
+        let active = front_matter_group_plan(&buffer, &decorations, &[caret..caret], true);
+        assert_eq!(
+            front_matter_vertical_neighbor(
+                &buffer,
+                &decorations,
+                &active,
+                1,
+                true,
+                true,
+                true,
+                hidden
+            ),
+            Some(Target::Source(caret))
+        );
+        let caret = body_start;
+        let active = front_matter_group_plan(&buffer, &decorations, &[caret..caret], true);
+        assert_eq!(
+            front_matter_vertical_neighbor(
+                &buffer,
+                &decorations,
+                &active,
+                6,
+                false,
+                true,
+                true,
+                hidden
+            ),
+            Some(Target::Source(
+                buffer.line_start(5)
+                    + decorations[5]
+                        .front_matter
+                        .as_ref()
+                        .unwrap()
+                        .value_range
+                        .end
+            ))
+        );
+    }
+
+    #[test]
+    fn front_matter_reading_navigation_skips_hidden_rows_and_uses_visible_click_anchor() {
+        use super::super::helpers::front_matter_group_plan;
+        use super::{
+            FrontMatterVerticalTarget as Target, front_matter_vertical_neighbor,
+            front_matter_visible_navigation_line,
+        };
+        let source = "---\ntags:\n  - first\n  - second\nnext: scalar\nbody: |-\n  first line\n  second line\n---";
+        let buffer = crate::buffer::Buffer::from_text(source);
+        let decorations = crate::markdown::parse_decorations(source);
+        let plans = front_matter_group_plan(&buffer, &decorations, &[], false);
+        let hidden = |line| Some(if [2, 3, 5].contains(&line) { 0 } else { 1 });
+        let neighbor = |line, downward| {
+            front_matter_vertical_neighbor(
+                &buffer,
+                &decorations,
+                &plans,
+                line,
+                downward,
+                false,
+                false,
+                hidden,
+            )
+        };
+        assert_eq!(neighbor(1, true), Some(Target::Line(4)));
+        assert_eq!(neighbor(4, false), Some(Target::Line(1)));
+        assert_eq!(neighbor(4, true), Some(Target::Line(6)));
+        assert_eq!(neighbor(6, false), Some(Target::Line(4)));
+        assert_eq!(front_matter_visible_navigation_line(&plans, 3, false), 1);
+        assert_eq!(front_matter_visible_navigation_line(&plans, 5, false), 6);
+        assert_eq!(front_matter_visible_navigation_line(&plans, 3, true), 3);
+        assert_eq!(buffer.text(), source);
+    }
+
+    #[test]
+    fn cursor_center_bootstraps_unmeasured_target_then_uses_measured_match_row() {
+        use super::cursor_center_layout_target;
+        let viewport = 600.0;
+        let estimate = cursor_center_layout_target(None, 10_000.0, 24.0, viewport);
+        assert_eq!(estimate, 9_712.0);
+        assert!(estimate <= 10_000.0 && 10_024.0 <= estimate + viewport);
+
+        // The match is on a later soft row after syntax expansion / tall math,
+        // not at the source line's initial estimated top.
+        let measured =
+            cursor_center_layout_target(Some((10_084.0, 10_144.0)), 10_000.0, 24.0, viewport);
+        assert_eq!(measured, 9_814.0);
+        assert_eq!((10_084.0 + 10_144.0) * 0.5 - measured, viewport * 0.5);
+    }
+
+    #[test]
+    fn cursor_center_wrap_match_uses_cumulative_row_top_and_its_own_height() {
+        use super::cursor_center_layout_target;
+        let wrapped = super::super::input_wrap::test_wrapped_line(&[24.0, 60.0, 24.0]);
+        for (offset, expected_top, expected_bottom) in
+            [(1, 100.0, 124.0), (3, 124.0, 184.0), (5, 184.0, 208.0)]
+        {
+            let pos = super::EditorView::visual_position_for_wrapped_display(
+                &wrapped,
+                &wrapped.text,
+                offset,
+                24.0,
+                0.0,
+                &std::collections::HashMap::new(),
+                None,
+            )
+            .unwrap();
+            let row = wrapped.row_for_y(pos.y, gpui::px(24.0));
+            let top = 100.0 + f32::from(wrapped.row_top(row, gpui::px(24.0)));
+            let bottom = top + f32::from(wrapped.row_height(row, gpui::px(24.0)));
+            assert_eq!((top, bottom), (expected_top, expected_bottom));
+            let target = cursor_center_layout_target(Some((top, bottom)), 100.0, 24.0, 80.0);
+            assert_eq!((top + bottom) * 0.5 - target, 40.0);
+        }
+    }
+
+    #[test]
+    fn cursor_center_confirmation_waits_for_measured_geometry_and_preview_refresh() {
+        let mut confirmation = super::CursorCenterConfirmation::default();
+        for _ in 0..5 {
+            assert!(!confirmation.observe(None, false));
+        }
+        assert!(!confirmation.observe(Some(100.0), true));
+        for _ in 0..5 {
+            assert!(!confirmation.observe(Some(100.0), true));
+        }
+        assert!(!confirmation.observe(Some(100.0), false));
+        assert!(confirmation.observe(Some(100.0), false));
+    }
+
+    #[test]
+    fn cursor_center_confirmation_restarts_when_layout_or_target_changes() {
+        let mut confirmation = super::CursorCenterConfirmation::default();
+        assert!(!confirmation.observe(Some(100.0), false));
+        assert!(!confirmation.observe(Some(100.0), false));
+        assert!(!confirmation.observe(Some(160.0), false));
+        assert!(!confirmation.observe(Some(160.0), false));
+        assert!(!confirmation.observe(None, false));
+        assert!(!confirmation.observe(Some(160.0), false));
+        assert!(!confirmation.observe(Some(160.0), false));
+        assert!(confirmation.observe(Some(160.0), false));
+    }
+
+    #[test]
+    fn cursor_center_epoch_protects_preview_refresh_but_not_newer_navigation() {
+        use super::super::outline::outline_navigation_in_progress;
+        let mut epoch = 4;
+        let mut navigation = Some(epoch);
+        super::begin_cursor_center_epoch(&mut epoch, &mut navigation);
+        assert_eq!((epoch, navigation), (5, Some(5)));
+        assert!(outline_navigation_in_progress(navigation, epoch));
+        assert!(!outline_navigation_in_progress(Some(4), epoch));
+        // A second request supersedes the first even if its scroll delta is
+        // subpixel or its layout has not been measured yet.
+        super::begin_cursor_center_epoch(&mut epoch, &mut navigation);
+        assert!(!outline_navigation_in_progress(Some(5), epoch));
+        assert!(outline_navigation_in_progress(navigation, epoch));
+        // Wheel scrolling increments the same epoch without renewing the guard.
+        epoch = epoch.wrapping_add(1);
+        assert!(!outline_navigation_in_progress(navigation, epoch));
+    }
+
+    #[test]
+    fn cursor_center_epoch_wraps_without_reusing_the_previous_navigation() {
+        use super::super::outline::outline_navigation_in_progress;
+        let mut epoch = usize::MAX;
+        let mut navigation = Some(epoch);
+        super::begin_cursor_center_epoch(&mut epoch, &mut navigation);
+        assert_eq!((epoch, navigation), (0, Some(0)));
+        assert!(outline_navigation_in_progress(navigation, epoch));
+        assert!(!outline_navigation_in_progress(Some(usize::MAX), epoch));
+    }
+
+    #[test]
+    fn cursor_center_confirmation_accepts_subpixel_layout_noise() {
+        let mut confirmation = super::CursorCenterConfirmation::default();
+        assert!(!confirmation.observe(Some(100.0), false));
+        assert!(!confirmation.observe(Some(100.25), false));
+        assert!(confirmation.observe(Some(100.0), false));
+    }
 
     #[test]
     fn oversized_row_reveal_converges_without_top_bottom_oscillation() {

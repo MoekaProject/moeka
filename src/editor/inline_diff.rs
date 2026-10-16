@@ -13,7 +13,7 @@ use std::time::Duration;
 use gpui::{Context, Pixels, Point, point, px};
 use similar::{Algorithm, DiffOp, TextDiff};
 
-use super::info_panel::{build_inline_change_text_and_highlights, git_show_file_at_revision};
+use super::info_panel::build_inline_change_text_and_highlights;
 use super::*;
 
 /// Accumulates the rows of one contiguous run of changed diff ops into a hunk.
@@ -557,7 +557,11 @@ impl EditorView {
     /// Consumes a pending inline-diff recompute request. Called from `render`,
     /// which provides the `Context` needed to spawn the background work.
     pub(crate) fn process_pending_inline_diff(&mut self, cx: &mut Context<Self>) {
-        if !self.inline_diff_dirty {
+        if !self.inline_diff_dirty
+            || self.current_file_path.as_ref().is_some_and(|path| {
+                file_watch::operation_suppressed("Refresh inline Git diff", path)
+            })
+        {
             return;
         }
         self.inline_diff_dirty = false;
@@ -627,29 +631,63 @@ impl EditorView {
                 return;
             }
 
-            let computed = cx
-                .background_executor()
-                .spawn(async move {
+            let read_path = path.clone();
+            let computed =
+                crate::platform::fs_task::run("Refresh inline Git diff", path.clone(), move || {
                     let base_text = match cached_base {
                         Some(text) => text,
                         None => {
-                            let context = git_repo_context_for_file(&path)?;
-                            git_show_file_at_revision(
-                                &context.repo_root,
-                                "HEAD",
-                                &context.relative_path,
-                            )
+                            let Some(parent) = read_path.parent() else {
+                                return Ok(None);
+                            };
+                            let Some(root) =
+                                git_repo_root_result(parent).map_err(std::io::Error::other)?
+                            else {
+                                return Ok(None);
+                            };
+                            let relative = read_path
+                                .strip_prefix(&root)
+                                .map_err(std::io::Error::other)?
+                                .to_string_lossy()
+                                .replace('\\', "/");
+                            let object = format!("HEAD:{relative}");
+                            match run_git_raw(&root, &["show", &object]) {
+                                Ok(text) => text,
+                                Err(error)
+                                    if error.contains("does not exist in 'HEAD'")
+                                        || error.contains("exists on disk, but not in 'HEAD'")
+                                        || error.contains("invalid object name 'HEAD'") =>
+                                {
+                                    String::new()
+                                }
+                                Err(error) => return Err(std::io::Error::other(error)),
+                            }
                         }
                     };
-                    Some(compute_inline_diff_state(
+                    crate::platform::fs_task::check_deadline()?;
+                    Ok(Some(compute_inline_diff_state(
                         &base_text,
                         &target_text,
                         &file_kind,
-                    ))
+                    )))
                 })
                 .await;
 
             let _ = this.update(cx, |this, cx| {
+                if this.current_file_path.as_ref() != Some(&path) {
+                    return;
+                }
+                let computed = match computed {
+                    Ok(computed) => computed,
+                    Err(error) => {
+                        // A filesystem failure applies even if another edit has
+                        // superseded this computation while its read was stuck.
+                        this.inline_diff_dirty = true;
+                        this.inline_diff_base_dirty |= need_base;
+                        this.notify_fs_error("Refresh inline Git diff", &path, &error, cx);
+                        return;
+                    }
+                };
                 if this.inline_diff_epoch != epoch {
                     return;
                 }

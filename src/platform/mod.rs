@@ -8,6 +8,7 @@ pub(crate) mod capabilities;
 pub(crate) mod clipboard;
 pub(crate) mod dialog;
 pub(crate) mod fonts;
+pub(crate) mod fs_task;
 pub(crate) mod keys;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;

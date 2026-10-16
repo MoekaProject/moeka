@@ -275,12 +275,18 @@ impl EditorView {
 
     pub(crate) fn run_quick_open_search(&mut self, cx: &mut Context<Self>) {
         let root = self.sidebar_root.clone();
-        if !root.exists() {
+        if root.as_os_str().is_empty() {
             self.quick_open_results.clear();
             self.quick_open_selected_index = 0;
             self.quick_open_task = None;
+            self.quick_open_epoch = self.quick_open_epoch.wrapping_add(1);
             self.quick_open_render_limit = super::list_viewport::SEARCH_LIST_POLICY.initial_count;
             cx.notify();
+            return;
+        }
+        // Keep the outstanding request alive until it reports a timeout/result;
+        // replacing its task cannot cancel a blocked kernel read.
+        if self.quick_open_task.is_some() || file_watch::operation_suppressed("Find files", &root) {
             return;
         }
 
@@ -292,32 +298,52 @@ impl EditorView {
         let task = cx.spawn(async move |this, cx| {
             let background_root = root.clone();
             let background_query = query.clone();
-            let (paths, results) = cx
-                .background_executor()
-                .spawn(async move {
-                    let paths = cached_paths.unwrap_or_else(|| {
+            let outcome = crate::platform::fs_task::run("Find files", root.clone(), move || {
+                let paths = match cached_paths {
+                    Some(paths) => paths,
+                    None => {
                         let mut paths = Vec::new();
-                        collect_openable_files(&background_root, &mut paths);
+                        collect_openable_files(&background_root, &mut paths)?;
                         paths
-                    });
-                    let results = collect_quick_open_results_from_paths(
-                        &background_root,
-                        &background_query,
-                        &paths,
-                    );
-                    (paths, results)
-                })
-                .await;
+                    }
+                };
+                let results = collect_quick_open_results_from_paths(
+                    &background_root,
+                    &background_query,
+                    &paths,
+                );
+                crate::platform::fs_task::check_deadline()?;
+                Ok((paths, results))
+            })
+            .await;
 
             this.update(cx, |this, cx| {
-                if this.quick_open_epoch != epoch || this.quick_open_query != query {
+                if this.quick_open_epoch != epoch {
                     return;
                 }
+                this.quick_open_task = None;
+                if !this.quick_open_visible {
+                    return;
+                }
+                if this.sidebar_root != root {
+                    this.run_quick_open_search(cx);
+                    return;
+                }
+                let (paths, results) = match outcome {
+                    Ok(results) => results,
+                    Err(error) => {
+                        this.notify_fs_error("Find files", &root, error, cx);
+                        return;
+                    }
+                };
                 this.quick_open_file_index = paths;
                 this.quick_open_index_root = Some(root);
+                if this.quick_open_query != query {
+                    this.run_quick_open_search(cx);
+                    return;
+                }
                 this.quick_open_results = results;
                 this.quick_open_selected_index = 0;
-                this.quick_open_task = None;
                 this.quick_open_render_limit =
                     super::list_viewport::SEARCH_LIST_POLICY.initial_count;
                 this.quick_open_scroll_handle.scroll_to_item(0);
@@ -549,7 +575,7 @@ impl EditorView {
 
 fn collect_quick_open_results(root: &Path, query: &str) -> Vec<QuickOpenResult> {
     let mut paths = Vec::new();
-    collect_openable_files(root, &mut paths);
+    let _ = collect_openable_files(root, &mut paths);
     collect_quick_open_results_from_paths(root, query, &paths)
 }
 
@@ -560,6 +586,9 @@ fn collect_quick_open_results_from_paths(
 ) -> Vec<QuickOpenResult> {
     let mut results = Vec::new();
     for path in paths.iter().cloned() {
+        if crate::platform::fs_task::check_deadline().is_err() {
+            break;
+        }
         let file_name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -652,9 +681,15 @@ fn collect_recent_openable_files(
     };
 
     for entry in entries.flatten() {
+        if crate::platform::fs_task::check_deadline().is_err() {
+            return;
+        }
         let path = entry.path();
-        let is_dir = path.is_dir();
-        if should_skip_path(&path, is_dir) {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let is_dir = kind.is_dir();
+        if kind.is_symlink() || should_skip_path(&path, is_dir) {
             continue;
         }
         if is_dir {
@@ -699,23 +734,32 @@ fn collect_recent_openable_files(
     }
 }
 
-fn collect_openable_files(dir: &Path, results: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_dir = path.is_dir();
-        if should_skip_path(&path, is_dir) {
-            continue;
-        }
-        if is_dir {
-            collect_openable_files(&path, results);
-        } else {
-            results.push(path);
+fn collect_openable_files(dir: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        crate::platform::fs_task::check_deadline()?;
+        let contextual = |error: std::io::Error| {
+            std::io::Error::new(error.kind(), format!("List {}: {error}", dir.display()))
+        };
+        for entry in std::fs::read_dir(&dir).map_err(contextual)? {
+            crate::platform::fs_task::check_deadline()?;
+            let entry = entry.map_err(contextual)?;
+            let path = entry.path();
+            let kind = entry.file_type().map_err(|error| {
+                std::io::Error::new(error.kind(), format!("Inspect {}: {error}", path.display()))
+            })?;
+            // Do not follow directory aliases into cycles or unrelated mounts.
+            if kind.is_symlink() || should_skip_path(&path, kind.is_dir()) {
+                continue;
+            }
+            if kind.is_dir() {
+                pending.push(path);
+            } else if kind.is_file() {
+                results.push(path);
+            }
         }
     }
+    Ok(())
 }
 
 fn fuzzy_match(text: &str, query: &str) -> Option<(i64, Vec<usize>)> {
@@ -928,4 +972,29 @@ pub(crate) fn render_highlighted_text(
         );
     }
     row.into_any_element()
+}
+
+#[cfg(test)]
+mod filesystem_tests {
+    use super::*;
+
+    #[test]
+    fn missing_directory_is_an_error_not_a_cached_empty_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        let error =
+            collect_openable_files(&directory.path().join("missing"), &mut paths).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_cycles_are_not_followed() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.md"), "text").unwrap();
+        std::os::unix::fs::symlink(directory.path(), directory.path().join("cycle")).unwrap();
+        let mut paths = Vec::new();
+        collect_openable_files(directory.path(), &mut paths).unwrap();
+        assert_eq!(paths, vec![directory.path().join("note.md")]);
+    }
 }

@@ -183,6 +183,7 @@ impl Cursor {
         self.select_to(offset, buffer);
     }
 
+    #[cfg(test)]
     pub fn delete_word_left(&mut self, buffer: &mut Buffer) {
         if self.has_selection() {
             let range = self.selection_range();
@@ -195,6 +196,7 @@ impl Cursor {
         }
     }
 
+    #[cfg(test)]
     pub fn delete_word_right(&mut self, buffer: &mut Buffer) {
         if self.has_selection() {
             let range = self.selection_range();

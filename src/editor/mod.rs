@@ -14,6 +14,11 @@ mod file_list;
 pub(crate) mod file_ops;
 mod file_watch;
 mod fold;
+mod front_matter;
+mod front_matter_backspace;
+mod front_matter_enter;
+mod front_matter_groups;
+mod front_matter_layout;
 mod git_ops;
 mod git_panel;
 mod handlers;
@@ -32,6 +37,7 @@ mod language_picker;
 mod line_drag;
 mod list_viewport;
 mod menus;
+mod navigation_io;
 mod notifications;
 mod outline;
 mod pane;
@@ -57,6 +63,11 @@ mod sidebar_state;
 mod sidebar_tree;
 mod sidebar_ui;
 mod status_bar;
+mod table_cell_edit;
+mod table_cell_interaction;
+mod table_cell_list_edit;
+mod table_cell_render;
+mod table_column_widths;
 mod table_handles;
 mod table_source;
 mod tabs;
@@ -332,6 +343,7 @@ fn is_image_path(path: &Path) -> bool {
         })
 }
 
+#[cfg(test)]
 fn unique_import_path(directory: &Path, stem: &str, extension: Option<&str>) -> PathBuf {
     let normalized_extension = extension
         .map(str::trim)
@@ -419,6 +431,12 @@ pub(crate) enum ContextMenuKind {
     Format,
     FormatHeading,
     FormatMore,
+    FrontMatterType {
+        line: usize,
+        pane_id: PaneId,
+        tab_id: Option<String>,
+        source: Arc<str>,
+    },
     TableResize {
         table_start_line: usize,
     },
@@ -446,6 +464,21 @@ pub(crate) enum ContextMenuKind {
         tab_id: String,
     },
     TerminalTabCreate,
+}
+
+fn front_matter_type_icon(ty: front_matter::FrontMatterType) -> &'static str {
+    use front_matter::FrontMatterType::*;
+    match ty {
+        Text | MultilineText | Empty => "assets/icons/format/front-matter-text.svg",
+        Checkbox => FMT_TODO_SVG,
+        Date => FMT_DATE_TIME_SVG,
+        DateTime => GIT_HISTORY_SVG_PATH,
+        List => FMT_LIST_SVG,
+        Number => "assets/icons/format/front-matter-number.svg",
+
+        Object => TABLE_GRID_SVG,
+        Raw => FMT_CODE_SVG,
+    }
 }
 
 #[derive(Clone)]
@@ -1019,6 +1052,26 @@ pub(crate) fn new_lazy_markdown_decorations(
     )
 }
 
+// Delimiter discovery only: the Markdown parser still validates the YAML mapping.
+fn leading_front_matter_line_range(buffer: &Buffer) -> Option<Range<usize>> {
+    let compact = match buffer.line_content(0).trim_start_matches('\u{feff}').trim() {
+        "---" => false,
+        "-" => true,
+        _ => return None,
+    };
+    let end = (1..buffer.line_count())
+        .find(|&line| {
+            let source = buffer.line_content(line).trim_end();
+            if compact {
+                source == "-"
+            } else {
+                matches!(source, "---" | "...")
+            }
+        })
+        .map_or(buffer.line_count(), |closing| closing + 1);
+    Some(0..end)
+}
+
 pub(crate) fn parse_lazy_markdown_range(
     buffer: &Buffer,
     decorations: &mut [LineDecoration],
@@ -1034,6 +1087,20 @@ pub(crate) fn parse_lazy_markdown_range(
     let end = range.end.max(start + 1).min(line_count);
     let first_chunk = start / LARGE_MARKDOWN_CHUNK_LINES;
     let last_chunk = (end - 1) / LARGE_MARKDOWN_CHUNK_LINES;
+    if (first_chunk..=last_chunk).all(|chunk| lazy.is_parsed(chunk)) {
+        return None;
+    }
+    // Discover once per request, not once per chunk; internal blanks are not
+    // parse boundaries for YAML scalars, sequences or nested mappings.
+    let old_front_matter_end = decorations
+        .first()
+        .and_then(|decoration| decoration.table_info.as_ref())
+        .filter(|table| table.is_front_matter)
+        .map_or(0, |table| table.table_end_line.min(line_count));
+    let front_matter_end = leading_front_matter_line_range(buffer)
+        .map_or(old_front_matter_end, |span| {
+            span.end.max(old_front_matter_end)
+        });
     let mut changed_range: Option<Range<usize>> = None;
     if lazy.fenced_code_spans.is_none() {
         lazy.fenced_code_spans = Some(markdown::fenced_code_block_line_ranges(buffer.text()));
@@ -1075,6 +1142,11 @@ pub(crate) fn parse_lazy_markdown_range(
             }
         }
 
+        if parse_start < front_matter_end {
+            parse_start = 0;
+            parse_end = parse_end.max(front_matter_end);
+        }
+
         let byte_start = buffer.line_start(parse_start);
         let byte_end = if parse_end < line_count {
             buffer.line_start(parse_end)
@@ -1086,6 +1158,9 @@ pub(crate) fn parse_lazy_markdown_range(
         } else {
             markdown::parse_decorations_fragment(&buffer.text()[byte_start..byte_end])
         };
+        if parse_start == 0 {
+            fold::decorate_empty_front_matter(buffer, &mut parsed);
+        }
         let expected_len = parse_end - parse_start;
         parsed.truncate(expected_len);
         parsed.resize_with(expected_len, LineDecoration::default);
@@ -1094,6 +1169,16 @@ pub(crate) fn parse_lazy_markdown_range(
         }
         decorations[parse_start..parse_end].clone_from_slice(&parsed);
         lazy.mark_parsed(chunk);
+        // Whole-block expansion can fully cover other chunks. Mark them too so
+        // a long frontmatter block is not reparsed for every requested chunk.
+        let complete_end = if parse_end == line_count {
+            line_count.div_ceil(LARGE_MARKDOWN_CHUNK_LINES)
+        } else {
+            parse_end / LARGE_MARKDOWN_CHUNK_LINES
+        };
+        for covered in parse_start.div_ceil(LARGE_MARKDOWN_CHUNK_LINES)..complete_end {
+            lazy.mark_parsed(covered);
+        }
         changed_range = Some(match changed_range {
             Some(changed) => changed.start.min(parse_start)..changed.end.max(parse_end),
             None => parse_start..parse_end,
@@ -1129,6 +1214,85 @@ fn apply_offset_delta(offset: usize, delta: isize) -> usize {
         offset.saturating_add(delta as usize)
     } else {
         offset.saturating_sub((-delta) as usize)
+    }
+}
+
+fn table_separator_skip_offset(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    offset: usize,
+    downward: bool,
+) -> Option<usize> {
+    let (line, col) = buffer.offset_to_line_col(offset);
+    let table = decorations.get(line)?.table_info.as_ref()?;
+    if !table.is_separator || table.is_front_matter {
+        return None;
+    }
+    let target = if downward {
+        (line + 1 < buffer.line_count()).then_some(line + 1)?
+    } else {
+        line.checked_sub(1)?
+    };
+    Some(buffer.line_start(target) + col.min(buffer.line_content(target).len()))
+}
+
+fn front_matter_boolean_edit(
+    buffer: &Buffer,
+    decoration: &LineDecoration,
+    line: usize,
+) -> Option<(Range<usize>, &'static str)> {
+    let info = decoration.front_matter.as_ref()?;
+    if !matches!(
+        info.value,
+        crate::front_matter::FrontMatterValue::Boolean(_)
+    ) {
+        return None;
+    }
+    let token = buffer.line_content(line).get(info.value_range.clone())?;
+    let replacement = front_matter::toggled_yaml_boolean(token)?;
+    let start = buffer.line_start(line);
+    Some((
+        start + info.value_range.start..start + info.value_range.end,
+        replacement,
+    ))
+}
+
+fn offset_after_source_replacement(
+    offset: usize,
+    replaced: &Range<usize>,
+    inserted_len: usize,
+) -> usize {
+    if offset <= replaced.start {
+        offset
+    } else if offset >= replaced.end {
+        offset - (replaced.end - replaced.start) + inserted_len
+    } else {
+        replaced.start + (offset - replaced.start).min(inserted_len)
+    }
+}
+
+fn remap_source_edit_positions(
+    cursor: &mut Cursor,
+    extra_cursors: &mut [Cursor],
+    marked_range: &mut Option<Range<usize>>,
+    extra_marked_ranges: &mut [Range<usize>],
+    affinity: &mut Option<WrapBoundaryAffinity>,
+    replaced: &Range<usize>,
+    inserted_len: usize,
+) {
+    let adjust = |offset| offset_after_source_replacement(offset, replaced, inserted_len);
+    for cursor in std::iter::once(cursor).chain(extra_cursors.iter_mut()) {
+        cursor.offset = adjust(cursor.offset);
+        cursor.anchor = adjust(cursor.anchor);
+    }
+    for range in marked_range
+        .iter_mut()
+        .chain(extra_marked_ranges.iter_mut())
+    {
+        *range = adjust(range.start)..adjust(range.end);
+    }
+    if let Some(affinity) = affinity.as_mut() {
+        affinity.offset = adjust(affinity.offset);
     }
 }
 
@@ -1238,6 +1402,20 @@ fn compute_incremental_markdown_decorations(
     // window now spans essentially the whole document.
     if win_start == 0 && win_end == new_line_count {
         return Err("window_spans_document");
+    }
+
+    if old_decorations
+        .first()
+        .and_then(|decoration| decoration.table_info.as_ref())
+        .is_some_and(|table| table.is_front_matter && win_start < table.table_end_line)
+        || leading_front_matter_line_range(buffer).is_some_and(|span| win_start < span.end)
+        || (win_start == 0
+            && matches!(
+                buffer.line_content(0).trim_start_matches('\u{feff}').trim(),
+                "---" | "-"
+            ))
+    {
+        return Err("window_touches_front_matter");
     }
 
     let window_len = win_end - win_start;
@@ -1902,6 +2080,15 @@ impl SparseLineGeometry {
         }
     }
 
+    fn clear_range_preserving_fold(&mut self, range: Range<usize>, hidden: Option<Range<usize>>) {
+        self.clear_range(range.clone());
+        if let Some(hidden) = hidden {
+            for line in range.start.max(hidden.start)..range.end.min(hidden.end) {
+                self.set_measured_height(line, 0.0);
+            }
+        }
+    }
+
     fn splice_lines(
         &mut self,
         start_line: usize,
@@ -2108,7 +2295,17 @@ pub struct EditorView {
     pub(crate) marked_range: Option<Range<usize>>,
     pub(crate) extra_marked_ranges: Vec<Range<usize>>,
     pub(crate) ime_composition_snapshot: Option<EditorSnapshot>,
+    pub(crate) fold_ime_cancellation: input_entity::FoldImeCancellation,
     pub(crate) checkbox_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
+    pub(crate) front_matter_type_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
+    pub(crate) front_matter_text_areas: Vec<input::FrontMatterTextHit>,
+    pub(crate) front_matter_delete_areas: Vec<(gpui::Bounds<Pixels>, usize, usize)>,
+    pub(crate) front_matter_list_scroll_areas: Vec<(gpui::Bounds<Pixels>, usize, f32)>,
+    pub(crate) front_matter_list_scroll_offsets: HashMap<usize, f32>,
+    pub(crate) front_matter_group_focus: Vec<(Range<usize>, bool, bool)>,
+    pub(crate) front_matter_group_geometry_dirty: bool,
+    pub(crate) front_matter_columns: Option<front_matter_layout::Columns>,
+
     pub(crate) hovering_checkbox: bool,
     pub(crate) hovering_checkbox_line: Option<usize>,
     pub(crate) image_click_areas: Vec<(gpui::Bounds<Pixels>, usize)>,
@@ -2353,6 +2550,7 @@ pub struct EditorView {
     pub(crate) dialog: Option<Dialog>,
     pub(crate) notifications: Vec<notifications::Notification>,
     pub(crate) next_notification_id: usize,
+    pub(crate) session_restore: session_store::SessionRestoreState,
     pub(crate) pending_close_tab_ids: Vec<String>,
     pub(crate) close_tab_return_to: Option<String>,
     /// 多选：最后一个选中的 focus 路径
@@ -2761,7 +2959,7 @@ impl EditorView {
             settings_panel::apply_app_icon_to_dock();
             // Resolve the login-shell PATH early so terminal CLI detection
             // works even when the app was launched from Finder.
-            chat_panel::prefetch_login_shell_path();
+            chat_panel::prefetch_login_shell_path(cx);
         }
         let ui_language = app_settings.ui_language();
         let mut welcome_tab = builtin_welcome_tab(ui_language);
@@ -2776,11 +2974,14 @@ impl EditorView {
         // A non-embedded editor immediately restores its session (or opens the
         // launch file) and reparses, so parsing the placeholder document here
         // would be thrown away before the first frame.
-        let decorations = if embedded_editor {
+        let mut decorations = if embedded_editor {
             markdown::parse_decorations(buffer.text())
         } else {
             Vec::new()
         };
+        if embedded_editor {
+            fold::decorate_empty_front_matter(&buffer, &mut decorations);
+        }
         let theme_kind = app_settings.theme_kind();
         let editor_theme_mode = app_settings.editor_theme_mode_for_appearance(theme_kind.is_dark());
         let theme = crate::theme::apply_editor_theme_mode(
@@ -2904,7 +3105,17 @@ impl EditorView {
             marked_range: None,
             extra_marked_ranges: Vec::new(),
             ime_composition_snapshot: None,
+            fold_ime_cancellation: input_entity::FoldImeCancellation::default(),
             checkbox_areas: Vec::new(),
+            front_matter_type_areas: Vec::new(),
+            front_matter_text_areas: Vec::new(),
+            front_matter_delete_areas: Vec::new(),
+            front_matter_list_scroll_areas: Vec::new(),
+            front_matter_list_scroll_offsets: HashMap::new(),
+            front_matter_group_focus: Vec::new(),
+            front_matter_group_geometry_dirty: false,
+            front_matter_columns: None,
+
             hovering_checkbox: false,
             hovering_checkbox_line: None,
             image_click_areas: Vec::new(),
@@ -3127,6 +3338,7 @@ impl EditorView {
             dialog: None,
             notifications: Vec::new(),
             next_notification_id: 0,
+            session_restore: Default::default(),
             pending_close_tab_ids: Vec::new(),
             close_tab_return_to: None,
             focused_sidebar_path: None,
@@ -3419,7 +3631,7 @@ impl EditorView {
         this.last_text_width =
             (init_max_width - this.padding_left() - this.padding_right()).max(this.scaled(120.0));
         if !embedded_editor {
-            session_store::restore_session(&mut this);
+            session_store::restore_session(&mut this, cx);
             if this.decorations.is_empty() {
                 this.reparse();
             }
@@ -4906,35 +5118,55 @@ impl EditorView {
         }
 
         self.image_cache.insert(path.clone(), None);
+        let source = navigation_io::DocumentContext::capture(self);
         let current_file = self.current_file_path.clone();
         let workspaces = self.workspaces.clone();
         let workspace_root = self.sidebar_root.clone();
+        let entity_id = cx.entity_id();
+        let request = navigation_io::begin_image_request(entity_id, &path);
+        let operation_path =
+            navigation_io::image_operation_path(&path, current_file.as_deref(), &workspace_root);
         cx.spawn(async move |this, cx| {
             let image_path = path.clone();
-            let file_dir = current_file
-                .as_ref()
-                .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-            let maybe_image = cx
-                .background_executor()
-                .spawn(async move {
-                    let resolved_path = if helpers::is_remote_image_url(&image_path) {
-                        None
-                    } else {
-                        attachments::WorkspaceLinkIndex::build(&workspace_root)
-                            .resolve(current_file.as_deref(), &image_path)
-                    };
-                    let load_path = resolved_path
-                        .as_ref()
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .unwrap_or(image_path);
-                    helpers::load_image(&load_path, file_dir.as_ref(), &workspaces)
-                        .ok()
-                        .map(Arc::new)
-                })
-                .await;
-
+            let result = crate::platform::fs_task::run_anyhow(
+                "load document image",
+                operation_path,
+                move || {
+                    navigation_io::load_document_image(
+                        &image_path,
+                        current_file.as_deref(),
+                        &workspace_root,
+                        &workspaces,
+                    )
+                },
+            )
+            .await;
             this.update(cx, |editor, cx| {
-                editor.image_cache.insert(path, maybe_image);
+                if !navigation_io::image_request_is_current(entity_id, &path, &request) {
+                    return;
+                }
+                let current = editor
+                    .with_pane_if_alive(source.pane_id(), |editor| source.is_current(editor))
+                    .unwrap_or(false);
+                if !current {
+                    if editor.image_cache.get(&path).is_some_and(Option::is_none) {
+                        editor.image_cache.remove(&path);
+                    }
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(image) => {
+                        editor.image_cache.insert(path, Some(image));
+                    }
+                    Err(error) => {
+                        editor.image_cache.insert(path.clone(), None);
+                        editor.notify_error(
+                            format!("{}: {path}: {error}", editor.t(TextKey::OpenFailed)),
+                            cx,
+                        );
+                    }
+                }
                 cx.notify();
             })
             .ok();
@@ -5090,60 +5322,148 @@ impl EditorView {
 
     // ── File system watcher ─────────────────────────────────────
 
+    pub(crate) fn notify_fs_error(
+        &mut self,
+        operation: &'static str,
+        path: &Path,
+        error: impl std::fmt::Display,
+        cx: &mut Context<Self>,
+    ) {
+        if file_watch::error_notification_due(operation, path) {
+            self.notify_error(
+                crate::platform::fs_task::format_error(operation, path, error),
+                cx,
+            );
+        } else {
+            cx.notify();
+        }
+    }
+
     pub(crate) fn start_watching(&mut self, cx: &mut Context<Self>) {
-        if self.embedded_editor || self._watcher_task.is_some() {
+        if self.embedded_editor {
             return;
         }
+        // Workspace switch/close also enters here when the service is running.
+        // Reject old index completions even after an away-and-back root switch.
+        self.invalidate_workspace_search_index();
+        // Abandon only the async waiter/lifetime token, never native state. A
+        // local root must not reuse a service still blocked on the old mount.
+        self._watcher_task = None;
         self._watcher_task = Some(cx.spawn(async move |this, cx| {
-            let mut watcher: Option<file_watch::FileWatch> = None;
+            let watcher = file_watch::WatchService::default();
+            let mut last_error = None;
             loop {
-                let Ok(request) = this.update(cx, |editor, _| file_watch::WatchRequest {
-                    root: editor.sidebar_root.clone(),
-                    documents: editor
-                        .all_tabs()
-                        .filter_map(|tab| tab.path.clone())
-                        .collect(),
+                let Ok(request) = this.update(cx, |editor, _| {
+                    let mut directories = HashSet::new();
+                    if !editor.sidebar_root.as_os_str().is_empty() {
+                        directories.insert(editor.sidebar_root.clone());
+                        for dir in &editor.expanded_dirs {
+                            if dir.starts_with(&editor.sidebar_root) && directories.len() < 64 {
+                                directories.insert(dir.clone());
+                            }
+                        }
+                        for item in editor.sidebar_items_cache.iter() {
+                            if item.is_dir && directories.len() < 64 {
+                                directories.insert(item.path.clone());
+                            }
+                        }
+                    }
+                    let file_list_dir = editor
+                        .file_list_visible
+                        .then(|| {
+                            let dir = editor.file_list_effective_dir();
+                            (!dir.as_os_str().is_empty()).then_some(dir)
+                        })
+                        .flatten();
+                    file_watch::WatchRequest {
+                        root: editor.sidebar_root.clone(),
+                        directories,
+                        file_list_dir,
+                        documents: editor
+                            .all_tabs()
+                            .filter_map(|tab| tab.path.clone())
+                            .collect(),
+                    }
                 }) else {
                     break;
                 };
-                let (updated, batch) = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let mut watcher =
-                            match watcher.map(Ok).unwrap_or_else(file_watch::FileWatch::new) {
-                                Ok(watcher) => watcher,
-                                Err(error) => {
-                                    eprintln!("Cannot start file watcher: {error}");
-                                    return (None, None);
-                                }
-                            };
-                        let batch = watcher.poll(request);
-                        (Some(watcher), Some(batch))
-                    })
-                    .await;
-                watcher = updated;
-                if let Some(batch) = batch
-                    && (!batch.events.is_empty() || !batch.documents_to_check.is_empty())
-                    && this
-                        .update(cx, |editor, cx| {
-                            if !batch.events.is_empty() {
-                                editor.handle_fs_notify_events(&batch.events, &batch.contents, cx);
-                            }
-                            if !batch.documents_to_check.is_empty() {
-                                editor.handle_fs_events_with_structure_hint(
-                                    &batch.documents_to_check,
-                                    false,
-                                    &batch.contents,
-                                    cx,
-                                );
-                            }
+                file_watch::retire_abandoned(cx.background_executor());
+                let root = request.root.clone();
+                let outcome = watcher.poll(request).await;
+                let is_would_block = outcome
+                    .as_ref()
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock);
+                let failed = !is_would_block
+                    && outcome.as_ref().map_or(true, |batch| {
+                        batch.contents.values().any(|observation| {
+                            matches!(observation, file_watch::FileObservation::Unavailable(_))
                         })
-                        .is_err()
+                    });
+                if this
+                    .update(cx, |editor, cx| {
+                        if editor.sidebar_root != root {
+                            watcher.request_rescan();
+                            return;
+                        }
+                        match outcome {
+                            Ok(batch) => {
+                                if !failed {
+                                    last_error = None;
+                                }
+                                if let Some((
+                                    path,
+                                    file_watch::FileObservation::Unavailable(error),
+                                )) = batch.contents.iter().find(|(_, observation)| {
+                                    matches!(
+                                        observation,
+                                        file_watch::FileObservation::Unavailable(_)
+                                    )
+                                }) {
+                                    let message = format!("Check {}: {error}", path.display());
+                                    if last_error.as_ref() != Some(&message) {
+                                        editor.notify_fs_error("Check file", path, error, cx);
+                                        last_error = Some(message);
+                                    }
+                                }
+                                if !batch.events.is_empty() {
+                                    editor.handle_fs_notify_events(
+                                        &batch.events,
+                                        &batch.contents,
+                                        cx,
+                                    );
+                                }
+                                if !batch.documents_to_check.is_empty() {
+                                    editor.handle_fs_events_with_structure_hint(
+                                        &batch.documents_to_check,
+                                        false,
+                                        &batch.contents,
+                                        cx,
+                                    );
+                                }
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                            Err(error) => {
+                                let message = format!(
+                                    "Watch files in {}: {error}. Background checks are paused.",
+                                    root.display()
+                                );
+                                if last_error.as_ref() != Some(&message) {
+                                    editor.notify_fs_error("Watch files", &root, &error, cx);
+                                    last_error = Some(message);
+                                }
+                            }
+                        }
+                    })
+                    .is_err()
                 {
                     break;
                 }
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(500))
+                    .timer(std::time::Duration::from_millis(if failed {
+                        30_000
+                    } else {
+                        500
+                    }))
                     .await;
             }
         }));
@@ -5217,13 +5537,6 @@ impl EditorView {
         GitMetadataImpact::default()
     }
 
-    fn fs_change_affects_git_status(&self, path: &Path) -> bool {
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) => !metadata.is_dir(),
-            Err(_) => true,
-        }
-    }
-
     fn fs_rename_mappings(events: &[notify::Event]) -> Vec<(PathBuf, PathBuf)> {
         use notify::EventKind;
         use notify::event::{ModifyKind, RenameMode};
@@ -5261,13 +5574,18 @@ impl EditorView {
     fn handle_fs_notify_events(
         &mut self,
         events: &[notify::Event],
-        contents: &HashMap<PathBuf, Option<Vec<u8>>>,
+        contents: &HashMap<PathBuf, file_watch::FileObservation>,
         cx: &mut Context<Self>,
     ) {
+        let mut renamed_any = false;
         for (from, to) in Self::fs_rename_mappings(events) {
             if from.starts_with(&self.sidebar_root) {
                 self.rewrite_open_tab_paths_after_move(&from, &to);
+                renamed_any = true;
             }
+        }
+        if renamed_any {
+            session_store::persist_session(self);
         }
         let structure_changed = Self::fs_events_require_structure_refresh(events);
         let changed_paths = events
@@ -5296,14 +5614,15 @@ impl EditorView {
     fn follow_external_tab_renames(
         &mut self,
         changed_paths: Vec<PathBuf>,
-        contents: &HashMap<PathBuf, Option<Vec<u8>>>,
+        contents: &HashMap<PathBuf, file_watch::FileObservation>,
     ) -> Vec<PathBuf> {
         let vanished = changed_paths
             .iter()
             .filter(|path| {
-                contents
-                    .get(*path)
-                    .map_or_else(|| !path.exists(), Option::is_none)
+                matches!(
+                    contents.get(*path),
+                    Some(file_watch::FileObservation::Missing)
+                )
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -5315,7 +5634,8 @@ impl EditorView {
             .filter(|path| {
                 contents
                     .get(*path)
-                    .map_or_else(|| path.is_file(), Option::is_some)
+                    .and_then(file_watch::FileObservation::bytes)
+                    .is_some()
                     && !self
                         .all_tabs()
                         .any(|tab| tab.path.as_deref() == Some(path.as_path()))
@@ -5341,9 +5661,8 @@ impl EditorView {
                 !followed.iter().any(|(_, taken)| taken == *candidate)
                     && contents
                         .get(*candidate)
-                        .cloned()
-                        .unwrap_or_else(|| std::fs::read(candidate).ok())
-                        .is_some_and(|bytes| String::from_utf8_lossy(&bytes) == expected)
+                        .and_then(file_watch::FileObservation::bytes)
+                        .is_some_and(|bytes| String::from_utf8_lossy(bytes) == expected)
             }) else {
                 continue;
             };
@@ -5364,14 +5683,64 @@ impl EditorView {
     }
 
     pub(crate) fn handle_fs_events(&mut self, changed_paths: &[PathBuf], cx: &mut Context<Self>) {
-        self.handle_fs_events_with_structure_hint(changed_paths, false, &HashMap::new(), cx);
+        let changed_paths = changed_paths.to_vec();
+        let root = self.sidebar_root.clone();
+        if changed_paths.is_empty()
+            || file_watch::operation_suppressed("Refresh changed files", &root)
+        {
+            return;
+        }
+        let mut paths = changed_paths.iter().cloned().collect::<HashSet<_>>();
+        paths.extend(
+            self.all_tabs()
+                .filter_map(|tab| tab.path.as_ref())
+                .filter(|tab_path| changed_paths.iter().any(|path| tab_path.starts_with(path)))
+                .cloned(),
+        );
+        cx.spawn(async move |this, cx| {
+            let observed =
+                crate::platform::fs_task::run("Refresh changed files", root.clone(), move || {
+                    file_watch::observe_paths(paths)
+                })
+                .await;
+            this.update(cx, |editor, cx| {
+                if editor.sidebar_root != root {
+                    return;
+                }
+                match observed {
+                    Ok(contents) => {
+                        if let Some((path, file_watch::FileObservation::Unavailable(error))) =
+                            contents.iter().find(|(_, observation)| {
+                                matches!(observation, file_watch::FileObservation::Unavailable(_))
+                            })
+                        {
+                            editor.notify_fs_error(
+                                "Refresh changed files",
+                                &root,
+                                format!("{}: {error}", path.display()),
+                                cx,
+                            );
+                        }
+                        editor.handle_fs_events_with_structure_hint(
+                            &changed_paths,
+                            false,
+                            &contents,
+                            cx,
+                        );
+                    }
+                    Err(error) => editor.notify_fs_error("Refresh changed files", &root, error, cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn handle_fs_events_with_structure_hint(
         &mut self,
         changed_paths: &[PathBuf],
         structure_changed: bool,
-        contents: &HashMap<PathBuf, Option<Vec<u8>>>,
+        contents: &HashMap<PathBuf, file_watch::FileObservation>,
         cx: &mut Context<Self>,
     ) {
         let mut changed_paths_in_workspace = Vec::new();
@@ -5430,10 +5799,16 @@ impl EditorView {
             self.mark_sidebar_dir_file_counts_dirty(
                 changed_paths_in_workspace
                     .iter()
-                    .filter_map(|path| path.parent().map(Path::to_path_buf)),
+                    .flat_map(|path| [Some(path.clone()), path.parent().map(Path::to_path_buf)])
+                    .flatten(),
             );
             if structure_changed
-                || self.sidebar_paths_require_structure_refresh(&changed_paths_in_workspace)
+                || changed_paths_in_workspace.iter().any(|path| {
+                    !matches!(
+                        contents.get(path),
+                        Some(file_watch::FileObservation::File(_))
+                    )
+                })
             {
                 self.invalidate_sidebar_items_cache();
             } else {
@@ -5442,10 +5817,8 @@ impl EditorView {
             self.mark_workspace_search_index_dirty(&changed_paths_in_workspace);
             needs_notify = true;
         }
-        let git_status_changed = git_metadata_impact.affects_sidebar_status
-            || changed_paths_in_workspace
-                .iter()
-                .any(|path| self.fs_change_affects_git_status(path));
+        let git_status_changed =
+            git_metadata_impact.affects_sidebar_status || !changed_paths_in_workspace.is_empty();
         if git_status_changed {
             self.invalidate_sidebar_git_statuses();
             self.invalidate_git_panel_status();
@@ -5485,18 +5858,25 @@ impl EditorView {
                                 if !should_refresh_diff {
                                     continue;
                                 }
-                                let exists = tab_path.exists();
-                                if tab.is_deleted == exists {
-                                    tab.is_deleted = !exists;
-                                    needs_notify = true;
+                                if let Some(exists) = contents
+                                    .get(tab_path)
+                                    .and_then(file_watch::FileObservation::exists)
+                                {
+                                    if tab.is_deleted == exists {
+                                        tab.is_deleted = !exists;
+                                        needs_notify = true;
+                                    }
                                 }
                                 diff_tabs_to_refresh.push(tab_index);
                                 continue;
                             }
 
-                            let exists = contents
+                            let Some(exists) = contents
                                 .get(tab_path)
-                                .map_or_else(|| tab_path.exists(), Option::is_some);
+                                .and_then(file_watch::FileObservation::exists)
+                            else {
+                                continue;
+                            };
                             if !exists {
                                 if !tab.is_deleted {
                                     tab.is_deleted = true;
@@ -5512,12 +5892,18 @@ impl EditorView {
                                         active_tab_id.as_deref() == Some(tab.id.as_str());
                                 }
                                 if !tab.is_dirty {
-                                    let bytes = contents
+                                    if !tab
+                                        .file_kind
+                                        .as_ref()
+                                        .is_some_and(FileKind::supports_text_buffer)
+                                    {
+                                        continue;
+                                    }
+                                    if let Some(bytes) = contents
                                         .get(tab_path)
-                                        .cloned()
-                                        .unwrap_or_else(|| std::fs::read(tab_path).ok());
-                                    if let Some(bytes) = bytes {
-                                        let new_text = String::from_utf8_lossy(&bytes).into_owned();
+                                        .and_then(file_watch::FileObservation::bytes)
+                                    {
+                                        let new_text = String::from_utf8_lossy(bytes).into_owned();
                                         if file_watch::refresh_clean_snapshot(
                                             &mut tab.snapshot,
                                             tab.is_dirty,
@@ -5537,13 +5923,7 @@ impl EditorView {
                 }
 
                 for tab_index in diff_tabs_to_refresh {
-                    if this.refresh_git_diff_tab(tab_index) {
-                        needs_notify = true;
-                        if let Some(tab) = this.tabs.get(tab_index) {
-                            active_tab_needs_reload |=
-                                active_tab_id.as_deref() == Some(tab.id.as_str());
-                        }
-                    }
+                    needs_notify |= this.refresh_git_diff_tab(tab_index, cx);
                 }
 
                 // A HEAD move (commit, checkout, reset) changes the inline-diff
@@ -5649,181 +6029,173 @@ impl EditorView {
             DialogAction::CloseTabUnsaved { ref tab_id }
             | DialogAction::SaveAndCloseTab { ref tab_id } => {
                 let tab_id = tab_id.clone();
-                // Phase 1 (bounded borrow): write the file / collect what the
-                // save dialog needs. Phase 2 acts with `self` free again.
-                enum SaveAndClose {
-                    Missing,
-                    NeedsSave { path: PathBuf, text: String },
-                    NeedsDialog { text: String, default_name: String },
-                }
-                let outcome = match self.all_tabs_mut().find(|t| t.id == tab_id) {
-                    None => SaveAndClose::Missing,
-                    Some(tab) => {
-                        if let Some(ref path) = tab.path {
-                            SaveAndClose::NeedsSave {
-                                path: path.clone(),
-                                text: tab.snapshot.text.clone(),
-                            }
-                        } else {
-                            SaveAndClose::NeedsDialog {
-                                text: tab.snapshot.text.clone(),
-                                default_name: format!("{}.md", tab.title),
-                            }
-                        }
-                    }
+                let Some(owner) = self.pane_id_for_tab(&tab_id) else {
+                    self.pending_close_tab_ids.clear();
+                    self.restore_tab_after_close(cx);
+                    cx.notify();
+                    return;
                 };
-                match outcome {
-                    SaveAndClose::NeedsSave { path, text } => {
-                        let save = file_ops::DocumentSave::new(path.clone());
-                        cx.spawn(async move |this, cx| {
-                            let saved_text = text.clone();
-                            let result = cx
-                                .background_executor()
-                                .spawn(async move { save.write(text.as_bytes()) })
-                                .await;
+                let payload = self.with_pane(owner, |editor| {
+                    editor.commit_history_transaction();
+                    let index = editor.tabs.iter().position(|tab| tab.id == tab_id)?;
+                    let snapshot = if editor.active_tab_id.as_deref() == Some(&tab_id) {
+                        editor.current_snapshot()
+                    } else {
+                        editor.tabs[index].snapshot.clone()
+                    };
+                    let tab = &editor.tabs[index];
+                    let is_whiteboard = tab.file_kind.as_ref().is_some_and(FileKind::is_whiteboard);
+                    let text = if is_whiteboard {
+                        tab.whiteboard.as_ref()?.document.to_json_string()
+                    } else {
+                        snapshot.text.clone()
+                    };
+                    let extension = if is_whiteboard {
+                        WHITEBOARD_EXTENSION
+                    } else {
+                        "md"
+                    };
+                    Some((
+                        tab.path.clone(),
+                        snapshot,
+                        text,
+                        format!("{}.{extension}", tab.title),
+                        is_whiteboard,
+                    ))
+                });
+                let Some((original_path, snapshot, text, default_name, is_whiteboard)) = payload
+                else {
+                    self.pending_close_tab_ids.clear();
+                    let path = self
+                        .all_tabs()
+                        .find(|tab| tab.id == tab_id)
+                        .and_then(|tab| tab.path.clone())
+                        .unwrap_or_else(|| PathBuf::from(&tab_id));
+                    self.notify_document_save_failed(
+                        &tab_id,
+                        &path,
+                        &std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "document contents are not available",
+                        ),
+                        cx,
+                    );
+                    self.restore_tab_after_close(cx);
+                    return;
+                };
+                #[cfg(not(target_os = "macos"))]
+                let title = self.t(crate::i18n::TextKey::SaveFileDialog).to_string();
+                cx.spawn(async move |this, cx| {
+                    let path = if let Some(path) = original_path.clone() {
+                        path
+                    } else {
+                        #[cfg(target_os = "macos")]
+                        let maybe_path = match this.update(cx, |_, cx| {
+                            cx.prompt_for_new_path(
+                                &std::env::home_dir().unwrap_or_default(),
+                                Some(&default_name),
+                            )
+                        }) {
+                            Ok(receiver) => receiver.await.ok().and_then(Result::ok).flatten(),
+                            Err(_) => None,
+                        };
+                        #[cfg(not(target_os = "macos"))]
+                        let maybe_path = cx
+                            .background_executor()
+                            .spawn(
+                                async move { helpers::save_file_blocking(&default_name, &title) },
+                            )
+                            .await;
+                        let Some(path) = maybe_path else {
                             this.update(cx, |editor, cx| {
-                                if !matches!(result, Ok(true)) {
-                                    editor.restore_tab_after_close(cx);
-                                    return;
-                                }
-                                let Some(owner) = editor.pane_id_for_tab(&tab_id) else {
-                                    return;
-                                };
-                                let unchanged = editor.with_pane(owner, |editor| {
-                                    let Some(index) =
-                                        editor.tabs.iter().position(|tab| tab.id == tab_id)
-                                    else {
-                                        return false;
-                                    };
-                                    let current_text =
-                                        if editor.active_tab_id.as_deref() == Some(&tab_id) {
-                                            editor.buffer.text()
-                                        } else {
-                                            &editor.tabs[index].snapshot.text
-                                        };
-                                    if editor.tabs[index].path.as_ref() != Some(&path)
-                                        || current_text != saved_text
-                                    {
-                                        return false;
-                                    }
-                                    editor.tabs[index].is_dirty = false;
-                                    let snapshot = editor.tabs[index].snapshot.clone();
-                                    let _ = history_store::persist_tab_history(
-                                        &tab_id,
-                                        Some(path.as_path()),
-                                        &mut editor.tabs[index].history,
-                                        &snapshot,
-                                    );
-                                    true
-                                });
-                                if !unchanged {
-                                    editor.restore_tab_after_close(cx);
-                                    return;
-                                }
-                                editor.clear_temp_file_for_tab(&tab_id);
-                                session_store::persist_session(editor);
-                                editor.close_tab(&tab_id, cx);
+                                editor.pending_close_tab_ids.clear();
+                                editor.persist_recovery_for_tab(&tab_id);
+                                editor.restore_tab_after_close(cx);
+                                cx.notify();
                             })
                             .ok();
+                            return;
+                        };
+                        path
+                    };
+                    let save = this.update(cx, |_, _| file_ops::DocumentSave::new(path.clone()));
+                    let Ok(save) = save else { return };
+                    let token = save.clone();
+                    let saved_text = text.clone();
+                    let result =
+                        crate::platform::fs_task::run("save and close", path.clone(), move || {
+                            save.write(text.as_bytes())
                         })
-                        .detach();
-                    }
-                    SaveAndClose::NeedsDialog { text, default_name } => {
-                        let tab_id_clone = tab_id.clone();
-                        #[cfg(not(target_os = "macos"))]
-                        let title = self.t(crate::i18n::TextKey::SaveFileDialog).to_string();
-                        cx.spawn(async move |this, cx| {
-                            #[cfg(target_os = "macos")]
-                            let maybe_path = match this.update(cx, |_, cx| {
-                                cx.prompt_for_new_path(
-                                    &std::env::home_dir().unwrap_or_default(),
-                                    Some(&default_name),
-                                )
-                            }) {
-                                Ok(receiver) => receiver.await.ok().and_then(Result::ok).flatten(),
-                                Err(_) => None,
+                        .await;
+                    token.observe_result(&result);
+                    this.update(cx, |editor, cx| {
+                        if !token.is_latest() || matches!(result, Ok(false)) {
+                            editor.pending_close_tab_ids.clear();
+                            editor.persist_recovery_for_tab(&tab_id);
+                            editor.restore_tab_after_close(cx);
+                            cx.notify();
+                            return;
+                        }
+                        if let Err(error) = result {
+                            editor.pending_close_tab_ids.clear();
+                            editor.notify_document_save_failed(&tab_id, &path, &error, cx);
+                            editor.restore_tab_after_close(cx);
+                            cx.notify();
+                            return;
+                        }
+                        let Some(owner) = editor.pane_id_for_tab(&tab_id) else {
+                            editor.pending_close_tab_ids.clear();
+                            editor.restore_tab_after_close(cx);
+                            cx.notify();
+                            return;
+                        };
+                        let unchanged = editor.with_pane(owner, |editor| {
+                            let Some(index) = editor.tabs.iter().position(|tab| tab.id == tab_id)
+                            else {
+                                return false;
                             };
-                            #[cfg(not(target_os = "macos"))]
-                            let maybe_path =
-                                cx.background_executor()
-                                    .spawn(async move {
-                                        helpers::save_file_blocking(&default_name, &title)
-                                    })
-                                    .await;
-                            if let Some(path) = maybe_path {
-                                let saved_text = text.clone();
-                                let save = this
-                                    .update(cx, |_, _| file_ops::DocumentSave::new(path.clone()));
-                                let result = if let Ok(save) = save {
-                                    cx.background_executor()
-                                        .spawn(async move { save.write(text.as_bytes()) })
-                                        .await
-                                } else {
-                                    Ok(false)
-                                };
-                                if matches!(result, Ok(true)) {
-                                    this.update(cx, |editor, cx| {
-                                        let Some(owner) = editor.pane_id_for_tab(&tab_id_clone)
-                                        else {
-                                            return;
-                                        };
-                                        let unchanged = editor.with_pane(owner, |editor| {
-                                            let Some(index) = editor
-                                                .tabs
-                                                .iter()
-                                                .position(|tab| tab.id == tab_id_clone)
-                                            else {
-                                                return false;
-                                            };
-                                            let current_text = if editor.active_tab_id.as_deref()
-                                                == Some(&tab_id_clone)
-                                            {
-                                                editor.buffer.text()
-                                            } else {
-                                                &editor.tabs[index].snapshot.text
-                                            };
-                                            let unchanged = current_text == saved_text;
-                                            editor.tabs[index].path = Some(path.clone());
-                                            editor.tabs[index].title = Self::title_for_path(&path);
-                                            if unchanged {
-                                                editor.tabs[index].is_dirty = false;
-                                                let snapshot = editor.tabs[index].snapshot.clone();
-                                                let _ = history_store::persist_tab_history(
-                                                    &tab_id_clone,
-                                                    Some(path.as_path()),
-                                                    &mut editor.tabs[index].history,
-                                                    &snapshot,
-                                                );
-                                            }
-                                            unchanged
-                                        });
-                                        if !unchanged {
-                                            session_store::persist_session(editor);
-                                            editor.restore_tab_after_close(cx);
-                                            return;
-                                        }
-                                        editor.clear_temp_file_for_tab(&tab_id_clone);
-                                        session_store::persist_session(editor);
-                                        editor.close_tab(&tab_id_clone, cx);
-                                    })
-                                    .ok();
-                                } else {
-                                    this.update(cx, |editor, cx| {
-                                        editor.restore_tab_after_close(cx)
-                                    })
-                                    .ok();
-                                }
-                            } else {
-                                this.update(cx, |editor, cx| editor.restore_tab_after_close(cx))
-                                    .ok();
+                            if editor.tabs[index].path != original_path {
+                                return false;
                             }
-                        })
-                        .detach();
-                    }
-                    SaveAndClose::Missing => {
-                        self.close_tab(&tab_id, cx);
-                    }
-                }
+                            let unchanged = if is_whiteboard {
+                                editor.tabs[index].whiteboard.as_ref().is_some_and(|state| {
+                                    state.document.to_json_string() == saved_text
+                                })
+                            } else if editor.active_tab_id.as_deref() == Some(&tab_id) {
+                                editor.buffer.text() == saved_text
+                            } else {
+                                editor.tabs[index].snapshot.text == saved_text
+                            };
+                            if original_path.is_none() {
+                                editor.tabs[index].path = Some(path.clone());
+                                editor.tabs[index].title = Self::title_for_path(&path);
+                                if editor.active_tab_id.as_deref() == Some(&tab_id) {
+                                    editor.current_file_path = Some(path.clone());
+                                }
+                            }
+                            editor.tabs[index].history.saved_text = Some(saved_text.clone());
+                            if !unchanged {
+                                editor.tabs[index].is_dirty = true;
+                                return false;
+                            }
+                            editor.tabs[index].is_dirty = false;
+                            editor.tabs[index].snapshot = snapshot.clone();
+                            editor.clear_temp_file_for_tab(&tab_id);
+                            editor.persist_saved_tab_history(&tab_id, &path, &snapshot, cx);
+                            true
+                        });
+                        if !unchanged {
+                            editor.pending_close_tab_ids.clear();
+                            editor.persist_recovery_for_tab(&tab_id);
+                            editor.restore_tab_after_close(cx);
+                            cx.notify();
+                            return;
+                        }
+                        editor.close_tab(&tab_id, cx);
+                    })
+                    .ok();
+                })
+                .detach();
             }
             DialogAction::DeletePath { .. }
             | DialogAction::DeletePaths { .. }
@@ -5863,9 +6235,8 @@ impl EditorView {
         let normalized = normalize_pasted_newlines(text);
         let selection = self.cursor.selection_range();
         let pasted_cell_text = (!self.has_extra_cursors())
-            .then(|| self.table_cursor_cell_range())
+            .then(|| self.table_edit_cell_range(&selection))
             .flatten()
-            .filter(|cell| selection.start >= cell.start && selection.end <= cell.end)
             .map(|_| markdown_table_cell_from_paste(&normalized));
         let markdown_table = if pasted_cell_text.is_none()
             && self.active_tab_is_markdown()
@@ -5957,10 +6328,6 @@ impl EditorView {
             });
             images.truncate(1);
         }
-        images = images
-            .into_iter()
-            .map(|image| normalize_clipboard_image(&image))
-            .collect();
 
         let mut file_paths = item
             .text()
@@ -5975,74 +6342,41 @@ impl EditorView {
             self.show_save_before_import_dialog(cx);
             return Ok(ClipboardPasteOutcome::Consumed);
         };
-        let policy_access = self.app_settings.attachment_policy_access();
+        let policy = self.app_settings.attachment_policy();
+        let bookmark = self
+            .app_settings
+            .attachment_external_folder_bookmark
+            .clone();
+        let source_context = navigation_io::DocumentContext::capture(self);
         let fallback_text = item.text();
         let workspace_root = self.sidebar_root.clone();
         let pane_id = self.current_pane_id();
         let tab_id = self.active_tab_id.clone();
         let cursor_offset = self.cursor.offset;
-        let images = images
-            .into_iter()
-            .map(|image| (image.bytes.to_vec(), image_extension(image.format)))
-            .collect::<Vec<_>>();
+
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let policy = policy_access.policy();
-                    let target_dir = policy.target_directory(&workspace_root, &current_file)?;
-                    std::fs::create_dir_all(&target_dir)?;
-                    let mut imported = Vec::new();
-                    for (bytes, extension) in &images {
-                        let target_path = unique_import_path(
-                            &target_dir,
-                            &timestamp_file_stem(),
-                            Some(extension),
-                        );
-                        std::fs::write(&target_path, bytes)?;
-                        imported.push((target_path, true));
-                    }
-                    file_paths.retain(|path| path.is_file());
-                    if !images.is_empty() {
-                        file_paths.retain(|path| !is_image_path(path));
-                    }
-                    file_paths.dedup();
-                    for source_path in file_paths {
-                        let extension = source_path
-                            .extension()
-                            .and_then(|extension| extension.to_str());
-                        let stem = source_path
-                            .file_stem()
-                            .and_then(|stem| stem.to_str())
-                            .filter(|stem| !stem.is_empty())
-                            .unwrap_or("attachment");
-                        let target_path = unique_import_path(&target_dir, stem, extension);
-                        file_ops::copy_file_data(&source_path, &target_path, false)?;
-                        imported.push((target_path, is_image_path(&source_path)));
-                    }
-                    if imported.is_empty() {
-                        return Ok(None);
-                    }
-                    let index = attachments::WorkspaceLinkIndex::build(&workspace_root);
-                    imported
-                        .iter()
-                        .map(|(path, is_image)| {
-                            policy.reference_for(
-                                &workspace_root,
-                                &current_file,
-                                path,
-                                *is_image,
-                                Some(&index),
-                            )
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()
-                        .map(|links| Some(links.join("\n")))
-                })
-                .await;
+            let result = crate::platform::fs_task::run_anyhow(
+                "import clipboard resources",
+                current_file.clone(),
+                move || {
+                    navigation_io::import_resources(
+                        policy,
+                        &bookmark,
+                        &workspace_root,
+                        &current_file,
+                        images,
+                        file_paths,
+                    )
+                },
+            )
+            .await;
             this.update(cx, |editor, cx| {
                 editor.with_pane_if_alive(pane_id, |editor| match result {
                     Ok(Some(insertion)) if !insertion.is_empty() => {
-                        if editor.active_tab_id == tab_id && editor.cursor.offset == cursor_offset {
+                        if source_context.is_current(editor)
+                            && editor.active_tab_id == tab_id
+                            && editor.cursor.offset == cursor_offset
+                        {
                             if editor.table_boundary_caret.is_some()
                                 && !editor.insert_line_at_table_boundary(cx)
                             {
@@ -6052,7 +6386,8 @@ impl EditorView {
                         }
                     }
                     Ok(None) => {
-                        if editor.active_tab_id == tab_id
+                        if source_context.is_current(editor)
+                            && editor.active_tab_id == tab_id
                             && editor.cursor.offset == cursor_offset
                             && let Some(text) = fallback_text.as_deref()
                         {
@@ -6096,51 +6431,39 @@ impl EditorView {
         };
         let current_file = current_file.to_path_buf();
         let workspace_root = self.sidebar_root.clone();
-        let policy_access = self.app_settings.attachment_policy_access();
+        let policy = self.app_settings.attachment_policy();
+        let bookmark = self
+            .app_settings
+            .attachment_external_folder_bookmark
+            .clone();
+        let source_context = navigation_io::DocumentContext::capture(self);
         let tab_id = self.active_tab_id.clone();
         let pane_id = self.current_pane_id();
         let cursor_offset = self.cursor.offset;
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let policy = policy_access.policy();
-                    let target_dir = policy.target_directory(&workspace_root, &current_file)?;
-                    std::fs::create_dir_all(&target_dir)?;
-                    let mut imported = Vec::new();
-                    for source_path in attachment_paths.iter().filter(|path| path.is_file()) {
-                        let extension = source_path
-                            .extension()
-                            .and_then(|extension| extension.to_str());
-                        let stem = source_path
-                            .file_stem()
-                            .and_then(|stem| stem.to_str())
-                            .filter(|stem| !stem.is_empty())
-                            .unwrap_or("attachment");
-                        let target_path = unique_import_path(&target_dir, stem, extension);
-                        file_ops::copy_file_data(source_path, &target_path, false)?;
-                        imported.push((target_path, is_image_path(source_path)));
-                    }
-                    let index = attachments::WorkspaceLinkIndex::build(&workspace_root);
-                    imported
-                        .iter()
-                        .map(|(path, image)| {
-                            policy.reference_for(
-                                &workspace_root,
-                                &current_file,
-                                path,
-                                *image,
-                                Some(&index),
-                            )
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()
-                        .map(|links| links.join("\n"))
-                })
-                .await;
+            let result = crate::platform::fs_task::run_anyhow(
+                "import dropped attachments",
+                current_file.clone(),
+                move || {
+                    navigation_io::import_resources(
+                        policy,
+                        &bookmark,
+                        &workspace_root,
+                        &current_file,
+                        Vec::new(),
+                        attachment_paths,
+                    )
+                    .map(Option::unwrap_or_default)
+                },
+            )
+            .await;
             this.update(cx, |editor, cx| {
                 editor.with_pane_if_alive(pane_id, |editor| match result {
                     Ok(insertion) if !insertion.is_empty() => {
-                        if editor.active_tab_id == tab_id && editor.cursor.offset == cursor_offset {
+                        if source_context.is_current(editor)
+                            && editor.active_tab_id == tab_id
+                            && editor.cursor.offset == cursor_offset
+                        {
                             editor.insert_pasted_text(&insertion, cx);
                         }
                     }
@@ -6150,7 +6473,7 @@ impl EditorView {
                         editor.notify_error(message, cx);
                     }
                 });
-                if editor.focused_pane_id == pane_id {
+                if editor.focused_pane_id == pane_id && source_context.is_current(editor) {
                     editor.open_external_paths_in_tabs(&markdown_paths, cx);
                 }
             })
@@ -6788,6 +7111,9 @@ impl EditorView {
     }
 
     pub(crate) fn pause_cursor_blinking(&mut self, cx: &mut Context<Self>) {
+        self.reconcile_front_matter_fold_cursor();
+        self.schedule_fold_ime_cancellation(cx);
+        self.sync_front_matter_group_focus();
         self.cursor_opacity = self.styles.cursor.cursor_opacity_max;
         let epoch = self.next_blink_epoch();
         cx.notify();
@@ -6805,6 +7131,9 @@ impl EditorView {
     // ── Shared utilities ────────────────────────────────────────────
 
     pub(crate) fn reparse(&mut self) {
+        let search_presentation_was_active =
+            self.search_visible && self.search_current_index.is_some();
+        self.front_matter_columns = None;
         self.reconcile_table_source_edits();
         self.reset_table_handles();
         self.table_cursor_paint_bounds = None;
@@ -6940,6 +7269,9 @@ impl EditorView {
         // second reparse after ordered-list renumbering) do not force the next
         // prepaint to re-shape the entire document.
         let preserved_line_display_info = self.take_line_display_info();
+        // Equal-length edits invalidate search offsets too. Never let a sliced
+        // scan resume at its old suffix after this document has changed.
+        self.cancel_search_scan();
         self.search_matches.clear();
         self.search_current_index = None;
         self.workspace_search_highlight_path = None;
@@ -7059,6 +7391,9 @@ impl EditorView {
                 }
             }
         }
+        if file_kind.is_markdown() {
+            fold::decorate_empty_front_matter(&self.buffer, &mut self.decorations);
+        }
         let outline_started = Instant::now();
         if file_kind.is_markdown() && self.uses_lazy_markdown_decorations() {
             self.markdown_outline_epoch = self.markdown_outline_epoch.wrapping_add(1);
@@ -7133,6 +7468,15 @@ impl EditorView {
             // and any offscreen line whose decoration changed converges when it
             // next scrolls into view.
             self.set_line_display_info(preserved_line_display_info);
+        }
+        if search_presentation_was_active {
+            // Search expansion belongs to the old source snapshot. Transferred
+            // offscreen layouts must not retain its source maps or row heights.
+            self.invalidate_search_presentation();
+        }
+        if self.collapsed_front_matter_range().is_some() {
+            self.invalidate_line_display_info_for_line(0);
+            self.front_matter_group_geometry_dirty = true;
         }
         let finalize_started = Instant::now();
         let generated_preview_is_affected =
@@ -8198,6 +8542,14 @@ impl EditorView {
         if self.reading_mode {
             self.toggle_reading_mode(cx);
         }
+        if self.collapsed_front_matter_range().is_some_and(|range| {
+            self.all_cursor_ranges().iter().any(|(head, anchor)| {
+                self.buffer.offset_to_line_col(*head).0 < range.end
+                    || self.buffer.offset_to_line_col(*anchor).0 < range.end
+            })
+        }) {
+            self.toggle_fold(0, cx);
+        }
         true
     }
 
@@ -8298,6 +8650,21 @@ impl EditorView {
     /// (i.e. the one shown in code/edit mode), or None when the cursor is not
     /// editing any preview.
     pub(crate) fn focused_code_mode_preview_key(&self) -> Option<String> {
+        if let Some(range) = self.current_search_source_range() {
+            let first = self.buffer.offset_to_line_col(range.start).0;
+            let last = self.buffer.offset_to_line_col(range.end - 1).0;
+            if let Some(preview) = self.decorations.get(first..=last).and_then(|decorations| {
+                decorations
+                    .iter()
+                    .filter_map(|d| d.block_preview.as_ref())
+                    .find(|preview| {
+                        range.start < preview.source_range.end
+                            && preview.source_range.start < range.end
+                    })
+            }) {
+                return Some(preview.cache_key.clone());
+            }
+        }
         if !self.markdown_syntax_expansion_allowed() {
             return None;
         }
@@ -8522,35 +8889,18 @@ impl EditorView {
         }
     }
 
-    /// The `|---|` row is never painted, so a caret must not rest on it: move
-    /// one more row in the direction the caret was travelling.
+    /// Skip unpainted Markdown table separators, but retain front-matter
+    /// delimiter rows so keyboard focus can reveal their transparent source.
     pub(crate) fn skip_table_separator_line(&mut self, downward: bool) {
-        let line = self.cursor_line();
-        let is_separator = self
-            .decorations
-            .get(line)
-            .and_then(|decoration| decoration.table_info.as_ref())
-            .is_some_and(|table| table.is_separator);
-        if !is_separator {
-            return;
+        if let Some(offset) = table_separator_skip_offset(
+            &self.buffer,
+            &self.decorations,
+            self.cursor.offset,
+            downward,
+        ) {
+            self.cursor.move_to(offset, &self.buffer);
+            self.snap_cursor_to_content();
         }
-        let target = if downward {
-            if line + 1 >= self.buffer.line_count() {
-                return;
-            }
-            line + 1
-        } else {
-            if line == 0 {
-                return;
-            }
-            line - 1
-        };
-        let col = self.cursor.offset - self.buffer.line_start(line);
-        let target_start = self.buffer.line_start(target);
-        let target_len = self.buffer.line_content(target).len();
-        self.cursor
-            .move_to(target_start + col.min(target_len), &self.buffer);
-        self.snap_cursor_to_content();
     }
 
     /// Table rows only paint a caret inside a cell's own range; a column that
@@ -8561,15 +8911,14 @@ impl EditorView {
         if table_info.is_separator || table_info.cell_ranges.is_empty() {
             return None;
         }
-        if table_info
-            .cell_ranges
+        let ranges = input_table::rendered_cell_ranges(table_info, self.buffer.line_content(line));
+        if ranges
             .iter()
             .any(|range| (range.start..=range.end).contains(&col))
         {
             return Some(col);
         }
-        table_info
-            .cell_ranges
+        ranges
             .iter()
             .map(|range| {
                 let clamped = col.clamp(range.start, range.end);
@@ -8592,6 +8941,7 @@ impl EditorView {
     pub(crate) fn clear_marked_ranges(&mut self) {
         self.marked_range = None;
         self.extra_marked_ranges.clear();
+        self.sync_front_matter_group_focus();
     }
 
     pub(crate) fn clear_vertical_move_goal_x(&mut self) {
@@ -8709,17 +9059,24 @@ impl EditorView {
     /// to start so that earlier offsets remain valid.
     pub(crate) fn multi_cursor_insert(&mut self, text: &str) {
         if self.extra_cursors.is_empty() {
-            self.cursor.insert(&mut self.buffer, text);
+            let text = self.table_cell_input_text(&self.cursor.selection_range(), text);
+            self.cursor.insert(&mut self.buffer, &text);
             return;
         }
         let all = self.collect_multi_cursor_targets_desc();
 
-        let text_len = text.len();
+        let replacements: Vec<_> = all
+            .iter()
+            .map(|(offset, anchor, _)| {
+                self.table_cell_input_text(&((*offset).min(*anchor)..(*offset).max(*anchor)), text)
+            })
+            .collect();
         let mut edits = Vec::with_capacity(all.len());
 
-        for (offset, anchor, is_primary) in &all {
+        for ((offset, anchor, is_primary), text) in all.iter().zip(&replacements) {
             let range_start = (*offset).min(*anchor);
             let range_end = (*offset).max(*anchor);
+            let text_len = text.len();
             self.buffer.replace(range_start..range_end, text);
             edits.push(MultiCursorResolvedEdit {
                 start: range_start,
@@ -8735,131 +9092,99 @@ impl EditorView {
 
     /// Apply backspace across all cursors.
     pub(crate) fn multi_cursor_backspace(&mut self) {
-        if self.extra_cursors.is_empty() {
-            self.cursor.backspace(&mut self.buffer);
-            return;
-        }
-        let all = self.collect_multi_cursor_targets_desc();
-        let mut edits = Vec::with_capacity(all.len());
-
-        for (offset, anchor, is_primary) in &all {
-            let before_len = self.buffer.len();
-            let mut cursor = Cursor {
-                offset: *offset,
-                anchor: *anchor,
-            };
-            cursor.backspace(&mut self.buffer);
-            let after_len = self.buffer.len();
-            edits.push(MultiCursorResolvedEdit {
-                start: cursor.offset,
-                cursor_after: cursor.offset,
-                delta: after_len as isize - before_len as isize,
-                is_primary: *is_primary,
-                ordered_list_update: None,
-            });
-        }
-
-        self.apply_multi_cursor_resolved_edits(edits);
+        self.apply_semantic_delete(table_cell_list_edit::DeleteAction::Backward);
     }
 
     /// Apply delete (forward) across all cursors.
     pub(crate) fn multi_cursor_delete(&mut self) {
-        if self.extra_cursors.is_empty() {
-            self.cursor.delete(&mut self.buffer);
-            return;
-        }
-        let all = self.collect_multi_cursor_targets_desc();
-        let mut edits = Vec::with_capacity(all.len());
-
-        for (offset, anchor, is_primary) in &all {
-            let before_len = self.buffer.len();
-            let mut cursor = Cursor {
-                offset: *offset,
-                anchor: *anchor,
-            };
-            cursor.delete(&mut self.buffer);
-            let after_len = self.buffer.len();
-            edits.push(MultiCursorResolvedEdit {
-                start: cursor.offset,
-                cursor_after: cursor.offset,
-                delta: after_len as isize - before_len as isize,
-                is_primary: *is_primary,
-                ordered_list_update: None,
-            });
-        }
-
-        self.apply_multi_cursor_resolved_edits(edits);
+        self.apply_semantic_delete(table_cell_list_edit::DeleteAction::Forward);
     }
 
     /// Move all cursors left.
     pub(crate) fn multi_cursor_move_left(&mut self) {
+        let previous = self.all_cursors_snapshot();
         self.cursor.move_left(&self.buffer);
         for c in &mut self.extra_cursors {
             c.move_left(&self.buffer);
         }
+        self.skip_front_matter_caret_navigation(&previous);
         self.dedup_cursors();
     }
 
     /// Move all cursors right.
     pub(crate) fn multi_cursor_move_right(&mut self) {
+        let previous = self.all_cursors_snapshot();
         self.cursor.move_right(&self.buffer);
         for c in &mut self.extra_cursors {
             c.move_right(&self.buffer);
         }
+        self.skip_front_matter_caret_navigation(&previous);
         self.dedup_cursors();
     }
 
     /// Move all cursors up.
     pub(crate) fn multi_cursor_move_up(&mut self) {
+        let previous = self.all_cursors_snapshot();
         self.cursor.move_up(&self.buffer);
         for c in &mut self.extra_cursors {
             c.move_up(&self.buffer);
         }
+        self.skip_front_matter_caret_navigation(&previous);
         self.dedup_cursors();
     }
 
     /// Move all cursors down.
     pub(crate) fn multi_cursor_move_down(&mut self) {
+        let previous = self.all_cursors_snapshot();
         self.cursor.move_down(&self.buffer);
         for c in &mut self.extra_cursors {
             c.move_down(&self.buffer);
         }
+        self.skip_front_matter_caret_navigation(&previous);
         self.dedup_cursors();
     }
 
     /// Select left for all cursors.
     pub(crate) fn multi_cursor_select_left(&mut self) {
+        let previous = self.all_cursors_snapshot();
         self.cursor.select_left(&self.buffer);
         for c in &mut self.extra_cursors {
             c.select_left(&self.buffer);
         }
+        self.skip_folded_front_matter_selection_navigation(&previous);
         self.dedup_cursors();
     }
 
     /// Select right for all cursors.
     pub(crate) fn multi_cursor_select_right(&mut self) {
+        let previous = self.all_cursors_snapshot();
         self.cursor.select_right(&self.buffer);
         for c in &mut self.extra_cursors {
             c.select_right(&self.buffer);
         }
+        self.skip_folded_front_matter_selection_navigation(&previous);
         self.dedup_cursors();
     }
 
     /// Select up for all cursors.
     pub(crate) fn multi_cursor_select_up(&mut self) {
+        let previous = self.all_cursors_snapshot();
         self.cursor.select_up(&self.buffer);
         for c in &mut self.extra_cursors {
             c.select_up(&self.buffer);
         }
+        self.skip_folded_front_matter_selection_navigation(&previous);
         self.dedup_cursors();
     }
 
     /// Select down for all cursors.
     pub(crate) fn multi_cursor_select_down(&mut self) {
+        let previous = self.all_cursors_snapshot();
         self.cursor.select_down(&self.buffer);
         for c in &mut self.extra_cursors {
             c.select_down(&self.buffer);
         }
+        self.skip_folded_front_matter_selection_navigation(&previous);
         self.dedup_cursors();
     }
 
@@ -8882,229 +9207,61 @@ impl EditorView {
     }
 
     pub(crate) fn multi_cursor_move_word_left(&mut self) {
+        let previous = self.all_cursors_snapshot();
         self.cursor.move_word_left(&self.buffer);
         for c in &mut self.extra_cursors {
             c.move_word_left(&self.buffer);
         }
+        self.skip_front_matter_caret_navigation(&previous);
         self.dedup_cursors();
     }
 
     pub(crate) fn multi_cursor_move_word_right(&mut self) {
+        let previous = self.all_cursors_snapshot();
         self.cursor.move_word_right(&self.buffer);
         for c in &mut self.extra_cursors {
             c.move_word_right(&self.buffer);
         }
+        self.skip_front_matter_caret_navigation(&previous);
         self.dedup_cursors();
     }
 
     pub(crate) fn multi_cursor_delete_word_left(&mut self) {
-        if self.extra_cursors.is_empty() {
-            self.cursor.delete_word_left(&mut self.buffer);
-            return;
-        }
-
-        let all = self.collect_multi_cursor_targets_desc();
-        let mut edits = Vec::with_capacity(all.len());
-        for (offset, anchor, is_primary) in &all {
-            let before_len = self.buffer.len();
-            let mut cursor = Cursor {
-                offset: *offset,
-                anchor: *anchor,
-            };
-            cursor.delete_word_left(&mut self.buffer);
-            let after_len = self.buffer.len();
-            edits.push(MultiCursorResolvedEdit {
-                start: cursor.offset,
-                cursor_after: cursor.offset,
-                delta: after_len as isize - before_len as isize,
-                is_primary: *is_primary,
-                ordered_list_update: None,
-            });
-        }
-
-        self.apply_multi_cursor_resolved_edits(edits);
+        self.apply_semantic_delete(table_cell_list_edit::DeleteAction::Word { backwards: true });
     }
 
     pub(crate) fn multi_cursor_delete_word_right(&mut self) {
-        if self.extra_cursors.is_empty() {
-            self.cursor.delete_word_right(&mut self.buffer);
-            return;
-        }
-
-        let all = self.collect_multi_cursor_targets_desc();
-        let mut edits = Vec::with_capacity(all.len());
-        for (offset, anchor, is_primary) in &all {
-            let before_len = self.buffer.len();
-            let mut cursor = Cursor {
-                offset: *offset,
-                anchor: *anchor,
-            };
-            cursor.delete_word_right(&mut self.buffer);
-            let after_len = self.buffer.len();
-            edits.push(MultiCursorResolvedEdit {
-                start: cursor.offset,
-                cursor_after: cursor.offset,
-                delta: after_len as isize - before_len as isize,
-                is_primary: *is_primary,
-                ordered_list_update: None,
-            });
-        }
-
-        self.apply_multi_cursor_resolved_edits(edits);
+        self.apply_semantic_delete(table_cell_list_edit::DeleteAction::Word { backwards: false });
     }
 
     pub(crate) fn multi_cursor_enter(&mut self) {
-        if self.extra_cursors.is_empty() {
-            self.cursor.insert(&mut self.buffer, "\n");
-            return;
-        }
-
-        let all = self.collect_multi_cursor_targets_desc();
-        let mut edits = Vec::with_capacity(all.len());
-
-        for (offset, anchor, is_primary) in &all {
-            let mut cursor = Cursor {
-                offset: *offset,
-                anchor: *anchor,
-            };
-            let before_len = self.buffer.len();
-            let mut edit_start = (*offset).min(*anchor);
-            let mut ordered_list_update = None;
-            let cursor_line = self.buffer.offset_to_line_col(cursor.offset).0;
-            let line_start = self.buffer.line_start(cursor_line);
-            let line_end = self.buffer.line_end(cursor_line);
-            let line_content = self.buffer.line_content(cursor_line).to_string();
-            let block_type = self
-                .decorations
-                .get(cursor_line)
-                .map(|d| d.block_type.clone())
-                .unwrap_or(BlockType::Normal);
-            let (ws_str, trimmed) = markdown::split_continuation_prefix(&line_content);
-            let quote_prefix_len = markdown::blockquote_prefix_len(&line_content);
-            let body_indent = ws_str.len().saturating_sub(quote_prefix_len);
-            let leading_ws = quote_prefix_len + body_indent;
-
-            match block_type {
-                BlockType::UnorderedList => {
-                    let marker_len = if trimmed.starts_with("- ")
-                        || trimmed.starts_with("* ")
-                        || trimmed.starts_with("+ ")
-                    {
-                        2
-                    } else {
-                        0
-                    };
-                    if marker_len > 0 && cursor.offset >= line_start + leading_ws + marker_len {
-                        let text_after_marker = &line_content[leading_ws + marker_len..];
-                        if text_after_marker.trim().is_empty() {
-                            edit_start = line_start;
-                            self.buffer
-                                .replace(line_start..line_end, &line_content[..quote_prefix_len]);
-                            cursor.move_to(line_start + quote_prefix_len, &self.buffer);
-                            cursor.insert(&mut self.buffer, "\n");
-                        } else {
-                            let marker = &trimmed[..marker_len];
-                            let continuation = format!("\n{}{}", ws_str, marker);
-                            cursor.insert(&mut self.buffer, &continuation);
-                        }
-                        let after_len = self.buffer.len();
-                        edits.push(MultiCursorResolvedEdit {
-                            start: edit_start,
-                            cursor_after: cursor.offset,
-                            delta: after_len as isize - before_len as isize,
-                            is_primary: *is_primary,
-                            ordered_list_update,
-                        });
-                        continue;
-                    }
-                }
-                BlockType::TaskList(_) => {
-                    let prefix_len = task_prefix_len(trimmed);
-                    if prefix_len > 0 && cursor.offset >= line_start + leading_ws + prefix_len {
-                        let text_after_marker = &line_content[leading_ws + prefix_len..];
-                        if text_after_marker.trim().is_empty() {
-                            edit_start = line_start;
-                            self.buffer
-                                .replace(line_start..line_end, &line_content[..quote_prefix_len]);
-                            cursor.move_to(line_start + quote_prefix_len, &self.buffer);
-                            cursor.insert(&mut self.buffer, "\n");
-                        } else {
-                            let bullet = if trimmed.starts_with("- ") {
-                                "- "
-                            } else if trimmed.starts_with("* ") {
-                                "* "
-                            } else {
-                                "+ "
-                            };
-                            let continuation = format!("\n{}{}[ ] ", ws_str, bullet);
-                            cursor.insert(&mut self.buffer, &continuation);
-                        }
-                        let after_len = self.buffer.len();
-                        edits.push(MultiCursorResolvedEdit {
-                            start: edit_start,
-                            cursor_after: cursor.offset,
-                            delta: after_len as isize - before_len as isize,
-                            is_primary: *is_primary,
-                            ordered_list_update,
-                        });
-                        continue;
-                    }
-                }
-                BlockType::OrderedList => {
-                    let prefix_len = markdown::ordered_list_prefix_len(trimmed);
-                    if prefix_len > 0 && cursor.offset >= line_start + leading_ws + prefix_len {
-                        let number: u32 =
-                            trimmed[..prefix_len.saturating_sub(2)].parse().unwrap_or(1);
-                        let text_after_marker = &line_content[leading_ws + prefix_len..];
-                        if text_after_marker.trim().is_empty() {
-                            edit_start = line_start;
-                            self.buffer
-                                .replace(line_start..line_end, &line_content[..quote_prefix_len]);
-                            cursor.move_to(line_start + quote_prefix_len, &self.buffer);
-                            cursor.insert(&mut self.buffer, "\n");
-                            ordered_list_update = Some(false);
-                        } else {
-                            let continuation = format!("\n{}{}. ", ws_str, number + 1);
-                            cursor.insert(&mut self.buffer, &continuation);
-                            ordered_list_update = Some(true);
-                        }
-                        let after_len = self.buffer.len();
-                        edits.push(MultiCursorResolvedEdit {
-                            start: edit_start,
-                            cursor_after: cursor.offset,
-                            delta: after_len as isize - before_len as isize,
-                            is_primary: *is_primary,
-                            ordered_list_update,
-                        });
-                        continue;
-                    }
-                }
-                _ => {}
-            }
-
-            cursor.insert(&mut self.buffer, "\n");
-            let after_len = self.buffer.len();
-            edits.push(MultiCursorResolvedEdit {
-                start: edit_start,
-                cursor_after: cursor.offset,
-                delta: after_len as isize - before_len as isize,
-                is_primary: *is_primary,
-                ordered_list_update,
-            });
-        }
-
-        let ordered_list_updates = self.apply_multi_cursor_resolved_edits(edits);
-
-        self.reparse();
-        for (offset, preserve_current_number) in ordered_list_updates {
-            let (line, _) = self
-                .buffer
-                .offset_to_line_col(offset.min(self.buffer.len()));
-            self.normalize_ordered_list_near_line(line, preserve_current_number);
-        }
-        if !self.extra_cursors.is_empty() {
-            self.reparse();
-        }
+        let plans = self
+            .collect_multi_cursor_targets_desc()
+            .into_iter()
+            .map(|(offset, anchor, primary)| {
+                let cursor = Cursor { offset, anchor };
+                let plan = self
+                    .table_cell_enter_plan(cursor, false)
+                    .unwrap_or_else(|| {
+                        let line = self.buffer.offset_to_line_col(offset).0;
+                        let kind = self
+                            .decorations
+                            .get(line)
+                            .map(|d| &d.block_type)
+                            .unwrap_or(&BlockType::Normal);
+                        table_cell_list_edit::enter(
+                            self.buffer.text(),
+                            self.buffer.line_start(line)..self.buffer.line_end(line),
+                            kind,
+                            cursor.selection_range(),
+                            offset,
+                            "\n",
+                        )
+                    });
+                (plan, primary)
+            })
+            .collect();
+        self.apply_table_aware_cursor_plans(plans);
     }
 
     /// Select to line start for all cursors.
@@ -9228,6 +9385,9 @@ impl EditorView {
     }
 
     pub(crate) fn restore_snapshot(&mut self, snapshot: EditorSnapshot) {
+        // Snapshots store offsets, not visual boundary intent. Do not inherit
+        // the current boundary when a restored offset belongs to a cell.
+        self.table_boundary_caret = None;
         if !self.restore_table_source_snapshot(&snapshot.text) {
             self.buffer = Buffer::from_text(&snapshot.text);
         }
@@ -9251,6 +9411,7 @@ impl EditorView {
     }
 
     pub(crate) fn restore_tab_snapshot_state(&mut self, snapshot: &EditorSnapshot) {
+        self.table_boundary_caret = None;
         self.table_source = None;
         self.buffer = Buffer::from_text(&snapshot.text);
         self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
@@ -9817,6 +9978,9 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_current_line_prefix(&mut self, prefix: &str) {
+        if !self.table_block_format_allowed(matches!(prefix, "- [ ] " | "- " | "1. ")) {
+            return;
+        }
         if self.extra_cursors.is_empty() {
             self.toggle_current_line_prefix_single(prefix);
             return;
@@ -10016,6 +10180,9 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_horizontal_rule_at_cursor(&mut self) {
+        if !self.table_block_format_allowed(false) {
+            return;
+        }
         if self.extra_cursors.is_empty() {
             self.toggle_horizontal_rule_at_cursor_single();
             return;
@@ -10297,6 +10464,30 @@ impl EditorView {
         if self.active_tab_is_read_only() {
             return;
         }
+        if let Some(decoration) = self.decorations.get(line)
+            && (decoration.front_matter.is_some()
+                || decoration
+                    .table_info
+                    .as_ref()
+                    .is_some_and(|table| table.is_front_matter))
+        {
+            if let Some((range, replacement)) =
+                front_matter_boolean_edit(&self.buffer, decoration, line)
+            {
+                self.queue_non_markdown_line_display_transfer(&range, replacement);
+                self.buffer.replace(range.clone(), replacement);
+                remap_source_edit_positions(
+                    &mut self.cursor,
+                    &mut self.extra_cursors,
+                    &mut self.marked_range,
+                    &mut self.extra_marked_ranges,
+                    &mut self.wrap_boundary_affinity,
+                    &range,
+                    replacement.len(),
+                );
+            }
+            return;
+        }
         let line_content = self.buffer.line_content(line).to_string();
         let line_start = self.buffer.line_start(line);
         if let Some(pos) = line_content.find("[ ]") {
@@ -10325,13 +10516,12 @@ impl EditorView {
         else {
             return false;
         };
-        let Some(cell) = info.cells.get(col) else {
+        if col >= info.cells.len() || col >= info.cell_ranges.len() {
             return false;
-        };
-        let Some(range) = info.cell_ranges.get(col) else {
-            return false;
-        };
-        let Some((relative, replacement)) = table_task_checkbox_edit_at(cell, cell_offset) else {
+        }
+        let (cell, range) =
+            table_cell_render::content_with_range(info, self.buffer.line_content(line), col);
+        let Some((relative, replacement)) = table_task_checkbox_edit_at(&cell, cell_offset) else {
             return false;
         };
         let offset = self.buffer.line_start(line) + range.start + relative;
@@ -10340,6 +10530,9 @@ impl EditorView {
     }
 
     pub(crate) fn wrap_current_lines_as_code_block(&mut self) {
+        if !self.table_block_format_allowed(false) {
+            return;
+        }
         if self.extra_cursors.is_empty() {
             self.wrap_current_lines_as_code_block_single();
             return;
@@ -10658,6 +10851,9 @@ impl EditorView {
     }
 
     pub(crate) fn apply_heading(&mut self, level: u8) {
+        if !self.table_block_format_allowed(false) {
+            return;
+        }
         if self.extra_cursors.is_empty() {
             self.apply_heading_single(level);
             return;
@@ -10745,26 +10941,38 @@ impl EditorView {
         let policy = self.app_settings.workspace_link_policy();
         let paths = paths.to_vec();
         cx.spawn(async move |this, cx| {
-            let links = cx
-                .background_executor()
-                .spawn(async move {
+            let links = crate::platform::fs_task::run_anyhow(
+                "Create workspace links",
+                root.clone(),
+                move || {
                     let index = attachments::WorkspaceLinkIndex::build(&root);
+                    crate::platform::fs_task::check_deadline()?;
                     paths
                         .iter()
-                        .filter_map(|path| {
-                            policy
-                                .reference_for(
-                                    &root,
-                                    &source,
-                                    path,
-                                    is_image_path(path),
-                                    Some(&index),
-                                )
-                                .ok()
+                        .map(|path| {
+                            crate::platform::fs_task::check_deadline()?;
+                            policy.reference_for(
+                                &root,
+                                &source,
+                                path,
+                                is_image_path(path),
+                                Some(&index),
+                            )
                         })
-                        .collect::<Vec<_>>()
-                })
-                .await;
+                        .collect::<anyhow::Result<Vec<_>>>()
+                },
+            )
+            .await;
+            let links = match links {
+                Ok(links) => links,
+                Err(error) => {
+                    this.update(cx, |editor, cx| {
+                        editor.notify_error(format!("{error:#}"), cx)
+                    })
+                    .ok();
+                    return;
+                }
+            };
             if links.is_empty() {
                 return;
             }
@@ -11432,7 +11640,13 @@ pub(crate) fn classify_file_kind_for_bytes(path: &Path, bytes: &[u8]) -> FileKin
         return FileKind::Whiteboard;
     }
 
-    if let Some(syntax) = helpers::find_syntax_for_path(path)
+    let first_line = String::from_utf8_lossy(
+        bytes
+            .split(|byte| *byte == b'\n')
+            .next()
+            .unwrap_or_default(),
+    );
+    if let Some(syntax) = helpers::find_syntax_for_path(path, &first_line)
         && syntax.name != "Plain Text"
         && syntax.name != "Markdown"
     {
@@ -11572,6 +11786,7 @@ fn heading_matches_anchor(raw_line: &str, anchor: &str) -> bool {
     slugify_heading_text(text_without_attrs) == anchor
 }
 
+// Worker/test helper. Render and hover paths must use lexical classification.
 fn resolve_markdown_target_path(
     sidebar_root: &Path,
     current_file_path: Option<&Path>,
@@ -11583,11 +11798,14 @@ fn resolve_markdown_target_path(
         return current_file_path.map(Path::to_path_buf);
     }
 
-    attachments::WorkspaceLinkIndex::build(sidebar_root).resolve(current_file_path, path_part)
-}
-
-pub(crate) fn resolve_wiki_link_target_path(sidebar_root: &Path, target: &str) -> Option<PathBuf> {
-    resolve_markdown_target_path(sidebar_root, None, target)
+    if crate::platform::fs_task::check_deadline().is_err() {
+        return None;
+    }
+    let index = attachments::WorkspaceLinkIndex::build(sidebar_root);
+    if crate::platform::fs_task::check_deadline().is_err() {
+        return None;
+    }
+    index.resolve(current_file_path, path_part)
 }
 
 pub(crate) fn parse_decorations_for_file_kind(
@@ -11622,14 +11840,29 @@ impl EditorView {
     }
 
     pub(crate) fn reset_sparse_line_geometry(&self) {
-        self.line_geometry_cache.borrow_mut().sparse = SparseLineGeometry::default();
+        let mut cache = self.line_geometry_cache.borrow_mut();
+        cache.sparse = SparseLineGeometry::default();
+        if self.uses_sparse_line_geometry()
+            && let Some(range) = self.collapsed_front_matter_range()
+        {
+            cache.sparse.ensure_dimensions(
+                self.buffer.line_count(),
+                self.line_height_for_block(&BlockType::Normal) as f64,
+            );
+            for line in fold::front_matter_fold_hidden_rows(&range) {
+                cache.sparse.set_measured_height(line, 0.0);
+            }
+        }
     }
 
     fn clear_sparse_line_geometry_range(&self, range: Range<usize>) {
+        let hidden = self
+            .collapsed_front_matter_range()
+            .map(|folded| fold::front_matter_fold_hidden_rows(&folded));
         self.line_geometry_cache
             .borrow_mut()
             .sparse
-            .clear_range(range);
+            .clear_range_preserving_fold(range, hidden);
     }
 
     fn invalidate_indent_guide_step_cache(&self) {
@@ -11648,6 +11881,17 @@ impl EditorView {
     }
 
     fn clear_line_display_info(&mut self) {
+        self.front_matter_columns = None;
+        if fold::front_matter_fold_range(&self.decorations, 0).is_some() {
+            self.reconcile_front_matter_fold_cursor();
+            self.front_matter_group_geometry_dirty = true;
+            self.last_stable_input_bounds = None;
+            self.pending_input_bounds = None;
+            self.front_matter_type_areas.clear();
+            self.front_matter_text_areas.clear();
+            self.front_matter_delete_areas.clear();
+            self.front_matter_list_scroll_areas.clear();
+        }
         self.line_display_info = LineDisplayCache::new();
         self.reset_sparse_line_geometry();
         self.invalidate_line_geometry_cache();
@@ -11773,7 +12017,10 @@ impl EditorView {
         std::mem::take(&mut self.line_display_info)
     }
 
-    fn set_decorations(&mut self, decorations: Vec<LineDecoration>) {
+    fn set_decorations(&mut self, mut decorations: Vec<LineDecoration>) {
+        if self.active_tab_is_markdown() {
+            fold::decorate_empty_front_matter(&self.buffer, &mut decorations);
+        }
         self.decorations = decorations;
         self.lazy_markdown_decorations = None;
         self.markdown_outline_index.borrow_mut().take();
@@ -12471,9 +12718,7 @@ impl EditorView {
                     }
                 }
 
-                if let Some(table_info) = decoration.table_info.as_ref()
-                    && !table_info.is_front_matter
-                {
+                if let Some(table_info) = decoration.table_info.as_ref() {
                     if table_info.table_start_line < dirty_start_old {
                         dirty_start_old = table_info.table_start_line;
                         expanded = true;
@@ -12557,36 +12802,7 @@ impl EditorView {
     }
 
     fn resolve_markdown_navigation_target(&self, target: &str) -> Option<MarkdownNavigationTarget> {
-        let trimmed = target.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-
-        if trimmed.starts_with("http://")
-            || trimmed.starts_with("https://")
-            || trimmed.starts_with("mailto:")
-        {
-            return Some(MarkdownNavigationTarget::ExternalUrl(trimmed.to_string()));
-        }
-
-        let (path_part, anchor) = split_markdown_target(trimmed);
-        if path_part.trim().is_empty() {
-            return anchor
-                .filter(|anchor| !anchor.is_empty())
-                .map(|anchor| MarkdownNavigationTarget::CurrentAnchor(anchor.to_string()));
-        }
-
-        resolve_markdown_target_path(
-            &self.sidebar_root,
-            self.current_file_path.as_deref(),
-            trimmed,
-        )
-        .map(|path| MarkdownNavigationTarget::File {
-            path,
-            anchor: anchor
-                .filter(|anchor| !anchor.is_empty())
-                .map(str::to_string),
-        })
+        navigation_io::classify_target(target)
     }
 
     pub(crate) fn markdown_target_is_navigable(&self, target: &str) -> bool {
@@ -12618,32 +12834,34 @@ impl EditorView {
         focus_editor: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(target) = self.resolve_markdown_navigation_target(target) else {
+        let Some(classified) = self.resolve_markdown_navigation_target(target) else {
             return false;
         };
 
-        match target {
+        match classified {
             MarkdownNavigationTarget::ExternalUrl(url) => {
                 if let Err(error) = crate::platform::shell::open_url(&url) {
-                    log_error!("failed to open URL: {error}");
+                    self.notify_error(
+                        format!("{}: {url}: {error}", self.t(TextKey::OpenFailed)),
+                        cx,
+                    );
                     return false;
                 }
                 true
             }
             MarkdownNavigationTarget::CurrentAnchor(anchor) => {
                 let Some(target_line) = self.find_anchor_line_in_current_buffer(&anchor) else {
+                    self.notify_error(
+                        format!("anchor ‘{anchor}’ was not found in the current document"),
+                        cx,
+                    );
                     return false;
                 };
                 self.reveal_line_in_current_buffer(target_line, cx);
                 true
             }
-            MarkdownNavigationTarget::File { path, anchor } => {
-                self.open_path_in_permanent_tab(path, focus_editor, cx);
-                if let Some(anchor) = anchor
-                    && let Some(target_line) = self.find_anchor_line_in_current_buffer(&anchor)
-                {
-                    self.reveal_line_in_current_buffer(target_line, cx);
-                }
+            MarkdownNavigationTarget::File { .. } => {
+                self.schedule_markdown_navigation(target.trim().to_string(), focus_editor, cx);
                 true
             }
         }
@@ -12697,27 +12915,9 @@ fn edit_may_change_leading_indent(
 }
 
 pub(crate) fn default_document_text(ui_language: UiLanguage) -> String {
-    let help_path = help_document_path(ui_language);
-    crate::resolve_runtime_path(help_path)
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .unwrap_or_else(|| bundled_help_document(ui_language).to_string())
-}
-
-fn help_document_path(ui_language: UiLanguage) -> &'static str {
-    match ui_language {
-        UiLanguage::English => "docs/help-en.md",
-        UiLanguage::ChineseSimplified => "docs/help-zh-cn.md",
-        UiLanguage::ChineseTraditional => "docs/help-zh-tw.md",
-        UiLanguage::Japanese => "docs/help-ja.md",
-        UiLanguage::Korean => "docs/help-ko.md",
-        UiLanguage::French => "docs/help-fr.md",
-        UiLanguage::German => "docs/help-de.md",
-        UiLanguage::Spanish => "docs/help-es.md",
-        UiLanguage::Portuguese => "docs/help-pt.md",
-        UiLanguage::Russian => "docs/help-ru.md",
-        UiLanguage::Arabic => "docs/help-ar.md",
-        UiLanguage::Hindi => "docs/help-hi.md",
-    }
+    // The first window must not consult the process working directory, which
+    // itself may be an unavailable remote mount.
+    bundled_help_document(ui_language).to_string()
 }
 
 fn bundled_help_document(ui_language: UiLanguage) -> &'static str {
@@ -12794,7 +12994,9 @@ pub(crate) fn classify_word_char(ch: char) -> WordCharClass {
 }
 
 pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
-    for marker in ["- [ ] ", "- [x] ", "* [ ] ", "* [x] ", "+ [ ] ", "+ [x] "] {
+    for marker in [
+        "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
+    ] {
         if trimmed.starts_with(marker) {
             return marker.len();
         }
@@ -12858,28 +13060,6 @@ fn markdown_table_cell_from_paste(text: &str) -> String {
         .join("<br>")
 }
 
-fn adjacent_html_break_range(
-    text: &str,
-    offset: usize,
-    backwards: bool,
-) -> Option<std::ops::Range<usize>> {
-    for length in [4usize, 5, 6] {
-        let range = if backwards {
-            offset.checked_sub(length)?..offset
-        } else {
-            offset..offset.checked_add(length)?
-        };
-        let candidate = text.get(range.clone())?;
-        if matches!(
-            candidate.to_ascii_lowercase().as_str(),
-            "<br>" | "<br/>" | "<br />"
-        ) {
-            return Some(range);
-        }
-    }
-    None
-}
-
 fn escape_markdown_table_cell(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for (index, character) in text.char_indices() {
@@ -12892,17 +13072,17 @@ fn escape_markdown_table_cell(text: &str) -> String {
 }
 
 fn table_cell_fragment_range(cell: &str, offset: usize) -> std::ops::Range<usize> {
-    let breaks = helpers::table_cell_break_ranges(cell);
-    let segment_start = breaks
+    let decoration = helpers::table_cell_decoration(
+        &markdown::LineDecoration::default(),
+        cell,
+        &(0..cell.len()),
+    );
+    decoration
+        .table_cell_fragments
         .iter()
-        .take_while(|range| range.end <= offset)
-        .last()
-        .map_or(0, |range| range.end);
-    let segment_end = breaks
-        .iter()
-        .find(|range| range.start >= segment_start)
-        .map_or(cell.len(), |range| range.start);
-    segment_start..segment_end
+        .rev()
+        .find(|fragment| fragment.range.start <= offset)
+        .map_or(0..cell.len(), |fragment| fragment.range.clone())
 }
 
 fn table_task_checkbox_edit_at(cell: &str, offset: usize) -> Option<(usize, &'static str)> {
@@ -12911,10 +13091,10 @@ fn table_task_checkbox_edit_at(cell: &str, offset: usize) -> Option<(usize, &'st
     let segment = &cell[fragment];
     let leading = segment.len() - segment.trim_start_matches([' ', '\t']).len();
     let prefix = &segment[leading..];
-    let checked = ["- [x]", "* [x]", "+ [x]"]
+    let checked = ["- [x] ", "* [x] ", "+ [x] "]
         .iter()
         .any(|item| prefix.starts_with(item));
-    let unchecked = ["- [ ]", "* [ ]", "+ [ ]"]
+    let unchecked = ["- [ ] ", "* [ ] ", "+ [ ] "]
         .iter()
         .any(|item| prefix.starts_with(item));
     (checked || unchecked).then_some((segment_start + leading + 3, if checked { " " } else { "x" }))
@@ -13023,6 +13203,24 @@ mod tests {
         let mut updated = cell.to_string();
         updated.replace_range(offset..offset + 1, replacement);
         assert_eq!(updated, "- [ ] parent<br>  - [x] child");
+    }
+
+    #[test]
+    fn table_task_click_requires_completed_marker_and_respects_protected_breaks() {
+        for cell in ["- [ ]", "- [x]", "lead<br>- [ ]", "lead<br>- [x]"] {
+            assert!(super::table_task_checkbox_edit_at(cell, cell.len()).is_none());
+        }
+        for cell in ["- [ ] ", "lead<br>- [ ] "] {
+            let (offset, replacement) =
+                super::table_task_checkbox_edit_at(cell, cell.len()).unwrap();
+            assert_eq!(&cell[offset..offset + 1], " ");
+            assert_eq!(replacement, "x");
+        }
+        for cell in ["`code<br>- [x] literal`", "[[note<br>- [x] literal]]"] {
+            let at = cell.find("literal").unwrap();
+            assert_eq!(super::table_cell_fragment_range(cell, at), 0..cell.len());
+            assert!(super::table_task_checkbox_edit_at(cell, at).is_none());
+        }
     }
 
     #[test]
@@ -13135,17 +13333,16 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        EditorView, LazyMarkdownDecorations, SparseLineGeometry, adjacent_html_break_range,
-        classify_file_kind_for_bytes, compute_incremental_markdown_decorations,
-        edit_may_change_leading_indent, editor_can_start_content_edit, editor_is_read_only,
-        generated_preview_content_in_range, generated_preview_intersects_range,
-        heading_matches_anchor, line_display_transfer_line_bounds,
-        markdown_plain_structural_edit_is_safe, markdown_syntax_expansion_allowed,
-        markdown_table_cell_from_paste, markdown_table_from_tsv, new_lazy_markdown_decorations,
-        normalize_ordered_list_numbers_in_buffer, normalize_pasted_newlines,
-        ordered_list_near_line, parse_lazy_markdown_range, resolve_markdown_target_path,
-        should_use_lazy_markdown_reparse, split_external_paths, split_markdown_target,
-        text_tab_is_dirty, unique_import_path,
+        EditorView, LazyMarkdownDecorations, SparseLineGeometry, classify_file_kind_for_bytes,
+        compute_incremental_markdown_decorations, edit_may_change_leading_indent,
+        editor_can_start_content_edit, editor_is_read_only, generated_preview_content_in_range,
+        generated_preview_intersects_range, heading_matches_anchor,
+        line_display_transfer_line_bounds, markdown_plain_structural_edit_is_safe,
+        markdown_syntax_expansion_allowed, markdown_table_cell_from_paste, markdown_table_from_tsv,
+        new_lazy_markdown_decorations, normalize_ordered_list_numbers_in_buffer,
+        normalize_pasted_newlines, ordered_list_near_line, parse_lazy_markdown_range,
+        resolve_markdown_target_path, should_use_lazy_markdown_reparse, split_external_paths,
+        split_markdown_target, text_tab_is_dirty, unique_import_path,
     };
     use crate::buffer::Buffer;
     use crate::markdown::{BlockType, parse_decorations};
@@ -13247,14 +13444,6 @@ mod tests {
             r"already\|escaped"
         );
         assert_eq!(markdown_table_cell_from_paste("A\tB\n1\t2"), "A\tB<br>1\t2");
-    }
-
-    #[test]
-    fn html_breaks_are_deleted_as_one_table_cell_unit() {
-        let text = "one<br>two<BR />three";
-        assert_eq!(adjacent_html_break_range(text, 7, true), Some(3..7));
-        assert_eq!(adjacent_html_break_range(text, 10, false), Some(10..16));
-        assert_eq!(adjacent_html_break_range(text, 3, true), None);
     }
 
     #[test]
@@ -13428,6 +13617,243 @@ mod tests {
         );
         assert_eq!(history.take_undo(&after), Some(before.clone()));
         assert_eq!(history.take_redo(&before), Some(after));
+    }
+
+    #[test]
+    fn vertical_navigation_keeps_front_matter_delimiters_but_skips_table_separators() {
+        for source in [
+            "---\nenabled: true\n---\nBody",
+            "---\nenabled: true\n...\nBody",
+            "-\nenabled: true\n-\nBody",
+            "| Key | Value |\n| --- | --- |\n| flag | true |",
+        ] {
+            let buffer = Buffer::from_text(source);
+            let decorations = parse_decorations(source);
+            let table = decorations[0].table_info.as_ref().unwrap();
+            let separator_line = if table.is_front_matter { 2 } else { 1 };
+            for downward in [true, false] {
+                let start_line = if downward {
+                    separator_line - 1
+                } else {
+                    separator_line + 1
+                };
+                let mut cursor = crate::cursor::Cursor::new();
+                cursor.move_to(buffer.line_start(start_line) + 1, &buffer);
+                if downward {
+                    cursor.move_down(&buffer);
+                } else {
+                    cursor.move_up(&buffer);
+                }
+                assert_eq!(buffer.offset_to_line_col(cursor.offset).0, separator_line);
+                let landed = cursor;
+                if let Some(offset) = super::table_separator_skip_offset(
+                    &buffer,
+                    &decorations,
+                    cursor.offset,
+                    downward,
+                ) {
+                    cursor.move_to(offset, &buffer);
+                }
+                if table.is_front_matter {
+                    assert_eq!(cursor, landed, "delimiter stays focusable: {source}");
+                } else {
+                    let expected_line = if downward { 2 } else { 0 };
+                    assert_eq!(buffer.offset_to_line_col(cursor.offset), (expected_line, 1));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn front_matter_boolean_toggle_preserves_source_positions_and_history() {
+        for (token, toggled) in [
+            ("true", "false"),
+            ("True", "False"),
+            ("TRUE", "FALSE"),
+            ("false", "true"),
+            ("False", "True"),
+            ("FALSE", "TRUE"),
+        ] {
+            let source = format!("---\nconfig:\n  完了: {token}   # keep [ ]\n---\n\nbody🙂\n");
+            let expected = source.replacen(token, toggled, 1);
+            let mut buffer = Buffer::from_text(&source);
+            let decorations = parse_decorations(&source);
+            let (range, replacement) =
+                super::front_matter_boolean_edit(&buffer, &decorations[2], 2).unwrap();
+            assert_eq!(&source[range.clone()], token);
+            let mut cursor = crate::cursor::Cursor {
+                offset: source.find("body").unwrap(),
+                anchor: 0,
+            };
+            let mut extra = vec![crate::cursor::Cursor {
+                offset: source.len(),
+                anchor: range.start,
+            }];
+            let before = super::EditorSnapshot {
+                text: source.clone(),
+                cursor_offset: cursor.offset,
+                cursor_anchor: cursor.anchor,
+                scroll_offset: 25.0,
+                extra_cursors: vec![(extra[0].offset, extra[0].anchor)],
+            };
+            let mut marked = Some(range.end..source.len());
+            let mut extra_marked = vec![0..range.start, range.clone()];
+            let mut affinity = Some(super::WrapBoundaryAffinity {
+                offset: cursor.offset,
+                kind: super::WrapBoundaryAffinityKind::Upstream,
+            });
+            buffer.begin_edit_recording();
+            buffer.replace(range.clone(), replacement);
+            super::remap_source_edit_positions(
+                &mut cursor,
+                &mut extra,
+                &mut marked,
+                &mut extra_marked,
+                &mut affinity,
+                &range,
+                replacement.len(),
+            );
+            let edits = buffer.finish_edit_recording();
+            let new_end = range.start + replacement.len();
+            assert_eq!(buffer.text(), expected);
+            assert_eq!(edits.len(), 1);
+            assert_eq!(edits[0].start, range.start);
+            assert_eq!(edits[0].deleted_text, token);
+            assert_eq!(edits[0].inserted_text, toggled);
+            assert_eq!(cursor.offset, expected.find("body").unwrap());
+            assert_eq!(cursor.anchor, 0);
+            assert_eq!(
+                (extra[0].offset, extra[0].anchor),
+                (expected.len(), range.start)
+            );
+            assert_eq!(marked, Some(new_end..expected.len()));
+            assert_eq!(extra_marked, vec![0..range.start, range.start..new_end]);
+            assert_eq!(affinity.unwrap().offset, cursor.offset);
+            assert_eq!(
+                affinity.unwrap().kind,
+                super::WrapBoundaryAffinityKind::Upstream
+            );
+            let after = super::EditorSnapshot {
+                text: expected.clone(),
+                cursor_offset: cursor.offset,
+                cursor_anchor: cursor.anchor,
+                scroll_offset: before.scroll_offset,
+                extra_cursors: vec![(extra[0].offset, extra[0].anchor)],
+            };
+            let mut history = super::history_store::TabHistory::default();
+            history.push_undo_transaction(
+                edits.clone(),
+                super::history_store::SnapshotViewState::from(&before),
+                super::history_store::SnapshotViewState::from(&after),
+                false,
+            );
+            assert_eq!(history.take_undo(&after), Some(before.clone()));
+            assert_eq!(history.take_redo(&before), Some(after));
+            assert!(buffer.apply_edits_inverse(&edits));
+            assert_eq!(buffer.text(), source);
+            assert!(buffer.apply_edits_forward(&edits));
+            assert_eq!(buffer.text(), expected);
+            // Repeated clicks toggle the token again without relocating the caret.
+            let updated = parse_decorations(buffer.text());
+            let (range, replacement) =
+                super::front_matter_boolean_edit(&buffer, &updated[2], 2).unwrap();
+            buffer.replace(range.clone(), replacement);
+            super::remap_source_edit_positions(
+                &mut cursor,
+                &mut extra,
+                &mut marked,
+                &mut extra_marked,
+                &mut affinity,
+                &range,
+                replacement.len(),
+            );
+            assert_eq!(buffer.text(), source);
+            assert_eq!(cursor.offset, before.cursor_offset);
+            assert_eq!(cursor.anchor, before.cursor_anchor);
+        }
+    }
+
+    #[test]
+    fn front_matter_boolean_offsets_clamp_inside_token_and_shift_suffix() {
+        for (old_len, new_len) in [(4, 5), (5, 4)] {
+            let range = 10..10 + old_len;
+            for offset in 0..=25 {
+                let expected = if offset <= 10 {
+                    offset
+                } else if offset >= range.end {
+                    offset - old_len + new_len
+                } else {
+                    10 + (offset - 10).min(new_len)
+                };
+                assert_eq!(
+                    super::offset_after_source_replacement(offset, &range, new_len),
+                    expected
+                );
+            }
+        }
+        let mut cursor = crate::cursor::Cursor {
+            offset: 14,
+            anchor: 15,
+        };
+        let mut marked = Some(14..15);
+        let mut affinity = Some(super::WrapBoundaryAffinity {
+            offset: 15,
+            kind: super::WrapBoundaryAffinityKind::Downstream,
+        });
+        super::remap_source_edit_positions(
+            &mut cursor,
+            &mut [],
+            &mut marked,
+            &mut [],
+            &mut affinity,
+            &(10..15),
+            4,
+        );
+        assert_eq!((cursor.offset, cursor.anchor), (14, 14));
+        assert_eq!(marked, Some(14..14));
+        assert_eq!(affinity.unwrap().offset, 14);
+    }
+
+    #[test]
+    fn front_matter_boolean_edit_rejects_quoted_and_non_boolean_values() {
+        let source = "---\nquoted: 'true'\nempty: null\ntext: '[ ]'\ndescription: |\n  true\n---\n";
+        let buffer = Buffer::from_text(source);
+        let decorations = parse_decorations(source);
+        for line in 0..buffer.line_count() {
+            assert!(super::front_matter_boolean_edit(&buffer, &decorations[line], line).is_none());
+        }
+    }
+
+    #[test]
+    fn front_matter_sparse_fold_geometry_skips_entire_block_before_hidden_rows_are_shaped() {
+        let source = format!(
+            "---\nbody: |-\n{}---\nBody\n{}",
+            "  scalar row\n".repeat(1200),
+            "paragraph\n".repeat(3000)
+        );
+        let buffer = Buffer::from_text(&source);
+        let decorations = parse_decorations(&source);
+        let range = super::fold::front_matter_fold_range(&decorations, 0).unwrap();
+        let mut geometry = SparseLineGeometry::default();
+        geometry.reset(buffer.line_count(), 20.0);
+        // Opener, summary row, and closer keep measured height; interior YAML collapses.
+        let hidden = super::fold::front_matter_fold_hidden_rows(&range);
+        for line in hidden.clone() {
+            geometry.set_measured_height(line, 0.0);
+        }
+        assert_eq!(geometry.y_offset(range.end, 8.0), 68.0);
+        assert_eq!(geometry.line_at_y(27.9, 8.0), 0);
+        assert_eq!(geometry.line_at_y(28.0, 8.0), 1);
+        assert_eq!(geometry.line_at_y(48.0, 8.0), range.end - 1);
+        geometry.clear_range_preserving_fold(0..range.end, Some(hidden));
+        assert_eq!(geometry.y_offset(range.end, 8.0), 68.0);
+        assert_eq!(geometry.line_at_y(48.0, 8.0), range.end - 1);
+        geometry.clear_range_preserving_fold(range.clone(), None);
+        assert_eq!(
+            geometry.y_offset(range.end, 8.0),
+            8.0 + range.end as f64 * 20.0
+        );
+        assert_eq!(buffer.text(), source);
     }
 
     #[test]
@@ -13651,6 +14077,165 @@ mod tests {
                 .expect("lazy range parsed");
         assert!(parsed_range.contains(&800));
         assert_eq!(decorations[800].block_type, BlockType::CodeBlock);
+    }
+
+    fn assert_lazy_front_matter_matches_full(source: &str, requested: std::ops::Range<usize>) {
+        let buffer = Buffer::from_text(source);
+        let full = parse_decorations(source);
+        let span = super::leading_front_matter_line_range(&buffer).unwrap();
+        let (mut decorations, mut lazy) = new_lazy_markdown_decorations(buffer.line_count());
+        let parsed = parse_lazy_markdown_range(&buffer, &mut decorations, &mut lazy, requested)
+            .expect("frontmatter parsed");
+        assert_eq!(parsed.start, 0);
+        assert!(parsed.end >= span.end);
+        for line in span.clone() {
+            assert_eq!(
+                format!("{:?}", decorations[line]),
+                format!("{:?}", full[line]),
+                "line {line}"
+            );
+        }
+        assert!(parse_lazy_markdown_range(&buffer, &mut decorations, &mut lazy, 0..1).is_none());
+        parse_lazy_markdown_range(&buffer, &mut decorations, &mut lazy, 0..buffer.line_count());
+        assert_eq!(format!("{decorations:#?}"), format!("{full:#?}"));
+        assert!(
+            parse_lazy_markdown_range(&buffer, &mut decorations, &mut lazy, 0..buffer.line_count())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lazy_markdown_front_matter_keeps_blanks_inside_scalar_and_list() {
+        let mut lines = vec!["---".to_string(), "description: |".to_string()];
+        for line in 0..145 {
+            lines.push(if matches!(line, 30 | 70 | 130) {
+                String::new()
+            } else {
+                format!("  scalar {line}")
+            });
+        }
+        lines.extend(
+            [
+                "  ---",
+                "items:",
+                "  - first",
+                "",
+                "  - true",
+                "enabled: TRUE",
+                "---",
+                "",
+                "# Body",
+                "",
+                "text",
+            ]
+            .map(str::to_string),
+        );
+        assert_lazy_front_matter_matches_full(&lines.join("\n"), 140..141);
+    }
+
+    #[test]
+    fn lazy_markdown_front_matter_keeps_long_blocks_across_chunks() {
+        for (opening, closing) in [("---", "---"), ("\u{feff}---", "..."), ("-", "-")] {
+            let mut lines = vec![opening.to_string(), "description: |".to_string()];
+            for line in 0..1_300 {
+                lines.push(if matches!(line, 180 | 600 | 900) {
+                    String::new()
+                } else {
+                    format!("  literal {line}")
+                });
+            }
+            lines.extend(
+                [
+                    "  ---",
+                    "items:",
+                    "  - first",
+                    "",
+                    "  - false",
+                    "enabled: true",
+                    closing,
+                    "",
+                    "# Body",
+                    "",
+                ]
+                .map(str::to_string),
+            );
+            for line in 0..300 {
+                lines.push(if line % 2 == 0 {
+                    format!("paragraph {line}")
+                } else {
+                    String::new()
+                });
+            }
+            assert_lazy_front_matter_matches_full(&lines.join("\n"), 800..801);
+        }
+    }
+
+    #[test]
+    fn lazy_markdown_front_matter_delimiter_edits_clear_old_metadata() {
+        let mut lines = vec!["---".to_string(), "description: |".to_string()];
+        for line in 0..1_300 {
+            lines.push(if line == 600 {
+                String::new()
+            } else {
+                format!("  literal {line}")
+            });
+        }
+        lines.extend(["---", "", "# Body", "", "text"].map(str::to_string));
+        let source = lines.join("\n");
+        for (line, replacement) in [(0, "--"), (702, "---"), (1_302, "--")] {
+            let mut buffer = Buffer::from_text(&source);
+            let (mut decorations, mut lazy) = new_lazy_markdown_decorations(buffer.line_count());
+            parse_lazy_markdown_range(&buffer, &mut decorations, &mut lazy, 0..buffer.line_count());
+            assert!(decorations[800].front_matter.is_some());
+            buffer.replace(buffer.line_start(line)..buffer.line_end(line), replacement);
+            lazy.invalidate_range(line..line + 1);
+            parse_lazy_markdown_range(&buffer, &mut decorations, &mut lazy, line..line + 1);
+            parse_lazy_markdown_range(&buffer, &mut decorations, &mut lazy, 0..buffer.line_count());
+            let full = parse_decorations(buffer.text());
+            assert_eq!(
+                format!("{decorations:#?}"),
+                format!("{full:#?}"),
+                "edited delimiter on line {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_markdown_front_matter_edits_fall_back_to_full_parse() {
+        let source = "---\ndescription: |\n  first\n\n  second\nitems:\n  - true\n\n  - false\nenabled: TRUE\n---\n\n# Body\n\ntext\n";
+        for edited in [
+            source.replacen("second", "changed", 1),
+            source.replacen("- true", "- false", 1),
+            source.replacen("TRUE", "FALSE", 1),
+            source.replacen("description: |", "description: >", 1),
+            source.replacen("---", "--", 1),
+            source.replace("TRUE\n---", "TRUE\n..."),
+            source.replace("TRUE\n---", "TRUE\n--"),
+        ] {
+            assert!(!assert_incremental_matches_full(source, &edited));
+            let buffer = Buffer::from_text(&edited);
+            let full = parse_decorations(&edited);
+            let result = compute_incremental_markdown_decorations(
+                parse_decorations(source),
+                &buffer,
+                buffer.line_count(),
+                Buffer::from_text(source).line_count(),
+                0,
+                buffer.line_count(),
+                edited.len() as isize - source.len() as isize,
+            )
+            .unwrap_or_else(|_| parse_decorations(buffer.text()));
+            assert_eq!(format!("{result:#?}"), format!("{full:#?}"));
+        }
+        assert!(assert_incremental_matches_full(
+            source,
+            &source.replace("text", "body text")
+        ));
+        let compact = source.replace("---", "-");
+        assert!(!assert_incremental_matches_full(
+            &compact,
+            &compact.replacen("TRUE", "FALSE", 1)
+        ));
     }
 
     #[test]

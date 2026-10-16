@@ -13,43 +13,97 @@ pub(crate) struct SidebarDirectoryChild {
     is_dir: bool,
 }
 
-fn load_sidebar_directory(path: &Path, sort_mode: SidebarSortMode) -> Vec<SidebarDirectoryChild> {
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return Vec::new();
-    };
-    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+fn load_sidebar_directory(
+    path: &Path,
+    sort_mode: SidebarSortMode,
+) -> std::io::Result<Vec<SidebarDirectoryChild>> {
+    let mut entries = std::fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by(|left, right| compare_dir_entries(sort_mode, left, right));
-    entries
-        .into_iter()
-        .filter_map(|entry| {
-            let entry_path = entry.path();
-            let is_dir = entry.file_type().ok()?.is_dir();
-            (!should_skip_path(&entry_path, is_dir)).then(|| SidebarDirectoryChild {
+    let mut children = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let entry_path = entry.path();
+        let is_dir = entry.file_type()?.is_dir();
+        if !should_skip_path(&entry_path, is_dir) {
+            children.push(SidebarDirectoryChild {
                 name: entry.file_name().to_string_lossy().into_owned(),
                 path: entry_path,
                 is_dir,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    Ok(children)
 }
 
 /// Number of markdown documents directly inside `dir`, matching what the
 /// FileList pane lists for that directory.
-fn count_dir_markdown_files(dir: &Path) -> usize {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            let path = entry.path();
-            let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-            !is_dir && !should_skip_path(&path, false) && is_markdown_file(&path)
-        })
-        .count()
+fn count_dir_markdown_files(dir: &Path) -> std::io::Result<usize> {
+    let mut count = 0;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_dir()
+            && !should_skip_path(&path, false)
+            && is_markdown_file(&path)
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn apply_sidebar_directory_snapshot(
+    cache: &mut std::collections::HashMap<PathBuf, Vec<SidebarDirectoryChild>>,
+    path: PathBuf,
+    snapshot: std::io::Result<Vec<SidebarDirectoryChild>>,
+) -> std::io::Result<()> {
+    cache.insert(path, snapshot?);
+    Ok(())
 }
 
 impl EditorView {
+    /// UI decisions use the directory snapshots, never mount-backed metadata.
+    pub(crate) fn sidebar_cached_path_is_dir(&self, path: &Path) -> Option<bool> {
+        if !path.as_os_str().is_empty() && path == self.sidebar_root {
+            return Some(true);
+        }
+        if let Some(child) = path
+            .parent()
+            .and_then(|parent| self.sidebar_directory_children.get(parent))
+            .and_then(|children| children.iter().find(|child| child.path == path))
+        {
+            return Some(child.is_dir);
+        }
+        if self.sidebar_directory_children.contains_key(path) || self.expanded_dirs.contains(path) {
+            return Some(true);
+        }
+        None
+    }
+
+    pub(super) fn report_sidebar_fs_error(
+        &mut self,
+        operation: &str,
+        path: &Path,
+        error: std::io::Error,
+        cx: &mut Context<Self>,
+    ) {
+        let message = crate::platform::fs_task::format_error(operation, path, error);
+        if self.sidebar_error.as_ref() != Some(&message) {
+            self.sidebar_error = Some(message.clone());
+            self.notify_error(message, cx);
+        }
+    }
+
+    pub(super) fn clear_sidebar_fs_error(&mut self, operation: &str, path: &Path) {
+        let prefix = format!("{operation} '{}'", path.display());
+        if self
+            .sidebar_error
+            .as_ref()
+            .is_some_and(|error| error.starts_with(&prefix))
+        {
+            self.sidebar_error = None;
+        }
+    }
+
     /// Marks the badge counts of `dirs` as out of date. The watcher calls this
     /// with the parent of every path that changed on disk, which is the only
     /// thing that can change a count.
@@ -67,6 +121,11 @@ impl EditorView {
         dirs: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        // Failed requests retry on explicit refresh/watcher invalidation, not
+        // every render frame while a mount is unavailable.
+        if self.sidebar_error.is_some() {
+            return;
+        }
         let pending = dirs
             .into_iter()
             .filter(|dir| {
@@ -78,30 +137,76 @@ impl EditorView {
         if pending.is_empty() {
             return;
         }
-        // Only the dispatched ones stop being dirty; anything skipped because a
-        // count was already in flight has to be asked for again next frame.
+        let root = self.sidebar_root.clone();
+        let epoch = self.sidebar_directory_epoch;
         for dir in &pending {
             self.sidebar_dir_file_counts_dirty.remove(dir);
+            self.sidebar_dir_file_counts_loading.insert(dir.clone());
         }
-        self.sidebar_dir_file_counts_loading
-            .extend(pending.iter().cloned());
+        let task_path = pending[0].clone();
         cx.spawn(async move |this, cx| {
-            let counted = cx
-                .background_executor()
-                .spawn(async move {
-                    pending
-                        .into_iter()
-                        .map(|dir| {
-                            let count = count_dir_markdown_files(&dir);
-                            (dir, count)
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .await;
+            let background_dirs = pending.clone();
+            let counted = crate::platform::fs_task::run(
+                "Count directory documents",
+                task_path.clone(),
+                move || {
+                    let mut counts = Vec::with_capacity(background_dirs.len());
+                    for dir in background_dirs {
+                        crate::platform::fs_task::check_deadline()?;
+                        match count_dir_markdown_files(&dir) {
+                            Ok(count) => counts.push((dir, Ok(count))),
+                            Err(error) => {
+                                counts.push((dir, Err(error)));
+                                break;
+                            }
+                        }
+                    }
+                    Ok(counts)
+                },
+            )
+            .await;
             this.update(cx, |this, cx| {
-                for (dir, count) in counted {
-                    this.sidebar_dir_file_counts_loading.remove(&dir);
-                    this.sidebar_dir_file_counts.insert(dir, count);
+                for dir in &pending {
+                    this.sidebar_dir_file_counts_loading.remove(dir);
+                }
+                if this.sidebar_root != root || this.sidebar_directory_epoch != epoch {
+                    this.sidebar_dir_file_counts_dirty.extend(pending);
+                    return;
+                }
+                match counted {
+                    Ok(counts) => {
+                        let mut handled = 0;
+                        for (dir, result) in counts {
+                            handled += 1;
+                            match result {
+                                Ok(count) => {
+                                    this.clear_sidebar_fs_error("Count directory documents", &dir);
+                                    this.sidebar_dir_file_counts.insert(dir, count);
+                                }
+                                Err(error) => {
+                                    this.sidebar_dir_file_counts_dirty.insert(dir.clone());
+                                    this.sidebar_dir_file_counts_dirty
+                                        .extend(pending.into_iter().skip(handled));
+                                    this.report_sidebar_fs_error(
+                                        "Count directory documents",
+                                        &dir,
+                                        error,
+                                        cx,
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        this.sidebar_dir_file_counts_dirty.extend(pending);
+                        this.report_sidebar_fs_error(
+                            "Count directory documents",
+                            &task_path,
+                            error,
+                            cx,
+                        );
+                    }
                 }
                 cx.notify();
             })
@@ -146,29 +251,14 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn sidebar_paths_require_structure_refresh(&self, paths: &[PathBuf]) -> bool {
-        paths.iter().any(|path| {
-            let Ok(metadata) = std::fs::metadata(path) else {
-                return true;
-            };
-            if metadata.is_dir() {
-                return true;
-            }
-            let Some(parent) = path.parent() else {
-                return true;
-            };
-            !self
-                .sidebar_directory_children
-                .get(parent)
-                .is_some_and(|children| children.iter().any(|child| child.path == *path))
-        })
-    }
-
     pub(crate) fn invalidate_sidebar_items_cache(&mut self) {
         self.capture_file_view_scroll_positions();
         // Preserve the rendered tree until the replacement snapshot is ready.
         // Clearing the cache produces an empty frame and a visible scroll jump.
         self.sidebar_directory_loading.clear();
+        self.sidebar_dir_file_counts_dirty
+            .extend(self.sidebar_dir_file_counts_loading.drain());
+        self.sidebar_error = None;
         self.sidebar_directory_epoch = self.sidebar_directory_epoch.wrapping_add(1);
         self.sidebar_directory_refresh_pending = true;
         self.quick_open_index_root = None;
@@ -187,7 +277,7 @@ impl EditorView {
             .filter(|path| path.starts_with(&self.sidebar_root))
             .cloned()
             .collect::<Vec<_>>();
-        if self.sidebar_root.exists() && !paths.contains(&self.sidebar_root) {
+        if !self.sidebar_root.as_os_str().is_empty() && !paths.contains(&self.sidebar_root) {
             paths.push(self.sidebar_root.clone());
         }
         if paths.is_empty() {
@@ -196,37 +286,9 @@ impl EditorView {
             return;
         }
 
-        let epoch = self.sidebar_directory_epoch;
-        let sort_mode = self.sidebar_sort_mode;
-        self.sidebar_directory_loading.extend(paths.iter().cloned());
-        cx.spawn(async move |this, cx| {
-            let refreshed = cx
-                .background_executor()
-                .spawn(async move {
-                    paths
-                        .into_iter()
-                        .map(|path| {
-                            let children = load_sidebar_directory(&path, sort_mode);
-                            (path, children)
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                if this.sidebar_directory_epoch != epoch {
-                    return;
-                }
-                for (path, children) in refreshed {
-                    this.sidebar_directory_loading.remove(&path);
-                    this.sidebar_directory_children.insert(path, children);
-                }
-                this.sidebar_items_dirty = true;
-                this.invalidate_sidebar_git_statuses();
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        for path in paths {
+            self.schedule_sidebar_directory_request(path, true, cx);
+        }
     }
 
     pub(super) fn invalidate_sidebar_flattened_items(&mut self) {
@@ -248,6 +310,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.capture_file_view_scroll_positions();
+        self.clear_sidebar_fs_error("Count directory documents", &path);
         self.mark_sidebar_dir_file_counts_dirty([path.clone()]);
         self.schedule_sidebar_directory_request(path, true, cx);
     }
@@ -258,27 +321,42 @@ impl EditorView {
         force: bool,
         cx: &mut Context<Self>,
     ) {
-        if (!force && self.sidebar_directory_children.contains_key(&path))
+        if (!force
+            && (self.sidebar_directory_children.contains_key(&path)
+                || self.sidebar_error.is_some()))
             || !self.sidebar_directory_loading.insert(path.clone())
         {
             return;
         }
         let epoch = self.sidebar_directory_epoch;
+        let root = self.sidebar_root.clone();
         let sort_mode = self.sidebar_sort_mode;
         cx.spawn(async move |this, cx| {
             let background_path = path.clone();
-            let children = cx
-                .background_executor()
-                .spawn(async move { load_sidebar_directory(&background_path, sort_mode) })
+            let children =
+                crate::platform::fs_task::run("Read sidebar directory", path.clone(), move || {
+                    load_sidebar_directory(&background_path, sort_mode)
+                })
                 .await;
             this.update(cx, |this, cx| {
-                if this.sidebar_directory_epoch != epoch {
+                this.sidebar_directory_loading.remove(&path);
+                if this.sidebar_root != root || this.sidebar_directory_epoch != epoch {
                     return;
                 }
-                this.sidebar_directory_loading.remove(&path);
-                this.sidebar_directory_children.insert(path, children);
-                this.invalidate_sidebar_flattened_items();
-                this.invalidate_sidebar_git_statuses();
+                match apply_sidebar_directory_snapshot(
+                    &mut this.sidebar_directory_children,
+                    path.clone(),
+                    children,
+                ) {
+                    Ok(()) => {
+                        this.clear_sidebar_fs_error("Read sidebar directory", &path);
+                        this.invalidate_sidebar_flattened_items();
+                        this.invalidate_sidebar_git_statuses();
+                    }
+                    Err(error) => {
+                        this.report_sidebar_fs_error("Read sidebar directory", &path, error, cx);
+                    }
+                }
                 cx.notify();
             })
             .ok();
@@ -295,6 +373,8 @@ impl EditorView {
     pub(crate) fn toggle_sidebar_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !self.expanded_dirs.insert(path.clone()) {
             self.expanded_dirs.remove(&path);
+        } else if self.sidebar_error.is_some() {
+            self.schedule_sidebar_directory_refresh(path, cx);
         } else {
             self.schedule_sidebar_directory_load(path, cx);
         }
@@ -307,34 +387,63 @@ impl EditorView {
         if !self.sidebar_root.as_os_str().is_empty() {
             self.expanded_dirs.insert(self.sidebar_root.clone());
         }
-        self.invalidate_sidebar_flattened_items();
+        self.invalidate_sidebar_items_cache();
         self.context_menu = None;
         cx.notify();
     }
 
     pub(crate) fn expand_all_dirs(&mut self, cx: &mut Context<Self>) {
         let root = self.sidebar_root.clone();
+        if root.as_os_str().is_empty() {
+            return;
+        }
+        let epoch = self.sidebar_directory_epoch;
         let sort_mode = self.sidebar_sort_mode;
         cx.spawn(async move |this, cx| {
-            let expanded_dirs = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut expanded = HashSet::from([root.clone()]);
-                    let mut pending = vec![root];
+            let background_root = root.clone();
+            let expanded_dirs = crate::platform::fs_task::run(
+                "Expand sidebar directories",
+                root.clone(),
+                move || {
+                    let mut expanded = HashSet::from([background_root.clone()]);
+                    let mut pending = vec![background_root];
                     while let Some(dir) = pending.pop() {
-                        for child in load_sidebar_directory(&dir, sort_mode) {
+                        let children =
+                            load_sidebar_directory(&dir, sort_mode).map_err(|error| {
+                                std::io::Error::new(
+                                    error.kind(),
+                                    format!("{}: {error}", dir.display()),
+                                )
+                            })?;
+                        for child in children {
                             if child.is_dir && expanded.insert(child.path.clone()) {
                                 pending.push(child.path);
                             }
                         }
                     }
-                    expanded
-                })
-                .await;
+                    Ok(expanded)
+                },
+            )
+            .await;
             this.update(cx, |this, cx| {
-                this.expanded_dirs = expanded_dirs;
-                this.invalidate_sidebar_items_cache();
-                this.context_menu = None;
+                if this.sidebar_root != root || this.sidebar_directory_epoch != epoch {
+                    return;
+                }
+                match expanded_dirs {
+                    Ok(expanded_dirs) => {
+                        this.expanded_dirs = expanded_dirs;
+                        this.invalidate_sidebar_items_cache();
+                        this.context_menu = None;
+                    }
+                    Err(error) => {
+                        this.report_sidebar_fs_error(
+                            "Expand sidebar directories",
+                            &root,
+                            error,
+                            cx,
+                        );
+                    }
+                }
                 cx.notify();
             })
             .ok();
@@ -377,8 +486,7 @@ impl EditorView {
     pub(crate) fn sidebar_items(&mut self) -> Rc<Vec<SidebarItem>> {
         if self.sidebar_items_dirty {
             let mut items = Vec::new();
-            if self.sidebar_error.is_none()
-                && self.sidebar_root.exists()
+            if !self.sidebar_root.as_os_str().is_empty()
                 && self.expanded_dirs.contains(&self.sidebar_root)
             {
                 self.collect_sidebar_items(&self.sidebar_root, 1, &mut items);
@@ -464,6 +572,44 @@ mod tests {
     use super::{SidebarSortMode, load_sidebar_directory};
 
     #[test]
+    fn failed_sidebar_refresh_preserves_cached_children() {
+        let root = std::path::PathBuf::from("offline-workspace");
+        let child = super::SidebarDirectoryChild {
+            name: "note.md".to_string(),
+            path: root.join("note.md"),
+            is_dir: false,
+        };
+        let mut cache = std::collections::HashMap::from([(root.clone(), vec![child])]);
+        let result = super::apply_sidebar_directory_snapshot(
+            &mut cache,
+            root.clone(),
+            Err(std::io::ErrorKind::TimedOut.into()),
+        );
+        assert!(result.is_err());
+        assert_eq!(cache[&root].len(), 1);
+        assert_eq!(cache[&root][0].name, "note.md");
+        super::apply_sidebar_directory_snapshot(&mut cache, root.clone(), Ok(Vec::new())).unwrap();
+        assert!(cache[&root].is_empty());
+    }
+
+    #[test]
+    fn directory_provider_and_counts_distinguish_failure_from_empty_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("unavailable");
+        assert!(load_sidebar_directory(&missing, SidebarSortMode::NameAsc).is_err());
+        assert!(super::count_dir_markdown_files(&missing).is_err());
+        assert!(
+            load_sidebar_directory(dir.path(), SidebarSortMode::NameAsc)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(super::count_dir_markdown_files(dir.path()).unwrap(), 0);
+        fs::write(dir.path().join("note.md"), "note").unwrap();
+        fs::create_dir(dir.path().join("folder.md")).unwrap();
+        assert_eq!(super::count_dir_markdown_files(dir.path()).unwrap(), 1);
+    }
+
+    #[test]
     fn directory_provider_loads_one_level_and_filters_hidden_entries() {
         let root = std::env::temp_dir().join(format!(
             "moeka-sidebar-provider-{}-{}",
@@ -477,7 +623,7 @@ mod tests {
         fs::write(root.join("visible.md"), "visible").unwrap();
         fs::write(root.join(".hidden.md"), "hidden").unwrap();
 
-        let children = load_sidebar_directory(&root, SidebarSortMode::NameAsc);
+        let children = load_sidebar_directory(&root, SidebarSortMode::NameAsc).unwrap();
 
         assert_eq!(children.len(), 2);
         assert!(children[0].is_dir);

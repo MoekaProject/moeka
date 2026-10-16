@@ -1,5 +1,7 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{Arc, Weak};
 
 use gpui::{
     AnyElement, Context, CursorStyle, Focusable, MouseButton, ScrollHandle, SharedString, Window,
@@ -117,6 +119,43 @@ enum SettingsOptionAction {
     SimpleMode(bool),
     SidebarAlwaysDark(bool),
     TerminalCopyOnSelect(bool),
+}
+
+thread_local! {
+    static ATTACHMENT_FOLDER_REQUESTS: RefCell<HashMap<gpui::EntityId, Weak<()>>> = RefCell::default();
+}
+
+fn attachment_folder_result_is_current(
+    request: &Arc<()>,
+    latest: Option<&Weak<()>>,
+    original: &super::app_settings::AppSettings,
+    current: &super::app_settings::AppSettings,
+) -> bool {
+    latest.is_some_and(|latest| latest.ptr_eq(&Arc::downgrade(request))) && original == current
+}
+
+fn capture_attachment_folder_bookmark(path: &std::path::Path) -> std::io::Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            "the selected attachment folder is not a directory",
+        ));
+    }
+    crate::platform::fs_task::check_deadline()?;
+    #[cfg(target_os = "macos")]
+    {
+        Ok(objc::rc::autoreleasepool(|| {
+            // Keep the known directory hint without asking NSURL to stat it again.
+            let directory_path = path.join("");
+            crate::platform::security_scope::bookmark_for(&directory_path).unwrap_or_default()
+        }))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Other platforms intentionally use plain paths rather than bookmarks.
+        Ok(String::new())
+    }
 }
 
 // ── Settings panel rendering ────────────────────────────────────────
@@ -699,40 +738,100 @@ impl EditorView {
     }
 
     fn pick_external_attachment_folder(&mut self, cx: &mut Context<Self>) {
+        let entity_id = cx.entity_id();
+        let request = Arc::new(());
+        ATTACHMENT_FOLDER_REQUESTS.with_borrow_mut(|requests| {
+            requests.retain(|_, request| request.strong_count() > 0);
+            requests.insert(entity_id, Arc::downgrade(&request));
+        });
+        let original_settings = self.app_settings.clone();
+        let tab_id = self.active_tab_id.clone();
+        let pane_id = self.current_pane_id();
         #[cfg(not(target_os = "macos"))]
         let title =
             attachment_settings_label(self.ui_language, "choose_external_folder").to_string();
         cx.spawn(async move |this, cx| {
-            #[cfg(target_os = "macos")]
-            let path = match this.update(cx, |_, cx| {
-                cx.prompt_for_paths(gpui::PathPromptOptions {
-                    files: false,
-                    directories: true,
-                    multiple: false,
-                    prompt: None,
-                })
-            }) {
-                Ok(receiver) => receiver
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .flatten()
-                    .and_then(|mut paths| paths.pop()),
-                Err(_) => None,
+            let is_current = |editor: &EditorView| {
+                editor.active_tab_is_settings()
+                    && editor.active_tab_id == tab_id
+                    && editor.current_pane_id() == pane_id
+                    && ATTACHMENT_FOLDER_REQUESTS.with_borrow(|requests| {
+                        attachment_folder_result_is_current(
+                            &request,
+                            requests.get(&entity_id),
+                            &original_settings,
+                            &editor.app_settings,
+                        )
+                    })
             };
+            #[cfg(target_os = "macos")]
+            let selected: anyhow::Result<Option<std::path::PathBuf>> =
+                match this.update(cx, |_, cx| {
+                    cx.prompt_for_paths(gpui::PathPromptOptions {
+                        files: false,
+                        directories: true,
+                        multiple: false,
+                        prompt: None,
+                    })
+                }) {
+                    Ok(receiver) => match receiver.await {
+                        Ok(result) => result.map(|paths| paths.and_then(|mut paths| paths.pop())),
+                        Err(error) => Err(anyhow::anyhow!(
+                            "attachment folder picker was interrupted: {error}"
+                        )),
+                    },
+                    Err(_) => return,
+                };
             #[cfg(not(target_os = "macos"))]
-            let path = cx
+            let selected: anyhow::Result<Option<std::path::PathBuf>> = Ok(cx
                 .background_executor()
                 .spawn(async move { helpers::pick_folder_blocking(&title) })
-                .await;
-            let Some(path) = path else {
-                return;
+                .await);
+            let path = match selected {
+                Ok(Some(path)) => path,
+                Ok(None) => return,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if is_current(this) {
+                            this.notify_error(
+                                format!("{}: {error:#}", this.t(TextKey::OpenFailed)),
+                                cx,
+                            );
+                        }
+                    });
+                    return;
+                }
             };
-            let bookmark = crate::platform::security_scope::bookmark_for(&path).unwrap_or_default();
+            if !this.update(cx, |this, _| is_current(this)).unwrap_or(false) {
+                return;
+            }
+            let bookmark_path = path.clone();
+            let result = crate::platform::fs_task::run(
+                "capture attachment folder bookmark",
+                path.clone(),
+                move || capture_attachment_folder_bookmark(&bookmark_path),
+            )
+            .await;
             let _ = this.update(cx, |this, cx| {
-                this.app_settings.attachment_external_folder = path.to_string_lossy().into_owned();
-                this.app_settings.attachment_external_folder_bookmark = bookmark;
-                this.finalize_settings_change(cx);
+                if !is_current(this) {
+                    return;
+                }
+                match result {
+                    Ok(bookmark) => {
+                        this.app_settings.attachment_external_folder =
+                            path.to_string_lossy().into_owned();
+                        this.app_settings.attachment_external_folder_bookmark = bookmark;
+                        this.finalize_settings_change(cx);
+                    }
+                    Err(error) => this.notify_error(
+                        format!(
+                            "{} — {}: {error}",
+                            this.t(TextKey::OpenFailed),
+                            path.display(),
+                        ),
+                        cx,
+                    ),
+                }
             });
         })
         .detach();
@@ -3012,35 +3111,30 @@ impl EditorView {
 pub(crate) fn apply_app_icon_to_dock() {
     use objc::{class, msg_send, sel, sel_impl};
 
-    let Some(padded_path) = build_padded_dock_icon() else {
-        return;
-    };
-    let Some(path_str) = padded_path.to_str() else {
-        return;
-    };
-    let Ok(c_path) = std::ffi::CString::new(path_str) else {
+    let Some(png) = build_padded_dock_icon() else {
         return;
     };
 
     unsafe {
-        let ns_path: *mut objc::runtime::Object =
-            msg_send![class!(NSString), stringWithUTF8String: c_path.as_ptr()];
+        let data: *mut objc::runtime::Object =
+            msg_send![class!(NSData), dataWithBytes: png.as_ptr() length: png.len()];
         let image: *mut objc::runtime::Object = msg_send![class!(NSImage), alloc];
-        let image: *mut objc::runtime::Object = msg_send![image, initWithContentsOfFile: ns_path];
+        let image: *mut objc::runtime::Object = msg_send![image, initWithData: data];
         if image.is_null() {
             return;
         }
         let app: *mut objc::runtime::Object = msg_send![class!(NSApplication), sharedApplication];
         let () = msg_send![app, setApplicationIconImage: image];
+        let () = msg_send![image, release];
     }
 }
 
-/// Renders the full-bleed tile onto a padded, transparent canvas so the Dock
-/// shows it at the standard macOS app-icon size, and returns the temp PNG path.
+/// Renders the embedded tile onto a padded, transparent canvas so the Dock
+/// shows it at the standard macOS app-icon size, returning PNG bytes in memory.
 /// A soft drop shadow is baked in so the Dock icon gains the same depth as the
 /// bundled app icon.
 #[cfg(target_os = "macos")]
-fn build_padded_dock_icon() -> Option<std::path::PathBuf> {
+fn build_padded_dock_icon() -> Option<Vec<u8>> {
     use image::{Rgba, RgbaImage, imageops};
 
     // Match the .icns margin: artwork fills ~80.5% of the canvas, centered.
@@ -3051,9 +3145,8 @@ fn build_padded_dock_icon() -> Option<std::path::PathBuf> {
     const SHADOW_BLUR: f32 = 16.0;
     const SHADOW_STRENGTH: f32 = 0.28;
 
-    let tile_path =
-        crate::editor::helpers::resolve_asset_image_path(crate::editor::helpers::APP_ICON_PATH);
-    let tile = image::open(&tile_path).ok()?.to_rgba8();
+    let tile_bytes = crate::embedded_asset(crate::editor::helpers::APP_ICON_PATH)?;
+    let tile = image::load_from_memory(tile_bytes).ok()?.to_rgba8();
     let content = imageops::resize(&tile, CONTENT, CONTENT, imageops::FilterType::Lanczos3);
     let offset = ((CANVAS - CONTENT) / 2) as i64;
 
@@ -3079,10 +3172,102 @@ fn build_padded_dock_icon() -> Option<std::path::PathBuf> {
     imageops::overlay(&mut canvas, &shadow, 0, 0);
     imageops::overlay(&mut canvas, &content, offset, offset);
 
-    let out_path = std::env::temp_dir().join("moeka-dock-icon.png");
-    canvas.save(&out_path).ok()?;
-    Some(out_path)
+    let mut output = std::io::Cursor::new(Vec::new());
+    canvas.write_to(&mut output, image::ImageFormat::Png).ok()?;
+    Some(output.into_inner())
 }
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn apply_app_icon_to_dock() {}
+
+#[cfg(test)]
+mod tests {
+    use super::super::app_settings::AppSettings;
+    use super::*;
+
+    #[test]
+    fn attachment_folder_results_reject_superseded_requests_and_changed_settings() {
+        let original = AppSettings::default();
+        let first = Arc::new(());
+        let latest = Arc::new(());
+        let latest_token = Arc::downgrade(&latest);
+        assert!(!attachment_folder_result_is_current(
+            &first,
+            Some(&latest_token),
+            &original,
+            &original
+        ));
+        assert!(attachment_folder_result_is_current(
+            &latest,
+            Some(&latest_token),
+            &original,
+            &original
+        ));
+        assert!(!attachment_folder_result_is_current(
+            &latest, None, &original, &original
+        ));
+        let mut changed = original.clone();
+        changed.attachment_external_folder = "/newer/folder".into();
+        assert!(!attachment_folder_result_is_current(
+            &latest,
+            Some(&latest_token),
+            &original,
+            &changed
+        ));
+        changed = original.clone();
+        changed.attachment_location = "current_folder".into();
+        assert!(!attachment_folder_result_is_current(
+            &latest,
+            Some(&latest_token),
+            &original,
+            &changed
+        ));
+        changed = original.clone();
+        changed.attachment_external_folder_bookmark = "newer bookmark".into();
+        assert!(!attachment_folder_result_is_current(
+            &latest,
+            Some(&latest_token),
+            &original,
+            &changed
+        ));
+    }
+
+    #[test]
+    fn attachment_folder_bookmark_preserves_missing_and_not_directory_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        assert_eq!(
+            capture_attachment_folder_bookmark(&missing)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        let file = dir.path().join("not-a-folder");
+        std::fs::write(&file, b"test").unwrap();
+        assert_eq!(
+            capture_attachment_folder_bookmark(&file)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotADirectory
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn attachment_folders_do_not_require_bookmarks_on_other_platforms() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(capture_attachment_folder_bookmark(dir.path()).unwrap(), "");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dock_icon_is_built_from_embedded_pixels_as_padded_png_bytes() {
+        let png = build_padded_dock_icon().expect("embedded Dock artwork");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let icon = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(icon.dimensions(), (1024, 1024));
+        assert_eq!(icon.get_pixel(0, 0)[3], 0);
+        assert_eq!(icon.get_pixel(1023, 1023)[3], 0);
+        assert!(icon.get_pixel(512, 512)[3] > 0);
+    }
+}

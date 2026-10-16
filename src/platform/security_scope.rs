@@ -38,8 +38,10 @@ mod macos_impl {
     use objc::runtime::Object;
     use objc::{class, msg_send, sel, sel_impl};
 
-    use crate::platform::macos::{file_url, path_from_url};
+    use crate::platform::macos::{file_url_with_directory, path_from_url};
     const CREATE_WITH_SECURITY_SCOPE: usize = 1 << 11;
+    const RESOLVE_WITHOUT_UI: usize = 1 << 8;
+    const RESOLVE_WITHOUT_MOUNTING: usize = 1 << 9;
     const RESOLVE_WITH_SECURITY_SCOPE: usize = 1 << 10;
 
     /// A retained `NSURL` whose security scope is currently open.
@@ -66,7 +68,7 @@ mod macos_impl {
     /// Captures the current access to `path` as a base64 bookmark blob.
     pub(crate) fn bookmark_for(path: &Path) -> Option<String> {
         unsafe {
-            let url = file_url(path);
+            let url = file_url_with_directory(path, true);
             if url.is_null() {
                 return None;
             }
@@ -110,7 +112,7 @@ mod macos_impl {
             let mut error: *mut std::ffi::c_void = std::ptr::null_mut();
             let url: *mut Object = msg_send![class!(NSURL),
             URLByResolvingBookmarkData: data
-            options: RESOLVE_WITH_SECURITY_SCOPE
+            options: RESOLVE_WITH_SECURITY_SCOPE | RESOLVE_WITHOUT_UI | RESOLVE_WITHOUT_MOUNTING
             relativeToURL: std::ptr::null_mut::<Object>()
             bookmarkDataIsStale: &mut stale
             error: &mut error];

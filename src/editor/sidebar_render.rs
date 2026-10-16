@@ -321,7 +321,7 @@ impl EditorView {
                     let root = this.sidebar_root.clone();
                     this.sidebar_select_item(&root, false, false);
                     this.focused_sidebar_path = Some(root.clone());
-                    this.set_file_list_dir_for_path(&root, cx);
+                    this.set_file_list_dir_for_entry(&root, true, cx);
                     cx.notify();
                 }),
             )
@@ -616,7 +616,7 @@ impl EditorView {
                                     let normalized =
                                         Self::normalize_sidebar_path(&remove_star_path);
                                     if this.app_settings.remove_starred_file(&normalized) {
-                                        this.app_settings.save();
+                                        this.save_sidebar_settings(cx);
                                     }
                                     cx.notify();
                                 }),
@@ -631,7 +631,7 @@ impl EditorView {
                     let has_modifier = secondary || mods.shift;
                     this.sidebar_select_item(&click_path, mods.shift, secondary);
                     if !has_modifier {
-                        this.set_file_list_dir_for_path(&click_path, cx);
+                        this.set_file_list_dir_for_entry(&click_path, false, cx);
                         this.suppress_next_sidebar_sync_path = Some(click_path.clone());
                         if event.click_count() >= 2 {
                             this.focused_sidebar_path = None;
@@ -695,6 +695,14 @@ impl EditorView {
             0.0
         };
         let current_name = editor.read(cx).text().to_string();
+        let indicator_name = if !is_dir
+            && matches!(self.sidebar_edit, Some(SidebarEditMode::CreateFile { .. }))
+            && !file_kind_has_indicator_for_name(current_name.trim())
+        {
+            "untitled.md"
+        } else {
+            current_name.trim()
+        };
 
         div()
             .w_full()
@@ -733,7 +741,7 @@ impl EditorView {
                             }),
                     )
                     .child(self.render_sidebar_edit_indicator(
-                        &current_name,
+                        indicator_name,
                         is_dir,
                         ss.sidebar_item_selected_icon_color,
                     ))
@@ -1004,8 +1012,8 @@ impl EditorView {
                     let has_modifier = secondary || mods.shift;
                     this.sidebar_select_item(&path, mods.shift, secondary);
                     if !has_modifier {
-                        this.set_file_list_dir_for_path(&path, cx);
-                        if path.is_dir() {
+                        this.set_file_list_dir_for_entry(&path, is_dir, cx);
+                        if is_dir {
                             this.toggle_sidebar_directory(path.clone(), cx);
                         } else {
                             this.suppress_next_sidebar_sync_path = Some(path.clone());
@@ -1157,7 +1165,7 @@ impl EditorView {
     }
 
     pub(crate) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let has_root = self.sidebar_root.exists() && self.sidebar_error.is_none();
+        let has_root = !self.sidebar_root.as_os_str().is_empty();
         if has_root {
             self.refresh_sidebar_directories_if_needed(cx);
             self.refresh_sidebar_git_statuses_if_needed(cx);
@@ -1311,7 +1319,8 @@ impl EditorView {
                     .child(error.clone())
                     .into_any_element(),
             );
-        } else if !has_root {
+        }
+        if !has_root {
             let empty_hover_bg = ss.sidebar_empty_btn_hover_bg;
             tree_items.push(
                 div()

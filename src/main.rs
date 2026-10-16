@@ -12,6 +12,7 @@ mod buffer;
 mod checkbox;
 mod cursor;
 mod editor;
+mod front_matter;
 mod i18n;
 #[cfg(test)]
 mod large_document_bench;
@@ -93,6 +94,9 @@ fn embedded_asset(path: &str) -> Option<&'static [u8]> {
 
 impl AssetSource for FsAssets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        if let Some(asset) = embedded_asset(path) {
+            return Ok(Some(Cow::Borrowed(asset)));
+        }
         let Some(resolved_path) = resolve_runtime_path(path) else {
             return Ok(embedded_asset(path).map(Cow::Borrowed));
         };
@@ -101,6 +105,15 @@ impl AssetSource for FsAssets {
     }
 
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
+        let prefix = format!("{}/", path.trim_end_matches('/'));
+        let embedded = EMBEDDED_ASSETS
+            .iter()
+            .filter(|(key, _, _)| key.starts_with(&prefix))
+            .map(|(key, _, _)| SharedString::from(*key))
+            .collect::<Vec<_>>();
+        if !embedded.is_empty() {
+            return Ok(embedded);
+        }
         let Some(resolved_path) = resolve_runtime_path(path) else {
             let prefix = format!("{}/", path.trim_end_matches('/'));
             return Ok(EMBEDDED_ASSETS
@@ -142,49 +155,74 @@ fn runtime_search_roots() -> Vec<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn macos_markdown_path_from_url(url: &str) -> Option<PathBuf> {
-    let path = platform::paths::path_from_file_url(url)?;
-    // Directories become workspace roots; files must be markdown documents.
-    if !path.is_dir() && !(editor::is_markdown_file(&path) && path.is_file()) {
-        return None;
-    }
-    std::fs::canonicalize(&path).ok().or(Some(path))
+    // Decoding is lexical; classification happens only after the window opens.
+    platform::paths::path_from_file_url(url)
 }
 
-/// Resolves launch arguments to existing absolute paths (files or dirs).
+/// Parse launch arguments without touching potentially unavailable mounts.
 fn launch_paths_from_args() -> Vec<PathBuf> {
     std::env::args()
         .skip(1)
         .filter(|arg| !arg.starts_with('-'))
-        .filter_map(|arg| {
-            let path = PathBuf::from(&arg);
-            let path = if path.is_absolute() {
-                path
-            } else {
-                std::env::current_dir().ok()?.join(path)
-            };
-            std::fs::canonicalize(&path).ok()
-        })
-        .filter(|path| path.is_dir() || path.is_file())
+        .map(PathBuf::from)
         .collect()
 }
 
 /// Opens launch paths: directories are added as workspaces (the last one
 /// becomes active), files open in permanent tabs.
 fn open_launch_paths(editor: &Entity<EditorView>, paths: Vec<PathBuf>, cx: &mut App) {
-    let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) =
-        paths.into_iter().partition(|path| path.is_dir());
-    let file_count = files.len();
-    editor.update(cx, |editor, cx| {
-        for dir in dirs {
-            if !editor.workspaces.contains(&dir) {
-                editor.workspaces.push(dir.clone());
+    open_launch_paths_with_policy(editor, paths, false, cx);
+}
+
+fn open_launch_paths_with_policy(
+    editor: &Entity<EditorView>,
+    paths: Vec<PathBuf>,
+    markdown_only: bool,
+    cx: &mut App,
+) {
+    editor.update(cx, |_, cx| {
+        cx.spawn(async move |this, cx| {
+            let mut dirs = Vec::new();
+            let mut files = Vec::new();
+            for path in paths {
+                let candidate = path.clone();
+                match platform::fs_task::run("Open launch path", path.clone(), move || {
+                    let absolute = std::path::absolute(candidate)?;
+                    let metadata = std::fs::metadata(&absolute)?;
+                    Ok((absolute, metadata))
+                })
+                .await
+                {
+                    Ok((path, metadata)) if metadata.is_dir() => dirs.push(path),
+                    Ok((path, metadata))
+                        if metadata.is_file()
+                            && (!markdown_only || editor::is_markdown_file(&path)) =>
+                    {
+                        files.push(path)
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        this.update(cx, |editor, cx| editor.notify_error(error.to_string(), cx))
+                            .ok();
+                    }
+                }
             }
-            editor.switch_workspace(dir, cx);
-        }
-        for (index, path) in files.into_iter().enumerate() {
-            editor.open_path_in_permanent_tab(path, index + 1 == file_count, cx);
-        }
-        cx.notify();
+            this.update(cx, |editor, cx| {
+                for dir in dirs {
+                    if !editor.workspaces.contains(&dir) {
+                        editor.workspaces.push(dir.clone());
+                    }
+                    editor.switch_workspace(dir, cx);
+                }
+                let file_count = files.len();
+                for (index, path) in files.into_iter().enumerate() {
+                    editor.open_path_in_permanent_tab(path, index + 1 == file_count, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     });
 }
 
@@ -443,7 +481,8 @@ fn main() {
             if let (Some(editor), Some(async_app)) = (editor, async_app) {
                 async_app
                     .spawn(async move |cx| {
-                        let _ = cx.update(|cx| open_launch_paths(&editor, paths, cx));
+                        let _ =
+                            cx.update(|cx| open_launch_paths_with_policy(&editor, paths, true, cx));
                     })
                     .detach();
             } else {
@@ -889,7 +928,7 @@ fn main() {
             *editor_for_window.borrow_mut() = Some(view.clone());
             let pending_paths = std::mem::take(&mut *pending_paths_for_window.borrow_mut());
             if !pending_paths.is_empty() {
-                open_launch_paths(&view, pending_paths, cx);
+                open_launch_paths_with_policy(&view, pending_paths, true, cx);
             }
         }
     });
@@ -912,19 +951,19 @@ mod macos_file_open_tests {
 
         assert_eq!(
             macos_markdown_path_from_url(&format!("file://{encoded_path}")),
-            std::fs::canonicalize(path).ok(),
+            Some(path),
         );
     }
 
     #[test]
-    fn rejects_non_markdown_file_urls() {
+    fn defers_file_classification_without_probing_the_launch_path() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("notes.txt");
         std::fs::write(&path, "notes").expect("write text");
 
         assert_eq!(
             macos_markdown_path_from_url(&format!("file://{}", path.display())),
-            None,
+            Some(path),
         );
         assert_eq!(
             macos_markdown_path_from_url("https://example.com/a.md"),
@@ -938,7 +977,7 @@ mod macos_file_open_tests {
 
         assert_eq!(
             macos_markdown_path_from_url(&format!("file://{}", directory.path().display())),
-            std::fs::canonicalize(directory.path()).ok(),
+            Some(directory.path().to_path_buf()),
         );
     }
 

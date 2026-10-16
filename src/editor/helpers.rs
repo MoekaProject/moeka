@@ -20,6 +20,7 @@ use image::{Frame, RgbaImage};
 use mathjax_svg_rs::{HorizontalAlign, MathJax, Options as MathJaxOptions};
 use resvg::tiny_skia::{Pixmap, Transform};
 
+use crate::front_matter::{self, FrontMatterValue};
 use crate::markdown::{
     self, BlockPreview, BlockPreviewKind, BlockType, DisplayReplacement, InlineKind,
     LineDecoration, TableLineInfo,
@@ -325,6 +326,697 @@ fn scaled_inline_placeholder(text: &str, scale: f32) -> String {
     " ".repeat(target_columns.max(1))
 }
 
+/// Scalar properties are row-local. Value groups supply a synthetic active
+/// range on every member row before reaching the display mapper.
+pub(crate) fn front_matter_row_is_active(active_ranges: &[Range<usize>], line_len: usize) -> bool {
+    active_ranges.iter().any(|range| {
+        if range.is_empty() {
+            range.start <= line_len
+        } else {
+            range.start <= line_len && range.end > 0
+        }
+    })
+}
+
+/// Delimiters share block focus; individual property syntax remains row-local.
+#[cfg(test)]
+pub(crate) fn front_matter_block_is_active(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    ranges: &[Range<usize>],
+    expansion_allowed: bool,
+) -> bool {
+    front_matter_block_is_active_with_search(buffer, decorations, ranges, expansion_allowed, None)
+}
+
+pub(crate) fn front_matter_block_is_active_with_search(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    ranges: &[Range<usize>],
+    expansion_allowed: bool,
+    search_reveal_range: Option<&Range<usize>>,
+) -> bool {
+    let Some(table) = decorations.first().and_then(|d| d.table_info.as_ref()) else {
+        return false;
+    };
+    if !table.is_front_matter
+        || table.table_end_line == 0
+        || table.table_end_line > buffer.line_count()
+    {
+        return false;
+    }
+    front_matter_source_rows_are_revealed(
+        buffer,
+        table.table_start_line..table.table_end_line,
+        ranges,
+        expansion_allowed,
+        search_reveal_range,
+    )
+}
+
+fn front_matter_source_rows_are_revealed(
+    buffer: &Buffer,
+    rows: Range<usize>,
+    ranges: &[Range<usize>],
+    expansion_allowed: bool,
+    search_reveal_range: Option<&Range<usize>>,
+) -> bool {
+    (expansion_allowed && front_matter_source_rows_are_active(buffer, rows.clone(), ranges))
+        || search_reveal_range.is_some_and(|range| {
+            range.start < range.end
+                && front_matter_source_rows_are_active(buffer, rows, std::slice::from_ref(range))
+        })
+}
+
+fn front_matter_source_rows_are_active(
+    buffer: &Buffer,
+    rows: Range<usize>,
+    ranges: &[Range<usize>],
+) -> bool {
+    if rows.is_empty() || rows.end > buffer.line_count() {
+        return false;
+    }
+    let start = buffer.line_start(rows.start);
+    let caret_end = buffer.line_end(rows.end - 1);
+    let selection_end = buffer.line_start(rows.end);
+    ranges.iter().any(|range| {
+        if range.is_empty() {
+            start <= range.start && range.start <= caret_end
+        } else {
+            range.start < selection_end && range.end > start
+        }
+    })
+}
+
+pub(crate) struct FrontMatterGroupPlan {
+    pub group: super::front_matter_groups::ValueGroup,
+    pub active: bool,
+    pub collapse_header: bool,
+    pub source_visible: bool,
+    body_indent_columns: usize,
+}
+
+impl FrontMatterGroupPlan {
+    pub fn hides_line(&self, line: usize) -> bool {
+        use super::front_matter_groups::GroupKind;
+        !self.active
+            && !self.source_visible
+            && self.group.source_lines.contains(&line)
+            && match self.group.kind {
+                GroupKind::Multiline => self.collapse_header && line == self.group.header_line,
+                GroupKind::List => line != self.group.header_line,
+            }
+    }
+
+    pub fn label_line(&self) -> usize {
+        use super::front_matter_groups::GroupKind;
+        match self.group.kind {
+            GroupKind::Multiline
+                if !self.active && !self.source_visible && self.collapse_header =>
+            {
+                self.group.header_line + 1
+            }
+            _ => self.group.header_line,
+        }
+    }
+}
+
+impl EditorView {
+    pub(super) fn front_matter_delimiters_are_visible(&self) -> bool {
+        let ranges: Vec<_> = self
+            .all_cursor_ranges()
+            .into_iter()
+            .map(|(head, anchor)| head.min(anchor)..head.max(anchor))
+            .chain(self.marked_ranges().cloned())
+            .collect();
+        front_matter_block_is_active_with_search(
+            &self.buffer,
+            &self.decorations,
+            &ranges,
+            self.markdown_syntax_expansion_allowed(),
+            self.current_search_source_range().as_ref(),
+        )
+    }
+
+    pub(super) fn front_matter_presentation_line_is_hidden(&self, line: usize) -> bool {
+        self.front_matter_line_is_hidden(line)
+            || (self.front_matter_summary_line() != Some(line)
+                && self
+                    .decorations
+                    .get(line)
+                    .and_then(|d| d.table_info.as_ref())
+                    .is_some_and(|table| table.is_front_matter)
+                && self
+                    .front_matter_group_plan()
+                    .iter()
+                    .any(|plan| plan.hides_line(line)))
+    }
+
+    /// Caret movement skips interior rows and unfocused delimiters. The summary
+    /// is excluded so the empty-metadata fallback on the opener stays a stop.
+    pub(super) fn front_matter_navigation_skips_line(&self, line: usize) -> bool {
+        self.front_matter_presentation_line_is_hidden(line)
+            || (self.front_matter_summary_line() != Some(line)
+                && !self.front_matter_delimiters_are_visible()
+                && self
+                    .decorations
+                    .get(line)
+                    .and_then(|d| d.table_info.as_ref())
+                    .is_some_and(|table| table.is_front_matter && table.is_separator))
+    }
+
+    pub(super) fn front_matter_group_plan(&self) -> Vec<FrontMatterGroupPlan> {
+        self.front_matter_group_plan_for_width(self.last_viewport_width)
+    }
+
+    pub(super) fn front_matter_group_plan_for_width(
+        &self,
+        viewport_width: f32,
+    ) -> Vec<FrontMatterGroupPlan> {
+        if self.collapsed_front_matter_range().is_some() {
+            return Vec::new();
+        }
+        let mut ranges: Vec<_> = self
+            .all_cursor_ranges()
+            .into_iter()
+            .map(|(head, anchor)| head.min(anchor)..head.max(anchor))
+            .collect();
+        ranges.extend(self.marked_ranges().cloned());
+        let mut plans = front_matter_group_plan_with_search(
+            &self.buffer,
+            &self.decorations,
+            &ranges,
+            self.markdown_syntax_expansion_allowed(),
+            self.current_search_source_range().as_ref(),
+        );
+        let editor_width = if self.editor_uses_expanded_layout() {
+            viewport_width
+        } else {
+            viewport_width.min(self.max_editor_width())
+        };
+        let text_width =
+            (editor_width - self.padding_left() - self.padding_right()).max(self.scaled(120.0));
+        let (_, available_width) =
+            super::element::front_matter_content_geometry(true, 0.0, text_width, self.scaled(1.0));
+        if self.front_matter_columns.is_some() {
+            super::front_matter_layout::constrain_groups(
+                &mut plans,
+                self.front_matter_columns,
+                available_width,
+                &self.decorations,
+            );
+            return plans;
+        }
+        // Before the first font measurement, use a conservative column budget.
+        let column_width = self.font_size_for_block(&BlockType::Table)
+            + self.styles.editor.editor_letter_spacing_px.max(0.0);
+        apply_front_matter_group_width_limit(
+            &mut plans,
+            &self.decorations,
+            (available_width - self.scaled(64.0)).max(0.0) / column_width.max(1.0),
+        );
+        plans
+    }
+
+    pub(super) fn sync_front_matter_group_focus(&mut self) -> bool {
+        self.sync_front_matter_group_focus_for_width(self.last_viewport_width)
+    }
+
+    pub(super) fn sync_front_matter_group_focus_for_width(&mut self, width: f32) -> bool {
+        let mut signature: Vec<_> = self
+            .front_matter_group_plan_for_width(width)
+            .iter()
+            .map(|plan| {
+                (
+                    plan.group.source_lines.clone(),
+                    plan.active,
+                    plan.source_visible,
+                )
+            })
+            .collect();
+        if let Some(table) = self
+            .decorations
+            .first()
+            .and_then(|d| d.table_info.as_ref())
+            .filter(|table| table.is_front_matter)
+        {
+            // The existing pane-local signature also owns block delimiter geometry.
+            signature.insert(
+                0,
+                (
+                    table.table_start_line..table.table_end_line,
+                    self.front_matter_delimiters_are_visible(),
+                    self.collapsed_front_matter_range().is_some(),
+                ),
+            );
+            // Scalar-row focus also changes source mapping before prepaint,
+            // even when block delimiter visibility itself does not change.
+            let ranges: Vec<_> = self
+                .all_cursor_ranges()
+                .into_iter()
+                .map(|(head, anchor)| head.min(anchor)..head.max(anchor))
+                .chain(self.marked_ranges().cloned())
+                .collect();
+            let search_reveal_range = self.current_search_source_range();
+            for line in table.table_start_line + 1..table.table_end_line - 1 {
+                signature.push((
+                    line..line + 1,
+                    front_matter_source_rows_are_revealed(
+                        &self.buffer,
+                        line..line + 1,
+                        &ranges,
+                        self.markdown_syntax_expansion_allowed(),
+                        search_reveal_range.as_ref(),
+                    ),
+                    false,
+                ));
+            }
+        }
+        if signature == self.front_matter_group_focus {
+            return false;
+        }
+        self.front_matter_group_focus = signature;
+        self.front_matter_group_geometry_dirty = true;
+        self.last_stable_input_bounds = None;
+        self.pending_input_bounds = None;
+        // Row visibility changes block height, including offscreen members.
+        if let Some(table) = self
+            .decorations
+            .first()
+            .and_then(|d| d.table_info.as_ref())
+            .filter(|t| t.is_front_matter)
+        {
+            for line in
+                table.table_start_line..table.table_end_line.min(self.line_display_info.len())
+            {
+                self.line_display_info[line] = None;
+            }
+            self.clear_sparse_line_geometry_range(table.table_start_line..table.table_end_line);
+        }
+        self.invalidate_line_geometry_cache();
+        self.visible_line_geometry.clear();
+        self.front_matter_type_areas.clear();
+        self.gutter_fold_areas.clear();
+        self.front_matter_text_areas.clear();
+        self.front_matter_delete_areas.clear();
+        self.front_matter_list_scroll_areas.clear();
+        true
+    }
+}
+
+pub(crate) fn apply_front_matter_group_width_limit(
+    plans: &mut [FrontMatterGroupPlan],
+    decorations: &[LineDecoration],
+    available_columns: f32,
+) {
+    for plan in plans {
+        if matches!(plan.group.kind, super::front_matter_groups::GroupKind::List) {
+            let columns = decorations
+                .get(plan.group.header_line)
+                .and_then(|d| d.table_info.as_ref())
+                .and_then(|t| t.column_widths.first())
+                .copied()
+                .unwrap_or(3)
+                + plan.body_indent_columns
+                + 2;
+            plan.source_visible |= columns as f32 > available_columns;
+        }
+    }
+}
+
+fn front_matter_list_has_comments(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    group: &super::front_matter_groups::ValueGroup,
+) -> bool {
+    let header = group.header_line;
+    let header_comment = decorations
+        .get(header)
+        .and_then(|d| d.front_matter.as_ref())
+        .and_then(|info| buffer.line_content(header).get(info.value_range.end..))
+        .is_some_and(|suffix| suffix.trim_start().starts_with('#'));
+    header_comment
+        || group
+            .source_lines
+            .clone()
+            .any(|line| buffer.line_content(line).trim_start().starts_with('#'))
+        || group.items.iter().any(|item| {
+            buffer
+                .line_content(item.source_line)
+                .get(item.source_range.end - buffer.line_start(item.source_line)..)
+                .is_some_and(|suffix| suffix.trim_start().starts_with('#'))
+        })
+}
+
+#[cfg(test)]
+pub(crate) fn front_matter_group_plan(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    ranges: &[Range<usize>],
+    expansion_allowed: bool,
+) -> Vec<FrontMatterGroupPlan> {
+    front_matter_group_plan_with_search(buffer, decorations, ranges, expansion_allowed, None)
+}
+
+pub(crate) fn front_matter_group_plan_with_search(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    ranges: &[Range<usize>],
+    expansion_allowed: bool,
+    search_reveal_range: Option<&Range<usize>>,
+) -> Vec<FrontMatterGroupPlan> {
+    super::front_matter_groups::groups(buffer, decorations)
+        .into_iter()
+        .map(|group| {
+            let active = front_matter_source_rows_are_revealed(
+                buffer,
+                group.source_lines.clone(),
+                ranges,
+                expansion_allowed,
+                search_reveal_range,
+            );
+            let collapse_header = group.source_lines.end > group.header_line + 1
+                && decorations
+                    .get(group.header_line)
+                    .and_then(|d| d.front_matter.as_ref())
+                    .is_some_and(|info| matches!(info.value, FrontMatterValue::BlockHeader));
+            let body_indent_columns = decorations
+                .get(group.header_line)
+                .and_then(|d| d.front_matter.as_ref())
+                .map_or(0, |info| info.indent_columns);
+            let source_visible = matches!(group.kind, super::front_matter_groups::GroupKind::List)
+                && front_matter_list_has_comments(buffer, decorations, &group);
+            FrontMatterGroupPlan {
+                group,
+                active,
+                collapse_header,
+                body_indent_columns,
+                source_visible,
+            }
+        })
+        .collect()
+}
+
+/// Collapsed list syntax is painted as separate, unwrapped item layouts. The
+/// key retains its ordinary source mapping in both prepaint and instant shape.
+pub(crate) fn apply_front_matter_group_display(
+    decoration: &mut LineDecoration,
+    line: usize,
+    plan: Option<&FrontMatterGroupPlan>,
+    source: &str,
+) {
+    if plan.is_some_and(|plan| plan.source_visible) {
+        if let Some(info) = decoration.front_matter.as_mut() {
+            info.key_range = None;
+            info.value_range = 0..source.len();
+            info.value = FrontMatterValue::Raw;
+        }
+        return;
+    }
+    if let Some(plan) = plan
+        && line != plan.group.header_line
+        && matches!(
+            plan.group.kind,
+            super::front_matter_groups::GroupKind::Multiline
+        )
+        && source.trim().is_empty()
+        && let Some(info) = decoration.front_matter.as_mut()
+    {
+        info.value_range = source.len()..source.len();
+        info.indent_columns = plan.body_indent_columns;
+        info.value = FrontMatterValue::Text(String::new());
+    }
+    if let Some(plan) = plan
+        && !plan.active
+        && line == plan.group.header_line
+        && matches!(plan.group.kind, super::front_matter_groups::GroupKind::List)
+        && let Some(info) = decoration.front_matter.as_mut()
+    {
+        info.value_range.end = source.len();
+        info.value = FrontMatterValue::Text(String::new());
+    }
+}
+
+/// Byte maps use decoded character source spans, never proportional byte ratios.
+pub(crate) fn front_matter_item_source_map(
+    source: &str,
+    display: &str,
+    start: usize,
+) -> Vec<usize> {
+    let ranges = front_matter::decoded_char_ranges(source, display).or_else(|| {
+        if !source.starts_with(['\'', '"']) {
+            return None;
+        }
+        let decoded = serde_yaml::from_str::<String>(source).ok()?;
+        let ranges = front_matter::decoded_char_ranges(source, &decoded)?;
+        let mut chars = decoded.chars().zip(ranges).peekable();
+        let mut normalized = String::new();
+        let mut spans = Vec::new();
+        while let Some((ch, mut span)) = chars.next() {
+            if ch == '\r' && chars.peek().is_some_and(|(next, _)| *next == '\n') {
+                span.end = chars.next()?.1.end;
+            }
+            normalized.push(
+                if matches!(ch, '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}') {
+                    ' '
+                } else {
+                    ch
+                },
+            );
+            spans.push(span);
+        }
+        (normalized == display).then_some(spans)
+    });
+    let mut map = Vec::with_capacity(display.len() + 1);
+    if let Some(ranges) = ranges {
+        for (ch, range) in display.chars().zip(ranges) {
+            map.extend(std::iter::repeat_n(start + range.start, ch.len_utf8()));
+        }
+    } else {
+        map.resize(display.len(), start);
+    }
+    map.push(start + source.len());
+    map
+}
+
+pub(crate) fn front_matter_display_selection_ranges(
+    display: &str,
+    source_map: &[usize],
+    selections: &[Range<usize>],
+) -> Vec<Range<usize>> {
+    let mut spans: Vec<Range<usize>> = Vec::new();
+    for (index, ch) in display.char_indices() {
+        let end = index + ch.len_utf8();
+        let (Some(&source_start), Some(&source_end)) = (source_map.get(index), source_map.get(end))
+        else {
+            continue;
+        };
+        if selections.iter().any(|selection| {
+            !selection.is_empty() && selection.start < source_end && selection.end > source_start
+        }) {
+            if let Some(last) = spans.last_mut()
+                && last.end == index
+            {
+                last.end = end;
+            } else {
+                spans.push(index..end);
+            }
+        }
+    }
+    spans
+}
+
+struct FrontMatterDisplayMapping<'a> {
+    source: &'a str,
+    text: String,
+    display_to_buffer: Vec<usize>,
+    buffer_to_display: Vec<usize>,
+}
+
+impl<'a> FrontMatterDisplayMapping<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            text: String::new(),
+            display_to_buffer: Vec::new(),
+            buffer_to_display: vec![0; source.len() + 1],
+        }
+    }
+
+    fn copy(&mut self, range: Range<usize>) {
+        for (offset, ch) in self.source[range.clone()].char_indices() {
+            let source_start = range.start + offset;
+            let display_start = self.text.len();
+            self.text.push(ch);
+            // Interior UTF-8 bytes point to their character's start, never to
+            // an invalid boundary. Unchanged characters retain exact identity.
+            self.display_to_buffer
+                .extend(std::iter::repeat_n(source_start, ch.len_utf8()));
+            self.buffer_to_display[source_start..source_start + ch.len_utf8()].fill(display_start);
+        }
+        self.buffer_to_display[range.end] = self.text.len();
+    }
+
+    fn replace(&mut self, range: Range<usize>, replacement: &str) {
+        let display_start = self.text.len();
+        self.buffer_to_display[range.clone()].fill(display_start);
+        let token = &self.source[range.clone()];
+        if let Some(char_ranges) = front_matter::decoded_char_ranges(token, replacement) {
+            let mut source_cursor = range.start;
+            for (ch, char_range) in replacement.chars().zip(char_ranges) {
+                let char_start = range.start + char_range.start;
+                let char_end = range.start + char_range.end;
+                self.buffer_to_display[source_cursor..char_end].fill(self.text.len());
+                self.display_to_buffer
+                    .extend(std::iter::repeat_n(char_start, ch.len_utf8()));
+                self.text.push(ch);
+                source_cursor = char_end;
+            }
+            self.buffer_to_display[source_cursor..range.end].fill(self.text.len());
+        } else {
+            // Synthetic padding, checkboxes and formatted dates have no
+            // per-character source identity. Anchor them at the token start.
+            self.display_to_buffer
+                .extend(std::iter::repeat_n(range.start, replacement.len()));
+            self.text.push_str(replacement);
+        }
+        self.buffer_to_display[range.end] = self.text.len();
+    }
+
+    fn finish(mut self, prefix_collapsed: bool) -> (String, Vec<usize>, Vec<usize>, bool) {
+        self.buffer_to_display[self.source.len()] = self.text.len();
+        (
+            self.text,
+            self.display_to_buffer,
+            self.buffer_to_display,
+            prefix_collapsed,
+        )
+    }
+}
+
+/// Synthetic summary bytes all anchor to the delimiter, never to proportional
+/// source offsets (which could land inside UTF-8 or hidden YAML).
+pub(crate) fn build_front_matter_fold_display(
+    source: &str,
+    summary: &str,
+) -> (String, Vec<usize>, Vec<usize>, bool) {
+    let mut mapping = FrontMatterDisplayMapping::new(source);
+    mapping.replace(0..source.len(), summary);
+    let (text, mut display_to_buffer, buffer_to_display, collapsed) = mapping.finish(false);
+    display_to_buffer.push(source.len());
+    (text, display_to_buffer, buffer_to_display, collapsed)
+}
+
+fn build_front_matter_display_text(
+    source: &str,
+    decoration: &LineDecoration,
+    active_ranges: &[Range<usize>],
+    key_padding: usize,
+    boolean_columns: usize,
+) -> (String, Vec<usize>, Vec<usize>, bool) {
+    let mut mapping = FrontMatterDisplayMapping::new(source);
+    let Some(info) = decoration.front_matter.as_ref() else {
+        mapping.copy(0..source.len());
+        return mapping.finish(false);
+    };
+    let active = front_matter_row_is_active(active_ranges, source.len());
+    let value_range = info.value_range.clone();
+    let valid_ranges = value_range.start <= value_range.end
+        && source.get(value_range.clone()).is_some()
+        && info.key_range.as_ref().is_none_or(|key| {
+            key.start <= key.end
+                && key.end <= value_range.start
+                && source.get(key.clone()).is_some()
+        });
+    // A truly empty key-less row has its key slot at column zero, where typed
+    // text is inserted. Padding it would move only the caret to the value column.
+    if !valid_ranges
+        || (info.key_range.is_none()
+            && (matches!(info.value, FrontMatterValue::Raw) || source.is_empty()))
+    {
+        mapping.copy(0..source.len());
+        return mapping.finish(false);
+    }
+    let max_key_width = decoration
+        .table_info
+        .as_ref()
+        .and_then(|table| table.column_widths.first())
+        .copied()
+        .unwrap_or(3);
+    let key_padding = key_padding.max(1);
+    if let Some(key) = info.key_range.as_ref() {
+        let Some(colon_offset) = source[key.end..value_range.start].find(':') else {
+            mapping.copy(0..source.len());
+            return mapping.finish(false);
+        };
+        let colon_end = key.end + colon_offset + 1;
+        if !active
+            && !info.display_prefix.is_empty()
+            && let Some(marker) = source[..key.start].find('-')
+        {
+            mapping.copy(0..marker);
+            mapping.replace(marker..key.start, &info.display_prefix);
+            mapping.copy(key.start..colon_end);
+        } else {
+            mapping.copy(0..colon_end);
+        }
+        let padding =
+            max_key_width.saturating_sub(display_width(&source[key.clone()])) + key_padding;
+        mapping.replace(colon_end..value_range.start, &" ".repeat(padding));
+    } else {
+        let padding = max_key_width + 1 + key_padding + info.indent_columns;
+        let marker = source[..value_range.start].find('-');
+        if active && let Some(marker) = marker {
+            let prefix = &source[marker..value_range.start];
+            if prefix[1..].chars().all(char::is_whitespace) {
+                mapping.replace(0..marker, &" ".repeat(padding.saturating_sub(2)));
+                mapping.copy(marker..marker + 1);
+                mapping.replace(marker + 1..value_range.start, " ");
+            } else {
+                let marker_width = display_width(prefix);
+                mapping.replace(0..marker, &" ".repeat(padding.saturating_sub(marker_width)));
+                mapping.copy(marker..value_range.start);
+            }
+        } else {
+            mapping.replace(
+                0..value_range.start,
+                &" ".repeat(padding.saturating_sub(display_width(&info.display_prefix))),
+            );
+            if !info.display_prefix.is_empty() {
+                // Keep the bullet mapped to the sequence marker, not its scalar.
+                mapping.text.push_str(&info.display_prefix);
+                mapping.display_to_buffer.extend(std::iter::repeat_n(
+                    marker.unwrap_or(0),
+                    info.display_prefix.len(),
+                ));
+            }
+        }
+    }
+    if active {
+        mapping.copy(value_range.clone());
+    } else {
+        match &info.value {
+            FrontMatterValue::Text(text)
+                if !text.contains(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}']) =>
+            {
+                mapping.replace(value_range.clone(), text);
+            }
+            FrontMatterValue::Boolean(_) => {
+                mapping.replace(
+                    value_range.clone(),
+                    &"\u{a0}".repeat(boolean_columns.max(3)),
+                );
+            }
+            FrontMatterValue::BlockHeader => mapping.replace(value_range.clone(), ""),
+            // Date formatting belongs to the editor settings helper. Until it
+            // supplies Text(formatted), leave the exact ISO source token alone.
+            _ => mapping.copy(value_range.clone()),
+        }
+    }
+    mapping.copy(value_range.end..source.len());
+    mapping.finish(!active && !info.display_prefix.is_empty())
+}
+
 /// Build display text by selectively hiding syntax ranges.
 pub(crate) fn build_display_text(
     line_content: &str,
@@ -346,8 +1038,10 @@ pub(crate) fn build_display_text(
         display_to_buffer: &mut Vec<usize>,
         buffer_to_display: &mut [usize],
         display_pos: &mut usize,
+        source: &str,
         source_range: Range<usize>,
         replacement: &str,
+        anchor_source_start: bool,
     ) {
         let replacement_display_start = *display_pos;
         display_text.push_str(replacement);
@@ -378,7 +1072,11 @@ pub(crate) fn build_display_text(
                 .get(index + 1)
                 .copied()
                 .unwrap_or(replacement.len());
-            let source_offset = (char_start * source_len / replacement.len()).min(source_len - 1);
+            let mut source_offset =
+                (char_start * source_len / replacement.len()).min(source_len - 1);
+            while source_offset > 0 && !source.is_char_boundary(source_start + source_offset) {
+                source_offset -= 1;
+            }
             replacement_segments.push((source_offset, char_start));
             for _ in char_start..char_end {
                 display_to_buffer.push(source_start + source_offset);
@@ -395,6 +1093,11 @@ pub(crate) fn build_display_text(
             buffer_to_display[source_start + source_offset] =
                 replacement_display_start + replacement_segments[segment_index].1;
         }
+        // Expansion can map several display characters to the source start.
+        // Anchor that endpoint to the first one so the full replacement is reserved.
+        if anchor_source_start {
+            buffer_to_display[source_start] = replacement_display_start;
+        }
 
         *display_pos += replacement.len();
     }
@@ -406,75 +1109,17 @@ pub(crate) fn build_display_text(
     let task_core_len = task_core_syntax_len(trimmed);
     let task_fold_len = task_prefix_len(trimmed);
 
-    if let Some(table_info) = decoration.table_info.as_ref()
-        && table_info.is_front_matter
+    if decoration
+        .table_info
+        .as_ref()
+        .is_some_and(|table| table.is_front_matter)
     {
-        if !table_info.is_separator
-            && let Some(colon) = line_content.find(':')
-        {
-            let value_start = table_info
-                .cell_ranges
-                .get(1)
-                .map(|range| range.start)
-                .unwrap_or(line_content.len())
-                .max(colon + 1)
-                .min(line_content.len());
-            let key_width = table_info
-                .cells
-                .first()
-                .map(|key| display_width(key.trim()))
-                .unwrap_or(0);
-            let max_key_width = table_info
-                .column_widths
-                .first()
-                .copied()
-                .unwrap_or(key_width);
-            let padding = " ".repeat(
-                max_key_width
-                    .saturating_sub(key_width)
-                    .saturating_add(front_matter_key_padding_chars.max(1)),
-            );
-            let mut display_text = String::with_capacity(line_content.len() + padding.len());
-            let mut display_to_buffer = Vec::with_capacity(line_content.len() + padding.len());
-            let mut buffer_to_display = vec![0; len + 1];
-            let mut display_pos = 0;
-
-            append_mapped_replacement(
-                &mut display_text,
-                &mut display_to_buffer,
-                &mut buffer_to_display,
-                &mut display_pos,
-                0..colon + 1,
-                &line_content[..colon + 1],
-            );
-            append_mapped_replacement(
-                &mut display_text,
-                &mut display_to_buffer,
-                &mut buffer_to_display,
-                &mut display_pos,
-                colon + 1..value_start,
-                &padding,
-            );
-            append_mapped_replacement(
-                &mut display_text,
-                &mut display_to_buffer,
-                &mut buffer_to_display,
-                &mut display_pos,
-                value_start..len,
-                &line_content[value_start..],
-            );
-            buffer_to_display[len] = display_text.len();
-            return (display_text, display_to_buffer, buffer_to_display, false);
-        }
-
-        let display_to_buffer: Vec<usize> = (0..len).collect();
-        let mut buffer_to_display: Vec<usize> = (0..len).collect();
-        buffer_to_display.push(len);
-        return (
-            line_content.to_string(),
-            display_to_buffer,
-            buffer_to_display,
-            false,
+        return build_front_matter_display_text(
+            line_content,
+            decoration,
+            active_ranges,
+            front_matter_key_padding_chars,
+            collapsed_task_prefix_chars,
         );
     }
 
@@ -509,6 +1154,27 @@ pub(crate) fn build_display_text(
 
     let mut display_replacements: Vec<DisplayReplacement> =
         decoration.display_replacements.iter().cloned().collect();
+
+    for fragment in &decoration.table_cell_fragments {
+        if !table_cell_fragment_prefix_is_folded(line_content, fragment, active_ranges) {
+            continue;
+        }
+        let source = &line_content[fragment.range.clone()];
+        let display_columns = if matches!(fragment.block_type, BlockType::TaskList(_)) {
+            task_visual_indent_display_columns(
+                list_marker_body_indent(source),
+                task_indent_step_display_columns,
+                task_source_indent_step_chars,
+            ) + collapsed_task_prefix_chars.max(1)
+        } else {
+            fragment.prefix_len
+        };
+        display_replacements.push(DisplayReplacement {
+            source_range: fragment.range.start..fragment.range.start + fragment.prefix_len,
+            display_text: " ".repeat(display_columns),
+            trigger_range: fragment.range.start..fragment.range.start + fragment.prefix_len,
+        });
+    }
 
     for superscript_range in &decoration.superscript_spans {
         if !inline_range_is_collapsed(decoration, superscript_range, active_ranges) {
@@ -559,6 +1225,11 @@ pub(crate) fn build_display_text(
 
     display_replacements.retain(|replacement| {
         replacement.display_text == "\n"
+            || decoration.table_cell_fragments.iter().any(|fragment| {
+                fragment.prefix_len > 0
+                    && replacement.source_range
+                        == (fragment.range.start..fragment.range.start + fragment.prefix_len)
+            })
             || !active_ranges_intersect(active_ranges, &replacement.trigger_range)
     });
     display_replacements.sort_by_key(|replacement| replacement.source_range.start);
@@ -637,6 +1308,7 @@ pub(crate) fn build_display_text(
     }
 
     let prefix_range_and_replacement = match decoration.block_type {
+        _ if !decoration.table_cell_fragments.is_empty() => None,
         BlockType::UnorderedList => {
             let fold_len = if trimmed.starts_with("- ")
                 || trimmed.starts_with("* ")
@@ -676,7 +1348,13 @@ pub(crate) fn build_display_text(
         _ => None,
     };
 
-    let prefix_collapsed = prefix_range_and_replacement.is_some();
+    let prefix_collapsed = prefix_range_and_replacement.is_some()
+        || decoration
+            .table_cell_fragments
+            .first()
+            .is_some_and(|fragment| {
+                table_cell_fragment_prefix_is_folded(line_content, fragment, active_ranges)
+            });
 
     let mut display_text = String::with_capacity(len);
     let mut display_to_buffer = Vec::with_capacity(len);
@@ -694,8 +1372,10 @@ pub(crate) fn build_display_text(
                 &mut display_to_buffer,
                 &mut buffer_to_display,
                 &mut display_pos,
+                line_content,
                 prefix_range.clone(),
                 replacement,
+                true,
             );
             buffer_pos = prefix_range.end.min(len);
             continue;
@@ -709,8 +1389,13 @@ pub(crate) fn build_display_text(
                 &mut display_to_buffer,
                 &mut buffer_to_display,
                 &mut display_pos,
+                line_content,
                 replacement.source_range.clone(),
                 &replacement.display_text,
+                // Math retains its interior hit mapping and derives the full span from its end.
+                !decoration
+                    .inline_math_spans
+                    .contains(&replacement.source_range),
             );
             buffer_pos = replacement.source_range.end.min(len);
             replacement_index += 1;
@@ -881,156 +1566,384 @@ pub(crate) fn build_table_display_text(
     (display, d2b, b2d, false)
 }
 
+#[derive(Default)]
+pub(crate) struct TableCellSyntaxFocus {
+    pub selections: Vec<Range<usize>>,
+    pub marked_ranges: Vec<Range<usize>>,
+    pub search_reveal_range: Option<Range<usize>>,
+    pub dragging: bool,
+    pub suppress_empty_caret: bool,
+}
+
+impl EditorView {
+    pub(super) fn table_cell_syntax_focus(&self) -> TableCellSyntaxFocus {
+        let search_reveal_range = self.current_search_source_range();
+        if !self.markdown_syntax_expansion_allowed() {
+            return TableCellSyntaxFocus {
+                search_reveal_range,
+                ..Default::default()
+            };
+        }
+        TableCellSyntaxFocus {
+            // Drag activation follows the primary cursor, not source-sorted extras.
+            selections: self
+                .all_cursors_snapshot()
+                .into_iter()
+                .map(|cursor| cursor.selection_range())
+                .collect(),
+            marked_ranges: self.marked_ranges().cloned().collect(),
+            search_reveal_range,
+            dragging: self.is_selecting && self.selection_drag_has_moved,
+            suppress_empty_caret: self.suppress_fold_for_empty_selection_drag,
+        }
+    }
+}
+
+/// Mirror ordinary text selection activation, projected into one source-owned
+/// cell. During drag, only a selection inside one token reveals that token;
+/// crossing unrelated content stays folded until the selection is committed.
+pub(crate) fn table_cell_active_ranges(
+    line_start_offset: usize,
+    cell_range: &Range<usize>,
+    focus: &TableCellSyntaxFocus,
+    decoration: &LineDecoration,
+) -> Vec<Range<usize>> {
+    let start = line_start_offset + cell_range.start;
+    let end = line_start_offset + cell_range.end;
+    let project = |range: &Range<usize>| {
+        range.start.saturating_sub(start).min(cell_range.len())
+            ..range.end.saturating_sub(start).min(cell_range.len())
+    };
+    let mut active = Vec::new();
+    if !focus.dragging {
+        active.extend(
+            focus
+                .selections
+                .iter()
+                .filter(|range| !range.is_empty() && range.start < end && range.end > start)
+                .map(project),
+        );
+    } else if let Some(selection) = focus.selections.first()
+        && !selection.is_empty()
+        && selection.start >= start
+        && selection.end <= end
+    {
+        let local = project(selection);
+        let trigger = decoration
+            .syntax_ranges
+            .iter()
+            .map(|syntax| syntax.trigger_range.clone())
+            .chain(
+                decoration
+                    .table_cell_fragments
+                    .iter()
+                    .filter(|fragment| fragment.prefix_len > 0)
+                    .map(|fragment| {
+                        fragment.range.start..fragment.range.start + fragment.prefix_len
+                    }),
+            )
+            .find(|trigger| local.start >= trigger.start && local.end <= trigger.end);
+        if let Some(trigger) = trigger {
+            active.push(trigger);
+        }
+    }
+    active.extend(
+        focus
+            .marked_ranges
+            .iter()
+            .filter(|range| range.start < end && range.end > start)
+            .map(project),
+    );
+    if active.is_empty() && !focus.dragging && !focus.suppress_empty_caret {
+        active.extend(
+            focus
+                .selections
+                .iter()
+                .filter(|range| range.is_empty() && range.start >= start && range.start <= end)
+                .map(project),
+        );
+    }
+    // Search is a presentation reason, independent of drag/caret suppression.
+    if let Some(range) = focus.search_reveal_range.as_ref()
+        && range.start.max(start) < range.end.min(end)
+    {
+        active.push(project(range));
+    }
+    active
+}
+
+#[cfg(test)]
 pub(crate) fn active_table_cell_ranges(
     line_start_offset: usize,
     cell_range: &Range<usize>,
     cursor_offsets: &[usize],
     marked_range: Option<&Range<usize>>,
 ) -> Vec<Range<usize>> {
-    let cell_start = line_start_offset + cell_range.start;
-    let cell_end = line_start_offset + cell_range.end;
-    let cell_len = cell_range.len();
+    table_cell_active_ranges(
+        line_start_offset,
+        cell_range,
+        &TableCellSyntaxFocus {
+            selections: cursor_offsets
+                .iter()
+                .map(|&offset| offset..offset)
+                .collect(),
+            marked_ranges: marked_range.into_iter().cloned().collect(),
+            ..Default::default()
+        },
+        &LineDecoration::default(),
+    )
+}
 
-    let mut active_ranges = cursor_offsets
+/// Structural list syntax at the start of a cell, including incomplete markers
+/// whose indentation must survive until completion. This is not display folding.
+pub(crate) fn table_cell_list_syntax_len(source: &str) -> usize {
+    let leading = list_marker_indent(source);
+    let trimmed = &source[leading..];
+    let bullet = if ["- ", "* ", "+ "]
         .iter()
-        .copied()
-        .filter(|offset| *offset >= cell_start && *offset <= cell_end)
-        .map(|offset| {
-            let col = (offset - cell_start).min(cell_len);
-            col..col
-        })
-        .collect::<Vec<_>>();
-
-    if let Some(marked_range) = marked_range
-        && !(marked_range.end < cell_start || marked_range.start > cell_end)
+        .any(|marker| trimmed.starts_with(marker))
     {
-        let start = marked_range.start.saturating_sub(cell_start).min(cell_len);
-        let end = marked_range.end.saturating_sub(cell_start).min(cell_len);
-        active_ranges.push(start..end);
-    }
-
-    active_ranges
+        2
+    } else if matches!(trimmed, "-" | "*" | "+") {
+        1
+    } else {
+        0
+    };
+    let syntax = bullet
+        .max(task_core_syntax_len(trimmed))
+        .max(markdown::ordered_list_prefix_len(trimmed));
+    if syntax == 0 { 0 } else { leading + syntax }
 }
 
 pub(crate) fn table_cell_decoration(
     row_decoration: &markdown::LineDecoration,
     cell_content: &str,
-    cell_range: &Range<usize>,
+    _cell_range: &Range<usize>,
 ) -> markdown::LineDecoration {
-    let mut cell_decoration = markdown::parse_decorations(cell_content)
+    let mut cell_decoration = markdown::parse_table_cell_decorations(cell_content, row_decoration)
         .into_iter()
         .next()
         .unwrap_or_default();
-    if cell_decoration.block_type == BlockType::OrderedList {
-        let leading = list_marker_indent(cell_content);
-        let prefix_len = markdown::ordered_list_prefix_len(&cell_content[leading..]);
-        if prefix_len > 0 {
-            let range = leading..leading + prefix_len;
-            cell_decoration
-                .display_replacements
-                .push(markdown::DisplayReplacement {
-                    source_range: range.clone(),
-                    display_text: " ".repeat(prefix_len),
-                    trigger_range: range,
-                });
-        }
-    }
-    let project = |range: &Range<usize>| {
-        (range.start >= cell_range.start && range.end <= cell_range.end)
-            .then(|| range.start - cell_range.start..range.end - cell_range.start)
+    let first_list_syntax = if row_decoration
+        .table_info
+        .as_ref()
+        .is_some_and(|info| info.is_front_matter)
+    {
+        0
+    } else {
+        table_cell_list_syntax_len(cell_content)
     };
-
-    for span in row_decoration.inline_spans.iter().filter(|span| {
-        matches!(
-            span.kind,
-            markdown::InlineKind::Link | markdown::InlineKind::Image
-        )
-    }) {
-        let Some(range) = project(&span.range) else {
-            continue;
+    let indented_list = cell_decoration.block_type == BlockType::CodeBlock && first_list_syntax > 0;
+    if indented_list {
+        // Source indentation is a list depth inside a cell, not an indented
+        // code block. The paragraph context below restores its inline syntax.
+        cell_decoration.block_type = BlockType::Normal;
+        cell_decoration.block_preview = None;
+        cell_decoration.code_language = None;
+    }
+    // Cell breaks are inline HTML, even at the start of a cell. Reuse the
+    // paragraph parse for both protection and presentation, without borrowing
+    // block-level syntax from the synthetic `x ` prefix.
+    let break_context =
+        markdown::parse_table_cell_decorations(&format!("x {cell_content}"), row_decoration)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+    if matches!(
+        cell_decoration.block_type,
+        BlockType::Normal
+            | BlockType::UnorderedList
+            | BlockType::OrderedList
+            | BlockType::TaskList(_)
+    ) && cell_decoration.block_preview.is_none()
+        && cell_decoration.footnote_definition_label.is_none()
+    {
+        let shift = |range: &Range<usize>| {
+            let start = range.start.checked_sub(2)?;
+            let end = range.end.checked_sub(2)?;
+            (start <= end && end <= cell_content.len()).then_some(start..end)
         };
-        if !cell_decoration
+        // Inline triggers include the preceding byte for caret expansion. At
+        // cell start that byte belongs to `x `, so clip it rather than dropping
+        // the cell's opening/closing syntax ranges.
+        let shift_trigger = |range: &Range<usize>| shift(&(range.start.max(2)..range.end));
+        let shift_ranges =
+            |ranges: &[Range<usize>]| ranges.iter().filter_map(&shift).collect::<Vec<_>>();
+        cell_decoration.inline_spans = break_context
             .inline_spans
             .iter()
-            .any(|existing| existing.kind == span.kind && existing.range == range)
-        {
-            cell_decoration.inline_spans.push(markdown::InlineSpan {
-                range,
-                kind: span.kind.clone(),
-                target: span.target.clone(),
-            });
-        }
-    }
-
-    for syntax in &row_decoration.syntax_ranges {
-        let (Some(range), Some(trigger_range)) =
-            (project(&syntax.range), project(&syntax.trigger_range))
-        else {
-            continue;
-        };
-        if !cell_decoration
+            .filter_map(|span| {
+                Some(markdown::InlineSpan {
+                    range: shift(&span.range)?,
+                    ..span.clone()
+                })
+            })
+            .collect();
+        cell_decoration.inline_math_spans = shift_ranges(&break_context.inline_math_spans);
+        cell_decoration.protected_ranges = shift_ranges(&break_context.protected_ranges);
+        cell_decoration.syntax_ranges = break_context
             .syntax_ranges
             .iter()
-            .any(|existing| existing.range == range && existing.trigger_range == trigger_range)
-        {
-            cell_decoration.syntax_ranges.push(markdown::SyntaxRange {
-                range,
-                trigger_range,
-            });
-        }
+            .filter_map(|syntax| {
+                Some(markdown::SyntaxRange {
+                    range: shift(&syntax.range)?,
+                    trigger_range: shift_trigger(&syntax.trigger_range)?,
+                })
+            })
+            .collect();
+        cell_decoration.display_replacements = break_context
+            .display_replacements
+            .iter()
+            .filter_map(|replacement| {
+                Some(markdown::DisplayReplacement {
+                    source_range: shift(&replacement.source_range)?,
+                    trigger_range: shift_trigger(&replacement.trigger_range)?,
+                    ..replacement.clone()
+                })
+            })
+            .collect();
+        cell_decoration.highlight_spans = shift_ranges(&break_context.highlight_spans);
+        cell_decoration.superscript_spans = shift_ranges(&break_context.superscript_spans);
+        cell_decoration.subscript_spans = shift_ranges(&break_context.subscript_spans);
+        cell_decoration.wiki_links = break_context
+            .wiki_links
+            .iter()
+            .filter_map(|wiki| {
+                Some(markdown::WikiLinkSpan {
+                    full_range: shift(&wiki.full_range)?,
+                    collapsed_range: shift(&wiki.collapsed_range)?,
+                    ..wiki.clone()
+                })
+            })
+            .collect();
+        cell_decoration.footnote_references = break_context
+            .footnote_references
+            .iter()
+            .filter_map(|footnote| {
+                Some(markdown::FootnoteReferenceSpan {
+                    full_range: shift(&footnote.full_range)?,
+                    collapsed_range: shift(&footnote.collapsed_range)?,
+                    ..footnote.clone()
+                })
+            })
+            .collect();
+        cell_decoration.image_path = break_context.image_path.clone();
     }
 
-    let breaks = table_cell_break_ranges(cell_content);
-    for (index, line_break) in breaks.iter().enumerate() {
-        let start = line_break.end;
-        let end = breaks
-            .get(index + 1)
-            .map_or(cell_content.len(), |next| next.start);
+    let breaks = table_cell_break_ranges(cell_content)
+        .into_iter()
+        .filter(|source_range| {
+            let inner = &cell_content[source_range.start + 1..source_range.end - 1];
+            if !inner
+                .get(..2)
+                .is_some_and(|name| name.eq_ignore_ascii_case("br"))
+                || !inner[2..]
+                    .strip_suffix('/')
+                    .unwrap_or(&inner[2..])
+                    .bytes()
+                    .all(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'))
+            {
+                return false;
+            }
+            let target = source_range.start + 2..source_range.end + 2;
+            let overlaps =
+                |range: &Range<usize>| range.start < target.end && range.end > target.start;
+            !break_context.protected_ranges.iter().any(overlaps)
+                && !break_context.inline_spans.iter().any(|span| {
+                    span.kind == markdown::InlineKind::InlineCode && overlaps(&span.range)
+                })
+                && !break_context
+                    .wiki_links
+                    .iter()
+                    .any(|link| overlaps(&link.full_range))
+                && !break_context.inline_math_spans.iter().any(overlaps)
+                && !break_context.superscript_spans.iter().any(overlaps)
+                && !break_context.subscript_spans.iter().any(overlaps)
+                && !break_context
+                    .footnote_references
+                    .iter()
+                    .any(|reference| overlaps(&reference.full_range))
+                && !break_context.inline_spans.iter().any(|span| {
+                    matches!(
+                        span.kind,
+                        markdown::InlineKind::Link | markdown::InlineKind::Image
+                    ) && markdown::inline_span_source_range(&break_context, span).is_some_and(
+                        |source| {
+                            break_context.syntax_ranges.iter().any(|syntax| {
+                                syntax.trigger_range == source && overlaps(&syntax.range)
+                            })
+                        },
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    for (start, end) in std::iter::once(0)
+        .chain(breaks.iter().map(|range| range.end))
+        .zip(
+            breaks
+                .iter()
+                .map(|range| range.start)
+                .chain([cell_content.len()]),
+        )
+    {
         let fragment = &cell_content[start..end];
-        let leading = fragment.len() - fragment.trim_start_matches([' ', '\t']).len();
+        let leading = list_marker_indent(fragment);
         let trimmed = &fragment[leading..];
-        let task = ["- [ ] ", "- [x] ", "* [ ] ", "* [x] ", "+ [ ] ", "+ [x] "]
-            .iter()
-            .any(|prefix| trimmed.starts_with(prefix));
-        let prefix_len = if task {
-            6
+        let task_core = task_core_syntax_len(trimmed);
+        let task_len = task_prefix_len(trimmed);
+        let ordered_len = complete_ordered_list_prefix_len(trimmed);
+        let (block_type, marker_len) = if task_core > 0 {
+            if task_len > 0 {
+                (
+                    BlockType::TaskList(matches!(trimmed.as_bytes()[3], b'x' | b'X')),
+                    task_len,
+                )
+            } else {
+                (BlockType::Normal, 0)
+            }
+        } else if ordered_len > 0 {
+            (BlockType::OrderedList, ordered_len)
         } else if ["- ", "* ", "+ "]
             .iter()
             .any(|prefix| trimmed.starts_with(prefix))
         {
-            2
+            (BlockType::UnorderedList, 2)
         } else {
-            markdown::ordered_list_prefix_len(trimmed)
+            (BlockType::Normal, 0)
         };
-        if prefix_len > 0 {
-            let source_range = start..start + leading + prefix_len;
-            let display_text = if task {
-                " ".repeat(leading / 2 * 3 + 3)
-            } else if trimmed.starts_with(|ch: char| ch.is_ascii_digit()) {
-                " ".repeat(leading + prefix_len)
-            } else {
-                " ".repeat(leading + 2)
-            };
-            cell_decoration
-                .display_replacements
-                .push(markdown::DisplayReplacement {
-                    source_range: source_range.clone(),
-                    display_text,
-                    trigger_range: source_range,
-                });
+        // Structural prefix folding is owned by each fragment, not the parser's
+        // first block (which otherwise extends across all source <br> tags).
+        if start == 0 {
+            let structural_end = leading
+                + marker_len
+                    .max(task_core)
+                    .max(markdown::ordered_list_prefix_len(trimmed));
+            cell_decoration.syntax_ranges.retain(|syntax| {
+                !(syntax.range.start < structural_end && syntax.trigger_range.end <= structural_end)
+            });
+            if indented_list
+                || matches!(
+                    cell_decoration.block_type,
+                    BlockType::TaskList(_) | BlockType::OrderedList | BlockType::UnorderedList
+                )
+            {
+                cell_decoration.block_type = block_type.clone();
+            }
         }
+        cell_decoration
+            .table_cell_fragments
+            .push(markdown::TableCellFragment {
+                range: start..end,
+                block_type,
+                prefix_len: if marker_len > 0 {
+                    leading + marker_len
+                } else {
+                    0
+                },
+            });
     }
 
     for source_range in breaks {
-        if cell_decoration.protected_ranges.iter().any(|protected| {
-            protected.start < source_range.end && protected.end > source_range.start
-        }) || cell_decoration.inline_spans.iter().any(|span| {
-            span.kind == markdown::InlineKind::InlineCode
-                && span.range.start < source_range.end
-                && span.range.end > source_range.start
-        }) {
-            continue;
-        }
         cell_decoration
             .display_replacements
             .push(markdown::DisplayReplacement {
@@ -1192,6 +2105,7 @@ pub(crate) struct TableLayout {
 }
 
 /// Compute the full table layout from decoration data of all lines in the table block.
+/// - `buffer`: raw source for restoring trailing cell whitespace during rendering
 /// - `decorations`: all parsed line decorations
 /// - `table_start`, `table_end`: line range of the table
 /// - `available_width`: pixel width available for the table
@@ -1200,6 +2114,7 @@ pub(crate) struct TableLayout {
 /// - `line_height`: text line height in pixels
 /// - `handle_size`: drag-handle area size in pixels
 pub(crate) fn compute_table_layout(
+    buffer: &Buffer,
     decorations: &[LineDecoration],
     table_start: usize,
     table_end: usize,
@@ -1232,13 +2147,44 @@ pub(crate) fn compute_table_layout(
         .is_some_and(|(_, ti)| ti.is_front_matter);
 
     // Measure desired column widths based on content
-    let mut desired_col_widths_chars = vec![3usize; col_count];
-    for (_, ti) in &visual_rows {
-        for (ci, cell) in ti.cells.iter().enumerate() {
-            if ci < col_count {
-                desired_col_widths_chars[ci] =
-                    desired_col_widths_chars[ci].max(display_width(cell.trim()));
-            }
+    let mut desired_col_widths_chars = vec![if is_front_matter { 3usize } else { 1 }; col_count];
+    for (line, ti) in &visual_rows {
+        for ci in 0..ti.cells.len().min(col_count) {
+            let (cell, cell_range) =
+                super::table_cell_render::content_with_range(ti, buffer.line_content(*line), ci);
+            let cell = cell.as_str();
+            let width = if is_front_matter {
+                display_width(cell.trim())
+            } else {
+                let decoration = table_cell_decoration(&decorations[*line], cell, &cell_range);
+                let (display, _, b2d, _) = build_display_text(
+                    cell,
+                    &decoration,
+                    &[],
+                    false,
+                    None,
+                    0,
+                    3,
+                    3,
+                    2,
+                    0,
+                    1.0,
+                    1.0,
+                    1.0,
+                );
+                hard_line_byte_ranges(&display)
+                    .iter()
+                    .zip(&decoration.table_cell_fragments)
+                    .map(|(range, fragment)| {
+                        let end = super::table_cell_render::intrinsic_line_end(
+                            cell, fragment, &b2d, range,
+                        );
+                        display_width(&display[range.start..range.start + end])
+                    })
+                    .max()
+                    .unwrap_or(0)
+            };
+            desired_col_widths_chars[ci] = desired_col_widths_chars[ci].max(width);
         }
     }
 
@@ -1254,7 +2200,13 @@ pub(crate) fn compute_table_layout(
         .map(|&w| w as f32 * base_char_width)
         .sum();
 
-    let col_widths: Vec<f32> = if desired_total <= content_width {
+    let col_widths: Vec<f32> = if !is_front_matter {
+        let desired = desired_col_widths_chars
+            .iter()
+            .map(|&width| width as f32 * base_char_width)
+            .collect::<Vec<_>>();
+        super::table_column_widths::allocate(&desired, content_width, base_char_width.max(1.0))
+    } else if desired_total <= content_width {
         let mut widths: Vec<f32> = desired_col_widths_chars
             .iter()
             .map(|&w| w as f32 * base_char_width)
@@ -1346,8 +2298,11 @@ pub(crate) fn compute_table_layout(
         let mut row_cells = Vec::new();
         let mut current_x = 0.0_f32;
         for ci in 0..col_count {
-            let cell_content = ti.cells.get(ci).cloned().unwrap_or_default();
-            let cell_range = ti.cell_ranges.get(ci).cloned().unwrap_or(0..0);
+            let (cell_content, cell_range) = super::table_cell_render::content_with_range(
+                ti,
+                buffer.line_content(*line_idx),
+                ci,
+            );
             let alignment = ti
                 .column_alignments
                 .get(ci)
@@ -1363,16 +2318,17 @@ pub(crate) fn compute_table_layout(
                 &[],
                 false,
                 None,
+                0,
                 3,
                 3,
                 2,
-                0,
                 0,
                 1.0,
                 1.0,
                 1.0,
             );
-            let trimmed_range = table_cell_trimmed_display_range(&folded_raw);
+            let trimmed_range =
+                table_cell_display_range(&folded_raw, &cell_content, &cell_decoration, &b2d_raw);
             let trim_start = trimmed_range.start;
             let display_text = folded_raw[trimmed_range.clone()].to_string();
             let d2b = d2b_raw[trimmed_range].to_vec();
@@ -1696,6 +2652,45 @@ pub(crate) fn hard_line_byte_ranges(text: &str) -> Vec<Range<usize>> {
     ranges
 }
 
+pub(crate) fn table_cell_display_range(
+    display_text: &str,
+    source: &str,
+    decoration: &LineDecoration,
+    buffer_to_display: &[usize],
+) -> Range<usize> {
+    // Only source padding is disposable. Spaces produced by scripts, footnotes
+    // and folded prefixes reserve real ink and must survive at cell edges.
+    let source_start = if decoration
+        .table_cell_fragments
+        .first()
+        .is_some_and(|fragment| fragment.prefix_len > 0)
+    {
+        0
+    } else {
+        source.len() - source.trim_start_matches([' ', '\t']).len()
+    };
+    let prefix_end = decoration
+        .table_cell_fragments
+        .last()
+        .map_or(0, |fragment| fragment.range.start + fragment.prefix_len);
+    let source_end = source
+        .trim_end_matches([' ', '\t'])
+        .len()
+        .max(source_start)
+        .max(prefix_end);
+    let start = buffer_to_display
+        .get(source_start)
+        .copied()
+        .unwrap_or(0)
+        .min(display_text.len());
+    let end = buffer_to_display
+        .get(source_end)
+        .copied()
+        .unwrap_or(display_text.len())
+        .clamp(start, display_text.len());
+    start..end
+}
+
 pub(crate) fn table_cell_trimmed_display_range(display_text: &str) -> Range<usize> {
     let trimmed_start = display_text.trim_start_matches([' ', '\t']);
     let start = display_text.len() - trimmed_start.len();
@@ -1817,17 +2812,62 @@ pub(crate) fn prefix_is_folded(
         || !active_ranges_intersect(active_ranges, &(leading_ws..leading_ws + prefix_len))
 }
 
-fn task_prefix_len(trimmed: &str) -> usize {
-    for marker in ["- [ ] ", "- [x] ", "* [ ] ", "* [x] ", "+ [ ] ", "+ [x] "] {
-        if trimmed.starts_with(marker) {
-            return marker.len();
-        }
+fn complete_ordered_list_prefix_len(trimmed: &str) -> usize {
+    let prefix_len = markdown::ordered_list_prefix_len(trimmed);
+    if prefix_len > 0 && matches!(trimmed.as_bytes()[prefix_len - 1], b' ' | b'\t') {
+        prefix_len
+    } else {
+        0
     }
-    0
+}
+
+pub(crate) fn table_cell_fragment_prefix_is_folded(
+    content: &str,
+    fragment: &markdown::TableCellFragment,
+    active_ranges: &[Range<usize>],
+) -> bool {
+    if fragment.prefix_len == 0 {
+        return false;
+    }
+    let source = &content[fragment.range.clone()];
+    let leading = list_marker_indent(source);
+    if matches!(fragment.block_type, BlockType::TaskList(_)) {
+        let local_active = active_ranges
+            .iter()
+            .filter_map(|range| {
+                (range.end >= fragment.range.start && range.start <= fragment.range.end).then(
+                    || {
+                        range
+                            .start
+                            .saturating_sub(fragment.range.start)
+                            .min(source.len())
+                            ..range
+                                .end
+                                .saturating_sub(fragment.range.start)
+                                .min(source.len())
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        task_prefix_is_folded(
+            source,
+            leading,
+            task_core_syntax_len(&source[leading..]),
+            &local_active,
+        )
+    } else {
+        prefix_is_folded(
+            fragment.range.start + leading,
+            fragment.prefix_len - leading,
+            active_ranges,
+        )
+    }
 }
 
 fn task_core_syntax_len(trimmed: &str) -> usize {
-    for marker in ["- [ ]", "- [x]", "* [ ]", "* [x]", "+ [ ]", "+ [x]"] {
+    for marker in [
+        "- [ ]", "- [x]", "- [X]", "* [ ]", "* [x]", "* [X]", "+ [ ]", "+ [x]", "+ [X]",
+    ] {
         if trimmed.starts_with(marker) {
             return marker.len();
         }
@@ -1841,6 +2881,9 @@ fn task_prefix_is_folded(
     task_core_len: usize,
     active_ranges: &[Range<usize>],
 ) -> bool {
+    if task_prefix_len(&line_content[leading_ws..]) == 0 {
+        return false;
+    }
     if active_ranges.is_empty() {
         return true;
     }
@@ -2333,19 +3376,453 @@ mod tests {
         ShapedRun, TextRun, WrapBoundary, WrappedLine, WrappedLineLayout, font, point, px, size,
     };
 
+    use crate::buffer::Buffer;
     use crate::editor::MermaidTheme;
-    use crate::markdown;
+    use crate::front_matter::FrontMatterValue;
+    use crate::markdown::{self, LineDecoration};
     use crate::theme::Theme;
 
     use super::{
         AnchoredPopupVertical, GeneratedPreviewFontFamilies, anchored_popup_placement,
-        apply_search_match_text_styles, build_display_text, build_generated_block_preview_svg,
-        build_table_display_text, build_text_runs_for_display, compute_display_prefix_bytes,
-        compute_generated_preview_size, compute_table_layout, fit_generated_preview_size,
-        load_generated_preview_image_from_svg, load_generated_preview_image_from_svg_for_editor,
-        prefix_is_folded, table_cell_content_offset, table_cell_decoration, task_prefix_is_folded,
+        apply_front_matter_group_display, apply_search_match_text_styles, build_display_text,
+        build_generated_block_preview_svg, build_table_display_text, build_text_runs_for_display,
+        compute_display_prefix_bytes, compute_generated_preview_size, compute_table_layout,
+        display_width, fit_generated_preview_size, front_matter_group_plan,
+        front_matter_item_source_map, load_generated_preview_image_from_svg,
+        load_generated_preview_image_from_svg_for_editor, prefix_is_folded,
+        table_cell_content_offset, table_cell_decoration, task_prefix_is_folded,
         wrap_segment_byte_ranges,
     };
+
+    mod search_source_reveal_tests {
+        use super::super as helpers;
+        use super::*;
+
+        type Display = (String, Vec<usize>, Vec<usize>, Vec<TextRun>);
+
+        fn display(
+            source: &str,
+            decoration: &LineDecoration,
+            active: &[Range<usize>],
+            cell: bool,
+        ) -> Display {
+            let (raw, d2b, b2d, collapsed) = build_display_text(
+                source, decoration, active, false, None, 0, 3, 3, 2, 0, 0.7, 0.7, 0.7,
+            );
+            let range = if cell {
+                helpers::table_cell_display_range(&raw, source, decoration, &b2d)
+            } else {
+                0..raw.len()
+            };
+            let text = raw[range.clone()].to_owned();
+            let d2b = d2b[range.clone()].to_vec();
+            let b2d = b2d
+                .iter()
+                .map(|index| index.saturating_sub(range.start).min(range.len()))
+                .collect();
+            let theme = Theme::one_dark();
+            let body = font("Helvetica");
+            let mono = font("Menlo");
+            let runs = build_text_runs_for_display(
+                &text,
+                source,
+                &d2b,
+                decoration,
+                active,
+                false,
+                collapsed,
+                &body,
+                &body,
+                &mono,
+                &body,
+                &body,
+                &body,
+                &body,
+                3,
+                16.0,
+                &theme,
+                theme.git_status_added,
+                theme.text_danger,
+                theme.link,
+                FontWeight::NORMAL,
+                theme.list_marker,
+                FontWeight::BOLD,
+                theme.syntax_marker,
+                None,
+                false,
+            );
+            (text, d2b, b2d, runs)
+        }
+
+        fn assert_keyword_mapping_and_highlight(
+            source: &str,
+            mapped: &mut Display,
+            base: usize,
+            keyword: Range<usize>,
+        ) {
+            let (text, d2b, b2d, runs) = mapped;
+            let visible = b2d[keyword.start]..b2d[keyword.end];
+            assert_eq!(&text[visible.clone()], &source[keyword.clone()]);
+            for (index, _) in source[keyword.clone()].char_indices() {
+                let source_index = keyword.start + index;
+                assert_eq!(d2b[b2d[source_index]], source_index);
+                assert!(text.is_char_boundary(b2d[source_index]));
+            }
+            let active_color = gpui::hsla(0.13, 1.0, 0.52, 1.0);
+            let inactive_color = gpui::hsla(0.73, 1.0, 0.52, 1.0);
+            let matches = [0..1, base + keyword.start..base + keyword.end];
+            apply_search_match_text_styles(
+                runs,
+                text,
+                d2b,
+                base,
+                &matches,
+                Some(1),
+                inactive_color,
+                active_color,
+            );
+            let colors: Vec<_> = runs
+                .iter()
+                .flat_map(|run| std::iter::repeat_n(run.color, run.len))
+                .collect();
+            assert_eq!(colors.len(), text.len());
+            for (index, _) in text.char_indices() {
+                assert_eq!(
+                    colors[index] == active_color,
+                    visible.contains(&index),
+                    "{text:?}, byte {index}"
+                );
+            }
+        }
+
+        #[test]
+        fn search_source_reveal_ordinary_link_math_cjk_navigation_and_dismiss() {
+            let source = "前 [名称](https://host/秘密) 中 $x+y$ 后";
+            let mut decoration = markdown::parse_decorations(source).remove(0);
+            let cache = inline_math_image_cache(&[("x+y", 183, 120)]);
+            assert!(helpers::add_inline_math_display_replacements(
+                &mut decoration,
+                source,
+                &cache,
+                6.0
+            ));
+            let target = source.find("秘密").unwrap();
+            let math = source.find("x+y").unwrap();
+            let folded = display(source, &decoration, &[], false);
+            assert!(!folded.0.contains("https://"));
+            assert!(!folded.0.contains("x+y"));
+            for keyword in [target..target + "秘密".len(), math..math + 3] {
+                let mut mapped =
+                    display(source, &decoration, std::slice::from_ref(&keyword), false);
+                assert_keyword_mapping_and_highlight(source, &mut mapped, 100, keyword.clone());
+                if keyword.start == target {
+                    assert!(mapped.0.contains("[名称](https://host/秘密)"));
+                    assert!(!mapped.0.contains("x+y"));
+                } else {
+                    assert!(mapped.0.contains("$x+y$"));
+                    assert!(!mapped.0.contains("https://"));
+                }
+            }
+            let spanning = 0..math + 3;
+            let mut mapped = display(source, &decoration, std::slice::from_ref(&spanning), false);
+            assert_eq!(mapped.0, source);
+            assert_keyword_mapping_and_highlight(source, &mut mapped, 100, spanning);
+            let dismissed = display(source, &decoration, &[], false);
+            assert_eq!(
+                (dismissed.0, dismissed.1, dismissed.2),
+                (folded.0, folded.1, folded.2)
+            );
+        }
+
+        #[test]
+        fn search_source_reveal_table_is_independent_of_readonly_drag_and_caret_suppression() {
+            let document = "| Head |\n| --- |\n| 前 [名称](https://host/秘密) 中 $x+y$ 后 |";
+            let buffer = Buffer::from_text(document);
+            let decorations = markdown::parse_decorations(document);
+            let row = &decorations[2];
+            let (source, cell_range) = crate::editor::table_cell_render::content_with_range(
+                row.table_info.as_ref().unwrap(),
+                buffer.line_content(2),
+                0,
+            );
+            let mut decoration = table_cell_decoration(row, &source, &cell_range);
+            let cache = inline_math_image_cache(&[("x+y", 183, 120)]);
+            helpers::add_inline_math_display_replacements(&mut decoration, &source, &cache, 6.0);
+            let base = buffer.line_start(2) + cell_range.start;
+            let target = source.find("秘密").unwrap();
+            let math = source.find("x+y").unwrap();
+            for readonly in [false, true] {
+                for dragging in [false, true] {
+                    for suppress_empty_caret in [false, true] {
+                        for keyword in [target..target + "秘密".len(), math..math + 3] {
+                            let focus = helpers::TableCellSyntaxFocus {
+                                selections: if readonly { vec![] } else { vec![base..base] },
+                                search_reveal_range: Some(base + keyword.start..base + keyword.end),
+                                dragging,
+                                suppress_empty_caret,
+                                ..Default::default()
+                            };
+                            let active = helpers::table_cell_active_ranges(
+                                buffer.line_start(2),
+                                &cell_range,
+                                &focus,
+                                &decoration,
+                            );
+                            assert!(active.contains(&keyword));
+                            let mut mapped = display(&source, &decoration, &active, true);
+                            assert_keyword_mapping_and_highlight(
+                                &source,
+                                &mut mapped,
+                                base,
+                                keyword.clone(),
+                            );
+                            assert_eq!(mapped.0.contains("https://"), keyword.start == target);
+                            assert_eq!(mapped.0.contains("x+y"), keyword.start == math);
+                        }
+                    }
+                }
+            }
+            let dismissed = helpers::TableCellSyntaxFocus::default();
+            let active = helpers::table_cell_active_ranges(
+                buffer.line_start(2),
+                &cell_range,
+                &dismissed,
+                &decoration,
+            );
+            assert!(active.is_empty());
+            let mapped = display(&source, &decoration, &active, true);
+            assert!(!mapped.0.contains("https://"));
+            assert!(!mapped.0.contains("x+y"));
+        }
+
+        #[test]
+        fn search_source_reveal_table_clips_cross_cell_ranges_and_excludes_touching_boundaries() {
+            let document = "| One | Two |\n| --- | --- |\n| [名](https://host/秘密) | $x+y$ |";
+            let buffer = Buffer::from_text(document);
+            let decorations = markdown::parse_decorations(document);
+            let row = &decorations[2];
+            let line_start = buffer.line_start(2);
+            let first = document.find("秘密").unwrap();
+            let last = document.find("x+y").unwrap() + 3;
+            for col in 0..2 {
+                let (source, cell_range) = crate::editor::table_cell_render::content_with_range(
+                    row.table_info.as_ref().unwrap(),
+                    buffer.line_content(2),
+                    col,
+                );
+                let decoration = table_cell_decoration(row, &source, &cell_range);
+                let start = line_start + cell_range.start;
+                let end = line_start + cell_range.end;
+                let focus = helpers::TableCellSyntaxFocus {
+                    search_reveal_range: Some(first..last),
+                    dragging: true,
+                    suppress_empty_caret: true,
+                    ..Default::default()
+                };
+                let active =
+                    helpers::table_cell_active_ranges(line_start, &cell_range, &focus, &decoration);
+                assert_eq!(
+                    active,
+                    vec![first.max(start) - start..last.min(end) - start]
+                );
+                let mut mapped = display(&source, &decoration, &active, true);
+                let keyword = if col == 0 { "秘密" } else { "x+y" };
+                let local = source.find(keyword).unwrap();
+                assert_keyword_mapping_and_highlight(
+                    &source,
+                    &mut mapped,
+                    start,
+                    local..local + keyword.len(),
+                );
+                for range in [start - 1..start, end..end + 1, start..start] {
+                    let focus = helpers::TableCellSyntaxFocus {
+                        search_reveal_range: Some(range),
+                        ..Default::default()
+                    };
+                    assert!(
+                        helpers::table_cell_active_ranges(
+                            line_start,
+                            &cell_range,
+                            &focus,
+                            &decoration
+                        )
+                        .is_empty()
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn search_source_reveal_front_matter_readonly_groups_and_lifecycle() {
+            let source = "---\ntitle: 'scalar'\nbody: |-\n  中文🌸\n  second\ntags:\n  - 'one'\n  - \"二\\u263a\"\nother: true\n---\nBody";
+            let buffer = Buffer::from_text(source);
+            let decorations = markdown::parse_decorations(source);
+            let selections = [0..buffer.len()];
+            let signature = |search: Option<&Range<usize>>| {
+                let plans = helpers::front_matter_group_plan_with_search(
+                    &buffer,
+                    &decorations,
+                    &selections,
+                    false,
+                    search,
+                );
+                let delimiter = helpers::front_matter_block_is_active_with_search(
+                    &buffer,
+                    &decorations,
+                    &selections,
+                    false,
+                    search,
+                );
+                let scalar_rows: Vec<_> = (1..9)
+                    .map(|line| {
+                        helpers::front_matter_source_rows_are_revealed(
+                            &buffer,
+                            line..line + 1,
+                            &selections,
+                            false,
+                            search,
+                        )
+                    })
+                    .collect();
+                (plans, delimiter, scalar_rows)
+            };
+            let (plans, delimiter, rows) = signature(None);
+            assert!(!delimiter);
+            assert!(rows.iter().all(|active| !active));
+            assert!(plans.iter().all(|plan| !plan.active));
+            assert!(plans[0].hides_line(2));
+            assert!(plans[1].hides_line(7));
+            for (line, keyword, group) in [
+                (3, "中文🌸", Some(0)),
+                (7, "\\u263a", Some(1)),
+                (1, "scalar", None),
+                (8, "true", None),
+            ] {
+                let local = buffer.line_content(line).find(keyword).unwrap();
+                let base = buffer.line_start(line);
+                let search = base + local..base + local + keyword.len();
+                let (plans, delimiter, rows) = signature(Some(&search));
+                assert!(delimiter);
+                assert_eq!(rows.iter().filter(|active| **active).count(), 1);
+                assert!(rows[line - 1]);
+                for (index, plan) in plans.iter().enumerate() {
+                    assert_eq!(plan.active, group == Some(index));
+                    if plan.active {
+                        assert!(
+                            plan.group
+                                .source_lines
+                                .clone()
+                                .all(|member| !plan.hides_line(member))
+                        );
+                    }
+                }
+                let mut decoration = decorations[line].clone();
+                let plan = plans
+                    .iter()
+                    .find(|plan| plan.group.source_lines.contains(&line));
+                helpers::apply_front_matter_group_display(
+                    &mut decoration,
+                    line,
+                    plan,
+                    buffer.line_content(line),
+                );
+                let active = if plan.is_some_and(|plan| plan.active) {
+                    0..buffer.line_content(line).len()
+                } else {
+                    local..local + keyword.len()
+                };
+                let mut mapped = display(buffer.line_content(line), &decoration, &[active], false);
+                assert_keyword_mapping_and_highlight(
+                    buffer.line_content(line),
+                    &mut mapped,
+                    base,
+                    local..local + keyword.len(),
+                );
+            }
+            let (dismissed, delimiter, rows) = signature(None);
+            assert!(!delimiter);
+            assert!(rows.iter().all(|active| !active));
+            assert_eq!(
+                dismissed
+                    .iter()
+                    .map(|plan| (plan.active, plan.source_visible))
+                    .collect::<Vec<_>>(),
+                plans
+                    .iter()
+                    .map(|plan| (plan.active, plan.source_visible))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(buffer.text(), source);
+        }
+
+        #[test]
+        fn search_source_reveal_front_matter_delimiters_and_half_open_boundaries() {
+            let source = "---\ntitle: '中'\n---\nBody";
+            let buffer = Buffer::from_text(source);
+            let decorations = markdown::parse_decorations(source);
+            let body = buffer.line_start(3);
+            for range in [0..3, buffer.line_start(2)..buffer.line_end(2)] {
+                assert!(helpers::front_matter_block_is_active_with_search(
+                    &buffer,
+                    &decorations,
+                    &[],
+                    false,
+                    Some(&range)
+                ));
+            }
+            for range in [body..buffer.len(), body..body] {
+                assert!(!helpers::front_matter_block_is_active_with_search(
+                    &buffer,
+                    &decorations,
+                    &[0..body],
+                    false,
+                    Some(&range)
+                ));
+            }
+            let rows = 1..2;
+            let start = buffer.line_start(1);
+            let end = buffer.line_start(2);
+            for range in [0..start, end..body, start..start] {
+                assert!(!helpers::front_matter_source_rows_are_revealed(
+                    &buffer,
+                    rows.clone(),
+                    &[start..end],
+                    false,
+                    Some(&range)
+                ));
+            }
+        }
+
+        #[test]
+        fn search_source_reveal_front_matter_raw_scalar_values_keep_exact_mapping() {
+            let source = "---\nquoted: \"中文\\u263a\"\nflag: true\nwhen: 2026-10-16\n---";
+            let buffer = Buffer::from_text(source);
+            let decorations = markdown::parse_decorations(source);
+            for (line, keyword) in [(1, "\\u263a"), (2, "true"), (3, "2026-10-16")] {
+                let text = buffer.line_content(line);
+                let mut decoration = decorations[line].clone();
+                if line == 3 {
+                    decoration.front_matter.as_mut().unwrap().value =
+                        FrontMatterValue::Text("16 October 2026".into());
+                }
+                let folded = display(text, &decoration, &[], false);
+                assert!(!folded.0.contains(keyword));
+                let start = text.find(keyword).unwrap();
+                let mut mapped = display(text, &decoration, &[start..start + keyword.len()], false);
+                assert_keyword_mapping_and_highlight(
+                    text,
+                    &mut mapped,
+                    buffer.line_start(line),
+                    start..start + keyword.len(),
+                );
+                let dismissed = display(text, &decoration, &[], false);
+                assert_eq!(
+                    (dismissed.0, dismissed.1, dismissed.2),
+                    (folded.0, folded.1, folded.2)
+                );
+            }
+        }
+    }
 
     fn inline_math_image_cache(
         entries: &[(&str, u32, u32)],
@@ -2747,6 +4224,7 @@ mod tests {
         let decorations = markdown::parse_decorations(text);
         for available_width in [80.0, 160.0, 320.0] {
             let layout = compute_table_layout(
+                &Buffer::from_text(text),
                 &decorations,
                 0,
                 3,
@@ -2759,6 +4237,382 @@ mod tests {
             );
             assert!(layout.total_width <= available_width + 0.01);
             assert!(layout.cells.iter().flatten().all(|cell| cell.width > 0.0));
+        }
+    }
+
+    fn table_layout_fallback(text: &str, available_width: f32, scale: f32) -> super::TableLayout {
+        let decorations = markdown::parse_decorations(text);
+        compute_table_layout(
+            &Buffer::from_text(text),
+            &decorations,
+            0,
+            decorations.len(),
+            available_width,
+            8.0 * scale,
+            4.0 * scale,
+            8.0 * scale,
+            20.0 * scale,
+            16.0 * scale,
+        )
+    }
+
+    fn assert_table_layout_fallback_widths(
+        layout: &super::TableLayout,
+        expected_content_widths: &[f32],
+        available_width: f32,
+    ) {
+        let tolerance = (available_width * f32::EPSILON * 8.0).max(0.001);
+        assert!(!layout.is_front_matter);
+        assert_eq!(layout.col_count, expected_content_widths.len());
+        assert_eq!(layout.cells.len(), layout.visual_row_count);
+        assert!(!layout.cells.is_empty());
+        assert!(layout.total_width <= available_width + tolerance);
+        assert!((layout.total_width - available_width).abs() <= tolerance);
+        for row in &layout.cells {
+            assert_eq!(row.len(), expected_content_widths.len());
+            let mut x = 0.0;
+            for (cell, &expected) in row.iter().zip(expected_content_widths) {
+                let content_width = cell.width - layout.cell_padding_x * 2.0;
+                assert!(content_width.is_finite() && content_width > 0.0);
+                assert!(
+                    (content_width - expected).abs() <= tolerance,
+                    "column {}: expected {expected}, got {content_width}",
+                    cell.col,
+                );
+                assert!((cell.x - x).abs() <= tolerance);
+                x += cell.width;
+            }
+            assert!((x - layout.total_width).abs() <= tolerance);
+        }
+    }
+
+    #[test]
+    fn table_layout_fallback_short_column_fits_and_long_column_gets_remainder() {
+        let paragraph = "a long paragraph with many words ".repeat(20);
+        let text = format!("| A | B |\n| --- | --- |\n| ok | {paragraph} |");
+        let layout = table_layout_fallback(&text, 300.0, 1.0);
+        assert_eq!(layout.cells[1][0].display_text, "ok");
+        // Two characters at eight pixels, with 32 pixels of table padding.
+        assert_table_layout_fallback_widths(&layout, &[16.0, 252.0], 300.0);
+    }
+
+    #[test]
+    fn table_layout_fallback_long_url_targets_do_not_widen_short_aliases() {
+        let target = format!("https://example.test/{}", "very-long-path/".repeat(120));
+        let paragraph = "a long paragraph with many words ".repeat(20);
+        assert!(target.len() > paragraph.len());
+        for link in [format!("[[{target}|Go]]"), format!("[Go]({target})")] {
+            let text = format!("| A | B |\n| --- | --- |\n| {link} | {paragraph} |");
+            let layout = table_layout_fallback(&text, 300.0, 1.0);
+            assert_eq!(layout.col_count, 2);
+            assert_eq!(layout.cells[1][0].display_text, "Go");
+            assert_table_layout_fallback_widths(&layout, &[16.0, 252.0], 300.0);
+        }
+    }
+
+    #[test]
+    fn table_layout_fallback_break_tags_measure_only_the_longest_hard_line() {
+        let paragraph = "a longer column with many words ".repeat(20);
+        for (content, longest_line, breaks) in [
+            ("<br>a".repeat(80), 1, 80),
+            ("a<br>bbbb<BR/>cc<br />d".to_string(), 4, 3),
+        ] {
+            let text = format!("| A | B |\n| --- | --- |\n| {content} | {paragraph} |");
+            let layout = table_layout_fallback(&text, 300.0, 1.0);
+            let display = &layout.cells[1][0].display_text;
+            assert!(!display.contains('<'));
+            assert_eq!(display.matches('\n').count(), breaks);
+            assert_eq!(
+                display.split('\n').map(display_width).max(),
+                Some(longest_line)
+            );
+            let short_width = longest_line as f32 * 8.0;
+            assert_table_layout_fallback_widths(
+                &layout,
+                &[short_width, 268.0 - short_width],
+                300.0,
+            );
+        }
+    }
+
+    #[test]
+    fn table_layout_fallback_hidden_bold_markers_do_not_consume_width() {
+        let paragraph = "a long paragraph with many words ".repeat(20);
+        let text = format!("| A | B |\n| --- | --- |\n| **ok** | {paragraph} |");
+        let layout = table_layout_fallback(&text, 300.0, 1.0);
+        assert_eq!(layout.cells[1][0].display_text, "ok");
+        assert_table_layout_fallback_widths(&layout, &[16.0, 252.0], 300.0);
+    }
+
+    #[test]
+    fn table_layout_fallback_header_and_all_body_rows_contribute_maxima() {
+        let paragraph = "a long paragraph with many words ".repeat(20);
+        let text = format!(
+            "| **Heading** | B | C |\n| --- | --- | --- |\n| x | ok | {paragraph} |\n| y | longest | z |"
+        );
+        let layout = table_layout_fallback(&text, 500.0, 1.0);
+        assert_eq!(layout.cells[0][0].display_text, "Heading");
+        assert_eq!(layout.cells[2][1].display_text, "longest");
+        assert_eq!(layout.is_header, vec![true, false, false]);
+        assert_table_layout_fallback_widths(&layout, &[56.0, 56.0, 340.0], 500.0);
+    }
+
+    #[test]
+    fn table_layout_fallback_surplus_does_not_expand_short_columns() {
+        let text = "| A | B | C |\n| --- | --- | --- |\n| a | bbb | abcdefghij |";
+        let layout = table_layout_fallback(text, 600.0, 1.0);
+        assert_table_layout_fallback_widths(&layout, &[8.0, 24.0, 520.0], 600.0);
+
+        let tied = "| A | B | C |\n| --- | --- | --- |\n| a | abcdefghij | klmnopqrst |";
+        let layout = table_layout_fallback(tied, 600.0, 1.0);
+        assert_table_layout_fallback_widths(&layout, &[8.0, 272.0, 272.0], 600.0);
+    }
+
+    #[test]
+    fn table_layout_fallback_multiple_long_columns_share_remaining_space() {
+        let text = format!(
+            "| A | B | C | D |\n| --- | --- | --- | --- |\n| ok | four | {} | {} |",
+            "x".repeat(100),
+            "y".repeat(200),
+        );
+        let layout = table_layout_fallback(&text, 500.0, 1.0);
+        assert_table_layout_fallback_widths(&layout, &[16.0, 32.0, 194.0, 194.0], 500.0);
+    }
+
+    #[test]
+    fn table_layout_fallback_unicode_uses_display_columns_not_utf8_bytes() {
+        let paragraph = "a long paragraph with many words ".repeat(20);
+        for (content, display, columns) in [
+            ("東京", "東京", 4),
+            ("**東京**", "東京", 4),
+            ("[[notes/a-very-long-target.md|東京]]", "東京", 4),
+            ("é", "é", 1),
+        ] {
+            let text = format!("| A | B |\n| --- | --- |\n| {content} | {paragraph} |");
+            let layout = table_layout_fallback(&text, 300.0, 1.0);
+            assert_eq!(layout.cells[1][0].display_text, display);
+            assert_eq!(display_width(display), columns);
+            let short_width = columns as f32 * 8.0;
+            assert_table_layout_fallback_widths(
+                &layout,
+                &[short_width, 268.0 - short_width],
+                300.0,
+            );
+        }
+    }
+
+    #[test]
+    fn table_layout_fallback_empty_column_keeps_one_character_minimum() {
+        let paragraph = "a long paragraph with many words ".repeat(20);
+        let text = format!("| | B |\n| --- | --- |\n| | {paragraph} |");
+        let layout = table_layout_fallback(&text, 300.0, 1.0);
+        assert_eq!(layout.cells[0][0].display_text, "");
+        assert_eq!(layout.cells[1][0].display_text, "");
+        assert_table_layout_fallback_widths(&layout, &[8.0, 260.0], 300.0);
+    }
+
+    #[test]
+    fn table_layout_intrinsic_nonfinal_overlays_keep_all_reserved_advance() {
+        let paragraph = "a long paragraph with many words ".repeat(20);
+        for overlay in ["x^abcdefghij^", "x~abcdefghij~", "x[^abcdefghij]"] {
+            for padding in ["", "   \t"] {
+                let content = format!("{overlay}{padding}<br>z");
+                let decoration = table_cell_decoration(
+                    &LineDecoration::default(),
+                    &content,
+                    &(0..content.len()),
+                );
+                let (display, _, b2d, _) =
+                    table_cell_inline_display_and_runs(&content, &decoration);
+                let ranges = super::hard_line_byte_ranges(&display);
+                assert_eq!(ranges.len(), 2);
+                let end = super::super::table_cell_render::intrinsic_line_end(
+                    &content,
+                    &decoration.table_cell_fragments[0],
+                    &b2d,
+                    &ranges[0],
+                );
+                assert_eq!(end, 11, "{content:?}");
+                assert_eq!(
+                    &display[ranges[0].start..ranges[0].start + end],
+                    "x          "
+                );
+                assert_eq!(ranges[0].len() - end, padding.len());
+
+                let text = format!("| A | B |\n| --- | --- |\n| {content} | {paragraph} |");
+                let layout = table_layout_fallback(&text, 300.0, 1.0);
+                assert_table_layout_fallback_widths(&layout, &[88.0, 180.0], 300.0);
+            }
+        }
+    }
+
+    #[test]
+    fn table_layout_intrinsic_real_source_trailing_padding_is_excluded() {
+        let paragraph = "a long paragraph with many words ".repeat(20);
+        for content in ["ab   \t<br>z", "ab<br>z   \t", "ab   \t<br>z   \t"] {
+            let decoration =
+                table_cell_decoration(&LineDecoration::default(), content, &(0..content.len()));
+            let (display, _, b2d, _) = table_cell_inline_display_and_runs(content, &decoration);
+            for ((range, fragment), expected) in super::hard_line_byte_ranges(&display)
+                .iter()
+                .zip(&decoration.table_cell_fragments)
+                .zip(["ab", "z"])
+            {
+                let end = super::super::table_cell_render::intrinsic_line_end(
+                    content, fragment, &b2d, range,
+                );
+                assert_eq!(&display[range.start..range.start + end], expected);
+            }
+            let text = format!("| A | B |\n| --- | --- |\n| {content} | {paragraph} |");
+            let layout = table_layout_fallback(&text, 300.0, 1.0);
+            assert_table_layout_fallback_widths(&layout, &[16.0, 252.0], 300.0);
+        }
+    }
+
+    #[test]
+    fn table_layout_intrinsic_empty_complete_prefixes_retain_reserved_advance() {
+        let paragraph = "a long paragraph with many words ".repeat(20);
+        for (prefix, columns) in [("- [ ] ", 3), ("- [x] ", 3), ("123. ", 5), ("12) ", 4)] {
+            for leading in ["", "q<br>"] {
+                let content = format!("{leading}{prefix}<br>z");
+                let decoration = table_cell_decoration(
+                    &LineDecoration::default(),
+                    &content,
+                    &(0..content.len()),
+                );
+                let (display, _, b2d, _) =
+                    table_cell_inline_display_and_runs(&content, &decoration);
+                let ranges = super::hard_line_byte_ranges(&display);
+                let index = usize::from(!leading.is_empty());
+                let fragment = &decoration.table_cell_fragments[index];
+                assert_eq!(fragment.prefix_len, prefix.len());
+                let end = super::super::table_cell_render::intrinsic_line_end(
+                    &content,
+                    fragment,
+                    &b2d,
+                    &ranges[index],
+                );
+                assert_eq!(end, columns, "{content:?}");
+                assert_eq!(&display[ranges[index].clone()], " ".repeat(columns));
+
+                let text = format!("| A | B |\n| --- | --- |\n| {content} | {paragraph} |");
+                let layout = table_layout_fallback(&text, 300.0, 1.0);
+                let width = columns as f32 * 8.0;
+                assert_table_layout_fallback_widths(&layout, &[width, 268.0 - width], 300.0);
+            }
+        }
+    }
+
+    #[test]
+    fn table_layout_intrinsic_cached_math_matches_exact_rendered_advance() {
+        let cache = inline_math_image_cache(&[("x", 183, 120), ("y", 60, 120)]);
+        for (content, formula_line, has_space) in [
+            ("$x$$y$<br>z", 0, false),
+            ("z<br>$x$$y$<br>z", 1, false),
+            ("z<br>$x$ $y$  \t<br>z", 1, true),
+        ] {
+            let mut decoration =
+                table_cell_decoration(&LineDecoration::default(), content, &(0..content.len()));
+            assert_eq!(decoration.inline_math_spans.len(), 2);
+            assert!(super::add_inline_math_display_replacements(
+                &mut decoration,
+                content,
+                &cache,
+                6.0,
+            ));
+            let (display, _, b2d, _) = table_cell_inline_display_and_runs(content, &decoration);
+            let ranges = super::hard_line_byte_ranges(&display);
+            let formula_ranges = decoration
+                .inline_math_spans
+                .iter()
+                .map(|source_range| {
+                    super::inline_math_display_range(&decoration, source_range, &b2d).unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                display[ranges[formula_line].clone()]
+                    .chars()
+                    .filter(|&ch| ch == '\u{a0}')
+                    .count(),
+                15,
+            );
+            for tracking in [0.5, 2.0] {
+                let gap = if has_space { 6.0 + tracking } else { 0.0 };
+                let expected = 61.0 + gap + 20.0;
+                let mut longest = 0.0_f32;
+                for (index, (range, fragment)) in ranges
+                    .iter()
+                    .zip(&decoration.table_cell_fragments)
+                    .enumerate()
+                {
+                    let mut line = inline_math_test_wrapped_line(&display[range.clone()], &[]);
+                    super::apply_letter_spacing(&mut line, tracking);
+                    super::keep_inline_math_placeholders_unwrapped(
+                        &mut line,
+                        &decoration,
+                        content,
+                        &b2d,
+                        &[],
+                        &cache,
+                        range.start,
+                    );
+                    let end = super::super::table_cell_render::intrinsic_line_end(
+                        content, fragment, &b2d, range,
+                    );
+                    let measured = f32::from(line.unwrapped_layout.x_for_index(end));
+                    longest = longest.max(measured);
+                    if index != formula_line {
+                        continue;
+                    }
+                    assert_eq!(end, formula_ranges[1].end - range.start);
+                    for (formula, width) in formula_ranges.iter().zip([61.0, 20.0]) {
+                        let left = line
+                            .unwrapped_layout
+                            .x_for_index(formula.start - range.start);
+                        let right = line.unwrapped_layout.x_for_index(formula.end - range.start);
+                        assert!((f32::from(right - left) - width).abs() <= 0.001);
+                    }
+                    let first_end = line
+                        .unwrapped_layout
+                        .x_for_index(formula_ranges[0].end - range.start);
+                    let second_start = line
+                        .unwrapped_layout
+                        .x_for_index(formula_ranges[1].start - range.start);
+                    assert!((f32::from(second_start - first_end) - gap).abs() <= 0.001);
+                    assert!(
+                        (measured - expected).abs() <= 0.001,
+                        "{content:?}, tracking {tracking}: expected {expected}, got {measured}",
+                    );
+                }
+                assert!((longest - expected).abs() <= 0.001);
+                let widths =
+                    super::super::table_column_widths::allocate(&[longest, 400.0], 268.0, 6.0);
+                assert!((widths[0] - expected).abs() <= 0.001);
+                assert!((widths[1] - (268.0 - expected)).abs() <= 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn table_layout_fallback_view_width_and_scale_preserve_content_budget() {
+        let paragraph = "a long paragraph with many words ".repeat(20);
+        let text = format!("| A | B |\n| --- | --- |\n| Go | {paragraph} |");
+        for view_width in [
+            8.0_f32, 16.0, 32.0, 64.0, 80.0, 160.0, 300.0, 1200.0, 8192.0,
+        ] {
+            for scale in [0.5, 1.0, 1.25, 2.0, 3.0] {
+                let available = view_width * scale;
+                let layout = table_layout_fallback(&text, available, scale);
+                let padding = (8.0 * scale).min(available / 8.0);
+                assert!((layout.cell_padding_x - padding).abs() <= 0.001);
+                let content_budget = available - padding * 4.0;
+                let short_width = (16.0 * scale).min(content_budget / 2.0);
+                assert_table_layout_fallback_widths(
+                    &layout,
+                    &[short_width, content_budget - short_width],
+                    available,
+                );
+            }
         }
     }
 
@@ -4891,6 +6745,875 @@ mod tests {
     }
 
     #[test]
+    fn front_matter_block_focus_includes_every_row_eol_selection_and_ime_not_body() {
+        for source in [
+            "---\ntitle: '中'\nbody: |\n  first\n\n  last\ntags:\n  - one\n  - two\n---\nBody",
+            "---\r\ntitle: 中\r\n...\r\nBody",
+        ] {
+            let buffer = Buffer::from_text(source);
+            let decorations = markdown::parse_decorations(source);
+            let end = decorations[0].table_info.as_ref().unwrap().table_end_line;
+            assert!(!super::front_matter_block_is_active(
+                &buffer,
+                &decorations,
+                &[],
+                true
+            ));
+            for line in 0..end {
+                for offset in [buffer.line_start(line), buffer.line_end(line)] {
+                    assert!(
+                        super::front_matter_block_is_active(
+                            &buffer,
+                            &decorations,
+                            &[offset..offset],
+                            true
+                        ),
+                        "line {line}"
+                    );
+                    assert!(!super::front_matter_block_is_active(
+                        &buffer,
+                        &decorations,
+                        &[offset..offset],
+                        false
+                    ));
+                }
+            }
+            let marked = buffer.line_start(1)..buffer.line_end(1);
+            assert!(super::front_matter_block_is_active(
+                &buffer,
+                &decorations,
+                &[marked],
+                true
+            ));
+            let body = buffer.line_start(end);
+            assert!(!super::front_matter_block_is_active(
+                &buffer,
+                &decorations,
+                &[body..body, body..buffer.len()],
+                true
+            ));
+            assert!(super::front_matter_block_is_active(
+                &buffer,
+                &decorations,
+                &[buffer.line_start(1)..buffer.len()],
+                true
+            ));
+        }
+        let buffer = Buffer::from_text("---\ntitle: value\n---");
+        let decorations = markdown::parse_decorations(buffer.text());
+        let eof = buffer.len();
+        assert!(super::front_matter_block_is_active(
+            &buffer,
+            &decorations,
+            &[eof..eof],
+            true
+        ));
+    }
+
+    #[test]
+    fn front_matter_scalar_focus_signature_changes_inside_an_already_active_block() {
+        let buffer = Buffer::from_text("---\ntitle: 'one'\nflag: true\n---\nBody");
+        for line in [1, 2] {
+            let offset = buffer.line_end(line);
+            let ranges = [offset..offset];
+            assert!(super::front_matter_source_rows_are_active(
+                &buffer,
+                0..4,
+                &ranges
+            ));
+            assert!(super::front_matter_source_rows_are_active(
+                &buffer,
+                line..line + 1,
+                &ranges
+            ));
+            let other = 3 - line;
+            assert!(!super::front_matter_source_rows_are_active(
+                &buffer,
+                other..other + 1,
+                &ranges
+            ));
+        }
+    }
+
+    fn front_matter_test_display(
+        source: &str,
+        decoration: &LineDecoration,
+        active_ranges: &[Range<usize>],
+        group_active: bool,
+    ) -> (String, Vec<usize>, Vec<usize>, bool) {
+        build_display_text(
+            source,
+            decoration,
+            active_ranges,
+            group_active,
+            None,
+            0,
+            3,
+            0,
+            0,
+            1,
+            1.0,
+            1.0,
+            1.0,
+        )
+    }
+
+    fn front_matter_test_runs(
+        source: &str,
+        decoration: &LineDecoration,
+        active_ranges: &[Range<usize>],
+        group_active: bool,
+        theme: &Theme,
+    ) -> (String, Vec<TextRun>) {
+        let (display, d2b, _, collapsed) =
+            front_matter_test_display(source, decoration, active_ranges, group_active);
+        let runs = build_text_runs_for_display(
+            &display,
+            source,
+            &d2b,
+            decoration,
+            active_ranges,
+            group_active,
+            collapsed,
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font("Menlo"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font(".SystemUIFont"),
+            &font("Kaiti SC"),
+            3,
+            16.0,
+            theme,
+            theme.git_status_added,
+            theme.text_danger,
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            Some(theme.text_bright),
+            false,
+        );
+        (display, runs)
+    }
+
+    #[test]
+    fn front_matter_mapper_preserves_scalar_source_and_continuation_padding() {
+        let source = concat!(
+            "---\n",
+            "title: \"Moeka: 编辑器\" # title\n",
+            "quoted_bool: 'true'\n",
+            "enabled: true # switch\n",
+            "disabled: false\n",
+            "nothing: null\n",
+            "number: 1.20e+3\n",
+            "date: 2026-10-12T14:30:00Z\n",
+            "tags:\n",
+            "  - \"first: item\"\n",
+            "  - 'true'\n",
+            "nested:\n",
+            "  key: \"中文\\u263a\"\n",
+            "description: |-\n",
+            "  1. literal **text**\n",
+            "  true\n",
+            "  2026-10-12\n",
+            "  key: not a mapping\n",
+            "folded: >+\n",
+            "  false\n",
+            "  another line\n",
+            "---",
+        );
+        let decorations = markdown::parse_decorations(source);
+        let lines: Vec<_> = source.lines().collect();
+        let expected = [
+            (1, "Moeka: 编辑器 # title"),
+            (2, "true"),
+            (3, "\u{a0}\u{a0}\u{a0} # switch"),
+            (4, "\u{a0}\u{a0}\u{a0}"),
+            (5, "null"),
+            (6, "1.20e+3"),
+            (7, "2026-10-12T14:30:00Z"),
+            (8, ""),
+            (9, "• first: item"),
+            (10, "• true"),
+            (11, ""),
+            (12, "中文☺"),
+            (13, ""),
+            (14, "1. literal **text**"),
+            (15, "true"),
+            (16, "2026-10-12"),
+            (17, "key: not a mapping"),
+            (18, ""),
+            (19, "false"),
+            (20, "another line"),
+        ];
+        for (index, value) in expected {
+            let decoration = &decorations[index];
+            let info = decoration
+                .front_matter
+                .as_ref()
+                .expect("front matter metadata");
+            let (display, _, b2d, _) =
+                front_matter_test_display(lines[index], decoration, &[], true);
+            let display_start = if info.key_range.is_some() {
+                b2d[info.value_range.start]
+            } else {
+                display.len() - display.trim_start_matches(' ').len()
+            };
+            assert_eq!(&display[display_start..], value, "collapsed row {index}");
+            assert!(!display.contains(['\n', '\r']));
+            // The mapper accepts row-local activity; the shared group plan
+            // supplies it to every member of an active multiline/list value.
+            for position in lines[index]
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain([lines[index].len()])
+            {
+                let (expanded, _, b2d, _) = front_matter_test_display(
+                    lines[index],
+                    decoration,
+                    &[position..position],
+                    false,
+                );
+                if info.key_range.is_some() {
+                    assert_eq!(
+                        &expanded[b2d[info.value_range.start]..],
+                        &lines[index][info.value_range.start..]
+                    );
+                } else {
+                    let value_display = b2d[info.value_range.start];
+                    assert_eq!(
+                        &expanded[value_display..],
+                        &lines[index][info.value_range.start..]
+                    );
+                    let collapsed = front_matter_test_display(lines[index], decoration, &[], false);
+                    assert_eq!(
+                        display_width(&expanded[..value_display]),
+                        display_width(&collapsed.0[..collapsed.2[info.value_range.start]])
+                    );
+                }
+            }
+            let selected = [0..lines[index].len()];
+            let expanded = front_matter_test_display(lines[index], decoration, &selected, false).0;
+            assert!(expanded.contains(&lines[index][info.value_range.clone()]));
+            assert_eq!(
+                front_matter_test_display(lines[index], decoration, &[], false).0,
+                display
+            );
+        }
+        let width = decorations[1].table_info.as_ref().unwrap().column_widths[0];
+        assert_eq!(width, "quoted_bool".len());
+        for index in [9, 10, 14, 15, 16, 17, 19, 20] {
+            assert!(
+                decorations[index]
+                    .front_matter
+                    .as_ref()
+                    .unwrap()
+                    .key_range
+                    .is_none()
+            );
+            assert!(decorations[index].table_info.as_ref().unwrap().cells[0].is_empty());
+        }
+        assert_eq!(source.lines().collect::<Vec<_>>(), lines);
+    }
+
+    #[test]
+    fn front_matter_fold_summary_maps_synthetic_utf8_only_to_delimiter_boundaries() {
+        for source in ["---", "\u{feff}---", "---\r"] {
+            for count in [0, 1, 20, 1000] {
+                let summary = crate::i18n::front_matter_fold_summary(
+                    crate::i18n::UiLanguage::ChineseSimplified,
+                    count,
+                );
+                let (display, d2b, b2d, collapsed) =
+                    super::build_front_matter_fold_display(source, &summary);
+                assert_eq!(display, summary);
+                assert!(!collapsed);
+                assert_eq!(d2b.len(), display.len() + 1);
+                assert!(d2b[..display.len()].iter().all(|offset| *offset == 0));
+                assert_eq!(d2b[display.len()], source.len());
+                assert_eq!(b2d.len(), source.len() + 1);
+                assert!(b2d[..source.len()].iter().all(|offset| *offset == 0));
+                assert_eq!(b2d[source.len()], display.len());
+                assert!(d2b.iter().all(|offset| source.is_char_boundary(*offset)));
+                assert!(b2d.iter().all(|offset| display.is_char_boundary(*offset)));
+            }
+        }
+    }
+
+    #[test]
+    fn front_matter_active_block_indicator_alone_uses_faded_syntax_color() {
+        let theme = crate::theme::Theme::one_dark();
+        for token in ["|", "|-", "|+", ">", ">-", ">+", "|2-", ">+2"] {
+            let source = format!("---\nbody: {token} # keep\n  中文🌸\n---");
+            let decorations = markdown::parse_decorations(&source);
+            let text = source.lines().nth(1).unwrap();
+            let info = decorations[1].front_matter.as_ref().unwrap();
+            let (display, runs) = front_matter_test_runs(
+                text,
+                &decorations[1],
+                &[info.value_range.start..info.value_range.start],
+                true,
+                &theme,
+            );
+            let (_, _, b2d, _) = front_matter_test_display(
+                text,
+                &decorations[1],
+                &[info.value_range.start..info.value_range.start],
+                true,
+            );
+            let colors: Vec<_> = runs
+                .iter()
+                .flat_map(|run| std::iter::repeat_n(run.color, run.len))
+                .collect();
+            assert_eq!(
+                &display[b2d[info.value_range.start]..b2d[info.value_range.end]],
+                token
+            );
+            assert!(
+                colors[b2d[info.value_range.start]..b2d[info.value_range.end]]
+                    .iter()
+                    .all(|color| *color == theme.syntax_marker)
+            );
+            assert_eq!(colors[0], theme.text_bright);
+            assert_eq!(colors[display.find('#').unwrap()], theme.text_primary);
+            let body = source.lines().nth(2).unwrap();
+            let (body_display, body_runs) =
+                front_matter_test_runs(body, &decorations[2], &[0..body.len()], true, &theme);
+            assert!(body_display.contains("中文🌸"));
+            assert!(body_runs.iter().all(|run| run.color == theme.text_primary));
+        }
+    }
+
+    #[test]
+    fn front_matter_group_focus_reveals_only_own_members_and_keeps_scalar_rows_local() {
+        let source = "---\ntitle: 'scalar'\nbody: |-\n  中文🌸\n  second\ntags:\n  - 'one'\n  - \"二\\u263a\"\nother: true\n---";
+        let buffer = Buffer::from_text(source);
+        let decorations = markdown::parse_decorations(source);
+        let collapsed = front_matter_group_plan(&buffer, &decorations, &[], true);
+        assert_eq!(collapsed.len(), 2);
+        assert!(collapsed[0].hides_line(2));
+        assert_eq!(collapsed[0].label_line(), 3);
+        assert!(!collapsed[0].hides_line(3));
+        assert!(!collapsed[1].hides_line(5));
+        assert!(collapsed[1].hides_line(6));
+        assert!(collapsed[1].hides_line(7));
+        for caret_line in 2..=7 {
+            let caret = buffer.line_end(caret_line);
+            let plans = front_matter_group_plan(&buffer, &decorations, &[caret..caret], true);
+            let active_index = usize::from(caret_line >= 5);
+            assert!(plans[active_index].active);
+            assert!(!plans[1 - active_index].active);
+            assert!(
+                plans[active_index]
+                    .group
+                    .source_lines
+                    .clone()
+                    .all(|line| !plans[active_index].hides_line(line))
+            );
+        }
+        let ranges = [
+            buffer.line_end(3)..buffer.line_end(3),
+            buffer.line_start(7)..buffer.line_end(7),
+        ];
+        assert!(
+            front_matter_group_plan(&buffer, &decorations, &ranges, true)
+                .iter()
+                .all(|plan| plan.active)
+        );
+        // The same absolute ranges cover extra carets, selections and IME.
+        assert!(
+            front_matter_group_plan(&buffer, &decorations, &ranges, false)
+                .iter()
+                .all(|plan| !plan.active)
+        );
+        for line in [0, 1, 8, 9] {
+            let caret = buffer.line_end(line);
+            assert!(
+                front_matter_group_plan(&buffer, &decorations, &[caret..caret], true)
+                    .iter()
+                    .all(|plan| !plan.active)
+            );
+        }
+        assert_eq!(buffer.text(), source);
+    }
+
+    #[test]
+    fn front_matter_long_key_list_uses_identical_source_visible_width_fallback_in_both_focus_states()
+     {
+        let key = "long_key_".repeat(20);
+        for source in [
+            format!("---\n{key}: [one, '二']\n---"),
+            format!("---\n{key}:\n  - one\n  - '二'\n---"),
+        ] {
+            let buffer = Buffer::from_text(&source);
+            let decorations = markdown::parse_decorations(&source);
+            for ranges in [vec![], vec![buffer.line_end(1)..buffer.line_end(1)]] {
+                let mut plans = front_matter_group_plan(&buffer, &decorations, &ranges, true);
+                super::apply_front_matter_group_width_limit(&mut plans, &decorations, 12.0);
+                assert!(plans[0].source_visible);
+                for line in plans[0].group.source_lines.clone() {
+                    assert!(!plans[0].hides_line(line));
+                    let text = buffer.line_content(line);
+                    let mut decoration = decorations[line].clone();
+                    apply_front_matter_group_display(&mut decoration, line, Some(&plans[0]), text);
+                    let (display, d2b, b2d, _) =
+                        front_matter_test_display(text, &decoration, &[], false);
+                    assert_eq!(display, text);
+                    for (index, _) in text.char_indices() {
+                        assert_eq!(b2d[index], index);
+                        assert_eq!(d2b[index], index);
+                    }
+                }
+            }
+            assert_eq!(buffer.text(), source);
+        }
+        let source = "---\ntags: [one, two]\n---";
+        let buffer = Buffer::from_text(source);
+        let decorations = markdown::parse_decorations(source);
+        let mut plans = front_matter_group_plan(&buffer, &decorations, &[], true);
+        super::apply_front_matter_group_width_limit(&mut plans, &decorations, 20.0);
+        assert!(!plans[0].source_visible);
+    }
+
+    #[test]
+    fn front_matter_commented_lists_remain_readable_without_expanding_or_mutating_source() {
+        for source in [
+            "---\ntags: [one, 'two#literal'] # header\n---",
+            "---\ntags:\n  - 'one#literal' # item\n  # between\n  - two\n---",
+        ] {
+            let buffer = Buffer::from_text(source);
+            let decorations = markdown::parse_decorations(source);
+            let plans = front_matter_group_plan(&buffer, &decorations, &[], false);
+            assert!(plans[0].source_visible);
+            for line in plans[0].group.source_lines.clone() {
+                assert!(!plans[0].hides_line(line));
+                let text = buffer.line_content(line);
+                let mut decoration = decorations[line].clone();
+                apply_front_matter_group_display(&mut decoration, line, Some(&plans[0]), text);
+                assert_eq!(
+                    front_matter_test_display(text, &decoration, &[], false).0,
+                    text
+                );
+            }
+            assert_eq!(buffer.text(), source);
+        }
+        let source = "---\ntags: ['one#literal']\n---";
+        let buffer = Buffer::from_text(source);
+        let decorations = markdown::parse_decorations(source);
+        assert!(!front_matter_group_plan(&buffer, &decorations, &[], false)[0].source_visible);
+    }
+
+    #[test]
+    fn front_matter_wide_dash_spacing_keeps_all_item_value_columns_and_exact_scalar_hits() {
+        let source = "---\ntags:\n  -        one\n  - 二🌸\n---";
+        let buffer = Buffer::from_text(source);
+        let decorations = markdown::parse_decorations(source);
+        let mut column = None;
+        for line in [2, 3] {
+            let text = buffer.line_content(line);
+            let info = decorations[line].front_matter.as_ref().unwrap();
+            for ranges in [vec![], vec![0..text.len()]] {
+                let (display, d2b, b2d, _) =
+                    front_matter_test_display(text, &decorations[line], &ranges, false);
+                let value = b2d[info.value_range.start];
+                let value_column = display_width(&display[..value]);
+                assert_eq!(*column.get_or_insert(value_column), value_column);
+                for (index, _) in text[info.value_range.clone()].char_indices() {
+                    let source_index = info.value_range.start + index;
+                    assert_eq!(d2b[b2d[source_index]], source_index);
+                }
+                if !ranges.is_empty() {
+                    assert_eq!(&display[value..], &text[info.value_range.start..]);
+                }
+            }
+        }
+        assert_eq!(column, Some(6));
+        assert_eq!(buffer.text(), source);
+    }
+
+    #[test]
+    fn front_matter_normalized_newline_hits_keep_decoded_character_spans_and_crlf_selection() {
+        for (token, display) in [
+            ("\"a\\nb\"", "a b"),
+            ("\"中\\r\\n🌸\"", "中 🌸"),
+            ("\"a\\Nb\\Lc\\Pd\"", "a b c d"),
+        ] {
+            let start = 100;
+            let map = front_matter_item_source_map(token, display, start);
+            assert_eq!(map.len(), display.len() + 1);
+            let last_display = display.char_indices().next_back().unwrap().0;
+            let last_source = token[..token.len() - 1]
+                .char_indices()
+                .next_back()
+                .unwrap()
+                .0;
+            assert_eq!(map[last_display], start + last_source);
+            assert!(
+                map.iter()
+                    .all(|offset| token.is_char_boundary(offset - start))
+            );
+            if let Some(crlf) = token.find("\\r\\n") {
+                let space = display.find(' ').unwrap();
+                assert_eq!(map[space], start + crlf);
+                assert_eq!(
+                    super::front_matter_display_selection_ranges(
+                        display,
+                        &map,
+                        &[start + crlf + 2..start + crlf + 4]
+                    ),
+                    vec![space..space + 1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn front_matter_group_body_columns_are_focus_invariant() {
+        let source = "---\nnested:\n  body: |2-\n    first\n    中文🌸\n  tags:\n    - 'first'\n    - second\n---";
+        let decorations = markdown::parse_decorations(source);
+        for line in [3, 4, 6, 7] {
+            let text = source.lines().nth(line).unwrap();
+            let info = decorations[line].front_matter.as_ref().unwrap();
+            let (collapsed, _, collapsed_map, _) =
+                front_matter_test_display(text, &decorations[line], &[], false);
+            let (active, _, active_map, _) = front_matter_test_display(
+                text,
+                &decorations[line],
+                &[text.len()..text.len()],
+                false,
+            );
+            assert_eq!(
+                display_width(&collapsed[..collapsed_map[info.value_range.start]]),
+                display_width(&active[..active_map[info.value_range.start]]),
+                "line {line}"
+            );
+            assert_eq!(
+                &active[active_map[info.value_range.start]..],
+                &text[info.value_range.start..]
+            );
+        }
+    }
+
+    #[test]
+    fn front_matter_blank_multiline_body_has_the_same_value_column_for_caret_and_ime() {
+        let source = "---\nnested:\n  body: |-\n\n    中文\n    \n  next: scalar\n---";
+        let buffer = Buffer::from_text(source);
+        let decorations = markdown::parse_decorations(source);
+        let plans = front_matter_group_plan(&buffer, &decorations, &[], true);
+        let plan = &plans[0];
+        assert_eq!(plan.label_line(), 3);
+        let mut expected_column = None;
+        for line in 3..6 {
+            let text = buffer.line_content(line);
+            let mut decoration = decorations[line].clone();
+            apply_front_matter_group_display(&mut decoration, line, Some(plan), text);
+            let value_start = decoration.front_matter.as_ref().unwrap().value_range.start;
+            for active in [vec![], vec![0..text.len()]] {
+                let (display, _, map, _) =
+                    front_matter_test_display(text, &decoration, &active, false);
+                let column = display_width(&display[..map[value_start]]);
+                if text.is_empty() {
+                    assert_eq!(column, 0);
+                    assert_eq!(display, "");
+                    continue;
+                }
+                assert_eq!(*expected_column.get_or_insert(column), column);
+                assert_eq!(map[text.len()], display.len());
+            }
+        }
+        assert_eq!(buffer.text(), source);
+    }
+
+    #[test]
+    fn front_matter_list_hits_map_decoded_utf8_characters_to_exact_absolute_source() {
+        for (token, display) in [
+            ("\"中\\u263a\\\"🌸\"", "中☺\"🌸"),
+            ("'中''文'", "中'文"),
+            ("你好🌸", "你好🌸"),
+        ] {
+            let start = 100;
+            let map = front_matter_item_source_map(token, display, start);
+            assert_eq!(map.len(), display.len() + 1);
+            assert!(
+                map.iter()
+                    .all(|offset| token.is_char_boundary(offset - start))
+            );
+            for (index, ch) in display.char_indices() {
+                assert!(
+                    map[index..index + ch.len_utf8()]
+                        .iter()
+                        .all(|offset| *offset == map[index])
+                );
+            }
+            assert_eq!(map[display.len()], start + token.len());
+            if let Some(escaped) = token.find("\\u") {
+                assert_eq!(map[display.find('☺').unwrap()], start + escaped);
+            }
+        }
+    }
+
+    #[test]
+    fn front_matter_collapsed_list_selection_projects_source_escapes_without_splitting_utf8() {
+        let token = "\"中\\u263a🌸\"";
+        let display = "中☺🌸";
+        let map = front_matter_item_source_map(token, display, 100);
+        let escape = 100 + token.find("\\u").unwrap();
+        assert_eq!(
+            super::front_matter_display_selection_ranges(display, &map, &[escape + 1..escape + 2]),
+            vec!["中".len().."中☺".len()]
+        );
+        assert_eq!(
+            super::front_matter_display_selection_ranges(display, &map, &[100..100 + token.len()]),
+            vec![0..display.len()]
+        );
+        assert!(
+            super::front_matter_display_selection_ranges(display, &map, &[escape..escape])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn front_matter_empty_block_header_does_not_disappear_and_plain_first_value_is_retained() {
+        for source in [
+            "---\nbody: |-\nnext: value\n---",
+            "---\nbody: first\n  second\nnext: value\n---",
+        ] {
+            let buffer = Buffer::from_text(source);
+            let decorations = markdown::parse_decorations(source);
+            let plans = front_matter_group_plan(&buffer, &decorations, &[], true);
+            assert!(!plans[0].hides_line(1));
+            assert_eq!(plans[0].label_line(), 1);
+        }
+    }
+
+    #[test]
+    fn front_matter_unicode_mappings_keep_character_identity_and_token_bounds() {
+        let source = "---\n\"键:名\": \"中\\u263a\\\"x\" # 评论\nflag: true # 开关\nlist:\n  - '中''文'\n---";
+        let decorations = markdown::parse_decorations(source);
+        let lines: Vec<_> = source.lines().collect();
+        for index in 0..lines.len() {
+            for active in [vec![], vec![lines[index].len()..lines[index].len()]] {
+                let (display, d2b, b2d, _) =
+                    front_matter_test_display(lines[index], &decorations[index], &active, true);
+                assert_eq!(d2b.len(), display.len());
+                assert_eq!(b2d.len(), lines[index].len() + 1);
+                assert!(
+                    d2b.iter()
+                        .all(|offset| lines[index].is_char_boundary(*offset))
+                );
+                assert!(b2d.iter().all(|offset| display.is_char_boundary(*offset)));
+                assert_eq!(b2d[lines[index].len()], display.len());
+                for (position, ch) in lines[index].char_indices() {
+                    // Exact identity for unchanged key and comment characters.
+                    let info = decorations[index].front_matter.as_ref();
+                    if info.is_some_and(|info| {
+                        info.key_range
+                            .as_ref()
+                            .is_some_and(|r| r.contains(&position))
+                            || position >= info.value_range.end
+                    }) {
+                        assert_eq!(display[b2d[position]..].chars().next(), Some(ch));
+                        assert_eq!(d2b[b2d[position]], position);
+                    }
+                }
+            }
+        }
+        let info = decorations[1].front_matter.as_ref().unwrap();
+        let (display, d2b, b2d, _) =
+            front_matter_test_display(lines[1], &decorations[1], &[], false);
+        let value_display = b2d[info.value_range.start]..b2d[info.value_range.end];
+        assert_eq!(&display[value_display.clone()], "中☺\"x");
+        let smile = display.find('☺').unwrap();
+        assert_eq!(&lines[1][d2b[smile]..d2b[smile] + 6], "\\u263a");
+        assert_eq!(
+            d2b[display.find('中').unwrap()],
+            lines[1].find('中').unwrap()
+        );
+        let info = decorations[2].front_matter.as_ref().unwrap();
+        assert_eq!(&lines[2][info.value_range.clone()], "true");
+        let (display, d2b, b2d, _) =
+            front_matter_test_display(lines[2], &decorations[2], &[], false);
+        let range = b2d[info.value_range.start]..b2d[info.value_range.end];
+        assert_eq!(&display[range.clone()], "\u{a0}".repeat(3));
+        assert!(
+            d2b[range.clone()]
+                .iter()
+                .all(|i| *i == info.value_range.start)
+        );
+        assert_eq!(&display[range.end..], " # 开关");
+        let (display, d2b, _, _) = front_matter_test_display(lines[4], &decorations[4], &[], false);
+        assert_eq!(d2b[display.find('•').unwrap()], lines[4].find('-').unwrap());
+        assert_eq!(
+            d2b[display.find('中').unwrap()],
+            lines[4].find('中').unwrap()
+        );
+    }
+
+    #[test]
+    fn front_matter_nested_block_bodies_align_and_indented_delimiters_are_literal() {
+        let source = "---\nnested:\n  body: |2- # header\n    1. **literal**\n    ---\n    true\n  items:\n    - name: 'record'\n      body: >-\n        2026-10-12\n        false\n---";
+        let decorations = markdown::parse_decorations(source);
+        let lines: Vec<_> = source.lines().collect();
+        assert_eq!(
+            decorations[1].table_info.as_ref().unwrap().table_end_line,
+            lines.len()
+        );
+        let display = |index: usize| {
+            front_matter_test_display(lines[index], &decorations[index], &[], true).0
+        };
+        let value_start = |index: usize| {
+            let info = decorations[index].front_matter.as_ref().unwrap();
+            front_matter_test_display(lines[index], &decorations[index], &[], true).2
+                [info.value_range.start]
+        };
+        assert_eq!(value_start(2), value_start(3));
+        assert_eq!(value_start(8), value_start(9));
+        assert_eq!(display(4).trim(), "---");
+        assert_eq!(display(5).trim(), "true");
+        assert_eq!(display(9).trim(), "2026-10-12");
+        assert_eq!(display(10).trim(), "false");
+        assert!(display(7).contains("• name:"));
+        for index in [3, 4, 5, 9, 10] {
+            assert!(
+                decorations[index]
+                    .front_matter
+                    .as_ref()
+                    .unwrap()
+                    .key_range
+                    .is_none()
+            );
+            let (expanded, _, b2d, _) = front_matter_test_display(
+                lines[index],
+                &decorations[index],
+                &[lines[index].len()..lines[index].len() + 1],
+                false,
+            );
+            let info = decorations[index].front_matter.as_ref().unwrap();
+            assert_eq!(
+                &expanded[b2d[info.value_range.start]..],
+                &lines[index][info.value_range.start..]
+            );
+            assert_eq!(b2d[info.value_range.start], value_start(index));
+        }
+    }
+
+    #[test]
+    fn front_matter_formatted_dates_and_newline_scalars_have_safe_mappings() {
+        let source = "---\ndate: '2026-10-12' # 日期\ntext: \"first\\nsecond\"\n---";
+        let mut decorations = markdown::parse_decorations(source);
+        let line = source.lines().nth(1).unwrap();
+        assert_eq!(
+            decorations[1].front_matter.as_ref().unwrap().value,
+            FrontMatterValue::DateTime("2026-10-12".into())
+        );
+        decorations[1].front_matter.as_mut().unwrap().value =
+            FrontMatterValue::Text("2026年10月12日".into());
+        let info = decorations[1].front_matter.as_ref().unwrap();
+        let (display, d2b, b2d, _) = front_matter_test_display(line, &decorations[1], &[], false);
+        assert_eq!(
+            &display[b2d[info.value_range.start]..b2d[info.value_range.end]],
+            "2026年10月12日"
+        );
+        assert!(d2b.iter().all(|i| line.is_char_boundary(*i)));
+        assert!(b2d.iter().all(|i| display.is_char_boundary(*i)));
+        let expanded =
+            front_matter_test_display(line, &decorations[1], &[line.len()..line.len()], false).0;
+        assert!(expanded.contains("'2026-10-12' # 日期"));
+        let line = source.lines().nth(2).unwrap();
+        let display = front_matter_test_display(line, &decorations[2], &[], false).0;
+        assert!(display.contains("\"first\\nsecond\""));
+        assert!(!display.contains('\n'));
+    }
+
+    #[test]
+    fn front_matter_incomplete_and_collection_rows_remain_visible() {
+        for source in [
+            "---\ntitle: \"unfinished\ncontinuation: still quote\n---",
+            "-\ncategory: 入门教程\ndescription: 介绍小语文稿的使用\nefefef\n-",
+            "---\nflow: [one,\n  {key: true}]\n---",
+        ] {
+            let decorations = markdown::parse_decorations(source);
+            for (index, line) in source.lines().enumerate() {
+                let (display, d2b, b2d, _) =
+                    front_matter_test_display(line, &decorations[index], &[], false);
+                if let Some(info) = decorations[index].front_matter.as_ref()
+                    && let Some(key) = info.key_range.as_ref()
+                {
+                    assert_eq!(&display[b2d[key.start]..b2d[key.end]], &line[key.clone()]);
+                    assert_eq!(
+                        &display[b2d[info.value_range.start]..],
+                        &line[info.value_range.start..]
+                    );
+                } else {
+                    assert_eq!(
+                        display, line,
+                        "unsupported row {index} stays source-visible"
+                    );
+                }
+                assert!(d2b.iter().all(|offset| line.is_char_boundary(*offset)));
+                assert!(b2d.iter().all(|offset| display.is_char_boundary(*offset)));
+            }
+        }
+    }
+
+    #[test]
+    fn front_matter_keys_bullets_booleans_and_delimiters_have_metadata_styles() {
+        let source = "---\n\"键:名\": 'value'\nflag: false # switch\ntags:\n  - \"item: value\"\nbody: |-\n  literal: **body**\n---";
+        let decorations = markdown::parse_decorations(source);
+        let lines: Vec<_> = source.lines().collect();
+        let theme = Theme::one_dark();
+        let (display, runs) = front_matter_test_runs(lines[1], &decorations[1], &[], true, &theme);
+        assert_eq!(
+            run_at_byte(&runs, display.find('名').unwrap()).color,
+            theme.text_bright
+        );
+        assert_eq!(
+            run_at_byte(&runs, display.find("value").unwrap()).color,
+            theme.text_primary
+        );
+        let (display, runs) = front_matter_test_runs(lines[2], &decorations[2], &[], true, &theme);
+        assert_eq!(
+            run_at_byte(&runs, display.find('\u{a0}').unwrap()).color.a,
+            0.0
+        );
+        assert_eq!(
+            run_at_byte(&runs, display.find('#').unwrap()).color,
+            theme.text_primary
+        );
+        let (display, runs) = front_matter_test_runs(lines[4], &decorations[4], &[], true, &theme);
+        assert_eq!(
+            run_at_byte(&runs, display.find('•').unwrap()).color,
+            theme.list_marker
+        );
+        assert_eq!(
+            run_at_byte(&runs, display.find("item").unwrap())
+                .font
+                .weight,
+            FontWeight::NORMAL
+        );
+        let (display, runs) = front_matter_test_runs(lines[6], &decorations[6], &[], true, &theme);
+        for offset in [
+            display.find("literal").unwrap(),
+            display.find("body").unwrap(),
+        ] {
+            assert_eq!(run_at_byte(&runs, offset).color, theme.text_primary);
+            assert_eq!(run_at_byte(&runs, offset).font.weight, FontWeight::NORMAL);
+        }
+        let (_, runs) = front_matter_test_runs(lines[0], &decorations[0], &[], true, &theme);
+        assert!(
+            runs[0].color.a > 0.0,
+            "a focused front matter block shows its delimiters"
+        );
+        let (_, runs) = front_matter_test_runs(lines[0], &decorations[0], &[], false, &theme);
+        assert_eq!(
+            runs[0].color.a, 0.0,
+            "an unfocused delimiter keeps measured geometry with transparent ink"
+        );
+    }
+
+    #[test]
     fn front_matter_values_align_after_longest_key() {
         let source = "---\ntitle: Moeka\ndescription: Markdown editor\n---";
         let decorations = markdown::parse_decorations(source);
@@ -5058,6 +7781,464 @@ mod tests {
         assert!(runs.iter().all(|run| run.color != theme.syntax_marker));
     }
 
+    fn table_cell_parser_parity_parse(
+        content: &str,
+        definitions: &str,
+    ) -> (String, LineDecoration) {
+        let source =
+            format!("| Neighbor | Input |\n| --- | --- |\n| 隣🙂 | {content}|\n\n{definitions}");
+        let decorations = markdown::parse_decorations(&source);
+        let row = &decorations[2];
+        let info = row.table_info.as_ref().expect("input remains a table row");
+        let (content, range) = super::super::table_cell_render::content_with_range(
+            info,
+            source.lines().nth(2).unwrap(),
+            1,
+        );
+        let decoration = table_cell_decoration(row, &content, &range);
+        assert_table_cell_inline_ranges(&content, &decoration);
+        (content, decoration)
+    }
+
+    fn table_cell_parser_parity_display(
+        content: &str,
+        decoration: &LineDecoration,
+        active: &[std::ops::Range<usize>],
+    ) -> String {
+        build_display_text(
+            content, decoration, active, false, None, 0, 3, 3, 2, 0, 1.0, 1.0, 1.0,
+        )
+        .0
+    }
+
+    #[test]
+    fn table_cell_parser_parity_reference_boundary_triggers() {
+        let definitions = "[ref]: https://reference.test\n[pic]: photo.png\n";
+        for input in [
+            "[label][ref]",
+            "[ref]",
+            "[ref][]",
+            "![photo][pic]",
+            "![pic]",
+            "![pic][]",
+        ] {
+            for padding in ["", " "] {
+                let (content, cell) =
+                    table_cell_parser_parity_parse(&format!("{input}{padding}"), definitions);
+                let normal =
+                    markdown::parse_decorations(&format!("{content}\n\n{definitions}")).remove(0);
+                assert_eq!(cell.inline_spans, normal.inline_spans, "{content:?}");
+                assert!(!cell.syntax_ranges.is_empty(), "{content:?}");
+                assert!(
+                    cell.syntax_ranges
+                        .iter()
+                        .all(|syntax| syntax.trigger_range.start == 0)
+                );
+                for active in [vec![], vec![1..1], vec![0..content.len()]] {
+                    assert_eq!(
+                        table_cell_parser_parity_display(&content, &cell, &active),
+                        table_cell_parser_parity_display(&content, &normal, &active),
+                        "{content:?}, {active:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn table_cell_parser_parity_reference_identifiers_are_opaque() {
+        for identifier in [
+            ":rocket:",
+            "x^super^",
+            "x~sub~",
+            "==ref==",
+            "++ref++",
+            "**ref**",
+            "`code`",
+            "$x$",
+            "https://label.test",
+        ] {
+            let input = format!("a [label][{identifier}]");
+            let definitions = format!("[{identifier}]: https://reference.test\n");
+            let (content, cell) = table_cell_parser_parity_parse(&input, &definitions);
+            let normal =
+                markdown::parse_decorations(&format!("{content}\n\n{definitions}")).remove(0);
+            assert_eq!(cell.inline_spans, normal.inline_spans, "{identifier:?}");
+            assert!(cell.display_replacements.is_empty(), "{identifier:?}");
+            assert!(cell.highlight_spans.is_empty(), "{identifier:?}");
+            assert!(cell.superscript_spans.is_empty(), "{identifier:?}");
+            assert!(cell.subscript_spans.is_empty(), "{identifier:?}");
+            assert!(cell.inline_math_spans.is_empty(), "{identifier:?}");
+            for active in [vec![], vec![3..3], vec![0..content.len()]] {
+                assert_eq!(
+                    table_cell_parser_parity_display(&content, &cell, &active),
+                    table_cell_parser_parity_display(&content, &normal, &active),
+                    "{identifier:?}, {active:?}",
+                );
+            }
+        }
+        for input in [
+            "[:rocket:][ref]",
+            "a [==label==][ref]",
+            "a [++label++][ref]",
+        ] {
+            let definitions = "[ref]: https://reference.test\n";
+            let (content, cell) = table_cell_parser_parity_parse(input, definitions);
+            let normal =
+                markdown::parse_decorations(&format!("{content}\n\n{definitions}")).remove(0);
+            assert_eq!(cell.highlight_spans, normal.highlight_spans);
+            assert_eq!(cell.display_replacements, normal.display_replacements);
+            assert_eq!(
+                table_cell_parser_parity_display(&content, &cell, &[]),
+                table_cell_parser_parity_display(&content, &normal, &[]),
+            );
+        }
+    }
+
+    #[test]
+    fn table_cell_parser_parity_references_after_protected_pipes() {
+        let definitions = "[ref]: https://reference.test\n[pic]: photo.png\n";
+        for prefix in ["[[notes/page.md|Page]]", "`a|b`", r"a\|b"] {
+            let input = format!("{prefix} a [label][ref] ![photo][pic]");
+            let source = format!("| h |\n| --- |\n| {input} |\n\n{definitions}");
+            let rows = markdown::parse_decorations(&source);
+            let row = &rows[2];
+            let cell_start = row.table_info.as_ref().unwrap().cell_ranges[0].start;
+            assert_eq!(
+                markdown::link_target_at_column(row, cell_start + input.find("label").unwrap()),
+                Some("https://reference.test"),
+                "row-level navigation metadata: {prefix:?}",
+            );
+            let (content, cell) = table_cell_parser_parity_parse(&input, definitions);
+            let normal =
+                markdown::parse_decorations(&format!("{content}\n\n{definitions}")).remove(0);
+            assert_eq!(cell.inline_spans, normal.inline_spans, "{prefix:?}");
+            for active in [
+                vec![],
+                vec![content.find("label").unwrap()..content.find("label").unwrap()],
+            ] {
+                assert_eq!(
+                    table_cell_parser_parity_display(&content, &cell, &active),
+                    table_cell_parser_parity_display(&content, &normal, &active),
+                    "{prefix:?}, {active:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn table_cell_parser_parity_row_links_without_reference_definitions() {
+        for prefix in [
+            "[[notes/page.md|Page]]",
+            "`a|b`",
+            "`[fake](https://fake.test)|raw`",
+            "`https://fake.test|raw`",
+            "`a|b` $[fake](https://fake.test)$",
+            "`a|b` $$[fake](https://fake.test)$$",
+            "`a|b` $[[fake/path|Fake]]$",
+            "`a|b` $$[[fake/path|Fake]]$$",
+        ] {
+            for link in [
+                "[real](https://real.test)",
+                "<https://real.test>",
+                "https://real.test",
+                "<person@example.test>",
+            ] {
+                let input = format!("{prefix} plain {link}");
+                let source = format!("| h |\n| --- |\n| {input} |\n| later |\n");
+                let rows = markdown::parse_decorations(&source);
+                let row = &rows[2];
+                assert!(row.table_reference_definitions.is_none());
+                let info = row.table_info.as_ref().unwrap();
+                let cell = table_cell_decoration(row, &info.cells[0], &info.cell_ranges[0]);
+                let cell_start = info.cell_ranges[0].start;
+                for column in input.char_indices().map(|(column, _)| column) {
+                    assert_eq!(
+                        markdown::link_target_at_column(row, cell_start + column),
+                        markdown::link_target_at_column(&cell, column),
+                        "{input:?} at {column}",
+                    );
+                }
+                assert!(
+                    !row.inline_spans.iter().any(|span| {
+                        span.kind == markdown::InlineKind::Link
+                            && span
+                                .target
+                                .as_deref()
+                                .is_some_and(|target| target.contains("fake.test"))
+                    }),
+                    "code contents must not acquire command-click targets: {input:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn table_cell_parser_parity_row_bare_urls_do_not_capture_neighboring_cells() {
+        for source in [
+            "| A | B | C |\n| --- | --- | --- |\n| https://real.test | plain | [[notes/page.md|Page]] |",
+            "|A|B|C|\n|---|---|---|\n|https://real.test|plain|[[notes/page.md|Page]]|",
+            "> |A|B|C|\n> |---|---|---|\n> |https://real.test|plain|[[notes/page.md|Page]]|",
+        ] {
+            let rows = markdown::parse_decorations(source);
+            let row = &rows[2];
+            let info = row.table_info.as_ref().unwrap();
+            for (content, range) in info.cells.iter().zip(&info.cell_ranges) {
+                let cell = table_cell_decoration(row, content, range);
+                for column in content.char_indices().map(|(column, _)| column) {
+                    assert_eq!(
+                        markdown::link_target_at_column(row, range.start + column),
+                        markdown::link_target_at_column(&cell, column),
+                        "{source:?}: {content:?} at {column}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn table_cell_parser_parity_reference_context_preserves_control_character_uris() {
+        for uri in [
+            "https://reference.test/a&#10;b",
+            "https://reference.test/a&#13;b",
+            "https://reference.test/a&#13;&#10;b",
+            "https://reference.test/a&#9;b",
+            "https://reference.test/a&#32;b",
+            "https://reference.test/a&#12;b",
+            "https://reference.test/a&amp;amp;b?x=%26%20#片段",
+            r"https://reference.test/a\\b\<c\>d",
+            "",
+        ] {
+            let input = "[label][ref] ![photo][ref]";
+            let definitions = format!("[ref]: <{uri}>\n");
+            let (content, cell) = table_cell_parser_parity_parse(input, &definitions);
+            let normal =
+                markdown::parse_decorations(&format!("{content}\n\n{definitions}")).remove(0);
+            assert_eq!(normal.inline_spans.len(), 2, "valid reference: {uri:?}");
+            assert_eq!(cell.inline_spans, normal.inline_spans, "{uri:?}");
+            let source = format!("| h |\n| --- |\n| [[page|Page]] {input} |\n\n{definitions}");
+            let rows = markdown::parse_decorations(&source);
+            let row = &rows[2];
+            let range = &row.table_info.as_ref().unwrap().cell_ranges[0];
+            assert_eq!(
+                markdown::link_target_at_column(row, range.start + "[[page|Page]] [".len()),
+                normal.inline_spans[0].target.as_deref(),
+                "row URI: {uri:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn table_cell_parser_parity_break_tag_spellings() {
+        for (tag, valid) in [
+            ("<br>", true),
+            ("<BR>", true),
+            ("<br/>", true),
+            ("<Br \t/>", true),
+            ("<br >", true),
+            ("<br\t>", true),
+            ("<br\u{c}>", true),
+            ("< br>", false),
+            ("< br >", false),
+            ("<br/ >", false),
+            ("<br / >", false),
+            ("<br\u{a0}>", false),
+            ("<br\u{b}>", false),
+            ("<br//>", false),
+            ("</br>", false),
+            ("<brx>", false),
+        ] {
+            let input = format!("a{tag}b<br>tail");
+            let (content, cell) = table_cell_parser_parity_parse(&input, "");
+            let display = table_cell_parser_parity_display(&content, &cell, &[]);
+            let expected = if valid {
+                "a\nb\ntail".to_string()
+            } else {
+                format!("a{tag}b\ntail")
+            };
+            assert_eq!(display, expected, "{tag:?}");
+            assert_eq!(cell.table_cell_fragments.len(), if valid { 3 } else { 2 });
+        }
+    }
+
+    #[test]
+    fn table_cell_parser_parity_reference_context_preserves_normalization_and_urls() {
+        for (reference, definition) in [
+            ("STRASSE", "[straße]: https://reference.test"),
+            ("a   b", "[a b]: https://reference.test"),
+            (
+                "ref",
+                "[ref]: <https://reference.test/a&amp;amp;b\\>c> \"title\"",
+            ),
+            (
+                "ref",
+                "[ref]:\n  <https://reference.test/a&amp;b>\n  \"title\"",
+            ),
+            ("ref", "> [ref]: https://reference.test/quoted"),
+            (r"a\]b", r"[a\]b]: https://reference.test/escaped-bracket"),
+            (r"a\\b", r"[a\\b]: https://reference.test/backslash"),
+            ("a&amp;b", "[a&amp;b]: https://reference.test/entity-label"),
+            ("片段", "[片段]: https://reference.test/日本語#片段"),
+            ("a b", "[a\n  b]: https://reference.test/multiline-label"),
+            (
+                "ref",
+                "[ref]: https://reference.test/first\n[ref]: https://reference.test/second",
+            ),
+        ] {
+            let input = format!("[[notes/page.md|Page]] [label][{reference}]");
+            let (content, cell) = table_cell_parser_parity_parse(&input, definition);
+            let normal =
+                markdown::parse_decorations(&format!("{content}\n\n{definition}")).remove(0);
+            assert!(
+                normal
+                    .inline_spans
+                    .iter()
+                    .any(|span| span.kind == markdown::InlineKind::Link)
+            );
+            assert_eq!(cell.inline_spans, normal.inline_spans, "{definition:?}");
+            assert_eq!(
+                table_cell_parser_parity_display(&content, &cell, &[]),
+                table_cell_parser_parity_display(&content, &normal, &[]),
+            );
+        }
+    }
+
+    #[test]
+    fn table_cell_parser_parity_breaks_exclude_link_and_image_tails() {
+        for input in [
+            "[label](https://reference.test \"<br>- [x] literal\")<br>tail :rocket:",
+            "![photo](photo.png \"<br>- [x] literal\")<br>tail :rocket:",
+            "[label][a<br>b]<br>tail :rocket:",
+            "![photo][a<br>b]<br>tail :rocket:",
+        ] {
+            let definitions = "[a<br>b]: https://reference.test\n";
+            let (content, cell) = table_cell_parser_parity_parse(input, definitions);
+            let accepted = content.rfind("<br>").unwrap();
+            assert_eq!(cell.table_cell_fragments.len(), 2, "{input:?}");
+            assert_eq!(cell.table_cell_fragments[0].range.end, accepted);
+            assert!(
+                cell.table_cell_fragments
+                    .iter()
+                    .all(|fragment| fragment.prefix_len == 0)
+            );
+            let folded = table_cell_parser_parity_display(&content, &cell, &[]);
+            assert!(folded.ends_with("\ntail 🚀"), "{folded:?}");
+            assert_eq!(folded.matches('\n').count(), 1);
+            let expanded = table_cell_parser_parity_display(&content, &cell, &[1..1]);
+            assert!(expanded.contains("<br>"), "{expanded:?}");
+            assert_eq!(expanded.matches('\n').count(), 1);
+            assert!(expanded.ends_with("\ntail 🚀"));
+        }
+        for input in [
+            "[a<br>b](https://reference.test)<br>tail",
+            "![a<br>b](photo.png)<br>tail",
+        ] {
+            let (content, cell) = table_cell_parser_parity_parse(input, "");
+            assert_eq!(cell.table_cell_fragments.len(), 3);
+            assert_eq!(
+                table_cell_parser_parity_display(&content, &cell, &[]),
+                "a\nb\ntail"
+            );
+        }
+    }
+
+    #[test]
+    fn table_cell_parser_parity_footnote_breaks_do_not_block_later_replacements() {
+        let (content, cell) = table_cell_parser_parity_parse("[^a<br>b]<br>**tail** :rocket:", "");
+        assert_eq!(cell.footnote_references.len(), 1);
+        assert_eq!(cell.table_cell_fragments.len(), 2);
+        assert_eq!(cell.table_cell_fragments[0].range, 0..9);
+        assert_eq!(
+            table_cell_parser_parity_display(&content, &cell, &[]),
+            "      \ntail 🚀",
+        );
+        assert_eq!(
+            table_cell_parser_parity_display(&content, &cell, &[3..3]),
+            "[^a<br>b]\ntail 🚀",
+        );
+    }
+
+    #[test]
+    fn table_cell_parser_parity_non_list_blocks_keep_existing_semantics() {
+        for input in [
+            "# **heading**",
+            "> **quote**",
+            "---",
+            "```rust",
+            "[^note]: **body**",
+        ] {
+            let baseline =
+                table_cell_decoration(&LineDecoration::default(), input, &(0..input.len()));
+            let (_, cell) =
+                table_cell_parser_parity_parse(input, "[ref]: https://reference.test\n");
+            assert_eq!(cell, baseline, "{input:?}");
+        }
+        let content = "$$x^2$$";
+        let standalone =
+            table_cell_decoration(&LineDecoration::default(), content, &(0..content.len()));
+        assert!(standalone.block_preview.is_some());
+        assert_eq!(standalone.block_type, markdown::BlockType::CodeBlockFence);
+    }
+
+    #[test]
+    fn table_cell_parser_parity_display_math_keeps_table_ownership() {
+        for source in [
+            "| h |\n| --- |\n| $$x^2$$ |\n| later |",
+            "| $$x^2$$ |\n| --- |\n| later |",
+            "| A | B |\n| --- | --- |\n| `a|b` $$x$$ $$y$$ | $$z$$ |\n| later | row |",
+            "| $$a$$ | $$b$$ |\n| --- | --- |\n| $$c$$ | $$d$$ |\n| later | row |",
+            "> | h |\n> | --- |\n> | $$x^2$$ |\n> | later |",
+        ] {
+            let decorations = markdown::parse_decorations(source);
+            for (line, row) in decorations.iter().enumerate() {
+                let info = row
+                    .table_info
+                    .as_ref()
+                    .expect("all source rows stay in the table");
+                assert_eq!(row.block_type, markdown::BlockType::Table);
+                assert!(row.block_preview.is_none());
+                assert!(row.code_language.is_none());
+                assert_eq!(info.table_end_line, decorations.len());
+                if info.is_separator {
+                    continue;
+                }
+                for (content, range) in info.cells.iter().zip(&info.cell_ranges) {
+                    let cell = table_cell_decoration(row, content, range);
+                    assert_table_cell_inline_ranges(content, &cell);
+                    assert!(cell.block_preview.is_none(), "{line}: {content:?}");
+                    assert!(cell.code_language.is_none());
+                    assert_eq!(
+                        cell.inline_math_spans.len(),
+                        content.matches("$$").count() / 2
+                    );
+                    for syntax in &cell.syntax_ranges {
+                        assert!(!content[syntax.range.clone()].contains("x^2"));
+                    }
+                }
+            }
+        }
+        for source in [
+            "$$x^2$$",
+            "text $$x^2$$",
+            "$$\n| h |\n| --- |\n| literal |\n$$",
+            "\\[\n| h |\n| --- |\n| literal |\n\\]",
+            "```math\n| h |\n| --- |\n| literal |\n```",
+            "```text\n| h |\n| --- |\n| $$literal$$ |\n```",
+        ] {
+            let decorations = markdown::parse_decorations(source);
+            assert_eq!(
+                decorations[0].block_preview.is_some(),
+                !source.starts_with("```"),
+                "{source:?}",
+            );
+            assert_eq!(
+                decorations[0].block_type,
+                markdown::BlockType::CodeBlockFence
+            );
+            assert!(decorations.iter().all(|row| row.table_info.is_none()));
+        }
+    }
+
     #[test]
     fn table_cells_keep_inline_syntax_and_document_reference_targets() {
         let source = "| inline | references |\n| --- | --- |\n| **bold** *italic* ~~gone~~ `code` [link](https://inline.test) ![img](inline.png) | [reference][ref] ![photo][pic] |\n\n[ref]: https://reference.test\n[pic]: photo.png\n";
@@ -5089,6 +8270,332 @@ mod tests {
         assert!(references.inline_spans.iter().any(|span| {
             span.kind == markdown::InlineKind::Image && span.target.as_deref() == Some("photo.png")
         }));
+    }
+
+    fn table_cell_inline_display_and_runs(
+        content: &str,
+        decoration: &LineDecoration,
+    ) -> (String, Vec<usize>, Vec<usize>, Vec<TextRun>) {
+        let (display, d2b, b2d, collapsed) = build_display_text(
+            content,
+            decoration,
+            &[],
+            false,
+            None,
+            0,
+            3,
+            3,
+            2,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let theme = Theme::one_dark();
+        let runs = build_text_runs_for_display(
+            &display,
+            content,
+            &d2b,
+            decoration,
+            &[],
+            false,
+            collapsed,
+            &font("Test Body"),
+            &font("Test CJK"),
+            &font("Test Mono"),
+            &font("Test Heading"),
+            &font("Test Heading CJK"),
+            &font("Test Italic"),
+            &font("Test Italic CJK"),
+            3,
+            16.0,
+            &theme,
+            theme.git_status_added,
+            theme.text_danger,
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            None,
+            false,
+        );
+        assert_eq!(d2b.len(), display.len());
+        assert_eq!(b2d.len(), content.len() + 1);
+        assert_eq!(b2d[content.len()], display.len());
+        assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), display.len());
+        for (source, _) in content.char_indices() {
+            assert!(display.is_char_boundary(b2d[source]));
+        }
+        for (shown, _) in display.char_indices() {
+            assert!(content.is_char_boundary(d2b[shown]));
+        }
+        (display, d2b, b2d, runs)
+    }
+
+    fn assert_table_cell_inline_ranges(content: &str, decoration: &LineDecoration) {
+        let mut ranges = Vec::new();
+        ranges.extend(decoration.inline_spans.iter().map(|span| &span.range));
+        ranges.extend(&decoration.inline_math_spans);
+        ranges.extend(&decoration.protected_ranges);
+        ranges.extend(&decoration.highlight_spans);
+        ranges.extend(&decoration.superscript_spans);
+        ranges.extend(&decoration.subscript_spans);
+        for syntax in &decoration.syntax_ranges {
+            ranges.extend([&syntax.range, &syntax.trigger_range]);
+        }
+        for replacement in &decoration.display_replacements {
+            ranges.extend([&replacement.source_range, &replacement.trigger_range]);
+        }
+        for wiki in &decoration.wiki_links {
+            ranges.extend([&wiki.full_range, &wiki.collapsed_range]);
+        }
+        for footnote in &decoration.footnote_references {
+            ranges.extend([&footnote.full_range, &footnote.collapsed_range]);
+        }
+        for range in ranges {
+            assert!(
+                range.start <= range.end && range.end <= content.len(),
+                "{range:?}"
+            );
+            assert!(content.is_char_boundary(range.start), "{range:?}");
+            assert!(content.is_char_boundary(range.end), "{range:?}");
+        }
+    }
+
+    #[test]
+    fn table_cell_leading_break_keeps_bold_code_wiki_and_checked_body_styles() {
+        let source = "| Neighbor | Input |\n| --- | --- |\n| 隣🙂 | <br>- [x] **完🙂** `code` [[notes/page.md|頁]]<br>- [ ] open |";
+        let decorations = markdown::parse_decorations(source);
+        let row = &decorations[2];
+        let info = row.table_info.as_ref().unwrap();
+        let content = &info.cells[1];
+        let decoration = table_cell_decoration(row, content, &info.cell_ranges[1]);
+        assert_eq!(decoration.table_cell_fragments.len(), 3);
+        assert_eq!(decoration.table_cell_fragments[0].range, 0..0);
+        assert_eq!(
+            decoration.table_cell_fragments[1].block_type,
+            markdown::BlockType::TaskList(true)
+        );
+        assert_eq!(decoration.table_cell_fragments[1].prefix_len, 6);
+        assert_eq!(
+            decoration.table_cell_fragments[2].block_type,
+            markdown::BlockType::TaskList(false)
+        );
+        for (kind, word) in [
+            (markdown::InlineKind::Bold, "完🙂"),
+            (markdown::InlineKind::InlineCode, "code"),
+        ] {
+            let span = decoration
+                .inline_spans
+                .iter()
+                .find(|span| span.kind == kind)
+                .expect("leading break must not suppress inline parsing");
+            assert_eq!(&content[span.range.clone()], word);
+        }
+        assert_eq!(decoration.wiki_links.len(), 1);
+        let wiki = &decoration.wiki_links[0];
+        assert_eq!(wiki.target_path, "notes/page.md");
+        assert_eq!(&content[wiki.full_range.clone()], "[[notes/page.md|頁]]");
+        assert_eq!(&content[wiki.collapsed_range.clone()], "頁");
+        assert_table_cell_inline_ranges(content, &decoration);
+        let (display, d2b, b2d, runs) = table_cell_inline_display_and_runs(content, &decoration);
+        assert_eq!(display, "\n   完🙂 code 頁\n   open");
+        for word in ["完🙂", "code", "頁", "open"] {
+            let source = content.find(word).unwrap();
+            let shown = display.find(word).unwrap();
+            for relative in 0..word.len() {
+                assert_eq!(d2b[shown + relative], source + relative);
+                assert_eq!(b2d[source + relative], shown + relative);
+            }
+            for byte in shown..shown + word.len() {
+                assert_eq!(
+                    run_at_byte(&runs, byte).strikethrough.is_some(),
+                    word != "open"
+                );
+            }
+        }
+        assert_eq!(
+            run_at_byte(&runs, display.find("完🙂").unwrap())
+                .font
+                .weight,
+            FontWeight::EXTRA_BOLD
+        );
+        let code = run_at_byte(&runs, display.find("code").unwrap());
+        assert_eq!(code.font.family.as_ref(), "Test Mono");
+        assert_eq!(
+            code.background_color,
+            Some(Theme::one_dark().inline_code_bg)
+        );
+        let fragment = &decoration.table_cell_fragments[1];
+        for byte in b2d[fragment.range.start]..b2d[fragment.range.start + fragment.prefix_len] {
+            let run = run_at_byte(&runs, byte);
+            assert_eq!(run.font.family.as_ref(), "Test Mono");
+            assert!(run.strikethrough.is_none());
+        }
+    }
+
+    #[test]
+    fn table_cell_leading_break_shifts_extended_inline_metadata_and_replacements() {
+        let content = "<br>- [ ] ==標🙂== ++under++ ^super^ ~sub~ $x^2$ [^note] :rocket: <code>raw<br>literal</code>";
+        let decoration =
+            table_cell_decoration(&LineDecoration::default(), content, &(0..content.len()));
+        assert_eq!(decoration.table_cell_fragments.len(), 2);
+        assert_eq!(&content[decoration.highlight_spans[0].clone()], "標🙂");
+        assert_eq!(&content[decoration.superscript_spans[0].clone()], "super");
+        assert_eq!(&content[decoration.subscript_spans[0].clone()], "sub");
+        assert_eq!(&content[decoration.inline_math_spans[0].clone()], "x^2");
+        let underline = decoration
+            .inline_spans
+            .iter()
+            .find(|span| span.kind == markdown::InlineKind::Underline)
+            .unwrap();
+        assert_eq!(&content[underline.range.clone()], "under");
+        let footnote = &decoration.footnote_references[0];
+        assert_eq!(footnote.label, "note");
+        assert_eq!(&content[footnote.full_range.clone()], "[^note]");
+        assert_eq!(&content[footnote.collapsed_range.clone()], "note");
+        let rocket = decoration
+            .display_replacements
+            .iter()
+            .find(|replacement| replacement.display_text == "🚀")
+            .unwrap();
+        assert_eq!(&content[rocket.source_range.clone()], ":rocket:");
+        assert_eq!(rocket.source_range, rocket.trigger_range);
+        let raw = content.find("<code>").unwrap();
+        assert!(decoration.protected_ranges.iter().any(|range| {
+            range.start == raw && &content[range.clone()] == "<code>raw<br>literal</code>"
+        }));
+        assert_table_cell_inline_ranges(content, &decoration);
+        let (display, _, _, runs) = table_cell_inline_display_and_runs(content, &decoration);
+        assert_eq!(display.matches('\n').count(), 1);
+        assert!(display.contains("🚀"));
+        assert!(display.contains("<code>raw<br>literal</code>"));
+        assert!(runs.iter().all(|run| run.strikethrough.is_none()));
+    }
+
+    #[test]
+    fn table_cell_inline_context_clips_cell_start_triggers_without_losing_syntax() {
+        for (content, expected) in [
+            ("**bold**", "bold"),
+            ("*italic*", "italic"),
+            ("~~gone~~", "gone"),
+            ("`code`", "code"),
+            ("[link](https://example.test)", "link"),
+            ("*lead<br>- [x] task*", "lead\n   task"),
+        ] {
+            let decoration =
+                table_cell_decoration(&LineDecoration::default(), content, &(0..content.len()));
+            assert!(!decoration.syntax_ranges.is_empty(), "{content:?}");
+            assert!(
+                decoration
+                    .syntax_ranges
+                    .iter()
+                    .any(|syntax| syntax.trigger_range.start == 0)
+            );
+            assert_table_cell_inline_ranges(content, &decoration);
+            let (display, _, _, _) = table_cell_inline_display_and_runs(content, &decoration);
+            assert_eq!(display, expected, "{content:?}");
+        }
+    }
+
+    #[test]
+    fn table_cell_leading_break_does_not_add_block_html_protection() {
+        for content in ["<br>", "<br><br>"] {
+            let decoration =
+                table_cell_decoration(&LineDecoration::default(), content, &(0..content.len()));
+            assert!(decoration.protected_ranges.is_empty());
+            assert_eq!(
+                decoration.table_cell_fragments.len(),
+                content.matches("<br>").count() + 1
+            );
+            assert_table_cell_inline_ranges(content, &decoration);
+            let (display, _, _, _) = table_cell_inline_display_and_runs(content, &decoration);
+            assert_eq!(display, "\n".repeat(content.matches("<br>").count()));
+        }
+    }
+
+    #[test]
+    fn table_cell_leading_break_preserves_projected_document_reference_targets() {
+        let source = "| Neighbor | Input |\n| --- | --- |\n| 隣🙂 | <br>- [ ] [参照][ref] ![写真][pic] |\n\n[ref]: https://reference.test\n[pic]: photo.png\n";
+        let decorations = markdown::parse_decorations(source);
+        let row = &decorations[2];
+        let info = row.table_info.as_ref().unwrap();
+        let content = &info.cells[1];
+        let decoration = table_cell_decoration(row, content, &info.cell_ranges[1]);
+        for (kind, target, label) in [
+            (markdown::InlineKind::Link, "https://reference.test", "参照"),
+            (markdown::InlineKind::Image, "photo.png", "写真"),
+        ] {
+            let span = decoration
+                .inline_spans
+                .iter()
+                .find(|span| span.kind == kind && span.target.as_deref() == Some(target))
+                .expect("document reference target must survive paragraph-context parsing");
+            assert!(content[span.range.clone()].contains(label));
+            assert_eq!(
+                decoration
+                    .inline_spans
+                    .iter()
+                    .filter(|other| { other.kind == kind && other.range == span.range })
+                    .count(),
+                1
+            );
+        }
+        assert_table_cell_inline_ranges(content, &decoration);
+        let (display, d2b, b2d, _) = table_cell_inline_display_and_runs(content, &decoration);
+        assert!(display.starts_with("\n   参照"));
+        assert!(!display.contains("[ref]"));
+        let source = content.find("参照").unwrap();
+        let shown = display.find("参照").unwrap();
+        assert_eq!(b2d[source], shown);
+        assert_eq!(d2b[shown], source);
+    }
+
+    #[test]
+    fn table_cell_inline_context_preserves_explicit_non_list_block_parsing() {
+        for content in [
+            "# **heading**",
+            "> **quote**",
+            "---",
+            "```rust",
+            "[^note]: **body**",
+            "$$x^2$$",
+        ] {
+            let original = markdown::parse_decorations(content).remove(0);
+            let decoration =
+                table_cell_decoration(&LineDecoration::default(), content, &(0..content.len()));
+            assert_eq!(decoration.block_type, original.block_type, "{content:?}");
+            assert_eq!(
+                decoration.inline_spans, original.inline_spans,
+                "{content:?}"
+            );
+            // Fragment classification already removes the leading quote's
+            // structural syntax; the inline-context change must not alter it.
+            let leading = super::list_marker_indent(content);
+            let expected_syntax = original
+                .syntax_ranges
+                .iter()
+                .filter(|syntax| {
+                    !(syntax.range.start < leading && syntax.trigger_range.end <= leading)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(decoration.syntax_ranges, expected_syntax, "{content:?}");
+            assert_eq!(
+                decoration.display_replacements, original.display_replacements,
+                "{content:?}"
+            );
+            assert_eq!(
+                decoration.block_preview, original.block_preview,
+                "{content:?}"
+            );
+            assert_eq!(
+                decoration.footnote_definition_label, original.footnote_definition_label,
+                "{content:?}"
+            );
+            assert_table_cell_inline_ranges(content, &decoration);
+        }
     }
 
     #[test]
@@ -5566,16 +9073,55 @@ pub(crate) fn find_syntax_for_language(language: &str) -> Option<&'static Syntax
         })
 }
 
-pub(crate) fn find_syntax_for_path(path: &Path) -> Option<&'static SyntaxReference> {
-    if let Ok(Some(syntax)) = syntax_set().find_syntax_for_file(path)
-        && syntax.name != "Plain Text"
-    {
-        return Some(syntax);
+pub(crate) fn find_syntax_for_path(
+    path: &Path,
+    first_line: &str,
+) -> Option<&'static SyntaxReference> {
+    let syntaxes = syntax_set();
+    // syntect's find_syntax_for_file reopens unknown files to inspect their first
+    // line. Callers already have those bytes, including for disconnected mounts.
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| syntaxes.find_syntax_by_extension(name))
+        .or_else(|| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(|ext| syntaxes.find_syntax_by_extension(ext))
+        })
+        .or_else(|| syntaxes.find_syntax_by_first_line(first_line.trim_start_matches('\u{feff}')))
+        .filter(|syntax| syntax.name != "Plain Text")
+        .or_else(|| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(find_syntax_for_language)
+        })
+}
+
+#[cfg(test)]
+mod path_syntax_tests {
+    use super::*;
+
+    #[test]
+    fn syntax_detection_uses_supplied_first_line_without_opening_the_path() {
+        let path = Path::new("/unavailable-share/does-not-exist/script");
+        let syntax = find_syntax_for_path(path, "#!/usr/bin/env python3").unwrap();
+        assert!(syntax.name.contains("Python"));
+        assert!(find_syntax_for_path(path, "ordinary text").is_none());
     }
 
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .and_then(find_syntax_for_language)
+    #[test]
+    fn filename_and_extension_syntax_take_precedence_over_the_first_line() {
+        assert_eq!(
+            find_syntax_for_path(
+                Path::new("/unavailable-share/main.rs"),
+                "#!/usr/bin/env python3"
+            )
+            .unwrap()
+            .name,
+            "Rust"
+        );
+        assert!(find_syntax_for_path(Path::new("/unavailable-share/Dockerfile"), "").is_some());
+    }
 }
 
 #[cfg(test)]
@@ -6166,26 +9712,6 @@ fn apply_language_highlighting(
 /// Linux build: those ship a lone executable with no `assets/` beside it.
 pub(crate) fn asset_image_source(path: &'static str) -> gpui::ImageSource {
     gpui::ImageSource::Resource(gpui::Resource::Embedded(SharedString::new_static(path)))
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn resolve_asset_image_path(path: &str) -> PathBuf {
-    use std::sync::{Mutex, OnceLock};
-
-    static RESOLVED_ASSET_PATHS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
-
-    let cache = RESOLVED_ASSET_PATHS.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(cache) = cache.lock()
-        && let Some(resolved) = cache.get(path)
-    {
-        return resolved.clone();
-    }
-
-    let resolved = crate::resolve_runtime_path(path).unwrap_or_else(|| PathBuf::from(path));
-    if let Ok(mut cache) = cache.lock() {
-        cache.insert(path.to_string(), resolved.clone());
-    }
-    resolved
 }
 
 #[cfg(target_os = "macos")]
@@ -7454,9 +10980,11 @@ pub(crate) fn build_text_runs_for_display_with_language(
             }
         };
 
-    // Fence lines stay in layout, but become fully transparent when inactive.
+    // For metadata separators the caller supplies whole-block focus, not row
+    // focus. Transparent ink preserves measured height and source byte maps.
     if matches!(decoration.block_type, BlockType::CodeBlockFence) || is_front_matter_separator {
-        let fence_color = if code_block_syntax_active {
+        let fence_active = code_block_syntax_active;
+        let fence_color = if fence_active {
             let mut active = theme.text_secondary;
             active.a *= 0.5;
             active
@@ -7494,6 +11022,15 @@ pub(crate) fn build_text_runs_for_display_with_language(
     let leading_ws = list_marker_indent(line_content);
     let trimmed = &line_content[leading_ws..];
     match decoration.block_type {
+        _ if !decoration.table_cell_fragments.is_empty() => {
+            for fragment in &decoration.table_cell_fragments {
+                assign_font_roles(
+                    fragment.range.start..fragment.range.start + fragment.prefix_len,
+                    FontRole::Monospace,
+                    FontRole::Monospace,
+                );
+            }
+        }
         BlockType::UnorderedList => {
             if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
                 assign_font_roles(
@@ -7539,12 +11076,25 @@ pub(crate) fn build_text_runs_for_display_with_language(
         _ => {}
     }
 
-    if let BlockType::TaskList(true) = decoration.block_type {
-        let leading_ws = list_marker_indent(line_content);
-        let trimmed = &line_content[leading_ws..];
+    let checked_bodies = if decoration.table_cell_fragments.is_empty() {
         let prefix_len = task_prefix_len(trimmed);
-        let text_start = (leading_ws + prefix_len).min(buf_len);
-        for index in text_start..buf_len {
+        if decoration.block_type == BlockType::TaskList(true) && prefix_len > 0 {
+            vec![leading_ws + prefix_len..buf_len]
+        } else {
+            Vec::new()
+        }
+    } else {
+        decoration
+            .table_cell_fragments
+            .iter()
+            .filter(|fragment| {
+                fragment.block_type == BlockType::TaskList(true) && fragment.prefix_len > 0
+            })
+            .map(|fragment| fragment.range.start + fragment.prefix_len..fragment.range.end)
+            .collect()
+    };
+    for body in checked_bodies {
+        for index in body {
             buf_colors[index] = theme.strikethrough;
             buf_strikethroughs[index] = true;
         }
@@ -7671,6 +11221,16 @@ pub(crate) fn build_text_runs_for_display_with_language(
         }
     }
 
+    // Cross-fragment emphasis must not change the reserved marker advances.
+    for fragment in &decoration.table_cell_fragments {
+        let prefix = fragment.range.start..fragment.range.start + fragment.prefix_len;
+        assign_font_roles(prefix.clone(), FontRole::Monospace, FontRole::Monospace);
+        for index in prefix {
+            buf_font_styles[index] = FontStyle::Normal;
+            buf_weights[index] = list_marker_font_weight;
+        }
+    }
+
     for footnote_reference in &decoration.footnote_references {
         if decoration.footnote_definition_label.is_none()
             && !active_ranges_intersect(active_ranges, &footnote_reference.full_range)
@@ -7700,9 +11260,9 @@ pub(crate) fn build_text_runs_for_display_with_language(
         buf_strikethroughs.fill(false);
         buf_underlines.fill(false);
         if let Some(key_range) = decoration
-            .table_info
+            .front_matter
             .as_ref()
-            .and_then(|table_info| table_info.cell_ranges.first())
+            .and_then(|info| info.key_range.as_ref())
         {
             let key_color = front_matter_key_text_color
                 .unwrap_or_else(|| crate::theme::with_alpha(theme.text_bright, 1.0));
@@ -7711,6 +11271,16 @@ pub(crate) fn build_text_runs_for_display_with_language(
             for index in start..end {
                 buf_colors[index] = key_color;
                 buf_weights[index] = FontWeight::BOLD;
+            }
+        }
+        if let Some(info) = decoration.front_matter.as_ref()
+            && matches!(info.value, FrontMatterValue::BlockHeader)
+            && front_matter_row_is_active(active_ranges, line_content.len())
+        {
+            for color in &mut buf_colors
+                [info.value_range.start.min(buf_len)..info.value_range.end.min(buf_len)]
+            {
+                *color = theme.syntax_marker;
             }
         }
     }
@@ -7806,6 +11376,28 @@ pub(crate) fn build_text_runs_for_display_with_language(
         font_roles.push(buf_font_roles[buf_idx]);
     }
 
+    if let Some(info) = decoration.front_matter.as_ref() {
+        let active = front_matter_row_is_active(active_ranges, line_content.len());
+        if !active && matches!(info.value, FrontMatterValue::Boolean(_)) {
+            for (i, ch) in display_text.char_indices() {
+                let source = display_to_buffer.get(i).copied().unwrap_or(buf_len);
+                if ch == '\u{a0}' && info.value_range.contains(&source) {
+                    colors[i..i + ch.len_utf8()].fill(gpui::transparent_black());
+                }
+            }
+        }
+        if !active
+            && prefix_collapsed
+            && !info.display_prefix.is_empty()
+            && let Some(marker_start) = display_text.find(&info.display_prefix)
+        {
+            let marker_end = marker_start + info.display_prefix.len();
+            colors[marker_start..marker_end].fill(list_marker_text_color);
+            weights[marker_start..marker_end].fill(list_marker_font_weight);
+            font_roles[marker_start..marker_end].fill(FontRole::Monospace);
+        }
+    }
+
     if let Some(label) = decoration.footnote_definition_label.as_deref() {
         let leading_ws = display_text.len() - display_text.trim_start_matches([' ', '\t']).len();
         let raw_prefix = format!("[^{}]:", label);
@@ -7830,7 +11422,7 @@ pub(crate) fn build_text_runs_for_display_with_language(
         }
     }
 
-    if prefix_collapsed {
+    if prefix_collapsed && decoration.table_cell_fragments.is_empty() {
         let leading_ws = display_text.len() - display_text.trim_start_matches([' ', '\t']).len();
         let prefix_len = compute_display_prefix_bytes(
             display_text,

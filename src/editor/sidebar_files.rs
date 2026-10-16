@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use gpui::{AppContext, Context, Window};
 
+use crate::platform::fs_task::{self, check_deadline};
+
 use super::*;
 
 impl EditorView {
@@ -101,6 +103,7 @@ impl EditorView {
     }
 
     fn remove_copied_path(path: &Path) -> std::io::Result<()> {
+        check_deadline()?;
         match crate::platform::trash::remove_permanently(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             result => result,
@@ -113,10 +116,28 @@ impl EditorView {
         rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
         trash: impl FnOnce(&Path) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
+        Self::move_path_with_fallback_and_check(src, dst, rename, trash, check_deadline)
+    }
+
+    fn move_path_with_fallback_and_check(
+        src: &Path,
+        dst: &Path,
+        rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+        trash: impl FnOnce(&Path) -> anyhow::Result<()>,
+        check: impl Fn() -> std::io::Result<()>,
+    ) -> anyhow::Result<()> {
+        check()?;
         let rename_error = match rename(src, dst) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return check().map_err(anyhow::Error::from),
             Err(error) => error,
         };
+        check()?;
+        if matches!(
+            rename_error.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ) {
+            return Err(rename_error.into());
+        }
         let destination_missing = dst
             .symlink_metadata()
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
@@ -124,29 +145,43 @@ impl EditorView {
             return Err(rename_error.into());
         }
 
+        check()?;
         let mut destination_created = false;
         if let Err(copy_error) = Self::copy_path_recursively_with_creation(src, dst, || {
             destination_created = true;
         }) {
+            check()?;
+            if matches!(
+                copy_error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) {
+                return Err(copy_error.into());
+            }
             // A failed create_new/create_dir may belong to another operation.
             let cleanup_error = destination_created
                 .then(|| Self::remove_copied_path(dst).err())
                 .flatten();
-            return Err(anyhow::anyhow!(
-                "rename failed ({rename_error}); copy fallback failed ({copy_error}){}",
+            return Err(anyhow::Error::from(copy_error).context(format!(
+                "rename failed ({rename_error}); copy fallback failed{}",
                 cleanup_error
                     .map(|error| format!("; destination cleanup failed ({error})"))
                     .unwrap_or_default()
-            ));
+            )));
         }
 
+        check().map_err(|error| {
+            anyhow::Error::from(error).context(format!(
+                "source removal was not started; destination retained for recovery: {}",
+                dst.display()
+            ))
+        })?;
         if let Err(trash_error) = trash(src) {
             // Recursive network deletion or a native Trash operation may have
             // partially removed the source before failing. Keep the complete copy.
-            return Err(anyhow::anyhow!(
-                "rename failed ({rename_error}); source removal failed ({trash_error:#}); destination retained for recovery: {}",
+            return Err(trash_error.context(format!(
+                "rename failed ({rename_error}); source removal failed; destination retained for recovery: {}",
                 dst.display()
-            ));
+            )));
         }
 
         Ok(())
@@ -166,18 +201,20 @@ impl EditorView {
         self.context_menu = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let results = cx
-                .background_executor()
-                .spawn(async move {
-                    paths
-                        .into_iter()
-                        .map(|path| {
-                            let result = crate::platform::trash::move_to_trash(&path);
-                            (path, result)
-                        })
-                        .collect::<Vec<_>>()
+            let mut results = Vec::new();
+            for path in paths {
+                let operation_path = path.clone();
+                let result = Self::run_sidebar_mutation("delete", path.clone(), move || {
+                    check_deadline()?;
+                    crate::platform::trash::move_to_trash(&operation_path)
                 })
                 .await;
+                let uncertain = Self::sidebar_mutation_outcome_uncertain(&result);
+                results.push((path, result));
+                if uncertain {
+                    break;
+                }
+            }
             this.update(cx, |editor, cx| editor.finish_delete_paths(results, cx))
                 .ok();
         })
@@ -195,8 +232,9 @@ impl EditorView {
                 Ok(()) => deleted.push(path),
                 Err(error) => {
                     let message = format!(
-                        "{}: {error:#}",
-                        self.t(crate::i18n::TextKey::FileOperationFailed)
+                        "{} ({}): {error:#}",
+                        self.t(crate::i18n::TextKey::FileOperationFailed),
+                        path.display()
                     );
                     self.notify_error(message, cx);
                 }
@@ -286,33 +324,37 @@ impl EditorView {
     /// Create a new empty `.moeka` whiteboard in `parent`, then open it. Falls
     /// back to the current directory when no workspace folder is set.
     pub(crate) fn create_new_whiteboard(&mut self, parent: PathBuf, cx: &mut Context<Self>) {
-        let parent = if parent.as_os_str().is_empty() {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        } else {
-            parent
-        };
         let json = WhiteboardDocument::default().to_json_string();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut name = "Whiteboard.moeka".to_string();
-                    let mut index = 1;
-                    while parent.join(&name).exists() {
-                        index += 1;
-                        name = format!("Whiteboard {index}.moeka");
-                    }
-                    let path = parent.join(name);
-                    file_ops::atomic_write(&path, json.as_bytes()).map(|()| path)
-                })
-                .await;
+            let error_path = if parent.as_os_str().is_empty() {
+                PathBuf::from(".")
+            } else {
+                parent.clone()
+            };
+            let result = fs_task::run("create whiteboard", error_path.clone(), move || {
+                let parent = if parent.as_os_str().is_empty() {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                } else {
+                    parent
+                };
+                let mut name = "Whiteboard.moeka".to_string();
+                let mut index = 1;
+                while !Self::sidebar_destination_missing(&parent.join(&name))? {
+                    index += 1;
+                    name = format!("Whiteboard {index}.moeka");
+                }
+                let path = parent.join(name);
+                file_ops::atomic_write(&path, json.as_bytes()).map(|()| path)
+            })
+            .await;
             this.update(cx, |editor, cx| {
                 let path = match result {
                     Ok(path) => path,
                     Err(error) => {
                         let message = format!(
-                            "{}: {error}",
-                            editor.t(crate::i18n::TextKey::FileOperationFailed)
+                            "{} ({}): {error}",
+                            editor.t(crate::i18n::TextKey::FileOperationFailed),
+                            error_path.display()
                         );
                         editor.notify_error(message, cx);
                         return;
@@ -448,11 +490,10 @@ impl EditorView {
                         let move_old_path = old_path.clone();
                         let move_new_path = new_path.clone();
                         let result =
-                            cx.background_executor()
-                                .spawn(async move {
-                                    Self::move_path_compat(&move_old_path, &move_new_path)
-                                })
-                                .await;
+                            Self::run_sidebar_mutation("rename", old_path.clone(), move || {
+                                Self::move_path_compat(&move_old_path, &move_new_path)
+                            })
+                            .await;
                         this.update(cx, |editor, cx| {
                             editor.finish_sidebar_rename(
                                 old_path,
@@ -484,16 +525,15 @@ impl EditorView {
                     let parent = parent.clone();
                     cx.spawn(async move |this, cx| {
                         let create_path = new_path.clone();
-                        let result = cx
-                            .background_executor()
-                            .spawn(async move {
-                                std::fs::OpenOptions::new()
-                                    .write(true)
-                                    .create_new(true)
-                                    .open(create_path)
-                                    .map(drop)
-                            })
-                            .await;
+                        let result = fs_task::run("create file", new_path.clone(), move || {
+                            check_deadline()?;
+                            std::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(create_path)
+                                .map(drop)
+                        })
+                        .await;
                         this.update(cx, |editor, cx| {
                             editor.finish_create_file(parent, new_path, result, cx)
                         })
@@ -508,15 +548,17 @@ impl EditorView {
                     let new_path = parent.join(trimmed);
                     cx.spawn(async move |this, cx| {
                         let create_path = new_path.clone();
-                        let result = cx
-                            .background_executor()
-                            .spawn(async move { std::fs::create_dir(create_path) })
-                            .await;
+                        let result = fs_task::run("create folder", new_path.clone(), move || {
+                            check_deadline()?;
+                            std::fs::create_dir(create_path)
+                        })
+                        .await;
                         this.update(cx, |editor, cx| {
                             if let Err(error) = result {
                                 let message = format!(
-                                    "{}: {error}",
-                                    editor.t(crate::i18n::TextKey::FileOperationFailed)
+                                    "{} ({}): {error}",
+                                    editor.t(crate::i18n::TextKey::FileOperationFailed),
+                                    new_path.display()
                                 );
                                 editor.notify_error(message, cx);
                                 return;
@@ -543,8 +585,9 @@ impl EditorView {
     ) {
         if let Err(error) = result {
             let message = format!(
-                "{}: {error}",
-                self.t(crate::i18n::TextKey::FileOperationFailed)
+                "{} ({}): {error}",
+                self.t(crate::i18n::TextKey::FileOperationFailed),
+                new_path.display()
             );
             self.notify_error(message, cx);
             return;
@@ -574,8 +617,10 @@ impl EditorView {
     ) {
         if let Err(error) = result {
             let message = format!(
-                "{}: {error}",
-                self.t(crate::i18n::TextKey::FileOperationFailed)
+                "{} ({} → {}): {error:#}",
+                self.t(crate::i18n::TextKey::FileOperationFailed),
+                old_path.display(),
+                new_path.display()
             );
             self.notify_error(message, cx);
             return;
@@ -618,14 +663,49 @@ impl EditorView {
         self.delete_paths_to_trash(&[path], cx);
     }
 
-    fn next_available_paste_destination(src: &Path, target_dir: &Path) -> Option<PathBuf> {
-        let name = src.file_name()?;
+    pub(super) async fn run_sidebar_mutation<T: Send + 'static>(
+        operation: &'static str,
+        path: PathBuf,
+        work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+    ) -> anyhow::Result<T> {
+        // Keep inner I/O error kinds intact so batches stop on uncertain mutations.
+        fs_task::run_value(operation, path, work).await?
+    }
+
+    pub(super) fn sidebar_mutation_outcome_uncertain<T>(result: &anyhow::Result<T>) -> bool {
+        result.as_ref().is_err_and(|error| {
+            error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                )
+            })
+        })
+    }
+
+    fn sidebar_destination_missing(path: &Path) -> std::io::Result<bool> {
+        check_deadline()?;
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn next_available_paste_destination(
+        src: &Path,
+        target_dir: &Path,
+    ) -> std::io::Result<Option<PathBuf>> {
+        let Some(name) = src.file_name() else {
+            return Ok(None);
+        };
         let initial = target_dir.join(name);
-        if !initial.exists() {
-            return Some(initial);
+        if Self::sidebar_destination_missing(&initial)? {
+            return Ok(Some(initial));
         }
 
-        if src.is_file() {
+        check_deadline()?;
+        if std::fs::metadata(src)?.is_file() {
             let stem = src.file_stem().unwrap_or(name);
             let extension = src.extension().filter(|ext| !ext.is_empty());
             for suffix in 1.. {
@@ -636,8 +716,8 @@ impl EditorView {
                     candidate.push(extension);
                 }
                 let candidate_path = target_dir.join(candidate);
-                if !candidate_path.exists() {
-                    return Some(candidate_path);
+                if Self::sidebar_destination_missing(&candidate_path)? {
+                    return Ok(Some(candidate_path));
                 }
             }
         }
@@ -646,12 +726,12 @@ impl EditorView {
             let mut candidate = OsString::from(name);
             candidate.push(format!("-{suffix}"));
             let candidate_path = target_dir.join(candidate);
-            if !candidate_path.exists() {
-                return Some(candidate_path);
+            if Self::sidebar_destination_missing(&candidate_path)? {
+                return Ok(Some(candidate_path));
             }
         }
 
-        None
+        Ok(None)
     }
 
     fn copy_path_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -663,14 +743,19 @@ impl EditorView {
         dst: &Path,
         on_destination_created: impl FnOnce(),
     ) -> std::io::Result<()> {
+        check_deadline()?;
         // `symlink_metadata` keeps a symlinked directory from being walked into.
         if std::fs::symlink_metadata(src)?.is_dir() {
+            check_deadline()?;
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent)?;
             }
+            check_deadline()?;
             std::fs::create_dir(dst)?;
             on_destination_created();
+            check_deadline()?;
             for entry in std::fs::read_dir(src)? {
+                check_deadline()?;
                 let entry = entry?;
                 if entry.file_name().to_string_lossy().starts_with("._") {
                     continue;
@@ -682,42 +767,53 @@ impl EditorView {
             return Ok(());
         }
 
+        check_deadline()?;
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        check_deadline()?;
         let mut source = std::fs::File::open(src)?;
+        check_deadline()?;
         let mut destination = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(dst)?;
         on_destination_created();
+        check_deadline()?;
         std::io::copy(&mut source, &mut destination)?;
+        check_deadline()?;
         if let Ok(metadata) = source.metadata() {
+            check_deadline()?;
             let _ = destination.set_permissions(metadata.permissions());
         }
         Ok(())
     }
 
-    fn external_drop_destination(src: &Path, target_dir: &Path) -> Option<PathBuf> {
+    fn external_drop_destination(
+        src: &Path,
+        target_dir: &Path,
+    ) -> std::io::Result<Option<PathBuf>> {
         let src = Self::normalize_sidebar_path(src);
         let target_dir = Self::normalize_sidebar_path(target_dir);
-        if target_dir.starts_with(&src) {
-            return None;
+        if src.file_name().is_none() || target_dir.starts_with(&src) {
+            return Ok(None);
         }
         Self::next_available_paste_destination(&src, &target_dir)
     }
 
     pub(super) fn sidebar_drop_would_copy(paths: &[PathBuf], target_dir: &Path) -> bool {
-        paths
-            .iter()
-            .any(|src| Self::external_drop_destination(src, target_dir).is_some())
+        let target_dir = Self::normalize_sidebar_path(target_dir);
+        paths.iter().any(|src| {
+            let src = Self::normalize_sidebar_path(src);
+            src.file_name().is_some() && !target_dir.starts_with(&src)
+        })
     }
 
     fn copy_external_path_into_dir(
         src: &Path,
         target_dir: &Path,
     ) -> std::io::Result<Option<PathBuf>> {
-        let Some(destination) = Self::external_drop_destination(src, target_dir) else {
+        let Some(destination) = Self::external_drop_destination(src, target_dir)? else {
             return Ok(None);
         };
         Self::copy_path_recursively(src, &destination)?;
@@ -735,20 +831,25 @@ impl EditorView {
         self.context_menu = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let operation_target = target_dir.clone();
-            let results = cx
-                .background_executor()
-                .spawn(async move {
-                    paths
-                        .into_iter()
-                        .map(|source| {
-                            let result =
-                                Self::copy_external_path_into_dir(&source, &operation_target);
-                            (source, result)
-                        })
-                        .collect::<Vec<_>>()
+            let mut results = Vec::new();
+            for source in paths {
+                let operation_source = source.clone();
+                let operation_target = target_dir.clone();
+                let result = fs_task::run("copy", source.clone(), move || {
+                    Self::copy_external_path_into_dir(&operation_source, &operation_target)
                 })
                 .await;
+                let uncertain = result.as_ref().is_err_and(|error| {
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    )
+                });
+                results.push((source, result));
+                if uncertain {
+                    break;
+                }
+            }
             this.update(cx, |editor, cx| {
                 editor.finish_copy_external_paths(target_dir, results, cx)
             })
@@ -764,14 +865,16 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let mut copied_paths = Vec::new();
-        for (_, result) in results {
+        for (source, result) in results {
             match result {
                 Ok(Some(destination)) => copied_paths.push(destination),
                 Ok(None) => {}
                 Err(error) => {
                     let message = format!(
-                        "{}: {error}",
-                        self.t(crate::i18n::TextKey::FileOperationFailed)
+                        "{} ({} → {}): {error}",
+                        self.t(crate::i18n::TextKey::FileOperationFailed),
+                        source.display(),
+                        target_dir.display()
                     );
                     self.notify_error(message, cx);
                 }
@@ -802,31 +905,44 @@ impl EditorView {
             .then(|| self.capture_workspace_rewrite_context())
             .flatten();
         self.context_menu = None;
+        if clipboard.is_cut {
+            self.file_clipboard = None;
+        }
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let operation_target = target_dir.clone();
             let is_cut = clipboard.is_cut;
-            let results = cx
-                .background_executor()
-                .spawn(async move {
-                    clipboard
-                        .paths
-                        .into_iter()
-                        .filter_map(|source| {
-                            let source = Self::normalize_sidebar_path(&source);
-                            let destination =
-                                Self::next_available_paste_destination(&source, &operation_target)?;
-                            let result = if is_cut {
-                                Self::move_path_compat(&source, &destination)
-                            } else {
-                                Self::copy_path_recursively(&source, &destination)
-                                    .map_err(anyhow::Error::from)
-                            };
-                            Some((source, destination, result))
-                        })
-                        .collect::<Vec<_>>()
+            let mut results = Vec::new();
+            for source in clipboard.paths {
+                let source = Self::normalize_sidebar_path(&source);
+                let operation_source = source.clone();
+                let operation_target = target_dir.clone();
+                let outcome = Self::run_sidebar_mutation("paste", source.clone(), move || {
+                    let Some(destination) = Self::next_available_paste_destination(
+                        &operation_source,
+                        &operation_target,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    check_deadline()?;
+                    if is_cut {
+                        Self::move_path_compat(&operation_source, &destination)?;
+                    } else {
+                        Self::copy_path_recursively(&operation_source, &destination)?;
+                    }
+                    Ok(Some(destination))
                 })
                 .await;
+                let uncertain = Self::sidebar_mutation_outcome_uncertain(&outcome);
+                match outcome {
+                    Ok(Some(destination)) => results.push((source, destination, Ok(()))),
+                    Ok(None) => {}
+                    Err(error) => results.push((source, target_dir.clone(), Err(error))),
+                }
+                if uncertain {
+                    break;
+                }
+            }
             this.update(cx, |editor, cx| {
                 editor.finish_paste_into_dir(target_dir, is_cut, rewrite_context, results, cx)
             })
@@ -898,15 +1014,16 @@ impl EditorView {
                 Ok(()) => pasted_paths.push(dst),
                 Err(error) => {
                     let message = format!(
-                        "{}: {error}",
-                        self.t(crate::i18n::TextKey::FileOperationFailed)
+                        "{} ({} → {}): {error:#}",
+                        self.t(crate::i18n::TextKey::FileOperationFailed),
+                        src.display(),
+                        dst.display()
                     );
                     self.notify_error(message, cx);
                 }
             }
         }
         if is_cut {
-            self.file_clipboard = None;
             self.apply_workspace_link_rewrites(rewrite_context, &mappings, cx);
         }
         if starred_changed {
@@ -926,16 +1043,29 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn reveal_in_file_manager(&self, path: &Path) {
-        if let Err(error) = crate::platform::shell::reveal(path) {
-            log_error!("failed to reveal {}: {error}", path.display());
-        }
+    pub(crate) fn reveal_in_file_manager(&self, path: &Path, cx: &mut Context<Self>) {
+        self.reveal_paths_in_file_manager(&[path.to_path_buf()], cx);
     }
 
-    pub(crate) fn reveal_paths_in_file_manager(&self, paths: &[PathBuf]) {
-        for path in paths {
-            self.reveal_in_file_manager(path);
-        }
+    pub(crate) fn reveal_paths_in_file_manager(&self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let paths = paths.to_vec();
+        cx.spawn(async move |this, cx| {
+            for path in paths {
+                if let Err(error) = crate::platform::shell::reveal_async(path.clone()).await {
+                    let _ = this.update(cx, |this, cx| {
+                        this.notify_error(
+                            format!(
+                                "{} — {}: {error}",
+                                this.t(crate::i18n::TextKey::RevealInFinder),
+                                path.display(),
+                            ),
+                            cx,
+                        );
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn pick_workspace_folder(&mut self, cx: &mut Context<Self>) {
@@ -981,6 +1111,7 @@ impl EditorView {
     }
 
     pub(crate) fn switch_workspace(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        fs_task::register_workspace_root(&path);
         self.sidebar_root = path.clone();
         self.file_list_dir = path.clone();
         self.file_list_loaded_dir = None;
@@ -1083,7 +1214,218 @@ impl EditorView {
 #[cfg(test)]
 mod tests {
     use super::EditorView;
-    use std::fs;
+    use std::{
+        fs,
+        future::Future,
+        sync::Arc,
+        task::{Context, Poll, Wake, Waker},
+    };
+
+    struct TestWaker(std::thread::Thread);
+
+    impl Wake for TestWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    fn block_on<T>(future: impl Future<Output = T>) -> T {
+        let waker = Waker::from(Arc::new(TestWaker(std::thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let Poll::Ready(result) = future.as_mut().poll(&mut cx) {
+                return result;
+            }
+            std::thread::park_timeout(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn runner_preserves_uncertain_mutation_error_kinds() {
+        let temp = tempfile::tempdir().unwrap();
+        for kind in [std::io::ErrorKind::TimedOut, std::io::ErrorKind::WouldBlock] {
+            let result: anyhow::Result<()> = block_on(EditorView::run_sidebar_mutation(
+                "test uncertain mutation",
+                temp.path().join(format!("{kind:?}")),
+                move || {
+                    Err(anyhow::Error::from(std::io::Error::from(kind)).context("source removal"))
+                },
+            ));
+            assert!(EditorView::sidebar_mutation_outcome_uncertain(&result));
+            assert_eq!(
+                result
+                    .unwrap_err()
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .kind(),
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn external_drop_hover_only_checks_path_relationships() {
+        let missing = std::path::PathBuf::from("/unavailable-moeka-hover-test/note.md");
+        assert!(EditorView::sidebar_drop_would_copy(
+            std::slice::from_ref(&missing),
+            std::path::Path::new("/unavailable-moeka-hover-test/target"),
+        ));
+        assert!(!EditorView::sidebar_drop_would_copy(
+            std::slice::from_ref(&missing),
+            &missing.join("nested"),
+        ));
+    }
+
+    #[test]
+    fn runner_deadline_stops_late_rename_fallback_and_source_deletion() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::platform::fs_task::register_workspace_root(temp.path());
+        let source = temp.path().join("source.md");
+        let destination = temp.path().join("destination.md");
+        fs::write(&source, "keep").unwrap();
+        let worker_source = source.clone();
+        let worker_destination = destination.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (finished, done) = std::sync::mpsc::channel();
+        let result = block_on(crate::platform::fs_task::run_with_timeout(
+            "test expired move",
+            source.clone(),
+            std::time::Duration::from_millis(100),
+            move || {
+                let result = EditorView::move_path_with_fallback(
+                    &worker_source,
+                    &worker_destination,
+                    |_, _| {
+                        wait.recv_timeout(std::time::Duration::from_secs(2))
+                            .unwrap();
+                        Err(std::io::Error::other("late cross-volume rename failure"))
+                    },
+                    |_| panic!("late rename must not delete its source"),
+                );
+                finished
+                    .send(EditorView::sidebar_mutation_outcome_uncertain(&result))
+                    .unwrap();
+                Ok(result)
+            },
+        ));
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        release.send(()).unwrap();
+        assert!(
+            done.recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+        );
+        assert_eq!(fs::read_to_string(source).unwrap(), "keep");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn expired_rename_does_not_start_a_copy_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.md");
+        let destination = temp.path().join("destination.md");
+        fs::write(&source, "keep").unwrap();
+        let expired = std::cell::Cell::new(false);
+        let result = EditorView::move_path_with_fallback_and_check(
+            &source,
+            &destination,
+            |_, _| {
+                expired.set(true);
+                Err(std::io::Error::other("rename failed after deadline"))
+            },
+            |_| panic!("expired move must not delete its source"),
+            || {
+                if expired.get() {
+                    Err(std::io::ErrorKind::TimedOut.into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(EditorView::sidebar_mutation_outcome_uncertain(&result));
+        assert_eq!(fs::read_to_string(source).unwrap(), "keep");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn expired_copy_keeps_source_and_destination_without_deletion() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.md");
+        let destination = temp.path().join("destination.md");
+        fs::write(&source, "keep").unwrap();
+        let result = EditorView::move_path_with_fallback_and_check(
+            &source,
+            &destination,
+            |_, _| Err(std::io::Error::other("rename unsupported")),
+            |_| panic!("expired copy must not delete its source"),
+            || {
+                if destination.exists() {
+                    Err(std::io::ErrorKind::TimedOut.into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(EditorView::sidebar_mutation_outcome_uncertain(&result));
+        assert!(format!("{:#}", result.unwrap_err()).contains("retained for recovery"));
+        assert_eq!(fs::read_to_string(source).unwrap(), "keep");
+        assert_eq!(fs::read_to_string(destination).unwrap(), "keep");
+    }
+
+    #[test]
+    fn timed_out_source_removal_remains_an_uncertain_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.md");
+        let destination = temp.path().join("destination.md");
+        fs::write(&source, "keep").unwrap();
+        let result = EditorView::move_path_with_fallback(
+            &source,
+            &destination,
+            |_, _| Err(std::io::Error::other("rename unsupported")),
+            |_| Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into()),
+        );
+        assert!(EditorView::sidebar_mutation_outcome_uncertain(&result));
+        assert_eq!(fs::read_to_string(source).unwrap(), "keep");
+        assert_eq!(fs::read_to_string(destination).unwrap(), "keep");
+    }
+
+    #[test]
+    fn timed_out_rename_does_not_retry_through_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.md");
+        let destination = temp.path().join("destination.md");
+        fs::write(&source, "keep").unwrap();
+        let result = EditorView::move_path_with_fallback(
+            &source,
+            &destination,
+            |_, _| Err(std::io::ErrorKind::TimedOut.into()),
+            |_| panic!("uncertain rename must not delete its source"),
+        );
+        assert!(EditorView::sidebar_mutation_outcome_uncertain(&result));
+        assert_eq!(fs::read_to_string(source).unwrap(), "keep");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn busy_rename_does_not_retry_through_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.md");
+        let destination = temp.path().join("destination.md");
+        fs::write(&source, "keep").unwrap();
+        let result = EditorView::move_path_with_fallback(
+            &source,
+            &destination,
+            |_, _| Err(std::io::ErrorKind::WouldBlock.into()),
+            |_| panic!("uncertain rename must not delete its source"),
+        );
+        assert!(EditorView::sidebar_mutation_outcome_uncertain(&result));
+        assert_eq!(fs::read_to_string(source).unwrap(), "keep");
+        assert!(!destination.exists());
+    }
 
     #[test]
     fn paste_destination_adds_incrementing_suffix_before_extension() {
@@ -1098,8 +1440,9 @@ mod tests {
         fs::write(target_dir.join("file.ext"), "existing").unwrap();
         fs::write(target_dir.join("file-1.ext"), "existing").unwrap();
 
-        let destination =
-            EditorView::next_available_paste_destination(&source, &target_dir).unwrap();
+        let destination = EditorView::next_available_paste_destination(&source, &target_dir)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
             destination.file_name().unwrap().to_string_lossy(),
@@ -1117,13 +1460,31 @@ mod tests {
         fs::create_dir(target_dir.join("notes")).unwrap();
         fs::create_dir(target_dir.join("notes-1")).unwrap();
 
-        let destination =
-            EditorView::next_available_paste_destination(&source_dir, &target_dir).unwrap();
+        let destination = EditorView::next_available_paste_destination(&source_dir, &target_dir)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
             destination.file_name().unwrap().to_string_lossy(),
             "notes-2"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paste_destination_does_not_reuse_a_dangling_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source/note.md");
+        let target_dir = temp.path().join("target");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir(&target_dir).unwrap();
+        fs::write(&source, "keep").unwrap();
+        std::os::unix::fs::symlink(temp.path().join("missing"), target_dir.join("note.md"))
+            .unwrap();
+        let destination = EditorView::next_available_paste_destination(&source, &target_dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(destination, target_dir.join("note-1.md"));
     }
 
     #[test]

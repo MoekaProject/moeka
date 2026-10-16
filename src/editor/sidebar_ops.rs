@@ -65,6 +65,12 @@ impl EditorView {
             .iter()
             .map(|path| Self::rewrite_moved_path(path, &from, &to).unwrap_or_else(|| path.clone()))
             .collect();
+        if !self.file_list_dir.as_os_str().is_empty()
+            && let Some(new_dir) = Self::rewrite_moved_path(&self.file_list_dir, &from, &to)
+        {
+            self.file_list_dir = new_dir;
+            self.file_list_dirty = true;
+        }
         if self.app_settings.rename_starred_prefix(&from, &to) {
             self.app_settings.save();
         }
@@ -168,18 +174,57 @@ impl EditorView {
         target_dir: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        let mut first_revealed_path = None;
         let rewrite_context = self.capture_workspace_rewrite_context();
-        let mut successful_mappings = Vec::new();
         let target_dir = Self::normalize_sidebar_path(&target_dir);
-        for src in paths.iter().map(|path| Self::normalize_sidebar_path(path)) {
-            let Some(dst) = Self::sidebar_drop_destination(&src, &target_dir) else {
-                continue;
-            };
-            if let Err(error) = Self::move_path_compat(&src, &dst) {
+        let moves = paths
+            .iter()
+            .map(|path| Self::normalize_sidebar_path(path))
+            .filter_map(|src| {
+                Self::sidebar_drop_destination(&src, &target_dir).map(|dst| (src, dst))
+            })
+            .collect::<Vec<_>>();
+        self.context_menu = None;
+        self.clear_sidebar_drag_state(cx);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let mut results = Vec::new();
+            for (src, dst) in moves {
+                let operation_src = src.clone();
+                let operation_dst = dst.clone();
+                let result = Self::run_sidebar_mutation("move", src.clone(), move || {
+                    Self::move_path_compat(&operation_src, &operation_dst)
+                })
+                .await;
+                let uncertain = Self::sidebar_mutation_outcome_uncertain(&result);
+                results.push((src, dst, result));
+                if uncertain {
+                    break;
+                }
+            }
+            this.update(cx, |editor, cx| {
+                editor.finish_move_sidebar_items(target_dir, rewrite_context, results, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_move_sidebar_items(
+        &mut self,
+        target_dir: PathBuf,
+        rewrite_context: Option<attachments::WorkspaceRewriteContext>,
+        results: Vec<(PathBuf, PathBuf, anyhow::Result<()>)>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut first_revealed_path = None;
+        let mut successful_mappings = Vec::new();
+        for (src, dst, result) in results {
+            if let Err(error) = result {
                 let message = format!(
-                    "{}: {error}",
-                    self.t(crate::i18n::TextKey::FileOperationFailed)
+                    "{} ({} → {}): {error:#}",
+                    self.t(crate::i18n::TextKey::FileOperationFailed),
+                    src.display(),
+                    dst.display()
                 );
                 self.notify_error(message, cx);
                 continue;
@@ -235,7 +280,6 @@ impl EditorView {
         self.apply_workspace_link_rewrites(rewrite_context, &successful_mappings, cx);
         self.context_menu = None;
         self.invalidate_sidebar_items_cache();
-        self.clear_sidebar_drag_state(cx);
         if let Some(reveal_path) = first_revealed_path {
             let mut moved_selection = self.selected_sidebar_paths.clone();
             if !moved_selection.contains(&reveal_path) {

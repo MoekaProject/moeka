@@ -1,7 +1,50 @@
-use std::collections::HashMap;
-use std::fs;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::{Duration, Instant};
+use std::{fs, io};
+
+use crate::platform::fs_task;
+
+#[derive(Default)]
+pub(crate) struct SessionRestoreState {
+    pending: HashMap<String, PendingTabRestore>,
+    workspace_access: HashMap<PathBuf, WorkspaceAccess>,
+    queues: HashMap<PathBuf, VecDeque<String>>,
+    loading_scopes: HashSet<PathBuf>,
+}
+
+struct WorkspaceAccess {
+    bookmark: String,
+    loading: bool,
+    resolved: bool,
+    request_root: Option<PathBuf>,
+}
+
+impl WorkspaceAccess {
+    fn begin(&mut self, root: &Path) -> Option<String> {
+        if self.loading || self.resolved {
+            return None;
+        }
+        self.loading = true;
+        self.request_root = Some(root.to_path_buf());
+        Some(self.bookmark.clone())
+    }
+}
+
+struct PendingTabRestore {
+    record: TabSessionRecord,
+    initial_text: String,
+    loading: bool,
+}
+
+static BOOKMARK_EXECUTOR: OnceLock<gpui::BackgroundExecutor> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+fn bookmark_attempts() -> &'static Mutex<HashSet<PathBuf>> {
+    static ATTEMPTS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    ATTEMPTS.get_or_init(Mutex::default)
+}
 
 use super::config_store::{
     self, PaneLayoutRecord, SessionConfig, TabHistoryIndex, TabRecoveryState, TabSessionRecord,
@@ -63,7 +106,7 @@ fn session_writer() -> &'static mpsc::Sender<SessionWrite> {
 pub(crate) fn flush_session_writes() {
     let (sender, receiver) = mpsc::channel();
     if session_writer().send(SessionWrite::Flush(sender)).is_ok() {
-        let _ = receiver.recv();
+        let _ = receiver.recv_timeout(Duration::from_millis(500));
     }
 }
 
@@ -78,7 +121,10 @@ pub(crate) fn persist_session(editor: &EditorView) {
     } else {
         Some(editor.sidebar_root.clone())
     };
-    persist_workspace_bookmarks(&mut config.workspaces);
+    config
+        .workspaces
+        .bookmarks
+        .retain(|root, _| editor.workspaces.contains(root));
     let leaf_ids = editor.pane_layout.leaf_ids();
     let focused_pane_leaf = leaf_ids.iter().position(|id| *id == editor.focused_pane_id);
     let session = SessionConfig {
@@ -89,7 +135,7 @@ pub(crate) fn persist_session(editor: &EditorView) {
             .tabs
             .iter()
             .filter(|tab| tab.kind != TabKind::Diff)
-            .map(tab_to_record)
+            .map(|tab| session_tab_to_record(editor, tab))
             .collect(),
         pane_layout: Some(pane_layout_to_record(editor, &editor.pane_layout)),
         focused_pane_leaf,
@@ -100,48 +146,73 @@ pub(crate) fn persist_session(editor: &EditorView) {
     if !is_default_welcome_session(editor) || !session_contains_nonwelcome_tabs(&config.sessions) {
         config.sessions = session;
     }
-    let _ = session_writer().send(SessionWrite::Save(config.clone()));
+    let snapshot = config.clone();
+    let _ = session_writer().send(SessionWrite::Save(snapshot.clone()));
+    drop(cached);
+    persist_workspace_bookmarks(&snapshot.workspaces);
 }
 
-/// Mints a bookmark for every root that lacks one and forgets closed roots.
-///
-/// Running at save time covers every way a root can be added — the folder
-/// picker, drag and drop, and command-line arguments — because the app
-/// necessarily still has access to the folder it just opened.
-fn persist_workspace_bookmarks(workspaces: &mut config_store::WorkspaceConfig) {
-    workspaces
-        .bookmarks
-        .retain(|root, _| workspaces.roots.contains(root));
-    for root in &workspaces.roots {
-        if !workspaces.bookmarks.contains_key(root)
-            && let Some(bookmark) = crate::platform::security_scope::bookmark_for(root)
-        {
-            workspaces.bookmarks.insert(root.clone(), bookmark);
-        }
+fn with_bookmark_pool<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(target_os = "macos")]
+    {
+        objc::rc::autoreleasepool(f)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        f()
     }
 }
 
-/// Reopens the security scope for each saved root.
-///
-/// Returns the roots whose folder moved since the bookmark was taken, mapped
-/// to where they live now.
-fn reopen_workspace_bookmarks(
-    workspaces: &config_store::WorkspaceConfig,
-) -> HashMap<PathBuf, PathBuf> {
-    let mut relocated = HashMap::new();
-    for root in &workspaces.roots {
-        let Some(bookmark) = workspaces.bookmarks.get(root) else {
-            continue;
+fn persist_workspace_bookmarks(workspaces: &config_store::WorkspaceConfig) {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = workspaces;
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let Some(executor) = BOOKMARK_EXECUTOR.get() else {
+            return;
         };
-        match crate::platform::security_scope::start_access(bookmark) {
-            Some(resolved) if resolved != *root => {
-                relocated.insert(root.clone(), resolved);
+        for root in &workspaces.roots {
+            if workspaces.bookmarks.contains_key(root)
+                || !bookmark_attempts()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(root.clone())
+            {
+                continue;
             }
-            Some(_) => {}
-            None => log_error!("lost access to workspace {}", root.display()),
+            let root = root.clone();
+            executor
+                .spawn(async move {
+                    let bookmark_root = root.clone();
+                    let result =
+                        fs_task::run_value("Create workspace bookmark", root.clone(), move || {
+                            with_bookmark_pool(|| {
+                                crate::platform::security_scope::bookmark_for(&bookmark_root)
+                            })
+                        })
+                        .await;
+                    match result {
+                        Ok(Some(bookmark)) => {
+                            let mut cached =
+                                session_cache().lock().unwrap_or_else(|e| e.into_inner());
+                            if !cached.workspaces.roots.contains(&root) {
+                                return;
+                            }
+                            cached.workspaces.bookmarks.insert(root, bookmark);
+                            let snapshot = cached.clone();
+                            let _ = session_writer().send(SessionWrite::Save(snapshot));
+                            drop(cached);
+                        }
+                        Err(error) => log_error!("{error}"),
+                        Ok(None) => {}
+                    }
+                })
+                .detach();
         }
     }
-    relocated
 }
 
 fn is_default_welcome_session(editor: &EditorView) -> bool {
@@ -195,7 +266,7 @@ fn pane_layout_to_record(editor: &EditorView, layout: &PaneLayout) -> PaneLayout
                 tabs: tabs
                     .iter()
                     .filter(|tab| tab.kind != TabKind::Diff)
-                    .map(tab_to_record)
+                    .map(|tab| session_tab_to_record(editor, tab))
                     .collect(),
                 active_tab_id: active_tab_id.clone(),
             }
@@ -218,96 +289,520 @@ fn pane_layout_to_record(editor: &EditorView, layout: &PaneLayout) -> PaneLayout
     }
 }
 
-pub(crate) fn restore_session(editor: &mut EditorView) {
-    let config = config_store::load_sessions();
-    prefetch_session_files(&config.sessions);
-    let relocated = reopen_workspace_bookmarks(&config.workspaces);
-    editor.workspaces = config
-        .workspaces
-        .roots
-        .iter()
-        .map(|root| relocated.get(root).unwrap_or(root).clone())
-        .collect();
-    if let Some(active_root) = config.workspaces.active_root {
-        let active_root = relocated.get(&active_root).unwrap_or(&active_root).clone();
+pub(crate) fn restore_session(editor: &mut EditorView, cx: &mut Context<EditorView>) {
+    let _ = BOOKMARK_EXECUTOR.set(cx.background_executor().clone());
+    let config = session_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    editor.workspaces = config.workspaces.roots.clone();
+    for root in &editor.workspaces {
+        fs_task::register_workspace_root(root);
+    }
+    if let Some(active_root) = config.workspaces.active_root.clone() {
+        fs_task::register_workspace_root(&active_root);
         editor.sidebar_root = active_root.clone();
         editor.sidebar_visible = true;
         editor.expanded_dirs.clear();
         editor.expanded_dirs.insert(active_root);
     }
 
-    // Split-pane layout (new format) supersedes the legacy flat tab list.
-    if let Some(layout_record) = config.sessions.pane_layout.as_ref()
-        && restore_pane_layout(
+    let restored_layout = config.sessions.pane_layout.as_ref().is_some_and(|layout| {
+        restore_pane_layout(
             editor,
-            layout_record,
+            layout,
             config.sessions.focused_pane_leaf,
             config.sessions.next_tab_id,
         )
-    {
-        return;
-    }
-
-    if config.sessions.tabs.is_empty() {
-        return;
-    }
-
-    let mut restored_tabs = Vec::new();
-    for record in &config.sessions.tabs {
-        if let Some(tab) = restore_tab_from_record(record, editor.ui_language) {
-            restored_tabs.push(tab);
+    });
+    if !restored_layout {
+        let tabs = config
+            .sessions
+            .tabs
+            .iter()
+            .filter_map(|record| restore_tab_metadata(record, editor.ui_language))
+            .collect::<Vec<_>>();
+        if !tabs.is_empty() {
+            editor.tabs = tabs;
+            editor.active_tab_id = config
+                .sessions
+                .active_tab_id
+                .clone()
+                .filter(|id| editor.tabs.iter().any(|tab| &tab.id == id))
+                .or_else(|| editor.tabs.first().map(|tab| tab.id.clone()));
+            editor.next_tab_id = config
+                .sessions
+                .next_tab_id
+                .unwrap_or_else(|| infer_next_tab_id(&editor.tabs, editor.next_tab_id));
+            editor.active_tab_index_cache.set(None);
+            hydrate_active_tab_state(editor);
         }
     }
 
-    if restored_tabs.is_empty() {
-        return;
+    fn collect(layout: &PaneLayoutRecord, records: &mut Vec<TabSessionRecord>) {
+        match layout {
+            PaneLayoutRecord::Leaf { tabs, .. } => records.extend(tabs.iter().cloned()),
+            PaneLayoutRecord::Split { children, .. } => {
+                for child in children {
+                    collect(child, records);
+                }
+            }
+        }
     }
+    let mut records = Vec::new();
+    if restored_layout {
+        collect(config.sessions.pane_layout.as_ref().unwrap(), &mut records);
+    } else {
+        records = config.sessions.tabs.clone();
+    }
+    for record in records {
+        if record.kind == "editor" && editor.pane_id_for_tab(&record.id).is_some() {
+            let initial_text = editor
+                .all_tabs()
+                .find(|tab| tab.id == record.id)
+                .map(|tab| tab.snapshot.text.clone())
+                .unwrap_or_default();
+            editor.session_restore.pending.insert(
+                record.id.clone(),
+                PendingTabRestore {
+                    record,
+                    initial_text,
+                    loading: false,
+                },
+            );
+        }
+    }
+    if cfg!(target_os = "macos") {
+        for (root, bookmark) in config.workspaces.bookmarks {
+            if editor.workspaces.contains(&root) {
+                editor.session_restore.workspace_access.insert(
+                    root,
+                    WorkspaceAccess {
+                        bookmark,
+                        loading: false,
+                        resolved: false,
+                        request_root: None,
+                    },
+                );
+            }
+        }
+    }
+    schedule_pending_restores(editor, None, cx);
+    // Roots without restored documents still need their security scope reopened.
+    let roots = editor
+        .session_restore
+        .workspace_access
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for root in roots {
+        schedule_workspace_access(editor, root, cx);
+    }
+}
 
-    editor.tabs = restored_tabs;
-    editor.active_tab_id = config
-        .sessions
-        .active_tab_id
-        .filter(|active_id| editor.tabs.iter().any(|tab| tab.id == *active_id))
-        .or_else(|| editor.tabs.first().map(|tab| tab.id.clone()));
-    editor.next_tab_id = config
-        .sessions
-        .next_tab_id
-        .unwrap_or_else(|| infer_next_tab_id(&editor.tabs, editor.next_tab_id));
+pub(crate) fn restoring_path<'a>(editor: &'a EditorView, tab_id: &str) -> Option<&'a Path> {
+    editor
+        .session_restore
+        .pending
+        .get(tab_id)?
+        .record
+        .path
+        .as_deref()
+}
 
-    let Some(index) = editor.active_tab_index() else {
+pub(crate) fn forget_restoring_tab(editor: &mut EditorView, tab_id: &str) {
+    editor.session_restore.pending.remove(tab_id);
+}
+
+fn schedule_pending_restores(
+    editor: &mut EditorView,
+    root: Option<&Path>,
+    cx: &mut Context<EditorView>,
+) {
+    let mut ids = editor
+        .all_tabs()
+        .filter(|tab| {
+            editor
+                .session_restore
+                .pending
+                .get(&tab.id)
+                .is_some_and(|pending| {
+                    root.is_none_or(|root| {
+                        pending
+                            .record
+                            .path
+                            .as_ref()
+                            .is_some_and(|path| path.starts_with(root))
+                    })
+                })
+        })
+        .map(|tab| tab.id.clone())
+        .collect::<Vec<_>>();
+    ids.sort_by_key(|id| editor.active_tab_id.as_ref() != Some(id));
+    for id in ids {
+        schedule_tab_restore(editor, &id, cx);
+    }
+}
+
+async fn run_restore_job<T: Send + 'static>(
+    operation: &'static str,
+    path: PathBuf,
+    executor: &gpui::BackgroundExecutor,
+    work: impl Fn() -> io::Result<T> + Send + Sync + 'static,
+) -> io::Result<T> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let work = Arc::new(work);
+    loop {
+        let job = work.clone();
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let result =
+            fs_task::run_with_timeout(operation, path.clone(), remaining, move || job()).await;
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock)
+        {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                executor
+                    .timer(remaining.min(Duration::from_millis(50)))
+                    .await;
+                if Instant::now() < deadline {
+                    continue;
+                }
+            }
+        }
+        return result;
+    }
+}
+
+fn schedule_workspace_access(editor: &mut EditorView, root: PathBuf, cx: &mut Context<EditorView>) {
+    let Some(access) = editor.session_restore.workspace_access.get_mut(&root) else {
         return;
     };
-    let active_tab = editor.tabs[index].clone();
-    editor.current_file_path = active_tab.path.clone();
-    editor.editor_left_aligned = active_tab.editor_left_aligned;
-    if active_tab.kind == TabKind::Editor {
-        if active_tab
-            .file_kind
-            .as_ref()
-            .is_some_and(FileKind::supports_text_buffer)
-        {
-            editor.buffer = Buffer::from_text(&active_tab.snapshot.text);
-            editor.cursor.offset = active_tab.snapshot.cursor_offset.min(editor.buffer.len());
-            editor.cursor.anchor = active_tab.snapshot.cursor_anchor.min(editor.buffer.len());
-            editor.extra_cursors = active_tab
-                .snapshot
-                .extra_cursors
+    let Some(bookmark) = access.begin(&root) else {
+        return;
+    };
+    cx.spawn(async move |this, cx| {
+        let result = run_restore_job(
+            "Restore workspace access",
+            root.clone(),
+            cx.background_executor(),
+            move || {
+                Ok(with_bookmark_pool(|| {
+                    crate::platform::security_scope::start_access(&bookmark)
+                }))
+            },
+        )
+        .await;
+        this.update(cx, |editor, cx| {
+            // An enclosing bookmark may have relocated this root while its access job ran.
+            let Some(access_root) = editor
+                .session_restore
+                .workspace_access
                 .iter()
-                .map(|(offset, anchor)| Cursor {
-                    offset: (*offset).min(editor.buffer.len()),
-                    anchor: (*anchor).min(editor.buffer.len()),
-                })
-                .collect();
-        } else {
-            editor.buffer = Buffer::from_text("");
-            editor.cursor.offset = 0;
-            editor.cursor.anchor = 0;
-            editor.extra_cursors.clear();
+                .find(|(_, access)| access.request_root.as_ref() == Some(&root))
+                .map(|(root, _)| root.clone())
+            else {
+                return;
+            };
+            let access = editor
+                .session_restore
+                .workspace_access
+                .get_mut(&access_root)
+                .unwrap();
+            access.loading = false;
+            access.request_root = None;
+            let resolved = match result {
+                Ok(Some(resolved)) => {
+                    access.resolved = true;
+                    resolved
+                }
+                Ok(None) => {
+                    log_error!("lost access to workspace {}", access_root.display());
+                    access.resolved = true;
+                    session_cache()
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .workspaces
+                        .bookmarks
+                        .remove(&access_root);
+                    schedule_pending_restores(editor, Some(&access_root), cx);
+                    return;
+                }
+                Err(error) => {
+                    editor.notify_error(error.to_string(), cx);
+                    return;
+                }
+            };
+            fs_task::register_workspace_root(&resolved);
+            if resolved != access_root {
+                relocate_restoring_workspace(editor, &access_root, &resolved, cx);
+            }
+            schedule_pending_restores(editor, Some(&resolved), cx);
+        })
+        .ok();
+    })
+    .detach();
+}
+
+fn relocate_record(record: &mut TabSessionRecord, from: &Path, to: &Path) {
+    for path in [
+        &mut record.path,
+        &mut record.recovery.source_path,
+        &mut record.history.undo_log_path,
+    ] {
+        if let Some(current) = path.as_ref()
+            && let Ok(relative) = current.strip_prefix(from)
+        {
+            *path = Some(to.join(relative));
         }
-        editor.scroll_offset = active_tab.snapshot.scroll_offset;
-        editor.extra_marked_ranges.clear();
-        editor.reparse();
     }
+    if let Some(identity) = record.history.source_identity.as_ref()
+        && let Ok(relative) = Path::new(identity).strip_prefix(from)
+    {
+        record.history.source_identity = Some(to.join(relative).to_string_lossy().into_owned());
+    }
+}
+
+fn relocate_restoring_workspace(
+    editor: &mut EditorView,
+    from: &Path,
+    to: &Path,
+    cx: &mut Context<EditorView>,
+) {
+    for workspace in &mut editor.workspaces {
+        if let Ok(relative) = workspace.strip_prefix(from) {
+            *workspace = to.join(relative);
+            fs_task::register_workspace_root(workspace);
+        }
+    }
+    let access = std::mem::take(&mut editor.session_restore.workspace_access);
+    for (root, state) in access {
+        let relocated = root
+            .strip_prefix(from)
+            .map(|relative| to.join(relative))
+            .unwrap_or(root);
+        editor
+            .session_restore
+            .workspace_access
+            .insert(relocated, state);
+    }
+    for pending in editor.session_restore.pending.values_mut() {
+        relocate_record(&mut pending.record, from, to);
+    }
+    {
+        let mut cached = session_cache().lock().unwrap_or_else(|e| e.into_inner());
+        let bookmarks = std::mem::take(&mut cached.workspaces.bookmarks);
+        for (root, bookmark) in bookmarks {
+            let relocated = root
+                .strip_prefix(from)
+                .map(|relative| to.join(relative))
+                .unwrap_or(root);
+            cached.workspaces.bookmarks.insert(relocated, bookmark);
+        }
+    }
+    if editor.sidebar_root == from {
+        editor.switch_workspace(to.to_path_buf(), cx);
+    }
+    persist_session(editor);
+}
+
+fn restore_scope_for_path(path: &Path, roots: &[PathBuf]) -> PathBuf {
+    roots
+        .iter()
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .cloned()
+        .unwrap_or_else(|| path.components().take(3).collect())
+}
+
+pub(crate) fn schedule_tab_restore(
+    editor: &mut EditorView,
+    tab_id: &str,
+    cx: &mut Context<EditorView>,
+) {
+    let Some(pending) = editor.session_restore.pending.get(tab_id) else {
+        return;
+    };
+    if pending.loading {
+        return;
+    }
+    if let Some(path) = &pending.record.path {
+        let access_root = editor
+            .session_restore
+            .workspace_access
+            .iter()
+            .filter(|(root, access)| path.starts_with(root) && !access.resolved)
+            .max_by_key(|(root, _)| root.components().count())
+            .map(|(root, _)| root.clone());
+        if let Some(root) = access_root {
+            schedule_workspace_access(editor, root, cx);
+            return;
+        }
+    }
+    let path = pending
+        .record
+        .path
+        .clone()
+        .or_else(|| pending.record.history.undo_log_path.clone())
+        .unwrap_or_else(|| history_store::default_journal_path(tab_id, None));
+    let scope = restore_scope_for_path(&path, &editor.workspaces);
+    editor
+        .session_restore
+        .pending
+        .get_mut(tab_id)
+        .unwrap()
+        .loading = true;
+    editor
+        .session_restore
+        .queues
+        .entry(scope.clone())
+        .or_default()
+        .push_back(tab_id.to_string());
+    start_next_tab_restore(editor, scope, cx);
+}
+
+fn start_next_tab_restore(editor: &mut EditorView, scope: PathBuf, cx: &mut Context<EditorView>) {
+    if editor.session_restore.loading_scopes.contains(&scope) {
+        return;
+    }
+    let (record, initial_text) = loop {
+        let Some(id) = editor
+            .session_restore
+            .queues
+            .get_mut(&scope)
+            .and_then(VecDeque::pop_front)
+        else {
+            return;
+        };
+        let Some(pending) = editor.session_restore.pending.get(&id) else {
+            continue;
+        };
+        if editor.pane_id_for_tab(&id).is_none()
+            || editor
+                .all_tabs()
+                .any(|tab| tab.id == id && tab.path.is_some())
+        {
+            editor.session_restore.pending.remove(&id);
+            continue;
+        }
+        break (pending.record.clone(), pending.initial_text.clone());
+    };
+    editor.session_restore.loading_scopes.insert(scope.clone());
+    let job_path = record
+        .path
+        .clone()
+        .or_else(|| record.history.undo_log_path.clone())
+        .unwrap_or_else(|| history_store::default_journal_path(&record.id, None));
+    let load_record = record.clone();
+    let ui_language = editor.ui_language;
+    cx.spawn(async move |this, cx| {
+        let result = run_restore_job(
+            "Restore tab",
+            job_path,
+            cx.background_executor(),
+            move || load_restored_tab(&load_record, ui_language),
+        )
+        .await;
+        this.update(cx, |editor, cx| {
+            let pause = result.as_ref().is_err_and(|error| {
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                )
+            });
+            finish_tab_restore(editor, &record, &initial_text, result, cx);
+            editor.session_restore.loading_scopes.remove(&scope);
+            if pause {
+                // A stalled mount must not consume more workers or flood errors for every tab.
+                if let Some(queued) = editor.session_restore.queues.remove(&scope) {
+                    for id in queued {
+                        if let Some(pending) = editor.session_restore.pending.get_mut(&id) {
+                            pending.loading = false;
+                        }
+                    }
+                }
+            } else {
+                start_next_tab_restore(editor, scope, cx);
+            }
+        })
+        .ok();
+    })
+    .detach();
+}
+
+fn finish_tab_restore(
+    editor: &mut EditorView,
+    record: &TabSessionRecord,
+    initial_text: &str,
+    result: io::Result<RestoredTabData>,
+    cx: &mut Context<EditorView>,
+) {
+    let Some(owner) = editor.pane_id_for_tab(&record.id) else {
+        editor.session_restore.pending.remove(&record.id);
+        return;
+    };
+    if editor
+        .all_tabs()
+        .any(|tab| tab.id == record.id && tab.path.is_some())
+    {
+        editor.session_restore.pending.remove(&record.id);
+        return;
+    }
+    let Some(pending) = editor.session_restore.pending.get_mut(&record.id) else {
+        return;
+    };
+    pending.loading = false;
+    if pending.record != *record {
+        return;
+    }
+    let mut loaded = match result {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            editor.notify_error(format!("{}: {error}", editor.t(TextKey::OpenFailed)), cx);
+            return;
+        }
+    };
+    editor.with_pane_if_alive(owner, |editor| {
+        let Some(index) = editor.tabs.iter().position(|tab| tab.id == record.id) else {
+            return;
+        };
+        let active = editor.active_tab_id.as_deref() == Some(record.id.as_str());
+        let current_text = if active {
+            editor.buffer.text()
+        } else {
+            &editor.tabs[index].snapshot.text
+        };
+        if (active && editor.pending_history_transaction.is_some())
+            || !restore_can_apply(&editor.tabs[index], current_text, initial_text)
+        {
+            // Persist the live edit, not the stale snapshot that preceded this read.
+            if active {
+                editor.persist_active_tab_state();
+            }
+            return;
+        }
+        if record.recovery.text.is_some() {
+            let current = if active {
+                editor.current_snapshot()
+            } else {
+                editor.tabs[index].snapshot.clone()
+            };
+            loaded.snapshot.cursor_offset = current.cursor_offset;
+            loaded.snapshot.cursor_anchor = current.cursor_anchor;
+            loaded.snapshot.scroll_offset = current.scroll_offset;
+            loaded.snapshot.extra_cursors = current.extra_cursors;
+        }
+        apply_restored_tab(&mut editor.tabs[index], loaded);
+        editor.session_restore.pending.remove(&record.id);
+        if active {
+            editor.discard_history_transaction();
+            hydrate_active_tab_state(editor);
+            editor.invalidate_active_file_panel_caches();
+        }
+        cx.notify();
+    });
+    persist_session(editor);
 }
 
 /// Rebuilds the pane tree from a session record. Returns false when nothing
@@ -383,12 +878,9 @@ fn build_pane_layout(
         } => {
             let mut restored_tabs = Vec::new();
             for tab_record in tabs {
-                if let Some(tab) = restore_tab_from_record(tab_record, ui_language) {
+                if let Some(tab) = restore_tab_metadata(tab_record, ui_language) {
                     restored_tabs.push(tab);
                 }
-            }
-            if restored_tabs.is_empty() {
-                return None;
             }
             let pane_id = panes.iter().map(|pane| pane.id + 1).max().unwrap_or(0);
             let mut pane = Pane::new(pane_id);
@@ -444,6 +936,7 @@ fn hydrate_active_tab_state(editor: &mut EditorView) {
     let active_tab = editor.tabs[index].clone();
     editor.current_file_path = active_tab.path.clone();
     editor.editor_left_aligned = active_tab.editor_left_aligned;
+    editor.reading_mode = active_tab.reading_mode;
     // Keep the file-kind cache in sync so the status bar (language label)
     // and file-kind-dependent paths work right after session restore.
     editor.active_file_kind_cache = active_tab.file_kind.clone();
@@ -477,6 +970,43 @@ fn hydrate_active_tab_state(editor: &mut EditorView) {
     }
 }
 
+fn session_tab_to_record(editor: &EditorView, tab: &OpenTab) -> TabSessionRecord {
+    let Some(pending) = editor.session_restore.pending.get(&tab.id) else {
+        return tab_to_record(tab);
+    };
+    pending_tab_to_record(tab, pending)
+}
+
+fn pending_tab_to_record(tab: &OpenTab, pending: &PendingTabRestore) -> TabSessionRecord {
+    let mut record = pending.record.clone();
+    record.title = tab.title.clone();
+    record.is_preview = tab.is_preview;
+    record.is_pinned = tab.is_pinned;
+    record.view.editor_left_aligned = tab.editor_left_aligned;
+    record.view.reading_mode = tab.reading_mode;
+    if tab.path.is_some() {
+        return tab_to_record(tab);
+    }
+    let text_changed = tab.snapshot.text != pending.initial_text;
+    let len = pending.initial_text.len();
+    let view_changed = tab.snapshot.cursor_offset != pending.record.view.cursor_offset.min(len)
+        || tab.snapshot.cursor_anchor != pending.record.view.cursor_anchor.min(len)
+        || tab.snapshot.scroll_offset != pending.record.view.scroll_offset
+        || !tab.snapshot.extra_cursors.iter().copied().eq(pending
+            .record
+            .view
+            .extra_cursors
+            .iter()
+            .map(|(offset, anchor)| ((*offset).min(len), (*anchor).min(len))));
+    if text_changed {
+        record.recovery.text = Some(tab.snapshot.text.clone());
+    }
+    if text_changed || view_changed {
+        record.view = tab_to_record(tab).view;
+    }
+    record
+}
+
 fn tab_to_record(tab: &OpenTab) -> TabSessionRecord {
     TabSessionRecord {
         id: tab.id.clone(),
@@ -505,7 +1035,7 @@ fn tab_to_record(tab: &OpenTab) -> TabSessionRecord {
     }
 }
 
-fn restore_tab_from_record(record: &TabSessionRecord, ui_language: UiLanguage) -> Option<OpenTab> {
+fn restore_tab_metadata(record: &TabSessionRecord, ui_language: UiLanguage) -> Option<OpenTab> {
     if record.kind == "terminal" {
         let agent_cli = record
             .agent_cli
@@ -522,31 +1052,35 @@ fn restore_tab_from_record(record: &TabSessionRecord, ui_language: UiLanguage) -
         return Some(settings_tab(record.id.clone()));
     }
 
-    let file_kind = record.file_kind.as_deref().and_then(deserialize_file_kind);
-    let (path, snapshot, is_dirty) = resolve_snapshot(record, file_kind.as_ref(), ui_language)?;
-    let whiteboard = if matches!(file_kind, Some(FileKind::Whiteboard)) {
-        path.as_deref().map(WhiteboardTabState::load_from_path)
+    let saved_kind = record.file_kind.as_deref().and_then(deserialize_file_kind);
+    // Until the source is verified, no save/autosave/watcher path may target it.
+    // Recovery drafts remain editable; unknown source contents are non-text placeholders.
+    let file_kind = if record.path.is_some() && record.recovery.text.is_none() {
+        Some(FileKind::Binary)
     } else {
-        None
+        saved_kind
+            .filter(|kind| record.recovery.text.is_none() || kind.supports_text_buffer())
+            .or(Some(FileKind::Markdown))
     };
-    let mut history = history_store::load_tab_history_from_path(
-        &record.id,
-        path.as_deref(),
-        record.history.undo_log_path.as_deref(),
-        &snapshot,
+    let text = record.recovery.text.clone().unwrap_or_else(|| {
+        if record.id == WELCOME_TAB_ID {
+            default_document_text(ui_language)
+        } else {
+            String::new()
+        }
+    });
+    let snapshot = snapshot_for_record(record, text);
+    let is_dirty = record.recovery.text.is_some();
+    let mut recovery = record.recovery.clone();
+    if recovery.source_path.is_none() {
+        recovery.source_path = record.path.clone();
+    }
+    let history = history_store::TabHistory::new(
+        record.history.source_identity.clone(),
+        record.history.undo_log_path.clone(),
     );
-    if let Some(source_identity) = record.history.source_identity.clone() {
-        history.source_identity = Some(source_identity);
-    }
-    if !is_dirty && path.is_some() {
-        history.saved_text = Some(snapshot.text.clone());
-    }
-
-    let recovery = if is_dirty {
-        record.recovery.clone()
-    } else {
-        TabRecoveryState::default()
-    };
+    let path = None;
+    let whiteboard = None;
 
     Some(OpenTab {
         id: record.id.clone(),
@@ -570,26 +1104,149 @@ fn restore_tab_from_record(record: &TabSessionRecord, ui_language: UiLanguage) -
     })
 }
 
+// Unit tests use a synchronous adapter; production restores only through fs_task.
+#[cfg(test)]
+fn restore_tab_from_record(record: &TabSessionRecord, ui_language: UiLanguage) -> Option<OpenTab> {
+    let mut tab = restore_tab_metadata(record, ui_language)?;
+    if tab.kind == TabKind::Editor {
+        match load_restored_tab(record, ui_language) {
+            Ok(loaded) => apply_restored_tab(&mut tab, loaded),
+            Err(_) if record.recovery.text.is_some() => {}
+            Err(_) => return None,
+        }
+    }
+    Some(tab)
+}
+
+fn snapshot_for_record(record: &TabSessionRecord, text: String) -> EditorSnapshot {
+    EditorSnapshot {
+        cursor_offset: record.view.cursor_offset.min(text.len()),
+        cursor_anchor: record.view.cursor_anchor.min(text.len()),
+        scroll_offset: record.view.scroll_offset,
+        extra_cursors: record
+            .view
+            .extra_cursors
+            .iter()
+            .map(|(offset, anchor)| ((*offset).min(text.len()), (*anchor).min(text.len())))
+            .collect(),
+        text,
+    }
+}
+
+struct RestoredTabData {
+    path: Option<PathBuf>,
+    snapshot: EditorSnapshot,
+    file_kind: FileKind,
+    whiteboard: Option<WhiteboardTabState>,
+    history: history_store::TabHistory,
+    is_dirty: bool,
+    recovery: TabRecoveryState,
+}
+
+fn load_restored_tab(
+    record: &TabSessionRecord,
+    ui_language: UiLanguage,
+) -> io::Result<RestoredTabData> {
+    let saved_kind = record.file_kind.as_deref().and_then(deserialize_file_kind);
+    let bytes = record.path.as_deref().map(fs::read).transpose()?;
+    let mut file_kind = bytes
+        .as_deref()
+        .zip(record.path.as_deref())
+        .map(|(bytes, path)| classify_file_kind_for_bytes(path, bytes))
+        .or(saved_kind.clone())
+        .unwrap_or(FileKind::Markdown);
+    let (path, snapshot, is_dirty) =
+        resolve_snapshot(record, Some(&file_kind), ui_language, bytes.as_deref()).ok_or_else(
+            || {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "session tab has no recoverable contents",
+                )
+            },
+        )?;
+    if is_dirty && !file_kind.supports_text_buffer() {
+        file_kind = saved_kind
+            .filter(FileKind::supports_text_buffer)
+            .unwrap_or(FileKind::Markdown);
+    }
+    let whiteboard = if matches!(file_kind, FileKind::Whiteboard) {
+        bytes
+            .as_deref()
+            .map(|bytes| WhiteboardTabState::new(WhiteboardDocument::from_json_bytes(bytes)))
+    } else {
+        None
+    };
+    let mut history = history_store::load_tab_history_from_path(
+        &record.id,
+        path.as_deref(),
+        record.history.undo_log_path.as_deref(),
+        &snapshot,
+    );
+    if let Some(identity) = record.history.source_identity.clone() {
+        history.source_identity = Some(identity);
+    }
+    if !is_dirty && path.is_some() {
+        history.saved_text = Some(snapshot.text.clone());
+    }
+    let recovery = if is_dirty {
+        let mut recovery = record.recovery.clone();
+        if recovery.source_path.is_none() {
+            recovery.source_path = record.path.clone();
+        }
+        recovery
+    } else {
+        TabRecoveryState::default()
+    };
+    Ok(RestoredTabData {
+        path,
+        snapshot,
+        file_kind,
+        whiteboard,
+        history,
+        is_dirty,
+        recovery,
+    })
+}
+
+fn restore_can_apply(tab: &OpenTab, current_text: &str, initial_text: &str) -> bool {
+    tab.path.is_none()
+        && current_text == initial_text
+        && tab.history.undo_stack.is_empty()
+        && tab.history.redo_stack.is_empty()
+}
+
+fn apply_restored_tab(tab: &mut OpenTab, loaded: RestoredTabData) {
+    tab.path = loaded.path;
+    tab.snapshot = loaded.snapshot;
+    tab.file_kind = Some(loaded.file_kind);
+    tab.whiteboard = loaded.whiteboard;
+    tab.history = loaded.history;
+    tab.is_dirty = loaded.is_dirty;
+    tab.recovery = loaded.recovery;
+}
+
 fn resolve_snapshot(
     record: &TabSessionRecord,
     file_kind: Option<&FileKind>,
     ui_language: UiLanguage,
+    bytes: Option<&[u8]>,
 ) -> Option<(Option<PathBuf>, EditorSnapshot, bool)> {
     let recovery_text = record.recovery.text.clone();
     let has_recovery_text = recovery_text.is_some();
 
     match record.path.as_ref() {
-        Some(path) if path.exists() => {
-            let (mut snapshot, resolved_kind) = load_file_snapshot(path)?;
+        Some(path) if bytes.is_some() => {
+            let (mut snapshot, resolved_kind) = load_file_snapshot(path, bytes?);
             if resolved_kind.supports_text_buffer() {
                 if let Some(text) = recovery_text {
                     if snapshot.text != text {
-                        let source_changed = record
+                        // A missing baseline is not proof that the source is unchanged.
+                        let source_verified = record
                             .recovery
                             .source_content_hash
                             .as_ref()
                             .is_some_and(|expected| {
-                                file_ops::content_hash(snapshot.text.as_bytes()) != *expected
+                                file_ops::content_hash(snapshot.text.as_bytes()) == *expected
                             });
                         snapshot.text = text;
                         snapshot.cursor_offset = record.view.cursor_offset.min(snapshot.text.len());
@@ -606,7 +1263,7 @@ fn resolve_snapshot(
                                 )
                             })
                             .collect();
-                        return Some(((!source_changed).then(|| path.clone()), snapshot, true));
+                        return Some((source_verified.then(|| path.clone()), snapshot, true));
                     }
                 }
                 snapshot.cursor_offset = record.view.cursor_offset.min(snapshot.text.len());
@@ -624,6 +1281,9 @@ fn resolve_snapshot(
                     })
                     .collect();
                 Some((Some(path.clone()), snapshot, false))
+            } else if let Some(text) = recovery_text {
+                // An external replacement with an image/binary must not discard a text draft.
+                Some((None, snapshot_for_record(record, text), true))
             } else {
                 snapshot.scroll_offset = record.view.scroll_offset;
                 Some((Some(path.clone()), snapshot, false))
@@ -662,90 +1322,27 @@ fn resolve_snapshot(
             };
             Some((None, snapshot, has_recovery_text))
         }
-        None if file_kind.is_some_and(FileKind::supports_text_buffer) => {
-            recovery_text.map(|text| {
-                let snapshot = EditorSnapshot {
-                    cursor_offset: record.view.cursor_offset.min(text.len()),
-                    cursor_anchor: record.view.cursor_anchor.min(text.len()),
-                    scroll_offset: record.view.scroll_offset,
-                    extra_cursors: record
-                        .view
-                        .extra_cursors
-                        .iter()
-                        .map(|(offset, anchor)| {
-                            ((*offset).min(text.len()), (*anchor).min(text.len()))
-                        })
-                        .collect(),
-                    text,
-                };
-                (None, snapshot, true)
-            })
-        }
+        None if file_kind.is_some_and(FileKind::supports_text_buffer) => Some({
+            let text = recovery_text.unwrap_or_default();
+            let snapshot = EditorSnapshot {
+                cursor_offset: record.view.cursor_offset.min(text.len()),
+                cursor_anchor: record.view.cursor_anchor.min(text.len()),
+                scroll_offset: record.view.scroll_offset,
+                extra_cursors: record
+                    .view
+                    .extra_cursors
+                    .iter()
+                    .map(|(offset, anchor)| ((*offset).min(text.len()), (*anchor).min(text.len())))
+                    .collect(),
+                text,
+            };
+            (None, snapshot, has_recovery_text)
+        }),
         None => None,
     }
 }
 
-/// Restored tab contents, read in parallel so startup pays one round trip
-/// instead of one per tab (which is what hurts on network volumes).
-fn session_file_prefetch() -> &'static std::sync::Mutex<HashMap<PathBuf, Vec<u8>>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Vec<u8>>>> =
-        std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-fn prefetch_session_files(session: &SessionConfig) {
-    fn collect(layout: &PaneLayoutRecord, paths: &mut Vec<PathBuf>) {
-        match layout {
-            PaneLayoutRecord::Leaf { tabs, .. } => {
-                paths.extend(tabs.iter().filter_map(|tab| tab.path.clone()));
-            }
-            PaneLayoutRecord::Split { children, .. } => {
-                for child in children {
-                    collect(child, paths);
-                }
-            }
-        }
-    }
-
-    let mut paths = session
-        .tabs
-        .iter()
-        .filter_map(|tab| tab.path.clone())
-        .collect::<Vec<_>>();
-    if let Some(layout) = session.pane_layout.as_ref() {
-        collect(layout, &mut paths);
-    }
-    paths.sort();
-    paths.dedup();
-    if paths.len() < 2 {
-        return;
-    }
-
-    let results = std::thread::scope(|scope| {
-        let handles = paths
-            .into_iter()
-            .map(|path| scope.spawn(move || (path.clone(), fs::read(&path).ok())))
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .filter_map(|handle| handle.join().ok())
-            .filter_map(|(path, bytes)| bytes.map(|bytes| (path, bytes)))
-            .collect::<Vec<_>>()
-    });
-    if let Ok(mut cache) = session_file_prefetch().lock() {
-        cache.extend(results);
-    }
-}
-
-fn take_prefetched_session_file(path: &Path) -> Option<Vec<u8>> {
-    session_file_prefetch().lock().ok()?.remove(path)
-}
-
-fn load_file_snapshot(path: &Path) -> Option<(EditorSnapshot, FileKind)> {
-    let bytes = match take_prefetched_session_file(path) {
-        Some(bytes) => bytes,
-        None => fs::read(path).ok()?,
-    };
+fn load_file_snapshot(path: &Path, bytes: &[u8]) -> (EditorSnapshot, FileKind) {
     let file_kind = classify_file_kind_for_bytes(path, &bytes);
     let text = if file_kind.supports_text_buffer() {
         String::from_utf8_lossy(&bytes).into_owned()
@@ -753,7 +1350,7 @@ fn load_file_snapshot(path: &Path) -> Option<(EditorSnapshot, FileKind)> {
         String::new()
     };
     let first_line_end = text.find('\n').unwrap_or(text.len());
-    Some((
+    (
         EditorSnapshot {
             text,
             cursor_offset: first_line_end,
@@ -762,7 +1359,7 @@ fn load_file_snapshot(path: &Path) -> Option<(EditorSnapshot, FileKind)> {
             extra_cursors: Vec::new(),
         },
         file_kind,
-    ))
+    )
 }
 
 fn serialize_tab_kind(kind: TabKind) -> String {
@@ -908,6 +1505,228 @@ mod tests {
     use super::*;
 
     use tempfile::tempdir;
+
+    #[test]
+    fn bookmark_access_is_coalesced_until_success_or_an_explicit_retry() {
+        let root = Path::new("/unavailable-share/workspace");
+        let mut access = WorkspaceAccess {
+            bookmark: "saved-bookmark".into(),
+            loading: false,
+            resolved: false,
+            request_root: None,
+        };
+        assert_eq!(access.begin(root).as_deref(), Some("saved-bookmark"));
+        for _ in 0..12 {
+            assert!(access.begin(root).is_none());
+        }
+        assert_eq!(access.request_root.as_deref(), Some(root));
+        access.loading = false;
+        access.request_root = None;
+        assert!(access.begin(root).is_some());
+        access.loading = false;
+        access.resolved = true;
+        assert!(access.begin(root).is_none());
+    }
+
+    #[test]
+    fn relocating_a_bookmark_keeps_unknown_source_metadata_and_recovery() {
+        let mut record = text_tab_record(
+            Some(PathBuf::from("/old-share/workspace/note.md")),
+            Some("draft"),
+        );
+        record.recovery.source_content_hash = Some("saved-source-hash".into());
+        record.history.undo_log_path = Some(PathBuf::from("/local-cache/history.undo.json"));
+        record.history.source_identity = Some("/old-share/workspace/note.md".into());
+        let original_view = record.view.clone();
+        relocate_record(
+            &mut record,
+            Path::new("/old-share/workspace"),
+            Path::new("/new-share/workspace"),
+        );
+        assert_eq!(
+            record.path.as_deref(),
+            Some(Path::new("/new-share/workspace/note.md"))
+        );
+        assert_eq!(record.recovery.source_path, record.path);
+        assert_eq!(record.recovery.text.as_deref(), Some("draft"));
+        assert_eq!(
+            record.recovery.source_content_hash.as_deref(),
+            Some("saved-source-hash")
+        );
+        assert_eq!(
+            record.history.undo_log_path.as_deref(),
+            Some(Path::new("/local-cache/history.undo.json"))
+        );
+        assert_eq!(
+            record.history.source_identity.as_deref(),
+            Some("/new-share/workspace/note.md")
+        );
+        assert_eq!(record.view, original_view);
+        assert!(
+            restore_tab_metadata(&record, UiLanguage::English)
+                .unwrap()
+                .path
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn restore_scopes_are_lexical_and_group_nested_tabs_under_the_workspace() {
+        let roots = vec![PathBuf::from("/arbitrary/sshfs/project")];
+        let first = restore_scope_for_path(Path::new("/arbitrary/sshfs/project/docs/a.md"), &roots);
+        let second =
+            restore_scope_for_path(Path::new("/arbitrary/sshfs/project/other/b.md"), &roots);
+        assert_eq!(first, roots[0]);
+        assert_eq!(first, second);
+        fs_task::register_workspace_root(&roots[0]);
+    }
+
+    #[test]
+    fn unavailable_source_metadata_preserves_the_record_without_a_write_target() {
+        let mut record = text_tab_record(Some(PathBuf::from("/unavailable-share/note.md")), None);
+        record.is_pinned = true;
+        record.history = TabHistoryIndex {
+            undo_log_path: Some(PathBuf::from("/unavailable-share/history.json")),
+            source_identity: Some("original".into()),
+            current_index: Some(9),
+            entry_count: 20,
+        };
+        let tab = restore_tab_metadata(&record, UiLanguage::English).unwrap();
+        assert!(tab.path.is_none());
+        assert!(tab.history.saved_text.is_none());
+        assert!(!tab.file_kind.as_ref().unwrap().supports_text_buffer());
+        let pending = PendingTabRestore {
+            record: record.clone(),
+            initial_text: String::new(),
+            loading: true,
+        };
+        assert_eq!(pending_tab_to_record(&tab, &pending), record);
+    }
+
+    #[test]
+    fn unavailable_recovery_stays_editable_and_roundtrips_the_original_source() {
+        let mut record = text_tab_record(
+            Some(PathBuf::from("/unavailable-share/note.md")),
+            Some("draft"),
+        );
+        record.recovery.source_content_hash = Some("original-source-hash".into());
+        let mut tab = restore_tab_metadata(&record, UiLanguage::English).unwrap();
+        assert!(tab.is_dirty);
+        assert!(tab.path.is_none());
+        assert!(tab.file_kind.as_ref().unwrap().supports_text_buffer());
+        let pending = PendingTabRestore {
+            record: record.clone(),
+            initial_text: "draft".into(),
+            loading: false,
+        };
+        assert_eq!(pending_tab_to_record(&tab, &pending), record);
+        tab.snapshot.scroll_offset = 99.0;
+        assert_eq!(
+            pending_tab_to_record(&tab, &pending).view.scroll_offset,
+            99.0
+        );
+        tab.snapshot.text = "edited while unavailable".into();
+        // Debounced recovery sees a detached tab, but must not erase the original source identity.
+        tab.recovery.source_path = None;
+        tab.recovery.source_content_hash = None;
+        let saved = pending_tab_to_record(&tab, &pending);
+        assert_eq!(saved.path, record.path);
+        assert_eq!(saved.history, record.history);
+        assert_eq!(saved.recovery.source_path, record.recovery.source_path);
+        assert_eq!(
+            saved.recovery.source_content_hash,
+            record.recovery.source_content_hash
+        );
+        assert_eq!(
+            saved.recovery.text.as_deref(),
+            Some("edited while unavailable")
+        );
+    }
+
+    #[test]
+    fn unavailable_tabs_and_empty_leaves_keep_split_layout_and_view_flags() {
+        let record = text_tab_record(Some(PathBuf::from("/unavailable-share/note.md")), None);
+        let layout = PaneLayoutRecord::Split {
+            axis: "vertical".into(),
+            flexes: vec![2.0, 1.0],
+            children: vec![
+                PaneLayoutRecord::Leaf {
+                    tabs: vec![record.clone()],
+                    active_tab_id: Some(record.id.clone()),
+                },
+                PaneLayoutRecord::Leaf {
+                    tabs: Vec::new(),
+                    active_tab_id: None,
+                },
+            ],
+        };
+        let mut panes = Vec::new();
+        let built = build_pane_layout(UiLanguage::English, &layout, &mut panes).unwrap();
+        assert_eq!(built.leaf_ids(), vec![0, 1]);
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[0].state.active_tab_id, Some(record.id));
+        assert!(panes[0].state.tabs[0].reading_mode);
+        assert!(panes[0].state.tabs[0].editor_left_aligned);
+        assert!(panes[1].state.tabs.is_empty());
+        match built {
+            PaneLayout::Split { axis, flexes, .. } => {
+                assert_eq!(axis, SplitAxis::Vertical);
+                assert_eq!(flexes, vec![2.0, 1.0]);
+            }
+            _ => panic!("split was collapsed"),
+        }
+    }
+
+    #[test]
+    fn hydration_never_replaces_an_edit_or_a_save_as() {
+        let record = text_tab_record(
+            Some(PathBuf::from("/unavailable-share/note.md")),
+            Some("draft"),
+        );
+        let mut tab = restore_tab_metadata(&record, UiLanguage::English).unwrap();
+        assert!(restore_can_apply(&tab, "draft", "draft"));
+        assert!(!restore_can_apply(&tab, "new work", "draft"));
+        tab.path = Some(PathBuf::from("/local/saved-as.md"));
+        assert!(!restore_can_apply(&tab, "draft", "draft"));
+    }
+
+    #[test]
+    fn hydration_preserves_new_undo_or_redo_work_even_if_text_matches() {
+        let record = text_tab_record(
+            Some(PathBuf::from("/unavailable-share/note.md")),
+            Some("draft"),
+        );
+        let mut tab = restore_tab_metadata(&record, UiLanguage::English).unwrap();
+        tab.history.push_undo_snapshot(snapshot("draft", 5));
+        assert!(!restore_can_apply(&tab, "draft", "draft"));
+    }
+
+    #[test]
+    fn a_source_replaced_by_binary_content_never_discards_a_recovery_draft() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("replaced.bin");
+        fs::write(&path, [0, 1, 2, 0, 3]).unwrap();
+        let mut record = text_tab_record(Some(path.clone()), Some("unsaved draft"));
+        record.recovery.source_path = None;
+        let loaded = load_restored_tab(&record, UiLanguage::English).unwrap();
+        assert!(loaded.path.is_none());
+        assert!(loaded.is_dirty);
+        assert_eq!(loaded.snapshot.text, "unsaved draft");
+        assert!(loaded.file_kind.supports_text_buffer());
+        assert_eq!(loaded.recovery.source_path, Some(path));
+    }
+
+    #[test]
+    fn whiteboard_restore_uses_loaded_bytes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("board.moeka");
+        fs::write(&path, WhiteboardDocument::default().to_json_string()).unwrap();
+        let mut record = text_tab_record(Some(path), None);
+        record.file_kind = Some("whiteboard".into());
+        let loaded = load_restored_tab(&record, UiLanguage::English).unwrap();
+        assert!(loaded.whiteboard.is_some());
+        assert_eq!(loaded.file_kind, FileKind::Whiteboard);
+    }
 
     #[test]
     fn edited_welcome_tab_is_not_discarded_as_a_placeholder() {
@@ -1130,7 +1949,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let source_path = dir.path().join("note.md");
         fs::write(&source_path, "saved").unwrap();
-        let record = text_tab_record(Some(source_path.clone()), Some("recovered draft"));
+        let mut record = text_tab_record(Some(source_path.clone()), Some("recovered draft"));
+        record.recovery.source_content_hash = Some(file_ops::content_hash(b"saved"));
 
         let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
 
@@ -1151,7 +1971,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let source_path = dir.path().join("note.md");
         fs::write(&source_path, "saved").unwrap();
-        let record = text_tab_record(Some(source_path.clone()), Some("inline draft"));
+        let mut record = text_tab_record(Some(source_path.clone()), Some("inline draft"));
+        record.recovery.source_content_hash = Some(file_ops::content_hash(b"saved"));
 
         let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
 
@@ -1221,6 +2042,26 @@ mod tests {
     }
 
     #[test]
+    fn recovery_without_a_source_baseline_never_gets_an_overwrite_path() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("note.md");
+        fs::write(&source_path, "unverified source").unwrap();
+        let record = text_tab_record(Some(source_path.clone()), Some("unsaved draft"));
+
+        let loaded = load_restored_tab(&record, UiLanguage::English).unwrap();
+
+        assert!(loaded.path.is_none());
+        assert!(loaded.is_dirty);
+        assert!(loaded.history.saved_text.is_none());
+        assert_eq!(loaded.snapshot.text, "unsaved draft");
+        assert_eq!(loaded.recovery.source_path.as_ref(), Some(&source_path));
+        assert_eq!(
+            fs::read_to_string(source_path).unwrap(),
+            "unverified source"
+        );
+    }
+
+    #[test]
     fn external_source_change_restores_draft_without_overwrite_path() {
         let dir = tempdir().unwrap();
         let source_path = dir.path().join("note.md");
@@ -1237,11 +2078,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_source_without_recovery_drops_unrestorable_tab() {
+    fn missing_source_without_recovery_keeps_a_safe_metadata_tab() {
         let dir = tempdir().unwrap();
         let record = text_tab_record(Some(dir.path().join("missing.md")), None);
-
-        assert!(restore_tab_from_record(&record, UiLanguage::English).is_none());
+        let tab = restore_tab_metadata(&record, UiLanguage::English).unwrap();
+        assert!(tab.path.is_none());
+        assert_eq!(tab.title, record.title);
+        assert!(load_restored_tab(&record, UiLanguage::English).is_err());
     }
 
     #[test]

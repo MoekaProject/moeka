@@ -7,6 +7,7 @@
 //! (substring / case sensitivity / whole word / regex) identical to a full
 //! scan while skipping files that cannot possibly match.
 
+use anyhow::Context as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -53,6 +54,13 @@ impl WorkspaceSearchIndex {
     /// Walk the workspace and build an in-memory index of all text-searchable
     /// files. Runs on a background thread.
     pub(crate) fn build(root: &Path) -> anyhow::Result<Self> {
+        crate::platform::fs_task::check_deadline()?;
+        if !std::fs::metadata(root)
+            .with_context(|| format!("Inspect workspace {}", root.display()))?
+            .is_dir()
+        {
+            anyhow::bail!("Workspace {} is not a directory", root.display());
+        }
         let mut schema_builder = Schema::builder();
         let path_field = schema_builder.add_text_field("path", STRING | STORED);
         let content_options = TextOptions::default().set_indexing_options(
@@ -73,38 +81,62 @@ impl WorkspaceSearchIndex {
         let mut indexed_source_bytes = 0usize;
         let mut pending = vec![root.to_path_buf()];
         while let Some(path) = pending.pop() {
-            let is_dir = path.is_dir();
-            if should_skip_path(&path, is_dir) {
+            crate::platform::fs_task::check_deadline()?;
+            let observed = if path == root {
+                std::fs::metadata(&path)
+            } else {
+                std::fs::symlink_metadata(&path)
+            };
+            let metadata = match observed {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("Inspect {}", path.display()));
+                }
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            let is_dir = metadata.is_dir();
+            if path != root && should_skip_path(&path, is_dir) {
                 continue;
             }
             if is_dir {
-                if let Ok(entries) = std::fs::read_dir(&path) {
-                    pending.extend(entries.flatten().map(|entry| entry.path()));
+                for entry in
+                    std::fs::read_dir(&path).with_context(|| format!("List {}", path.display()))?
+                {
+                    crate::platform::fs_task::check_deadline()?;
+                    pending.push(entry?.path());
                 }
                 continue;
             }
-            let should_skip_full_read = std::fs::metadata(&path).is_ok_and(|metadata| {
-                metadata.len() > MAX_INDEXED_FILE_BYTES as u64
-                    || metadata.len()
-                        > MAX_INDEXED_WORKSPACE_BYTES.saturating_sub(indexed_source_bytes) as u64
-            });
+            if !metadata.is_file() {
+                continue;
+            }
+            let should_skip_full_read = metadata.len() > MAX_INDEXED_FILE_BYTES as u64
+                || metadata.len()
+                    > MAX_INDEXED_WORKSPACE_BYTES.saturating_sub(indexed_source_bytes) as u64;
             if should_skip_full_read {
                 let mut sample = [0; FILE_KIND_SAMPLE_BYTES];
-                let Ok(mut file) = std::fs::File::open(&path) else {
-                    continue;
-                };
-                let Ok(sample_len) = file.read(&mut sample) else {
-                    continue;
-                };
+                let mut file = std::fs::File::open(&path)
+                    .with_context(|| format!("Open {}", path.display()))?;
+                crate::platform::fs_task::check_deadline()?;
+                let sample_len = file
+                    .read(&mut sample)
+                    .with_context(|| format!("Read {}", path.display()))?;
                 if classify_file_kind_for_bytes(&path, &sample[..sample_len]).supports_text_search()
                 {
                     unindexed_paths.push(path);
                 }
                 continue;
             }
-            let Ok(bytes) = std::fs::read(&path) else {
-                continue;
-            };
+            let mut bytes = Vec::new();
+            std::fs::File::open(&path)
+                .with_context(|| format!("Open {}", path.display()))?
+                .take(MAX_INDEXED_FILE_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .with_context(|| format!("Read {}", path.display()))?;
+            crate::platform::fs_task::check_deadline()?;
             if !classify_file_kind_for_bytes(&path, &bytes).supports_text_search() {
                 continue;
             }
@@ -119,7 +151,9 @@ impl WorkspaceSearchIndex {
             document.add_text(content_field, content);
             writer.add_document(document)?;
         }
+        crate::platform::fs_task::check_deadline()?;
         writer.commit()?;
+        crate::platform::fs_task::check_deadline()?;
 
         let reader = index.reader()?;
         Ok(Self {
@@ -240,6 +274,64 @@ mod tests {
         assert_eq!(candidates, vec![root.join("real.md")]);
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_root_does_not_build_a_successful_empty_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("not-a-directory.md");
+        fs::write(&path, "text").unwrap();
+        assert!(WorkspaceSearchIndex::build(&path).is_err());
+        assert!(WorkspaceSearchIndex::build(&directory.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn selected_root_is_not_subject_to_descendant_exclusions() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in [".workspace", "target"] {
+            let root = directory.path().join(name);
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("note.md"), "needle").unwrap();
+            fs::write(root.join(".hidden.md"), "needle").unwrap();
+            for excluded in [".hidden", "target", "node_modules"] {
+                fs::create_dir(root.join(excluded)).unwrap();
+                fs::write(root.join(excluded).join("ignored.md"), "needle").unwrap();
+            }
+            let index = WorkspaceSearchIndex::build(&root).unwrap();
+            assert_eq!(
+                index.candidate_paths("needle", false).unwrap(),
+                vec![root.join("note.md")]
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicitly_selected_symlink_root_is_indexed() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("workspace");
+        let alias = directory.path().join(".alias");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("note.md"), "needle").unwrap();
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let index = WorkspaceSearchIndex::build(&alias).unwrap();
+        assert_eq!(
+            index.candidate_paths("needle", false).unwrap(),
+            vec![alias.join("note.md")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_does_not_follow_directory_cycles() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("note.md"), "needle").unwrap();
+        std::os::unix::fs::symlink(root.path(), root.path().join("cycle")).unwrap();
+        let index = WorkspaceSearchIndex::build(root.path()).unwrap();
+        assert_eq!(
+            index.candidate_paths("needle", false).unwrap(),
+            vec![root.path().join("note.md")]
+        );
     }
 
     #[test]

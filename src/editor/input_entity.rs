@@ -85,7 +85,487 @@ fn front_matter_uses_inline_ime_geometry() {
     assert!(!uses_table_ime_geometry(true, table_info));
 }
 
+fn stable_input_bounds_are_usable(
+    layout_dirty: bool,
+    group_geometry_dirty: bool,
+    anchor_rows: Option<usize>,
+) -> bool {
+    layout_dirty && !group_geometry_dirty && anchor_rows != Some(0)
+}
+
+/// Native composition may replace neither folded source nor the displayed summary.
+/// A range that merely starts outside the block can still overwrite it.
+fn ime_lines_touch_protected_front_matter(
+    folded: Option<Range<usize>>,
+    summary: Option<usize>,
+    first: usize,
+    last: usize,
+) -> bool {
+    folded.is_some_and(|folded| first < folded.end && last >= folded.start)
+        || summary.is_some_and(|line| (first..=last).contains(&line))
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_ime_protects_folded_source_and_summary_for_overlapping_ranges() {
+    let folded = Some(1..5);
+    assert!(ime_lines_touch_protected_front_matter(
+        folded.clone(),
+        Some(1),
+        0,
+        2
+    ));
+    assert!(ime_lines_touch_protected_front_matter(
+        folded.clone(),
+        None,
+        4,
+        6
+    ));
+    assert!(!ime_lines_touch_protected_front_matter(
+        folded.clone(),
+        None,
+        0,
+        0
+    ));
+    assert!(!ime_lines_touch_protected_front_matter(
+        folded.clone(),
+        None,
+        5,
+        6
+    ));
+    // Empty metadata falls back to a summary on the opener.
+    assert!(ime_lines_touch_protected_front_matter(None, Some(0), 0, 0));
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_ime_rejects_hidden_caches_and_stable_anchors_before_next_prepaint() {
+    assert!(!cached_input_geometry_is_visible(0, 0.0, false));
+    assert!(!cached_input_geometry_is_visible(0, 24.0, false));
+    assert!(!cached_input_geometry_is_visible(1, 24.0, true));
+    assert!(cached_input_geometry_is_visible(1, 24.0, false));
+    // A stable anchor from before a group expansion must not bypass fresh inline shaping.
+    for layout_dirty in [false, true] {
+        assert!(!stable_input_bounds_are_usable(layout_dirty, true, Some(1)));
+        assert!(!stable_input_bounds_are_usable(
+            layout_dirty,
+            false,
+            Some(0)
+        ));
+    }
+    let wrapped = super::input_wrap::test_wrapped_line(&[24.0]);
+    let bounds = input_bounds_for_wrapped_position(
+        &wrapped,
+        point(px(10.0), px(0.0)),
+        20.0,
+        24.0,
+        100.0,
+        200.0,
+    );
+    assert_eq!(bounds.size.height, px(24.0));
+    assert!(bounds.size.height > px(0.0));
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_ime_top_accounts_for_header_and_list_visibility_before_prepaint() {
+    // A previously hidden header now contributes a physical text row.
+    assert_eq!(
+        input_top_with_current_front_matter_heights(200.0, [(0.0, 24.0)]),
+        224.0
+    );
+    // Default unmeasured physical rows must not count hidden list items.
+    assert_eq!(
+        input_top_with_current_front_matter_heights(
+            200.0,
+            [(24.0, 24.0), (24.0, 0.0), (24.0, 0.0)]
+        ),
+        152.0
+    );
+    // Long-key fallback wraps source visibly in both focused and collapsed shapes.
+    assert_eq!(
+        input_top_with_current_front_matter_heights(200.0, [(24.0, 72.0)]),
+        248.0
+    );
+}
+
+fn cached_input_geometry_is_visible(
+    visual_rows: usize,
+    line_height: f32,
+    group_geometry_dirty: bool,
+) -> bool {
+    !group_geometry_dirty && visual_rows > 0 && line_height > 0.0
+}
+
+fn input_top_with_current_front_matter_heights(
+    top: f32,
+    heights: impl IntoIterator<Item = (f32, f32)>,
+) -> f32 {
+    top + heights
+        .into_iter()
+        .map(|(cached, current)| current - cached)
+        .sum::<f32>()
+}
+
+/// Survives local unmarking and unfolding: neither proves that the native
+/// input method has stopped sending callbacks for the old composition.
+#[derive(Debug, Default)]
+pub(crate) struct FoldImeCancellation {
+    blocked: bool,
+    epoch: usize,
+    scheduled: bool,
+    resume_after: Option<f64>,
+}
+
+impl FoldImeCancellation {
+    pub(super) fn arm(&mut self) {
+        self.blocked = true;
+        self.epoch = self.epoch.wrapping_add(1);
+        self.scheduled = false;
+        self.resume_after = None;
+    }
+
+    fn accepts(&mut self, key_event_timestamp: Option<f64>, terminal_callback: bool) -> bool {
+        if !self.blocked {
+            return true;
+        }
+        if self
+            .resume_after
+            .zip(key_event_timestamp)
+            .is_some_and(|(after, event)| event > after)
+        {
+            self.blocked = false;
+            return true;
+        }
+        // Platforms without a native cancellation bridge drain the old
+        // transaction through its commit/unmark callback before accepting input.
+        #[cfg(not(target_os = "macos"))]
+        if terminal_callback {
+            self.blocked = false;
+        }
+        #[cfg(target_os = "macos")]
+        let _ = terminal_callback;
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_key_event_timestamp(window: &Window) -> Option<f64> {
+    use objc::{class, msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return None;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return None;
+    };
+    unsafe {
+        let app: *mut objc::runtime::Object = msg_send![class!(NSApplication), sharedApplication];
+        let event: *mut objc::runtime::Object = msg_send![app, currentEvent];
+        if event.is_null() {
+            return None;
+        }
+        let view = appkit.ns_view.as_ptr() as *mut objc::runtime::Object;
+        let editor_window: *mut objc::runtime::Object = msg_send![view, window];
+        let event_window: *mut objc::runtime::Object = msg_send![event, window];
+        if editor_window.is_null() || event_window != editor_window {
+            return None;
+        }
+        let kind: usize = msg_send![event, type];
+        // NSEventTypeKeyDown. Mouse events and callbacks with no fresh key must
+        // not lift the barrier, even if local selection/fold state has changed.
+        (kind == 10).then(|| {
+            let timestamp: f64 = msg_send![event, timestamp];
+            timestamp
+        })
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_key_event_timestamp(_window: &Window) -> Option<f64> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+struct NativeImeContext(*mut objc::runtime::Object);
+
+#[cfg(target_os = "macos")]
+impl NativeImeContext {
+    fn capture() -> Self {
+        use objc::{class, msg_send, sel, sel_impl};
+        unsafe {
+            let mut input: *mut objc::runtime::Object =
+                msg_send![class!(NSTextInputContext), currentInputContext];
+            // Mouse-driven folding need not be inside handleEvent:, where
+            // currentInputContext is guaranteed. GPUI's native view remains
+            // the key window's first responder between keyboard events.
+            if input.is_null() {
+                let app: *mut objc::runtime::Object =
+                    msg_send![class!(NSApplication), sharedApplication];
+                let window: *mut objc::runtime::Object = msg_send![app, keyWindow];
+                let responder: *mut objc::runtime::Object = msg_send![window, firstResponder];
+                if !responder.is_null() {
+                    let responds: objc::runtime::BOOL =
+                        msg_send![responder, respondsToSelector: sel!(inputContext)];
+                    if responds != objc::runtime::NO {
+                        input = msg_send![responder, inputContext];
+                    }
+                }
+            }
+            if !input.is_null() {
+                let _: *mut objc::runtime::Object = msg_send![input, retain];
+            }
+            Self(input)
+        }
+    }
+
+    fn discard_marked_text(&self) -> f64 {
+        use objc::{class, msg_send, sel, sel_impl};
+        unsafe {
+            if !self.0.is_null() {
+                let () = msg_send![self.0, discardMarkedText];
+            }
+            let process: *mut objc::runtime::Object = msg_send![class!(NSProcessInfo), processInfo];
+            let uptime: f64 = msg_send![process, systemUptime];
+            uptime
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for NativeImeContext {
+    fn drop(&mut self) {
+        use objc::{msg_send, sel, sel_impl};
+        if !self.0.is_null() {
+            unsafe {
+                let () = msg_send![self.0, release];
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod fold_ime_tests {
+    use super::FoldImeCancellation;
+
+    #[test]
+    fn front_matter_fold_ime_cancellation_blocks_range_less_updates_and_commits() {
+        for terminal in [false, true] {
+            let source = "---\ntitle: 中\n---\nBody";
+            let mut buffer = crate::buffer::Buffer::from_text(source);
+            // Collapse has locally unmarked and moved the caret to the opener.
+            let mut cursor = crate::cursor::Cursor {
+                anchor: 3,
+                offset: 3,
+            };
+            let mut cancellation = FoldImeCancellation::default();
+            cancellation.arm();
+            let accepted = cancellation.accepts(None, terminal);
+            if accepted {
+                cursor.insert(&mut buffer, "中文");
+            }
+            assert!(!accepted);
+            assert_eq!(
+                buffer.text(),
+                source,
+                "late callback must not produce ---中文"
+            );
+            assert_eq!((cursor.anchor, cursor.offset), (3, 3));
+        }
+        let mut cancellation = FoldImeCancellation::default();
+        cancellation.arm();
+        // Local unmarking, caret movement, unfolding and reparsing cannot
+        // identify a fresh input transaction and do not remove the tombstone.
+        for _ in 0..3 {
+            assert!(!cancellation.accepts(None, false));
+        }
+    }
+
+    #[test]
+    fn front_matter_fold_ime_cancellation_resumes_only_after_native_discard_and_fresh_key() {
+        let mut cancellation = FoldImeCancellation::default();
+        cancellation.arm();
+        // A key alone is insufficient while native cancellation is pending.
+        assert!(!cancellation.accepts(Some(100.0), false));
+        cancellation.resume_after = Some(100.0);
+        for old_event in [None, Some(99.0), Some(100.0)] {
+            assert!(!cancellation.accepts(old_event, false));
+        }
+        assert!(cancellation.accepts(Some(101.0), false));
+        // Later callbacks in the new composition need no replacement range
+        // or native event identity, just like the ordinary input path.
+        assert!(cancellation.accepts(None, false));
+        assert!(cancellation.accepts(None, true));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn front_matter_fold_ime_cancellation_survives_unmark_then_delayed_commit() {
+        let mut cancellation = FoldImeCancellation::default();
+        cancellation.arm();
+        cancellation.resume_after = Some(100.0);
+        assert!(!cancellation.accepts(None, true)); // unmarkText
+        assert!(!cancellation.accepts(None, true)); // late insertText
+        assert!(!cancellation.accepts(None, false)); // late setMarkedText
+        assert!(cancellation.accepts(Some(101.0), true)); // first new typing, not swallowed
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn front_matter_fold_ime_cancellation_drains_terminal_callback_without_native_bridge() {
+        let mut cancellation = FoldImeCancellation::default();
+        cancellation.arm();
+        assert!(!cancellation.accepts(None, false));
+        assert!(!cancellation.accepts(None, true));
+        assert!(cancellation.accepts(None, false));
+    }
+
+    #[test]
+    fn front_matter_fold_ime_cancellation_is_pane_local_and_rearming_invalidates_completion() {
+        let mut first = super::PaneState::detached();
+        let mut second = super::PaneState::detached();
+        first.fold_ime_cancellation.arm();
+        let epoch = first.fold_ime_cancellation.epoch;
+        assert!(second.fold_ime_cancellation.accepts(None, false));
+        assert!(!first.fold_ime_cancellation.accepts(None, false));
+        first.fold_ime_cancellation.arm();
+        assert_ne!(first.fold_ime_cancellation.epoch, epoch);
+        assert!(first.fold_ime_cancellation.resume_after.is_none());
+        std::mem::swap(&mut first, &mut second);
+        assert!(first.fold_ime_cancellation.accepts(None, false));
+        assert!(!second.fold_ime_cancellation.accepts(None, false));
+    }
+}
+
 impl EditorView {
+    fn materialize_native_table_boundary(
+        &mut self,
+        range_utf16: &mut Option<Range<usize>>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(boundary) = self.table_boundary_caret else {
+            return true;
+        };
+        // Native offsets describe the old buffer. Resolve them before inserting
+        // the outside line, including the ambiguous pipe-less final-cell end.
+        let range = range_utf16
+            .as_ref()
+            .map(|range| self.range_from_utf16(range));
+        let marked = self.marked_range.clone();
+        let insertion =
+            super::input_table::table_boundary_offsets(&self.buffer, &self.decorations, boundary);
+        if !self.insert_line_at_table_boundary(cx) {
+            return false;
+        }
+        *range_utf16 = range.map(|range| {
+            self.range_to_utf16(
+                &super::table_cell_edit::native_range_after_boundary_insertion(range, insertion),
+            )
+        });
+        self.marked_range = marked.map(|range| {
+            super::table_cell_edit::native_range_after_boundary_insertion(range, insertion)
+        });
+        true
+    }
+
+    pub(super) fn schedule_fold_ime_cancellation(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            let state = &mut self.fold_ime_cancellation;
+            if !state.blocked
+                || state.scheduled
+                || state.resume_after.is_some()
+                || self.swapped_pane_id.is_some()
+            {
+                return;
+            }
+            state.scheduled = true;
+            let epoch = state.epoch;
+            let pane_id = self.focused_pane_id;
+            let editor = cx.entity().clone();
+            // Retain the originating context; a focus/window change before the
+            // deferred effect must not discard another client's composition.
+            let native_context = NativeImeContext::capture();
+            cx.defer(move |cx| {
+                let ready = {
+                    let this = editor.read(cx);
+                    this.focused_pane_id == pane_id
+                        && this.fold_ime_cancellation.epoch == epoch
+                        && this.fold_ime_cancellation.blocked
+                };
+                // discardMarkedText can synchronously reenter the input handler.
+                // Do not call it while EditorView is mutably borrowed.
+                let resume_after = ready.then(|| native_context.discard_marked_text());
+                editor.update(cx, |this, _| {
+                    this.with_pane_if_alive(pane_id, |this| {
+                        let state = &mut this.fold_ime_cancellation;
+                        if state.epoch == epoch {
+                            state.scheduled = false;
+                            state.resume_after = resume_after;
+                        }
+                    });
+                });
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = cx;
+    }
+
+    fn accepts_fold_ime_callback(
+        &mut self,
+        terminal_callback: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.schedule_fold_ime_cancellation(cx);
+        self.fold_ime_cancellation
+            .accepts(native_key_event_timestamp(window), terminal_callback)
+    }
+
+    fn ime_range_touches_folded_front_matter(&self, range_utf16: &Range<usize>) -> bool {
+        let range = self.range_from_utf16(range_utf16);
+        ime_lines_touch_protected_front_matter(
+            self.collapsed_front_matter_range(),
+            self.front_matter_summary_line(),
+            self.buffer.offset_to_line_col(range.start).0,
+            self.buffer.offset_to_line_col(range.end).0,
+        )
+    }
+
+    fn current_front_matter_input_top(
+        &self,
+        window: &mut Window,
+        line: usize,
+        bounds: Bounds<Pixels>,
+    ) -> f32 {
+        let top = self.text_y_offset_for_line(line);
+        if !self.front_matter_group_geometry_dirty {
+            return top;
+        }
+        let end = self
+            .decorations
+            .first()
+            .and_then(|d| d.table_info.as_ref())
+            .filter(|table| table.is_front_matter)
+            .map_or(0, |table| table.table_end_line.min(line));
+        let group_plans = self.front_matter_group_plan_for_width(f32::from(bounds.size.width));
+        input_top_with_current_front_matter_heights(
+            top,
+            (0..end).map(|row| {
+                let old = self.visual_height_for_line(row);
+                let height = self
+                    .inline_line_display_info_with_group_plan(window, row, bounds, &group_plans)
+                    .map_or(0.0, |info| {
+                        let padding = self.block_padding_for_line(row);
+                        f32::from(info.wrapped_line.size(px(info.line_height)).height)
+                            + padding.0
+                            + padding.1
+                    });
+                (old, height)
+            }),
+        )
+    }
+
     fn input_bounds_for_display_line(
         &self,
         anchor_offset: usize,
@@ -162,11 +642,14 @@ impl EntityInputHandler for EditorView {
         &mut self,
         _ignore_disabled_input: bool,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
         if !self.active_tab_supports_text_buffer() {
             return None;
         }
+        self.reconcile_front_matter_fold_cursor();
+        self.schedule_fold_ime_cancellation(cx);
+        self.sync_front_matter_group_focus();
         if self.selected_handle.is_some() {
             ime_debug_log("selected_text_range -> None (table handle selected)");
             return None;
@@ -209,8 +692,11 @@ impl EntityInputHandler for EditorView {
         marked
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.active_tab_supports_text_buffer() {
+            return;
+        }
+        if !self.accepts_fold_ime_callback(true, window, cx) {
             return;
         }
         self.clear_marked_ranges();
@@ -222,11 +708,22 @@ impl EntityInputHandler for EditorView {
 
     fn replace_text_in_range(
         &mut self,
-        range_utf16: Option<Range<usize>>,
+        mut range_utf16: Option<Range<usize>>,
         new_text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Range-less native callbacks must be checked before begin_content_edit
+        // can unfold the document or checkpoint/typing can clear IME state.
+        if !self.accepts_fold_ime_callback(true, window, cx) {
+            return;
+        }
+        if range_utf16
+            .as_ref()
+            .is_some_and(|range| self.ime_range_touches_folded_front_matter(range))
+        {
+            return;
+        }
         let replaces_text = range_utf16.as_ref().is_some_and(|range| !range.is_empty())
             || self
                 .marked_range
@@ -236,7 +733,7 @@ impl EntityInputHandler for EditorView {
             if !self.begin_content_edit(cx) {
                 return;
             }
-            if self.table_boundary_caret.is_some() && !self.insert_line_at_table_boundary(cx) {
+            if !self.materialize_native_table_boundary(&mut range_utf16, cx) {
                 return;
             }
         } else if self.active_tab_is_read_only() {
@@ -282,6 +779,15 @@ impl EntityInputHandler for EditorView {
         let had_ime_composition = self.ime_composition_snapshot.is_some();
         if !had_ime_composition {
             self.checkpoint_for_typing(new_text);
+        }
+        let native_range = range_utf16
+            .as_ref()
+            .map(|range| self.range_from_utf16(range));
+        if self.replace_table_cell_native_newlines(native_range, new_text, None, false, cx) {
+            if had_ime_composition {
+                self.finish_ime_composition();
+            }
+            return;
         }
 
         if self.has_extra_cursors()
@@ -412,9 +918,20 @@ impl EntityInputHandler for EditorView {
             }
         }
 
-        self.queue_non_markdown_line_display_transfer(&range, new_text);
-        self.buffer.replace(range.clone(), new_text);
-        let new_offset = range.start + new_text.len();
+        let key_colon_space = range.is_empty()
+            && new_text == ":"
+            && self.marked_range.is_none()
+            && range_utf16.is_none()
+            && self.active_tab_is_markdown()
+            && super::front_matter::key_colon_needs_space(
+                &self.buffer,
+                &self.decorations,
+                range.start,
+            );
+        let inserted = if key_colon_space { ": " } else { new_text };
+        self.queue_non_markdown_line_display_transfer(&range, inserted);
+        self.buffer.replace(range.clone(), inserted);
+        let new_offset = range.start + inserted.len();
         self.cursor.move_to(new_offset, &self.buffer);
         if self.active_tab_is_markdown()
             && !range_spans_multiple_lines
@@ -491,12 +1008,21 @@ impl EntityInputHandler for EditorView {
 
     fn replace_and_mark_text_in_range(
         &mut self,
-        range_utf16: Option<Range<usize>>,
+        mut range_utf16: Option<Range<usize>>,
         new_text: &str,
         new_selected_range_utf16: Option<Range<usize>>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.accepts_fold_ime_callback(false, window, cx) {
+            return;
+        }
+        if range_utf16
+            .as_ref()
+            .is_some_and(|range| self.ime_range_touches_folded_front_matter(range))
+        {
+            return;
+        }
         let replaces_text = range_utf16.as_ref().is_some_and(|range| !range.is_empty())
             || self
                 .marked_range
@@ -506,7 +1032,7 @@ impl EntityInputHandler for EditorView {
             if !self.begin_content_edit(cx) {
                 return;
             }
-            if self.table_boundary_caret.is_some() && !self.insert_line_at_table_boundary(cx) {
+            if !self.materialize_native_table_boundary(&mut range_utf16, cx) {
                 return;
             }
         } else if self.active_tab_is_read_only() {
@@ -528,6 +1054,18 @@ impl EntityInputHandler for EditorView {
             ));
         }
         self.begin_ime_composition();
+        let native_range = range_utf16
+            .as_ref()
+            .map(|range| self.range_from_utf16(range));
+        if self.replace_table_cell_native_newlines(
+            native_range,
+            new_text,
+            new_selected_range_utf16.as_ref(),
+            true,
+            cx,
+        ) {
+            return;
+        }
 
         if self.has_extra_cursors() {
             let range_spans_multiple_lines = self.apply_multi_cursor_ime_replace(
@@ -664,8 +1202,21 @@ impl EntityInputHandler for EditorView {
         } else {
             bounds
         };
-        if self.layout_dirty
-            && let Some(bounds) = self.last_stable_input_bounds
+        self.refresh_front_matter_input_geometry(window, editor_bounds);
+        let (line, col) = self.buffer.offset_to_line_col(anchor_offset);
+        if self.front_matter_presentation_line_is_hidden(line) {
+            return None;
+        }
+        let anchor_rows = self
+            .line_display_info
+            .get(line)
+            .and_then(|info| info.as_ref())
+            .map(|info| info.visual_line_count);
+        if stable_input_bounds_are_usable(
+            self.layout_dirty,
+            self.front_matter_group_geometry_dirty,
+            anchor_rows,
+        ) && let Some(bounds) = self.last_stable_input_bounds
         {
             if ime_debug_enabled() {
                 ime_debug_log(format!(
@@ -679,8 +1230,11 @@ impl EntityInputHandler for EditorView {
             }
             return Some(bounds);
         }
-        if self.layout_dirty
-            && let Some(bounds) = self.pending_input_bounds
+        if stable_input_bounds_are_usable(
+            self.layout_dirty,
+            self.front_matter_group_geometry_dirty,
+            anchor_rows,
+        ) && let Some(bounds) = self.pending_input_bounds
         {
             if ime_debug_enabled() {
                 ime_debug_log(format!(
@@ -694,9 +1248,10 @@ impl EntityInputHandler for EditorView {
             }
             return Some(bounds);
         }
-        let (line, col) = self.buffer.offset_to_line_col(anchor_offset);
         let origin_y: f32 = editor_bounds.origin.y.into();
-        let text_top_y = origin_y + self.text_y_offset_for_line(line) - self.scroll_offset;
+        let text_top_y = origin_y
+            + self.current_front_matter_input_top(window, line, editor_bounds)
+            - self.scroll_offset;
 
         if let Some(table_info) = self
             .decorations
@@ -730,6 +1285,13 @@ impl EntityInputHandler for EditorView {
             this.line_display_info
                 .get(line)
                 .and_then(|info| info.as_deref())
+                .filter(|info| {
+                    cached_input_geometry_is_visible(
+                        info.visual_line_count,
+                        info.line_height,
+                        this.front_matter_group_geometry_dirty,
+                    )
+                })
                 .map(|info| {
                     this.input_bounds_for_display_line(
                         anchor_offset,
@@ -766,7 +1328,7 @@ impl EntityInputHandler for EditorView {
                     )
                 })
         };
-        let line_bounds = if self.layout_dirty {
+        let line_bounds = if self.layout_dirty || self.front_matter_group_geometry_dirty {
             inline_line_bounds(self, window).or_else(|| cached_line_bounds(self))
         } else {
             cached_line_bounds(self).or_else(|| inline_line_bounds(self, window))
@@ -820,6 +1382,7 @@ impl EntityInputHandler for EditorView {
             return Some(utf16_offset);
         }
 
+        self.refresh_front_matter_input_geometry(window, self.front_matter_input_viewport_bounds());
         let table_offset = self
             .table_click_areas
             .iter()

@@ -6,6 +6,10 @@ use super::{EditorView, TableDragState};
 
 pub(super) type HandleKey = (usize, bool, usize);
 
+pub(super) fn handles_visible(read_only: bool, hovered: bool, selected: bool) -> bool {
+    !read_only && (hovered || selected)
+}
+
 pub(super) fn top_padding(
     decoration: Option<&crate::markdown::LineDecoration>,
     diff: bool,
@@ -487,6 +491,10 @@ impl EditorView {
     ) -> bool {
         if self.table_handles.press.is_none() {
             return false;
+        }
+        if self.active_tab_is_read_only() {
+            self.cancel_table_handle_press(cx);
+            return true;
         }
         let threshold = self.scaled(self.styles.table.table_border_drag_threshold_px);
         self.table_handles.press.as_mut().unwrap().update(
@@ -1062,6 +1070,19 @@ impl TableHandles {
 mod tests {
     use super::*;
     use gpui::{point, px};
+
+    #[test]
+    fn read_only_tables_never_reveal_handles_even_with_stale_selection() {
+        for hovered in [false, true] {
+            for selected in [false, true] {
+                assert!(!handles_visible(true, hovered, selected));
+                assert_eq!(
+                    handles_visible(false, hovered, selected),
+                    hovered || selected
+                );
+            }
+        }
+    }
 
     #[test]
     fn cell_drag_rectangles_classify_full_rows_and_columns() {

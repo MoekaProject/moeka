@@ -10,14 +10,223 @@ use gpui::{
     fill, point, px, quad, relative, size,
 };
 
-use crate::markdown::{BlockType, CalloutKind};
+use crate::markdown::{BlockType, CalloutKind, TableLineInfo};
 
 use super::helpers;
 use super::*;
 
-const LINE_FORMAT_ICON_SIZE_PX: f32 = 18.0;
+pub(super) const LINE_FORMAT_ICON_SIZE_PX: f32 = 18.0;
 const LINE_FORMAT_ICON_GAP_PX: f32 = 0.0;
-const LINE_FORMAT_CONTENT_GAP_PX: f32 = 6.0;
+pub(super) const LINE_FORMAT_CONTENT_GAP_PX: f32 = 6.0;
+const FRONT_MATTER_LIST_DELETE_GAP_PX: f32 = 4.0;
+const FRONT_MATTER_LIST_DELETE_WIDTH_PX: f32 = 14.0;
+const FRONT_MATTER_LIST_ITEM_GAP_PX: f32 = 3.0;
+
+/// Shared by prepaint and the uncached hit-test/IME shaping path. Reserve the
+/// column on continuation rows too; source indentation stays inside the text.
+pub(super) fn front_matter_content_geometry(
+    is_front_matter_line: bool,
+    content_left: f32,
+    wrap_width: f32,
+    scale: f32,
+) -> (f32, f32) {
+    if !is_front_matter_line {
+        return (content_left, wrap_width);
+    }
+    let inset = (LINE_FORMAT_ICON_SIZE_PX + LINE_FORMAT_CONTENT_GAP_PX) * scale;
+    (content_left + inset, (wrap_width - inset).max(1.0))
+}
+
+fn front_matter_svg_left_inset(svg: &[u8]) -> Option<f32> {
+    fn painted_left(group: &usvg::Group) -> Option<f32> {
+        group
+            .children()
+            .iter()
+            .filter_map(|node| match node {
+                usvg::Node::Group(group) => painted_left(group),
+                usvg::Node::Path(path) if path.fill().is_some() || path.stroke().is_some() => {
+                    Some(path.abs_stroke_bounding_box().left())
+                }
+                _ => None,
+            })
+            .min_by(f32::total_cmp)
+    }
+    let tree = usvg::Tree::from_data(svg, &usvg::Options::default()).ok()?;
+    Some(painted_left(tree.root())? / tree.size().width())
+}
+
+fn front_matter_type_icon_inset(path: &'static str, cx: &App) -> f32 {
+    static INSETS: std::sync::OnceLock<std::sync::Mutex<HashMap<&'static str, f32>>> =
+        std::sync::OnceLock::new();
+    let mut insets = INSETS.get_or_init(Default::default).lock().unwrap();
+    *insets.entry(path).or_insert_with(|| {
+        cx.asset_source()
+            .load(path)
+            .ok()
+            .flatten()
+            .and_then(|svg| front_matter_svg_left_inset(&svg))
+            .unwrap_or(0.0)
+    })
+}
+
+fn front_matter_type_glyph_bounds(slot: Bounds<Pixels>, icon_size: Pixels) -> Bounds<Pixels> {
+    Bounds::new(
+        slot.origin + point(px(0.0), (slot.size.height - icon_size) * 0.5),
+        size(icon_size, icon_size),
+    )
+}
+
+pub(super) fn front_matter_fold_hit_bounds(
+    left: f32,
+    content_left: f32,
+    top: f32,
+    height: f32,
+    viewport: Bounds<Pixels>,
+) -> Bounds<Pixels> {
+    Bounds::new(
+        point(px(left), px(top)),
+        size(px((content_left - left).max(0.0)), px(height)),
+    )
+    .intersect(&viewport)
+}
+
+pub(super) fn front_matter_type_hit_bounds(
+    slot: Bounds<Pixels>,
+    viewport: Bounds<Pixels>,
+) -> Option<Bounds<Pixels>> {
+    let clipped = slot.intersect(&viewport);
+    (clipped.size.width > px(0.0) && clipped.size.height > px(0.0)).then_some(clipped)
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_column_preserves_right_edge_and_source_indent_at_every_zoom() {
+    for scale in [0.75, 1.0, 1.5, 2.0] {
+        let (left, width) = front_matter_content_geometry(true, 100.0, 400.0, scale);
+        assert_eq!(left + width, 500.0);
+        assert_eq!(left, 100.0 + 24.0 * scale);
+        // Nested keys keep their source indent after the fixed icon column.
+        let source_indent = 12.0 * scale;
+        assert_eq!((left + source_indent) - left, source_indent);
+        assert_eq!(
+            front_matter_content_geometry(false, 100.0, 400.0, scale),
+            (100.0, 400.0),
+        );
+    }
+    assert_eq!(
+        front_matter_content_geometry(true, 0.0, 10.0, 1.0),
+        (24.0, 1.0)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_delimiters_and_summary_use_left_edge_and_fold_hits_stay_in_gutter() {
+    let decorations = crate::markdown::parse_decorations("---\ntitle: '中'\n---\nBody");
+    for scale in [0.75, 1.0, 1.5, 2.0] {
+        for line in [0, 2] {
+            let table = decorations[line].table_info.as_ref().unwrap();
+            assert_eq!(
+                front_matter_content_geometry(
+                    table.is_front_matter && !table.is_separator,
+                    100.0,
+                    400.0,
+                    scale
+                ),
+                (100.0, 400.0)
+            );
+        }
+        let slot = Bounds::new(
+            point(px(100.0), px(50.0)),
+            size(px(18.0 * scale), px(18.0 * scale)),
+        );
+        let glyph = front_matter_type_glyph_bounds(slot, px(14.0 * scale));
+        assert_eq!(glyph.left(), slot.left());
+        assert_eq!(glyph.center().y, slot.center().y);
+        let viewport = Bounds::new(point(px(85.0), px(50.0)), size(px(400.0), px(200.0)));
+        let hit = front_matter_fold_hit_bounds(80.0, 100.0, 45.0, 25.0, viewport);
+        assert_eq!(hit.left(), viewport.left());
+        assert_eq!(hit.top(), viewport.top());
+        assert_eq!(hit.right(), px(100.0));
+        assert!(hit.contains(&point(px(95.0), px(60.0))));
+        assert!(!hit.contains(&point(px(101.0), px(60.0))));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_visible_svg_ink_starts_at_content_left_without_changing_hit_targets() {
+    for svg in [
+        include_bytes!("../../assets/icons/format/front-matter-text.svg").as_slice(),
+        include_bytes!("../../assets/icons/format/front-matter-number.svg").as_slice(),
+    ] {
+        let inset = front_matter_svg_left_inset(svg).unwrap();
+        assert!(inset > 0.0);
+        for scale in [0.75, 1.0, 1.5, 2.0] {
+            let slot = Bounds::new(
+                point(px(100.0), px(50.0)),
+                size(px(18.0 * scale), px(18.0 * scale)),
+            );
+            let icon_size = px(14.0 * scale);
+            let mut glyph = front_matter_type_glyph_bounds(slot, icon_size);
+            glyph.origin.x -= icon_size * inset;
+            assert_eq!(glyph.left() + icon_size * inset, slot.left());
+            assert_eq!(glyph.size.width, icon_size);
+            assert_eq!(slot.size.width, px(18.0 * scale));
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_list_spacing_moves_delete_right_without_shrinking_its_target() {
+    for scale in [0.75, 1.0, 1.5, 2.0] {
+        let text_end = 100.0;
+        let delete_left = text_end + FRONT_MATTER_LIST_DELETE_GAP_PX * scale;
+        let delete_right = delete_left + FRONT_MATTER_LIST_DELETE_WIDTH_PX * scale;
+        let next_item = delete_right + FRONT_MATTER_LIST_ITEM_GAP_PX * scale;
+        assert_eq!(delete_left - text_end, 4.0 * scale);
+        assert_eq!(delete_right - delete_left, 14.0 * scale);
+        assert_eq!(next_item - delete_right, 3.0 * scale);
+        assert!(next_item < text_end + (2.0 + 14.0 + 6.0) * scale);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_type_hits_are_clipped_to_the_editor_viewport() {
+    let viewport = Bounds::new(point(px(100.0), px(50.0)), size(px(300.0), px(200.0)));
+    let slot = Bounds::new(point(px(95.0), px(45.0)), size(px(18.0), px(18.0)));
+    let hit = front_matter_type_hit_bounds(slot, viewport).unwrap();
+    assert_eq!(hit.origin, viewport.origin);
+    assert_eq!(hit.size, size(px(13.0), px(13.0)));
+    assert!(!hit.contains(&point(px(99.0), px(55.0))));
+    assert!(!hit.contains(&point(px(105.0), px(49.0))));
+    for origin in [point(px(80.0), px(60.0)), point(px(110.0), px(250.0))] {
+        assert!(front_matter_type_hit_bounds(Bounds::new(origin, slot.size), viewport).is_none());
+    }
+}
+
+fn table_group_expands_neighboring_rows(table: &TableLineInfo, cursor_line: usize) -> bool {
+    !table.is_front_matter && (table.table_start_line..table.table_end_line).contains(&cursor_line)
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_scalar_focus_does_not_expand_neighboring_rows() {
+    let yaml = crate::markdown::parse_decorations("---\ntitle: 'Moeka'\nflag: true\n---");
+    for decoration in &yaml {
+        assert!(!table_group_expands_neighboring_rows(
+            decoration.table_info.as_ref().unwrap(),
+            1,
+        ));
+    }
+    let table = crate::markdown::parse_decorations("| title |\n| --- |\n| Moeka |");
+    assert!(table_group_expands_neighboring_rows(
+        table[0].table_info.as_ref().unwrap(),
+        2,
+    ));
+}
 
 fn table_border_track_path(
     table_left: f32,
@@ -78,6 +287,74 @@ fn preview_height_changes_above_viewport_keep_the_next_line_fixed() {
     assert_eq!(preview_height_anchor_delta(24.0, 300.0, -12.0, 0.0), 276.0);
 }
 
+fn line_format_trigger_left(
+    content_left: f32,
+    format_size: f32,
+    fold_size: Option<f32>,
+    icon_gap: f32,
+    content_gap: f32,
+) -> f32 {
+    content_left - content_gap - format_size - fold_size.map_or(0.0, |size| size + icon_gap)
+}
+
+fn markdown_fold_opacity(
+    fold_hovered: bool,
+    row_hovered: bool,
+    row_opacity: f32,
+    persistent_opacity: f32,
+) -> f32 {
+    if fold_hovered {
+        selection_toolbar::FORMAT_TRIGGER_HOVER_OPACITY
+    } else if row_hovered {
+        row_opacity
+    } else {
+        persistent_opacity
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_hover_controls_share_heading_order_on_the_moved_property_row() {
+    let decorations = crate::markdown::parse_decorations("---\ntitle: Moeka\n---\nBody");
+    let control_line = super::fold::front_matter_fold_control_line(&decorations, &[], false);
+    assert_eq!(control_line, Some(1));
+    for scale in [0.75, 1.0, 1.5, 2.0] {
+        let content_left = 100.0;
+        let format_size = LINE_FORMAT_ICON_SIZE_PX * scale;
+        let fold_size = 12.0 * scale;
+        let content_gap = LINE_FORMAT_CONTENT_GAP_PX * scale;
+        let icon_gap = LINE_FORMAT_ICON_GAP_PX * scale;
+        let format_left = line_format_trigger_left(
+            content_left,
+            format_size,
+            Some(fold_size),
+            icon_gap,
+            content_gap,
+        );
+        let fold_left = content_left - content_gap - fold_size;
+        assert!(format_left < fold_left);
+        assert_eq!(format_left + format_size + icon_gap, fold_left);
+        assert!(fold_left + fold_size <= content_left);
+        assert_eq!(
+            line_format_trigger_left(content_left, format_size, None, icon_gap, content_gap),
+            content_left - format_size - content_gap
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn front_matter_fold_buttons_are_hidden_until_row_or_button_hover() {
+    assert_eq!(markdown_fold_opacity(false, false, 0.34, 0.0), 0.0);
+    assert_eq!(markdown_fold_opacity(false, true, 0.34, 0.0), 0.34);
+    assert_eq!(
+        markdown_fold_opacity(true, false, 0.34, 0.0),
+        selection_toolbar::FORMAT_TRIGGER_HOVER_OPACITY
+    );
+    // Other folded Markdown blocks retain their existing persistent affordance.
+    assert_eq!(markdown_fold_opacity(false, false, 0.34, 0.5), 0.5);
+}
+
 fn gutter_fold_row_hovered(gutter_hovered: bool, pointer_y: Pixels, top: f32, height: f32) -> bool {
     gutter_hovered && (top..top + height).contains(&f32::from(pointer_y))
 }
@@ -132,29 +409,6 @@ fn callout_icon_size(
         .min(available_width.max(0.0))
 }
 
-fn hide_front_matter_separator(
-    decoration: &crate::markdown::LineDecoration,
-    front_matter_active: bool,
-) -> bool {
-    !front_matter_active
-        && decoration
-            .table_info
-            .as_ref()
-            .is_some_and(|table_info| table_info.is_front_matter && table_info.is_separator)
-}
-
-fn front_matter_is_active(
-    decorations: &[crate::markdown::LineDecoration],
-    cursor_line: usize,
-    syntax_expansion_allowed: bool,
-) -> bool {
-    syntax_expansion_allowed
-        && decorations
-            .get(cursor_line)
-            .and_then(|decoration| decoration.table_info.as_ref())
-            .is_some_and(|table_info| table_info.is_front_matter)
-}
-
 fn generated_preview_action_is_visible(action: GeneratedPreviewAction, read_only: bool) -> bool {
     action != GeneratedPreviewAction::Code || !read_only
 }
@@ -165,14 +419,17 @@ fn generated_preview_code_mode_active(
     cursor_offset: usize,
     selection_ranges: &[Range<usize>],
     syntax_expansion_allowed: bool,
+    search_reveal_range: Option<&Range<usize>>,
 ) -> bool {
-    syntax_expansion_allowed
+    search_reveal_range.is_some_and(|range| {
+        range.start < preview.source_range.end && preview.source_range.start < range.end
+    }) || (syntax_expansion_allowed
         && ((preview.start_line..=preview.end_line).contains(&cursor_line)
             && preview.source_range.start <= cursor_offset
             && cursor_offset <= preview.source_range.end
             || selection_ranges.iter().any(|range| {
                 range.start < preview.source_range.end && range.end > preview.source_range.start
-            }))
+            })))
 }
 
 fn uses_table_cell_selection(
@@ -210,25 +467,6 @@ fn callout_icon_minimum_size_overrides_line_height_limit() {
 
 #[cfg(test)]
 #[test]
-fn front_matter_separators_hide_only_while_group_is_inactive() {
-    let decorations = crate::markdown::parse_decorations("---\ntitle: Moeka\n---");
-
-    assert!(hide_front_matter_separator(&decorations[0], false));
-    assert!(hide_front_matter_separator(&decorations[2], false));
-    assert!(!hide_front_matter_separator(&decorations[0], true));
-    assert!(!hide_front_matter_separator(&decorations[1], false));
-}
-
-#[cfg(test)]
-#[test]
-fn reading_mode_keeps_front_matter_separators_folded() {
-    let decorations = crate::markdown::parse_decorations("---\ntitle: Moeka\n---");
-    assert!(front_matter_is_active(&decorations, 1, true));
-    assert!(!front_matter_is_active(&decorations, 1, false));
-}
-
-#[cfg(test)]
-#[test]
 fn read_only_generated_previews_hide_code_action() {
     assert!(!generated_preview_action_is_visible(
         GeneratedPreviewAction::Code,
@@ -260,6 +498,7 @@ fn reading_mode_selection_does_not_activate_preview_code_mode() {
         preview.source_range.start,
         &selection,
         true,
+        None,
     ));
     assert!(!generated_preview_code_mode_active(
         preview,
@@ -267,7 +506,50 @@ fn reading_mode_selection_does_not_activate_preview_code_mode() {
         preview.source_range.start,
         &selection,
         false,
+        None,
     ));
+}
+
+#[cfg(test)]
+#[test]
+fn search_reveals_preview_source_without_enabling_read_only_selection_expansion() {
+    for source in ["```mermaid\ngraph TD\nA-->B\n```\n", "$$\nx + needle\n$$\n"] {
+        let decorations = crate::markdown::parse_decorations(source);
+        let preview = decorations
+            .iter()
+            .find_map(|d| d.block_preview.as_ref())
+            .unwrap();
+        for range in [
+            preview.source_range.start..preview.source_range.start + 1,
+            preview.source_range.end - 1..preview.source_range.end,
+        ] {
+            assert!(generated_preview_code_mode_active(
+                preview,
+                usize::MAX,
+                0,
+                &[],
+                false,
+                Some(&range)
+            ));
+        }
+        let adjacent = preview.source_range.end..preview.source_range.end + 1;
+        assert!(!generated_preview_code_mode_active(
+            preview,
+            usize::MAX,
+            0,
+            &[],
+            false,
+            Some(&adjacent)
+        ));
+        assert!(!generated_preview_code_mode_active(
+            preview,
+            usize::MAX,
+            0,
+            &[],
+            false,
+            None
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -395,6 +677,10 @@ pub(crate) struct EditorPrepaintState {
     inline_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
     gutter_fold_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
     format_icons: Vec<(Bounds<Pixels>, Hsla)>,
+    front_matter_type_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
+
+    front_matter_group_texts: Vec<(Bounds<Pixels>, WrappedLine, Point<Pixels>, Pixels)>,
+    front_matter_delete_hitboxes: Vec<Hitbox>,
     /// HR lines: (y_position, start_x, width, is_dashed). `***` renders dashed,
     /// `---`/`___` render solid.
     hr_lines: Vec<(f32, f32, f32, bool)>,
@@ -422,6 +708,7 @@ pub(crate) struct EditorPrepaintState {
     inline_diff_revert_buttons: Vec<CodeBlockCopyButtonPaint>,
     code_block_copy_hitboxes: Vec<Hitbox>,
     format_trigger_hitboxes: Vec<(Hitbox, usize)>,
+    front_matter_type_hitboxes: Vec<(Hitbox, usize)>,
     preview_zoom_buttons: Vec<CodeBlockCopyButtonPaint>,
     preview_zoom_hitboxes: Vec<Hitbox>,
     tooltips: Vec<(Hitbox, Bounds<Pixels>, SharedString)>,
@@ -708,6 +995,7 @@ impl LineDragGhost {
                 .gutter_svgs
                 .iter()
                 .chain(&state.inline_svgs)
+                .chain(&state.front_matter_type_icons)
                 .filter(|(rect, _, _)| intersects(*rect))
                 .cloned()
                 .collect(),
@@ -1081,6 +1369,7 @@ fn push_task_checkbox_paint(
     line_top: f32,
     total_line_height: f32,
     collapsed_task_prefix_display_columns: usize,
+    mapped_prefix_bytes: Option<usize>,
     checkbox_text_gap_px: f32,
     hit_line_idx: Option<usize>,
     gutter_quads: &mut Vec<PaintQuad>,
@@ -1096,13 +1385,16 @@ fn push_task_checkbox_paint(
 
     let checkbox_styles = &editor.styles.checkbox;
     let checkbox_size = font_size * checkbox_styles.checkbox_size_factor;
-    let prefix_bytes = helpers::compute_display_prefix_bytes(
-        display_text,
-        block_type,
-        prefix_collapsed,
-        collapsed_task_prefix_display_columns,
-    )
-    .min(display_text.len());
+    let prefix_bytes = mapped_prefix_bytes
+        .unwrap_or_else(|| {
+            helpers::compute_display_prefix_bytes(
+                display_text,
+                block_type,
+                prefix_collapsed,
+                collapsed_task_prefix_display_columns,
+            )
+        })
+        .min(display_text.len());
     let text_start_x = wrapped
         .position_for_index(prefix_bytes, px(line_height))
         .map(|pos| f32::from(pos.x))
@@ -1114,6 +1406,37 @@ fn push_task_checkbox_paint(
         point(px(checkbox_x), px(checkbox_y)),
         size(px(checkbox_size), px(checkbox_size)),
     );
+    push_checkbox_visuals(
+        editor,
+        *checked,
+        checkbox_bounds,
+        hit_line_idx,
+        gutter_quads,
+        gutter_svgs,
+    );
+
+    if let Some(line_idx) = hit_line_idx.filter(|_| !editor.active_tab_is_read_only()) {
+        let hit_padding = editor.scaled(2.0);
+        let hit_bounds = Bounds::new(
+            point(px(checkbox_x - hit_padding), px(line_top)),
+            size(px(checkbox_size + hit_padding * 2.0), px(total_line_height)),
+        );
+        checkbox_hit_areas.push((hit_bounds, line_idx));
+    }
+}
+
+fn push_checkbox_visuals(
+    editor: &EditorView,
+    checked: bool,
+    checkbox_bounds: Bounds<Pixels>,
+    hit_line_idx: Option<usize>,
+    gutter_quads: &mut Vec<PaintQuad>,
+    gutter_svgs: &mut Vec<(Bounds<Pixels>, &'static str, Hsla)>,
+) {
+    let checkbox_styles = &editor.styles.checkbox;
+    let checkbox_size = f32::from(checkbox_bounds.size.width);
+    let checkbox_x = f32::from(checkbox_bounds.origin.x);
+    let checkbox_y = f32::from(checkbox_bounds.origin.y);
     let corner_radius = px(editor.scaled(checkbox_styles.checkbox_radius_px));
     let checkbox_opacity =
         if hit_line_idx.is_some_and(|line_idx| editor.hovering_checkbox_line == Some(line_idx)) {
@@ -1122,7 +1445,7 @@ fn push_task_checkbox_paint(
             checkbox_styles.checkbox_default_opacity
         };
 
-    if *checked {
+    if checked {
         let mut checkbox_bg = checkbox_styles.checkbox_checked_bg;
         checkbox_bg.a *= checkbox_opacity;
         gutter_quads.push(quad(
@@ -1157,12 +1480,319 @@ fn push_task_checkbox_paint(
             BorderStyle::default(),
         ));
     }
+}
 
-    if let Some(line_idx) = hit_line_idx.filter(|_| !editor.active_tab_is_read_only()) {
-        let hit_padding = editor.scaled(2.0);
+fn shape_front_matter_group_text(
+    window: &mut Window,
+    text: &str,
+    font: &gpui::Font,
+    color: Hsla,
+    font_size: f32,
+    letter_spacing: f32,
+) -> Option<WrappedLine> {
+    let run = TextRun {
+        len: text.len().max(1),
+        font: font.clone(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let mut shaped = window
+        .text_system()
+        .shape_text(
+            if text.is_empty() {
+                " ".into()
+            } else {
+                text.to_string().into()
+            },
+            px(font_size),
+            &[run],
+            None,
+            None,
+        )
+        .ok()?
+        .into_iter()
+        .next()?;
+    if letter_spacing != 0.0 {
+        helpers::apply_letter_spacing(&mut shaped, letter_spacing);
+    }
+    Some(shaped)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_front_matter_group_paint(
+    editor: &EditorView,
+    plan: &helpers::FrontMatterGroupPlan,
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    wrapped: &WrappedLine,
+    display_start: usize,
+    content_x: f32,
+    top: f32,
+    line_height: f32,
+    font_size: f32,
+    content_width: f32,
+    font: &gpui::Font,
+    texts: &mut Vec<(Bounds<Pixels>, WrappedLine, Point<Pixels>, Pixels)>,
+    hits: &mut Vec<super::input::FrontMatterTextHit>,
+    deletes: &mut Vec<(Bounds<Pixels>, usize, usize)>,
+    scroll_areas: &mut Vec<(Bounds<Pixels>, usize, f32)>,
+    clipped_selections: &mut Vec<(Bounds<Pixels>, Vec<PaintQuad>)>,
+) {
+    use super::front_matter_groups::GroupKind;
+    let buffer = &editor.buffer;
+    let header = plan.group.header_line;
+
+    let value_x = content_x + f32::from(wrapped.unwrapped_layout.x_for_index(display_start));
+    let right = content_x + content_width;
+    let viewport = bounds.intersect(&window.content_mask().bounds);
+    let letter_spacing = editor.styles.editor.editor_letter_spacing_px;
+    let selections: Vec<_> = editor
+        .all_cursor_ranges()
+        .into_iter()
+        .map(|(head, anchor)| head.min(anchor)..head.max(anchor))
+        .collect();
+    let mut push_selections = |hit: &super::input::FrontMatterTextHit, display: &str, clip| {
+        let quads: Vec<_> =
+            helpers::front_matter_display_selection_ranges(display, &hit.source_map, &selections)
+                .into_iter()
+                .map(|span| {
+                    let left = hit.shaped.unwrapped_layout.x_for_index(span.start);
+                    let right = hit.shaped.unwrapped_layout.x_for_index(span.end);
+                    fill(
+                        Bounds::new(
+                            hit.origin + point(left, px(0.0)),
+                            size(right - left, px(line_height)),
+                        ),
+                        editor.theme.selection,
+                    )
+                })
+                .collect();
+        if !quads.is_empty() {
+            clipped_selections.push((clip, quads));
+        }
+    };
+    match plan.group.kind {
+        GroupKind::Multiline => {
+            if !plan.collapse_header {
+                return;
+            }
+            let source = buffer.line_content(header);
+            let Some(key) = editor
+                .decorations
+                .get(header)
+                .and_then(|d| d.front_matter.as_ref())
+                .and_then(|info| info.key_range.as_ref())
+            else {
+                return;
+            };
+            let end = source[key.end..]
+                .find(':')
+                .map(|col| key.end + col + 1)
+                .unwrap_or(key.end);
+            let label = &source[..end];
+            let runs = super::front_matter_layout::label_runs(
+                label,
+                key.clone(),
+                font,
+                editor.styles.table.front_matter_key_text_color,
+            );
+            if let Some(mut shaped) = window
+                .text_system()
+                .shape_text(label.to_owned().into(), px(font_size), &runs, None, None)
+                .ok()
+                .and_then(|lines| lines.into_iter().next())
+            {
+                helpers::apply_letter_spacing(&mut shaped, letter_spacing);
+                let origin = point(px(content_x), px(top));
+                let clip = Bounds::new(
+                    origin,
+                    size(px((value_x - content_x).max(0.0)), px(line_height)),
+                )
+                .intersect(&viewport);
+                if let Some(hit_bounds) = front_matter_type_hit_bounds(
+                    Bounds::new(origin, size(shaped.width(), px(line_height))),
+                    clip,
+                ) {
+                    let hit = super::input::FrontMatterTextHit {
+                        bounds: hit_bounds,
+                        origin,
+                        shaped: shaped.clone(),
+                        line_height,
+                        source_map: helpers::front_matter_item_source_map(
+                            label,
+                            label,
+                            buffer.line_start(header),
+                        ),
+                    };
+                    push_selections(&hit, label, clip);
+                    hits.push(hit);
+                }
+                texts.push((clip, shaped, origin, px(line_height)));
+            }
+        }
+        GroupKind::List => {
+            let clip = Bounds::new(
+                point(px(value_x), px(top)),
+                size(px((right - value_x).max(0.0)), px(line_height)),
+            )
+            .intersect(&viewport);
+            if clip.size.width <= px(0.0) || clip.size.height <= px(0.0) {
+                return;
+            }
+            let gap = editor.scaled(FRONT_MATTER_LIST_DELETE_GAP_PX);
+            let delete_width = editor.scaled(FRONT_MATTER_LIST_DELETE_WIDTH_PX);
+            let item_gap = editor.scaled(FRONT_MATTER_LIST_ITEM_GAP_PX);
+            let source = buffer.text();
+            let mut shaped_items = Vec::new();
+            let mut extent = 0.0;
+            for (index, item) in plan.group.items.iter().enumerate() {
+                if let Some(shaped) = shape_front_matter_group_text(
+                    window,
+                    &item.display_text,
+                    font,
+                    editor.theme.text_primary,
+                    font_size,
+                    letter_spacing,
+                ) {
+                    let width = f32::from(shaped.width());
+                    shaped_items.push((index, item, shaped, extent, width));
+                    extent += width + gap + delete_width + item_gap;
+                }
+            }
+            let max_offset = (extent - item_gap - f32::from(clip.size.width)).max(0.0);
+            let offset = editor
+                .front_matter_list_scroll_offsets
+                .get(&header)
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(0.0, max_offset);
+            scroll_areas.push((clip, header, max_offset));
+            let close = shape_front_matter_group_text(
+                window,
+                "×",
+                font,
+                editor.theme.text_secondary,
+                font_size,
+                0.0,
+            );
+            for (index, item, shaped, left, width) in shaped_items {
+                let origin = point(px(value_x + left - offset), px(top));
+                let text_bounds = Bounds::new(
+                    origin,
+                    size(px(width.max(editor.scaled(4.0))), px(line_height)),
+                );
+                if let Some(hit_bounds) = front_matter_type_hit_bounds(text_bounds, clip) {
+                    let hit = super::input::FrontMatterTextHit {
+                        bounds: hit_bounds,
+                        origin,
+                        shaped: shaped.clone(),
+                        line_height,
+                        source_map: helpers::front_matter_item_source_map(
+                            source.get(item.source_range.clone()).unwrap_or(""),
+                            &item.display_text,
+                            item.source_range.start,
+                        ),
+                    };
+                    push_selections(&hit, &item.display_text, clip);
+                    hits.push(hit);
+                    texts.push((clip, shaped, origin, px(line_height)));
+                }
+                let close_origin = origin + point(px(width + gap), px(0.0));
+                let close_bounds =
+                    Bounds::new(close_origin, size(px(delete_width), px(line_height)));
+                if let Some(hit_bounds) = front_matter_type_hit_bounds(close_bounds, clip) {
+                    if let Some(close) = &close {
+                        texts.push((clip, close.clone(), close_origin, px(line_height)));
+                    }
+                    if !editor.active_tab_is_read_only() {
+                        deletes.push((hit_bounds, header, index));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn push_front_matter_boolean_paint(
+    editor: &EditorView,
+    decoration: &LineDecoration,
+    line_content: &str,
+    active_ranges: &[Range<usize>],
+    display_text: &str,
+    buffer_to_display: &[usize],
+    wrapped: &WrappedLine,
+    font_size: f32,
+    line_height: f32,
+    content_x: f32,
+    text_line_top: f32,
+    indent_px: f32,
+    line_idx: usize,
+    gutter_quads: &mut Vec<PaintQuad>,
+    gutter_svgs: &mut Vec<(Bounds<Pixels>, &'static str, Hsla)>,
+    checkbox_hit_areas: &mut Vec<(Bounds<Pixels>, usize)>,
+) {
+    let Some(info) = decoration.front_matter.as_ref() else {
+        return;
+    };
+    let crate::front_matter::FrontMatterValue::Boolean(checked) = info.value else {
+        return;
+    };
+    if helpers::front_matter_row_is_active(active_ranges, line_content.len()) {
+        return;
+    }
+    let (Some(&display_start), Some(&display_end)) = (
+        buffer_to_display.get(info.value_range.start),
+        buffer_to_display.get(info.value_range.end),
+    ) else {
+        return;
+    };
+    if display_start >= display_end || display_end > display_text.len() {
+        return;
+    }
+    let position = if let Some(boundary_row) =
+        helpers::wrap_boundary_byte_indices(wrapped, display_text)
+            .iter()
+            .position(|boundary| *boundary == display_start)
+    {
+        point(
+            px(indent_px),
+            wrapped.row_top(boundary_row + 1, px(line_height)),
+        )
+    } else if let Some(position) = wrapped.position_for_index(display_start, px(line_height)) {
+        point(
+            position.x + px(helpers::indent_for_y(indent_px, position.y, line_height)),
+            position.y,
+        )
+    } else {
+        return;
+    };
+    let checkbox_size = font_size * editor.styles.checkbox.checkbox_size_factor;
+    let row_height = f32::from(wrapped.row_height(
+        wrapped.row_for_y(position.y, px(line_height)),
+        px(line_height),
+    ));
+    let checkbox_bounds = Bounds::new(
+        point(
+            px(content_x) + position.x,
+            px(text_line_top + (row_height - checkbox_size) / 2.0) + position.y,
+        ),
+        size(px(checkbox_size), px(checkbox_size)),
+    );
+    push_checkbox_visuals(
+        editor,
+        checked,
+        checkbox_bounds,
+        Some(line_idx),
+        gutter_quads,
+        gutter_svgs,
+    );
+    if !editor.active_tab_is_read_only() {
+        let padding = px(editor.scaled(2.0));
         let hit_bounds = Bounds::new(
-            point(px(checkbox_x - hit_padding), px(line_top)),
-            size(px(checkbox_size + hit_padding * 2.0), px(total_line_height)),
+            checkbox_bounds.origin - point(padding, padding),
+            checkbox_bounds.size + size(padding * 2.0, padding * 2.0),
         );
         checkbox_hit_areas.push((hit_bounds, line_idx));
     }
@@ -1443,11 +2073,9 @@ fn push_inline_code_background_quads(
     }
 }
 
+#[cfg(test)]
 fn table_cell_trimmed_display_range(display_text: &str) -> Range<usize> {
-    let trimmed_start = display_text.trim_start_matches([' ', '\t']);
-    let start = display_text.len() - trimmed_start.len();
-    let trimmed = trimmed_start.trim_end_matches([' ', '\t']);
-    start..start + trimmed.len()
+    helpers::table_cell_trimmed_display_range(display_text)
 }
 
 #[cfg(test)]
@@ -1503,6 +2131,8 @@ fn build_precise_table_layout(
     base_char_width: f32,
     line_height: f32,
     body_space_width: f32,
+    task_prefix_columns: usize,
+    task_source_indent_step_chars: usize,
     handle_size: f32,
     body_font: &Font,
     body_cjk_font: &Font,
@@ -1513,14 +2143,16 @@ fn build_precise_table_layout(
     italic_cjk_font: &Font,
     font_size: f32,
     letter_spacing: f32,
+    superscript_scale_factor: f32,
+    subscript_scale_factor: f32,
     theme: &Theme,
     list_marker_text_color: Hsla,
     list_marker_font_weight: FontWeight,
     heading_marker_text_color: Hsla,
-    cursor_offsets: &[usize],
-    marked_range: Option<&Range<usize>>,
+    syntax_focus: &helpers::TableCellSyntaxFocus,
 ) -> helpers::TableLayout {
     let mut layout = helpers::compute_table_layout(
+        buffer,
         decorations,
         table_start,
         table_end,
@@ -1532,6 +2164,149 @@ fn build_precise_table_layout(
         handle_size,
     );
     let cell_padding_x = layout.cell_padding_x;
+    let prepare_cell = |content: &str,
+                        decoration: &LineDecoration,
+                        active_ranges: &[Range<usize>],
+                        is_header: bool| {
+        let (folded, d2b, b2d, collapsed) = helpers::build_display_text(
+            content,
+            decoration,
+            active_ranges,
+            false,
+            None,
+            0,
+            task_prefix_columns,
+            task_prefix_columns,
+            task_source_indent_step_chars,
+            0,
+            superscript_scale_factor,
+            subscript_scale_factor,
+            superscript_scale_factor,
+        );
+        let range = helpers::table_cell_display_range(&folded, content, decoration, &b2d);
+        let display = folded[range.clone()].to_string();
+        let d2b = d2b[range.clone()].to_vec();
+        let b2d = b2d
+            .iter()
+            .map(|index| index.saturating_sub(range.start).min(range.len()))
+            .collect::<Vec<_>>();
+        let mut runs = helpers::build_text_runs_for_display(
+            &display,
+            content,
+            &d2b,
+            decoration,
+            active_ranges,
+            false,
+            collapsed,
+            body_font,
+            body_cjk_font,
+            monospace_font,
+            heading_font,
+            heading_cjk_font,
+            italic_font,
+            italic_cjk_font,
+            0,
+            font_size,
+            theme,
+            crate::theme::with_alpha(theme.git_status_added, 0.24),
+            crate::theme::with_alpha(theme.text_danger, 0.28),
+            theme.link,
+            FontWeight::BOLD,
+            list_marker_text_color,
+            list_marker_font_weight,
+            heading_marker_text_color,
+            None,
+            false,
+        );
+        if is_header {
+            for run in &mut runs {
+                run.font.weight = FontWeight::BOLD;
+            }
+        }
+        (display, d2b, b2d, collapsed, runs)
+    };
+
+    // Measure the rendered hard lines, not Markdown source length. Use the
+    // inactive presentation so revealing link/math syntax never resizes columns.
+    let mut desired_widths = vec![base_char_width; layout.col_count];
+    let mut cell_sources = Vec::with_capacity(layout.visual_row_count);
+    for (vi, cells) in layout.cells.iter_mut().enumerate() {
+        let source_line = layout.visual_row_to_line[vi];
+        let row_decoration = &decorations[source_line];
+        let mut sources = Vec::with_capacity(cells.len());
+        for cell in cells {
+            let Some(info) = row_decoration.table_info.as_ref() else {
+                continue;
+            };
+            let (content, range) = super::table_cell_render::content_with_range(
+                info,
+                buffer.line_content(source_line),
+                cell.col,
+            );
+            cell.cell_range = range;
+            let mut decoration =
+                helpers::table_cell_decoration(row_decoration, &content, &cell.cell_range);
+            helpers::add_inline_math_display_replacements(
+                &mut decoration,
+                &content,
+                image_cache,
+                body_space_width,
+            );
+            let (display, _, b2d, _, runs) =
+                prepare_cell(&content, &decoration, &[], layout.is_header[vi]);
+            if let Ok(mut lines) = window.text_system().shape_text(
+                if display.is_empty() {
+                    " ".into()
+                } else {
+                    display.clone().into()
+                },
+                px(font_size),
+                &runs,
+                None,
+                None,
+            ) {
+                for ((line, range), fragment) in lines
+                    .iter_mut()
+                    .zip(helpers::hard_line_byte_ranges(&display))
+                    .zip(&decoration.table_cell_fragments)
+                {
+                    helpers::apply_letter_spacing(line, letter_spacing);
+                    helpers::keep_inline_math_placeholders_unwrapped(
+                        line,
+                        &decoration,
+                        &content,
+                        &b2d,
+                        &[],
+                        image_cache,
+                        range.start,
+                    );
+                    let measured_end = super::table_cell_render::intrinsic_line_end(
+                        &content, fragment, &b2d, &range,
+                    );
+                    let width = f32::from(line.unwrapped_layout.x_for_index(measured_end)).ceil();
+                    desired_widths[cell.col] = desired_widths[cell.col].max(width);
+                }
+            }
+            sources.push((content, decoration));
+        }
+        cell_sources.push(sources);
+    }
+    let total_padding = cell_padding_x * 2.0 * layout.col_count as f32;
+    let available_content = (text_width - total_padding).max(layout.col_count as f32);
+    let column_widths = super::table_column_widths::allocate(
+        &desired_widths,
+        available_content,
+        base_char_width.max(1.0),
+    );
+    for cells in &mut layout.cells {
+        let mut x = 0.0;
+        for cell in cells {
+            cell.x = x;
+            cell.width = column_widths[cell.col] + cell_padding_x * 2.0;
+            x += cell.width;
+        }
+    }
+    layout.total_width = column_widths.iter().sum::<f32>() + total_padding;
 
     let mut row_heights = vec![line_height + cell_padding_y * 2.0; layout.visual_row_count];
     for vi in 0..layout.visual_row_count {
@@ -1539,149 +2314,52 @@ fn build_precise_table_layout(
             continue;
         };
         let line_start_offset = buffer.line_start(source_line);
-        let row_ti = decorations
-            .get(source_line)
-            .and_then(|d| d.table_info.as_ref());
         let mut row_height = line_height + cell_padding_y * 2.0;
 
-        if let Some(row_ti) = row_ti
-            && let Some(row_cells) = layout.cells.get_mut(vi)
-        {
+        if let Some(row_cells) = layout.cells.get_mut(vi) {
             for cell_layout in row_cells.iter_mut() {
-                let cell_content = row_ti
-                    .cells
-                    .get(cell_layout.col)
-                    .cloned()
-                    .unwrap_or_default();
-                let cell_active_ranges = helpers::active_table_cell_ranges(
+                let Some((cell_content, cell_decoration)) = cell_sources[vi].get(cell_layout.col)
+                else {
+                    continue;
+                };
+                let mut cell_active_ranges = helpers::table_cell_active_ranges(
                     line_start_offset,
                     &cell_layout.cell_range,
-                    cursor_offsets,
-                    marked_range,
+                    syntax_focus,
+                    cell_decoration,
                 );
-                let mut cell_decoration = helpers::table_cell_decoration(
-                    &decorations[source_line],
-                    &cell_content,
-                    &cell_layout.cell_range,
-                );
-                helpers::add_inline_math_display_replacements(
-                    &mut cell_decoration,
-                    &cell_content,
-                    image_cache,
-                    body_space_width,
-                );
-
-                let (folded_raw, d2b_raw, b2d_raw, prefix_collapsed) = helpers::build_display_text(
-                    &cell_content,
-                    &cell_decoration,
-                    &cell_active_ranges,
-                    false,
-                    None,
-                    3,
-                    3,
-                    2,
-                    0,
-                    0,
-                    1.0,
-                    1.0,
-                    1.0,
-                );
-                let trimmed_range = table_cell_trimmed_display_range(&folded_raw);
-                cell_layout.display_text = folded_raw[trimmed_range.clone()].to_string();
-                cell_layout.prefix_collapsed = prefix_collapsed;
-                cell_layout.display_to_buffer = d2b_raw[trimmed_range.clone()].to_vec();
-                let trim_start = trimmed_range.start;
-                let trimmed_len = trimmed_range.len();
-                cell_layout.buffer_to_display = b2d_raw
-                    .iter()
-                    .map(|&display_index| display_index.saturating_sub(trim_start).min(trimmed_len))
-                    .collect();
-
-                let mut cell_runs = helpers::build_text_runs_for_display(
-                    &cell_layout.display_text,
-                    &cell_content,
-                    &cell_layout.display_to_buffer,
-                    &cell_decoration,
-                    &cell_active_ranges,
-                    false,
-                    cell_layout.prefix_collapsed,
-                    body_font,
-                    body_cjk_font,
-                    monospace_font,
-                    heading_font,
-                    heading_cjk_font,
-                    italic_font,
-                    italic_cjk_font,
-                    0,
+                let inner_width = (cell_layout.width - cell_padding_x * 2.0).max(1.0);
+                if let Ok(prepared) = super::table_cell_render::prepare_cell(
+                    window,
+                    cell_content,
+                    cell_decoration,
+                    &mut cell_active_ranges,
+                    inner_width,
                     font_size,
-                    theme,
-                    crate::theme::with_alpha(theme.git_status_added, 0.24),
-                    crate::theme::with_alpha(theme.text_danger, 0.28),
-                    theme.link,
-                    FontWeight::BOLD,
-                    list_marker_text_color,
-                    list_marker_font_weight,
-                    heading_marker_text_color,
-                    None,
-                    false,
-                );
-                if layout.is_header.get(vi).copied().unwrap_or(false) && !layout.is_front_matter {
-                    for run in &mut cell_runs {
-                        run.font.weight = gpui::FontWeight::BOLD;
-                    }
-                }
-
-                let cell_text: SharedString = if cell_layout.display_text.is_empty() {
-                    " ".into()
-                } else {
-                    cell_layout.display_text.clone().into()
-                };
-                let inner_width = (cell_layout.width - cell_padding_x * 2.0).max(base_char_width);
-                let shape_width = inner_width;
-                if let Ok(mut shaped_lines) = window.text_system().shape_text(
-                    cell_text,
-                    px(font_size),
-                    &cell_runs,
-                    Some(px(shape_width)),
-                    None,
+                    letter_spacing,
+                    line_height,
+                    image_cache,
+                    |active| {
+                        prepare_cell(
+                            cell_content,
+                            cell_decoration,
+                            active,
+                            layout.is_header.get(vi).copied().unwrap_or(false)
+                                && !layout.is_front_matter,
+                        )
+                    },
                 ) {
-                    if letter_spacing != 0.0 {
-                        for shaped in shaped_lines.iter_mut() {
-                            helpers::apply_letter_spacing(shaped, letter_spacing);
-                        }
-                    }
-                    if !shaped_lines.is_empty() {
-                        let hard_line_ranges =
-                            helpers::hard_line_byte_ranges(&cell_layout.display_text);
-                        for (shaped, range) in shaped_lines.iter_mut().zip(&hard_line_ranges) {
-                            helpers::keep_inline_math_placeholders_unwrapped(
-                                shaped,
-                                &cell_decoration,
-                                &cell_content,
-                                &cell_layout.buffer_to_display,
-                                &cell_active_ranges,
-                                image_cache,
-                                range.start,
-                            );
-                        }
-                        for (shaped, range) in shaped_lines.iter_mut().zip(&hard_line_ranges) {
-                            helpers::apply_inline_math_row_heights(
-                                shaped,
-                                &cell_decoration,
-                                &cell_content,
-                                &cell_layout.buffer_to_display,
-                                &cell_active_ranges,
-                                image_cache,
-                                line_height,
-                                range.start,
-                            );
-                        }
-                        let cell_text_height = shaped_lines
-                            .iter()
-                            .map(|shaped| f32::from(shaped.size(px(line_height)).height))
-                            .sum::<f32>();
-                        row_height = row_height.max(cell_text_height + cell_padding_y * 2.0);
-                    }
+                    let (display, d2b, b2d, prefix_collapsed, _) = prepared.display;
+                    cell_layout.display_text = display;
+                    cell_layout.prefix_collapsed = prefix_collapsed;
+                    cell_layout.display_to_buffer = d2b;
+                    cell_layout.buffer_to_display = b2d;
+                    let cell_text_height = prepared
+                        .lines
+                        .iter()
+                        .map(|line| f32::from(line.size(px(line_height)).height))
+                        .sum::<f32>();
+                    row_height = row_height.max(cell_text_height + cell_padding_y * 2.0);
                 }
             }
         }
@@ -2505,6 +3183,7 @@ impl Element for EditorElement {
             if editor.focused_pane_id == self.pane_id {
                 editor.begin_large_document_frame_work();
             }
+            editor.refresh_front_matter_input_geometry(window, bounds);
         });
         // Resolve a deferred scroll-to-cursor before reading layout state, when
         // the per-line geometry cache is already valid (the common case after an
@@ -2580,6 +3259,16 @@ impl Element for EditorElement {
         });
 
         let editor = self.editor.read(cx);
+        let front_matter_group_plans =
+            editor.front_matter_group_plan_for_width(f32::from(bounds.size.width));
+        let collapsed_front_matter_range = editor.collapsed_front_matter_range();
+        let front_matter_fold_control_line = super::fold::front_matter_fold_control_line(
+            &editor.decorations,
+            &front_matter_group_plans,
+            collapsed_front_matter_range.is_some(),
+        );
+        let front_matter_summary_row = editor.front_matter_summary_line();
+        let front_matter_delimiters_visible = editor.front_matter_delimiters_are_visible();
         let theme = &editor.theme;
         let buffer = &editor.buffer;
         let cursor = &editor.cursor;
@@ -2728,7 +3417,7 @@ impl Element for EditorElement {
                         }
 
                         if let Some(table_info) = decoration.table_info.as_ref()
-                            && !table_info.is_front_matter
+                            && (!table_info.is_front_matter || !front_matter_group_plans.is_empty())
                         {
                             if table_info.table_start_line < start {
                                 start = table_info.table_start_line;
@@ -2788,16 +3477,8 @@ impl Element for EditorElement {
             all_cursor_offsets.push(ec.offset);
         }
         let syntax_expansion_allowed = editor.markdown_syntax_expansion_allowed();
-        let syntax_cursor_offsets: &[usize] = if syntax_expansion_allowed {
-            &all_cursor_offsets
-        } else {
-            &[]
-        };
-        let syntax_marked_range = if syntax_expansion_allowed {
-            editor.marked_range.as_ref()
-        } else {
-            None
-        };
+        let search_reveal_range = editor.current_search_source_range();
+        let table_syntax_focus = editor.table_cell_syntax_focus();
         let any_selection = all_sel_ranges.iter().any(|r| r.start != r.end);
         let mut active_line_numbers: HashSet<usize> = HashSet::new();
         for &offset in &all_cursor_offsets {
@@ -2823,6 +3504,13 @@ impl Element for EditorElement {
         let mut inline_svgs: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
         let mut gutter_fold_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
         let mut format_icons: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
+        let mut front_matter_type_icons = Vec::new();
+
+        let mut front_matter_type_areas_local = Vec::new();
+        let mut front_matter_group_texts = Vec::new();
+        let mut front_matter_text_areas = Vec::new();
+        let mut front_matter_delete_areas = Vec::new();
+        let mut front_matter_list_scroll_areas = Vec::new();
         let mut checkbox_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut image_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
         let mut generated_preview_hit_areas: Vec<(Bounds<Pixels>, usize)> = Vec::new();
@@ -2904,29 +3592,19 @@ impl Element for EditorElement {
         let hidden_lines: HashSet<usize> = {
             let mut set = HashSet::new();
             for &fold_line in &editor.folded_sections {
+                if collapsed_front_matter_range
+                    .as_ref()
+                    .is_some_and(|range| fold_line == range.start - 1)
+                {
+                    continue;
+                }
                 if let Some(range) = editor.fold_range_for_line(fold_line) {
                     for l in range {
                         set.insert(l);
                     }
                 }
             }
-            let front_matter_active =
-                front_matter_is_active(&decorations, cursor_line, syntax_expansion_allowed);
-            if !front_matter_active {
-                if let Some(front_matter) = decorations
-                    .first()
-                    .and_then(|decoration| decoration.table_info.as_ref())
-                    .filter(|table_info| table_info.is_front_matter)
-                {
-                    for line in front_matter.table_start_line
-                        ..front_matter.table_end_line.min(decorations.len())
-                    {
-                        if hide_front_matter_separator(&decorations[line], false) {
-                            set.insert(line);
-                        }
-                    }
-                }
-            }
+
             set
         };
 
@@ -3169,6 +3847,14 @@ impl Element for EditorElement {
         let bracket_match_ranges = editor.bracket_match_ranges();
 
         for line_idx in render_start_line..render_end_line {
+            // Fold geometry already measures collapsed interior rows as zero, including
+            // rows outside the shaping cache. The summary row and delimiters stay painted.
+            if editor.front_matter_line_is_hidden(line_idx) {
+                continue;
+            }
+            let group_plan = front_matter_group_plans
+                .iter()
+                .find(|plan| plan.group.source_lines.contains(&line_idx));
             let is_cursor_line_early = line_idx == cursor_line;
             let line_has_block_preview = decorations
                 .get(line_idx)
@@ -3192,7 +3878,8 @@ impl Element for EditorElement {
                 && cached_line.is_some_and(|cached| {
                     non_markdown_cached_line_can_reuse(cached, non_markdown_cached_wrap_width)
                 });
-            if !is_cursor_line_early && !line_has_block_preview {
+            if !is_cursor_line_early && !line_has_block_preview && !hidden_lines.contains(&line_idx)
+            {
                 if let Some(cached) = cached_line {
                     let cached_h = cached.total_height();
                     let est_top = y - scroll_anchor_delta;
@@ -3265,7 +3952,9 @@ impl Element for EditorElement {
             let line_height = editor.line_height_for_block(block_type);
             let (block_padding_top, block_padding_bottom) = editor.block_padding_for_line(line_idx);
 
-            if hidden_lines.contains(&line_idx) {
+            if hidden_lines.contains(&line_idx)
+                || group_plan.is_some_and(|plan| plan.hides_line(line_idx))
+            {
                 let line_content = buffer.line_content(line_idx);
                 let blank_run = TextRun {
                     len: 1,
@@ -3332,11 +4021,10 @@ impl Element for EditorElement {
             let line_content = buffer.line_content(line_idx);
             let line_start_offset = buffer.line_start(line_idx);
             let line_end_offset = buffer.line_end(line_idx);
-            let cursor_in_table = if let Some(ref ti) = decoration.table_info {
-                cursor_line >= ti.table_start_line && cursor_line < ti.table_end_line
-            } else {
-                false
-            };
+            let cursor_in_table = decoration
+                .table_info
+                .as_ref()
+                .is_some_and(|table| table_group_expands_neighboring_rows(table, cursor_line));
             let heading_content_start = matches!(decoration.block_type, BlockType::Heading(_))
                 .then(|| {
                     editor
@@ -3498,6 +4186,11 @@ impl Element for EditorElement {
                 active_ranges.push(clamped..clamped);
             }
 
+            if group_plan.is_some_and(|plan| plan.active) {
+                active_ranges.push(0..line_content.len());
+            }
+            editor.append_search_reveal_range(line_idx, &mut active_ranges);
+
             // Hide all non-first-row table lines (rendered as block on the first row)
             let hide_table_line = matches!(block_type, BlockType::Table)
                 && decoration.table_info.as_ref().is_some_and(|ti| {
@@ -3550,6 +4243,19 @@ impl Element for EditorElement {
                 .table_info
                 .as_ref()
                 .is_some_and(|ti| ti.is_front_matter);
+
+            let (front_matter_content_left, front_matter_wrap_width) =
+                front_matter_content_geometry(
+                    is_front_matter_line
+                        && (front_matter_summary_row == Some(line_idx)
+                            || !decoration
+                                .table_info
+                                .as_ref()
+                                .is_some_and(|table| table.is_separator)),
+                    editor_left + editor.padding_left(),
+                    wrap_width,
+                    editor.scaled(1.0),
+                );
 
             let table_width_chars = if *block_type == BlockType::Table && !is_front_matter_line {
                 Some((text_width / base_char_width) as usize)
@@ -4254,10 +4960,19 @@ impl Element for EditorElement {
                 continue;
             }
             let active_tab_is_diff = editor.active_tab_is_diff();
-            let code_block_syntax_active = active_code_fence_group
-                .is_some_and(|(start, end)| line_idx >= start && line_idx <= end)
-                || active_front_matter_group
-                    .is_some_and(|(start, end)| line_idx >= start && line_idx <= end);
+            let front_matter_separator_line = decoration
+                .table_info
+                .as_ref()
+                .is_some_and(|table| table.is_front_matter && table.is_separator);
+            let code_block_syntax_active = if front_matter_separator_line {
+                front_matter_delimiters_visible
+            } else {
+                active_code_fence_group
+                    .is_some_and(|(start, end)| line_idx >= start && line_idx <= end)
+                    || editor.search_reveals_code_fence_group(line_idx)
+                    || (is_front_matter_line
+                        && helpers::front_matter_row_is_active(&active_ranges, line_content.len()))
+            };
             let diff_table_syntax_line = active_tab_is_diff
                 && decoration
                     .table_info
@@ -4274,21 +4989,21 @@ impl Element for EditorElement {
                 })
             };
 
-            let block_preview_active = if !syntax_expansion_allowed {
-                false
-            } else if active_tab_is_diff {
-                decoration.block_preview.is_some()
-            } else {
+            let block_preview_code_mode =
                 decoration.block_preview.as_ref().is_some_and(|preview| {
-                    cursor_in_preview_source(preview)
-                        || selection_intersects_preview_source(preview)
-                })
-            };
-            let block_preview_code_mode = syntax_expansion_allowed
-                && decoration.block_preview.as_ref().is_some_and(|preview| {
-                    cursor_in_preview_source(preview)
-                        || selection_intersects_preview_source(preview)
+                    generated_preview_code_mode_active(
+                        preview,
+                        cursor_line,
+                        cursor.offset,
+                        &all_sel_ranges,
+                        syntax_expansion_allowed,
+                        search_reveal_range.as_ref(),
+                    )
                 });
+            let block_preview_active = block_preview_code_mode
+                || (syntax_expansion_allowed
+                    && active_tab_is_diff
+                    && decoration.block_preview.is_some());
             let collapsed_block_preview = decoration
                 .block_preview
                 .as_ref()
@@ -4300,7 +5015,8 @@ impl Element for EditorElement {
                 .filter(|preview| !editor.folded_sections.contains(&preview.start_line))
                 .filter(|_| block_preview_active)
                 .filter(|preview| {
-                    if cursor_in_preview_source(preview)
+                    if block_preview_code_mode
+                        || cursor_in_preview_source(preview)
                         || selection_intersects_preview_source(preview)
                     {
                         line_idx == preview.start_line
@@ -4376,10 +5092,27 @@ impl Element for EditorElement {
                     render_decoration_override = Some(dynamic_decoration);
                 }
             }
+            if is_front_matter_line {
+                let dynamic_decoration =
+                    render_decoration_override.get_or_insert_with(|| decoration.clone());
+                super::front_matter::apply_date_time_format(
+                    dynamic_decoration,
+                    editor.app_settings.date_time_format(),
+                );
+                helpers::apply_front_matter_group_display(
+                    dynamic_decoration,
+                    line_idx,
+                    group_plan,
+                    line_content,
+                );
+            }
             let render_decoration = render_decoration_override.as_ref().unwrap_or(&decoration);
 
-            let (mut display_text, display_to_buffer, buffer_to_display, prefix_collapsed) =
-                if collapsed_block_preview.is_some() {
+            let front_matter_summary = editor.front_matter_fold_summary(line_idx);
+            let (mut display_text, mut display_to_buffer, buffer_to_display, prefix_collapsed) =
+                if let Some(summary) = front_matter_summary.as_deref() {
+                    helpers::build_front_matter_fold_display(line_content, summary)
+                } else if collapsed_block_preview.is_some() {
                     (
                         String::new(),
                         Vec::new(),
@@ -4452,6 +5185,22 @@ impl Element for EditorElement {
                         _ => None,
                     },
                 );
+                if front_matter_summary.is_some() {
+                    for run in &mut runs {
+                        run.color = theme.syntax_marker;
+                    }
+                } else if is_front_matter_line
+                    && !front_matter_delimiters_visible
+                    && render_decoration
+                        .table_info
+                        .as_ref()
+                        .is_some_and(|table| table.is_separator)
+                {
+                    // Unfocused delimiters keep their measured row but draw no ink.
+                    for run in &mut runs {
+                        run.color = gpui::transparent_black();
+                    }
+                }
                 helpers::apply_search_match_text_styles(
                     &mut runs,
                     &display_text,
@@ -4513,7 +5262,14 @@ impl Element for EditorElement {
                 block_type,
                 BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_)
             );
-            let prefix_bytes = if is_list_type {
+            let prefix_bytes = if is_front_matter_line {
+                render_decoration
+                    .front_matter
+                    .as_ref()
+                    .and_then(|info| buffer_to_display.get(info.value_range.start))
+                    .copied()
+                    .unwrap_or(0)
+            } else if is_list_type {
                 helpers::compute_display_prefix_bytes(
                     &display_text,
                     block_type,
@@ -4523,25 +5279,24 @@ impl Element for EditorElement {
             } else {
                 0
             };
-            let wrap_indent_px =
-                if is_list_type && prefix_bytes > 0 && prefix_bytes <= display_text.len() {
-                    let prefix_text = &display_text[..prefix_bytes];
-                    let prefix_runs = helpers::extract_runs_for_range(&runs, 0, prefix_bytes);
-                    let prefix_shared: SharedString = if prefix_text.is_empty() {
-                        " ".into()
-                    } else {
-                        prefix_text.to_string().into()
-                    };
-                    window
-                        .text_system()
-                        .shape_text(prefix_shared, px(font_size), &prefix_runs, None, None)
-                        .ok()
-                        .and_then(|lines| lines.into_iter().next())
-                        .map(|line| f32::from(line.width()))
-                        .unwrap_or(0.0)
+            let wrap_indent_px = if prefix_bytes > 0 && prefix_bytes <= display_text.len() {
+                let prefix_text = &display_text[..prefix_bytes];
+                let prefix_runs = helpers::extract_runs_for_range(&runs, 0, prefix_bytes);
+                let prefix_shared: SharedString = if prefix_text.is_empty() {
+                    " ".into()
                 } else {
-                    0.0
+                    prefix_text.to_string().into()
                 };
+                window
+                    .text_system()
+                    .shape_text(prefix_shared, px(font_size), &prefix_runs, None, None)
+                    .ok()
+                    .and_then(|lines| lines.into_iter().next())
+                    .map(|line| f32::from(line.width()))
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
             let letter_spacing = editor_styles.editor_letter_spacing_px;
 
             let is_quote_line = editor.is_quote_line(line_idx);
@@ -4627,7 +5382,9 @@ impl Element for EditorElement {
                     code_block_left_inset,
                     quote_padding_right + code_block_right_padding,
                 );
-            let base_wrap_width = if block_preview_code_mode {
+            let base_wrap_width = if is_front_matter_line {
+                front_matter_wrap_width
+            } else if block_preview_code_mode {
                 helpers::code_block_soft_wrap_width(code_block_viewport_width, base_char_width)
             } else if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
                 helpers::code_block_soft_wrap_width(code_block_viewport_width, base_char_width)
@@ -4638,7 +5395,9 @@ impl Element for EditorElement {
                 wrap_width
             };
 
-            let effective_wrap_width = if wrap_indent_px > 0.0 {
+            let effective_wrap_width = if is_front_matter_line {
+                base_wrap_width
+            } else if wrap_indent_px > 0.0 {
                 (base_wrap_width - wrap_indent_px).max(base_wrap_width * 0.3)
             } else {
                 base_wrap_width
@@ -4698,6 +5457,23 @@ impl Element for EditorElement {
                     0,
                 );
             }
+            let metadata_indent = if is_front_matter_line {
+                editor.front_matter_columns.and_then(|columns| {
+                    wrapped_lines.first_mut().and_then(|wrapped| {
+                        super::front_matter_layout::align_and_wrap(
+                            wrapped,
+                            render_decoration,
+                            &buffer_to_display,
+                            helpers::front_matter_row_is_active(&active_ranges, line_content.len()),
+                            columns,
+                            wrap_width_param.map(|_| base_wrap_width),
+                            font_size * editor.styles.checkbox.checkbox_size_factor,
+                        )
+                    })
+                })
+            } else {
+                None
+            };
             let Some(wrapped) = wrapped_lines.first() else {
                 display_info_updates.push((line_idx, None));
                 y += estimated_total_line_height;
@@ -4733,15 +5509,31 @@ impl Element for EditorElement {
                         caret_width,
                     ));
             }
-            let indent_px =
-                if is_list_type && prefix_bytes > 0 && prefix_bytes <= display_text.len() {
+            if metadata_indent.is_some() {
+                super::front_matter_layout::align_stacked_padding_hits(
+                    wrapped,
+                    render_decoration,
+                    &buffer_to_display,
+                    &mut display_to_buffer,
+                );
+            }
+            let indent_px = if let Some(indent) = metadata_indent {
+                indent
+            } else if prefix_bytes > 0 && prefix_bytes <= display_text.len() {
+                if is_front_matter_line {
+                    super::front_matter::wrap_indent(
+                        f32::from(wrapped.unwrapped_layout.x_for_index(prefix_bytes)),
+                        wrap_width_param.map(|_| base_wrap_width),
+                    )
+                } else {
                     wrapped
                         .position_for_index(prefix_bytes, px(line_height))
-                        .map(|pos| f32::from(pos.x))
+                        .map(|position| f32::from(position.x))
                         .unwrap_or(0.0)
-                } else {
-                    0.0
-                };
+                }
+            } else {
+                0.0
+            };
             let visual_line_count = wrapped.wrap_boundaries().len() + 1;
             let text_line_height = f32::from(wrapped.size(px(line_height)).height);
             let image_gap_top = editor.scaled(editor.styles.image_preview.image_gap_top_px);
@@ -4750,15 +5542,16 @@ impl Element for EditorElement {
             let image_corner_radius = px(editor.scaled(image_styles.image_border_radius_px));
             let image_border_width = px(editor.scaled(image_styles.image_active_border_width_px));
 
-            let image_active = syntax_expansion_allowed
-                && decoration.image_path.is_some()
-                && helpers::is_image_syntax_active(
-                    &decoration,
-                    line_content,
-                    line_start_offset,
-                    cursor.offset,
-                    &sel_range,
-                );
+            let image_active = decoration.image_path.is_some()
+                && (editor.search_reveals_line(line_idx)
+                    || (syntax_expansion_allowed
+                        && helpers::is_image_syntax_active(
+                            &decoration,
+                            line_content,
+                            line_start_offset,
+                            cursor.offset,
+                            &sel_range,
+                        )));
 
             let image_extra_height = if let Some(ref path) = decoration.image_path {
                 if editor.folded_image_previews.contains(&line_idx) {
@@ -4846,6 +5639,12 @@ impl Element for EditorElement {
                                     base_char_width,
                                     line_height,
                                     body_space_width,
+                                    super::table_cell_render::task_prefix_columns(
+                                        base_char_width + letter_spacing,
+                                        checkbox_size_px + letter_spacing.max(0.0),
+                                        checkbox_text_gap_px,
+                                    ),
+                                    task_source_indent_step_chars,
                                     editor.scaled(table_styles.table_border_track_width_px),
                                     &body_font,
                                     &body_cjk_font,
@@ -4856,12 +5655,13 @@ impl Element for EditorElement {
                                     &italic_cjk_font,
                                     font_size,
                                     letter_spacing,
+                                    editor.styles.editor.editor_superscript_scale_factor,
+                                    editor.styles.editor.editor_subscript_scale_factor,
                                     theme,
                                     editor.styles.editor.editor_list_marker_text_color,
                                     editor.styles.editor.editor_list_marker_font_weight,
                                     editor.styles.editor.editor_heading_marker_text_color,
-                                    syntax_cursor_offsets,
-                                    syntax_marked_range,
+                                    &table_syntax_focus,
                                 )
                             })
                             .clone();
@@ -4914,18 +5714,19 @@ impl Element for EditorElement {
             if line_bottom >= origin_y && line_top <= origin_y + viewport_height {
                 inline_diff_line_geometry.push((line_idx, line_top, total_line_height));
             }
-            let base_content_x =
-                if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
-                    code_block_content_left
-                } else if is_quote_line {
-                    editor_left
-                        + editor.padding_left()
-                        + quote_indent_px
-                        + quote_content_indent_px
-                        + quote_inner_left_padding
-                } else {
-                    editor_left + editor.padding_left()
-                };
+            let base_content_x = if is_front_matter_line {
+                front_matter_content_left
+            } else if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence) {
+                code_block_content_left
+            } else if is_quote_line {
+                editor_left
+                    + editor.padding_left()
+                    + quote_indent_px
+                    + quote_content_indent_px
+                    + quote_inner_left_padding
+            } else {
+                editor_left + editor.padding_left()
+            };
             let content_x = if matches!(block_type, BlockType::TaskList(_)) && prefix_collapsed {
                 let target_prefix_width = helpers::task_prefix_target_width_px(
                     line_content,
@@ -4962,6 +5763,9 @@ impl Element for EditorElement {
             } else {
                 content_x
             };
+            let property_line = group_plan
+                .filter(|plan| plan.label_line() == line_idx)
+                .map_or(line_idx, |plan| plan.group.header_line);
             if editor.active_tab_is_markdown() && !editor.active_tab_is_read_only() {
                 let viewport = bounds.intersect(&window.content_mask().bounds);
                 let icon_size = editor.scaled(LINE_FORMAT_ICON_SIZE_PX);
@@ -4969,17 +5773,23 @@ impl Element for EditorElement {
                 let content_gap = editor.scaled(LINE_FORMAT_CONTENT_GAP_PX);
                 let trigger_padding = editor.scaled(4.0);
                 let fold_icon_size = editor.scaled(editor.styles.gutter.gutter_fold_icon_size_px);
-                let has_fold_icon = editor.fold_range_for_line(line_idx).is_some()
+                let has_fold_icon = (editor.fold_range_for_line(line_idx).is_some()
+                    && !super::fold::front_matter_opener_hides_fold_control(
+                        &editor.decorations,
+                        line_idx,
+                        front_matter_fold_control_line,
+                    ))
+                    || front_matter_fold_control_line == Some(line_idx)
                     || decoration.image_path.as_ref().is_some_and(|path| {
                         image_cache.get(path).is_some_and(|image| image.is_some())
                     });
-                let fold_slot_width = if has_fold_icon {
-                    icon_gap + fold_icon_size
-                } else {
-                    0.0
-                };
-                let icon_x =
-                    editor_left + editor.padding_left() - icon_size - fold_slot_width - content_gap;
+                let icon_x = line_format_trigger_left(
+                    editor_left + editor.padding_left(),
+                    icon_size,
+                    has_fold_icon.then_some(fold_icon_size),
+                    icon_gap,
+                    content_gap,
+                );
                 let icon_y = if image_extra_height > 0.0 {
                     text_line_top - image_extra_height + image_gap_top
                 } else {
@@ -5019,18 +5829,18 @@ impl Element for EditorElement {
                             px(total_line_height),
                         ),
                     ),
-                    line_idx,
+                    property_line,
                 ));
-                format_trigger_areas_local.push((trigger_bounds, line_idx));
+                format_trigger_areas_local.push((trigger_bounds, property_line));
                 line_format_toolbar_geometries_local.push(
                     selection_toolbar::LineFormatToolbarGeometry {
-                        line: line_idx,
+                        line: property_line,
                         viewport,
                         content_left: px(icon_x),
                         trigger_bounds,
                     },
                 );
-                if editor.format_trigger_line == Some(line_idx)
+                if editor.format_trigger_line == Some(property_line)
                     && editor.format_trigger_opacity > 0.01
                 {
                     let mut color = editor.styles.format_toolbar.format_toolbar_icon_color;
@@ -5069,15 +5879,19 @@ impl Element for EditorElement {
                     gutter.gutter_line_number_active_text_color,
                 );
             }
-            let wrap_boundary_upstream_xs = compute_wrap_boundary_upstream_xs(
-                window,
-                wrapped,
-                &display_text,
-                &runs,
-                font_size,
-                line_height,
-                letter_spacing,
-            );
+            let wrap_boundary_upstream_xs = if metadata_indent.is_some() {
+                super::front_matter_layout::wrap_boundary_upstream_xs(wrapped)
+            } else {
+                compute_wrap_boundary_upstream_xs(
+                    window,
+                    wrapped,
+                    &display_text,
+                    &runs,
+                    font_size,
+                    line_height,
+                    letter_spacing,
+                )
+            };
 
             display_info_updates.push((
                 line_idx,
@@ -5120,6 +5934,74 @@ impl Element for EditorElement {
                 continue;
             }
 
+            let front_matter_icon_type = if front_matter_summary.is_some() {
+                Some(super::front_matter::FrontMatterType::List)
+            } else if is_front_matter_line {
+                super::front_matter::property_type(buffer, &decorations, property_line)
+            } else {
+                None
+            };
+            if let Some(ty) = front_matter_icon_type {
+                let slot_size = editor.scaled(LINE_FORMAT_ICON_SIZE_PX);
+                let slot_bounds = Bounds::new(
+                    point(
+                        px(editor_left + editor.padding_left()),
+                        px(text_line_top + (line_height - slot_size) * 0.5),
+                    ),
+                    size(px(slot_size), px(slot_size)),
+                );
+                let viewport = bounds.intersect(&window.content_mask().bounds);
+                if let Some(hit_bounds) = front_matter_type_hit_bounds(slot_bounds, viewport) {
+                    let styles = &editor.styles.format_toolbar;
+                    // The collapsed summary is not a property, so its icon never takes hover accent.
+                    let color = if front_matter_summary.is_none()
+                        && hit_bounds.contains(&window.mouse_position())
+                    {
+                        editor.theme.text_accent
+                    } else {
+                        let mut color = styles.format_toolbar_icon_color;
+                        color.a *= 0.76;
+                        color
+                    };
+                    let icon_size = editor
+                        .scaled(styles.format_toolbar_icon_size_px)
+                        .min(slot_size);
+                    let path = front_matter_type_icon(ty);
+                    let mut glyph_bounds =
+                        front_matter_type_glyph_bounds(slot_bounds, px(icon_size));
+                    // The slot has no padding: the remaining inset is inside the SVG view box.
+                    glyph_bounds.origin.x -= px(icon_size * front_matter_type_icon_inset(path, cx));
+                    front_matter_type_icons.push((glyph_bounds, path, color));
+                    if front_matter_summary.is_none() {
+                        front_matter_type_areas_local.push((hit_bounds, property_line));
+                    }
+                }
+            }
+
+            if let Some(plan) = group_plan.filter(|plan| {
+                !plan.active && !plan.source_visible && plan.label_line() == line_idx
+            }) {
+                push_front_matter_group_paint(
+                    editor,
+                    plan,
+                    window,
+                    bounds,
+                    wrapped,
+                    prefix_bytes,
+                    content_x,
+                    text_line_top,
+                    line_height,
+                    font_size,
+                    front_matter_wrap_width,
+                    &monospace_font,
+                    &mut front_matter_group_texts,
+                    &mut front_matter_text_areas,
+                    &mut front_matter_delete_areas,
+                    &mut front_matter_list_scroll_areas,
+                    &mut clipped_table_selections,
+                );
+            }
+
             let reference_baseline = helpers::stable_text_baseline(
                 &helpers::line_baseline_font(
                     render_decoration,
@@ -5160,7 +6042,13 @@ impl Element for EditorElement {
                         None,
                     ) {
                         if let Some(mut seg_wrapped) = seg_wrapped_lines.into_iter().next() {
-                            if letter_spacing != 0.0 {
+                            if metadata_indent.is_some() {
+                                super::front_matter_layout::copy_segment_geometry(
+                                    &mut seg_wrapped,
+                                    wrapped,
+                                    segment_range.clone(),
+                                );
+                            } else if letter_spacing != 0.0 {
                                 helpers::apply_letter_spacing(&mut seg_wrapped, letter_spacing);
                             }
                             helpers::keep_inline_math_placeholders_unwrapped(
@@ -5413,6 +6301,12 @@ impl Element for EditorElement {
                                     base_char_width,
                                     line_height,
                                     body_space_width,
+                                    super::table_cell_render::task_prefix_columns(
+                                        base_char_width + letter_spacing,
+                                        checkbox_size_px + letter_spacing.max(0.0),
+                                        checkbox_text_gap_px,
+                                    ),
+                                    task_source_indent_step_chars,
                                     editor.scaled(table_styles.table_border_track_width_px),
                                     &body_font,
                                     &body_cjk_font,
@@ -5423,12 +6317,13 @@ impl Element for EditorElement {
                                     &italic_cjk_font,
                                     font_size,
                                     letter_spacing,
+                                    editor.styles.editor.editor_superscript_scale_factor,
+                                    editor.styles.editor.editor_subscript_scale_factor,
                                     theme,
                                     editor.styles.editor.editor_list_marker_text_color,
                                     editor.styles.editor.editor_list_marker_font_weight,
                                     editor.styles.editor.editor_heading_marker_text_color,
-                                    syntax_cursor_offsets,
-                                    syntax_marked_range,
+                                    &table_syntax_focus,
                                 )
                             })
                             .clone();
@@ -5528,11 +6423,17 @@ impl Element for EditorElement {
                                 && sr.start < table_block_end_offset
                                 && sr.end > table_block_start_offset
                         });
-                        let show_table_border =
-                            editor.hovering_table_start == Some(ti.table_start_line)
-                                || editor.table_handles.selection.as_ref().is_some_and(
-                                    |selection| selection.table_start_line == ti.table_start_line,
-                                );
+                        let show_table_border = super::table_handles::handles_visible(
+                            editor.active_tab_is_read_only(),
+                            editor.hovering_table_start == Some(ti.table_start_line),
+                            editor
+                                .table_handles
+                                .selection
+                                .as_ref()
+                                .is_some_and(|selection| {
+                                    selection.table_start_line == ti.table_start_line
+                                }),
+                        );
                         let table_corners = if show_table_border {
                             Corners {
                                 top_left: px(0.0),
@@ -5675,28 +6576,20 @@ impl Element for EditorElement {
                                             crate::theme::with_alpha(theme.cursor, 0.12),
                                         ));
                                     }
-                                    let cell_content = row_ti
-                                        .and_then(|t| t.cells.get(cell_layout.col))
-                                        .cloned()
+                                    let (cell_content, _) = row_ti
+                                        .map(|info| {
+                                            super::table_cell_render::content_with_range(
+                                                info,
+                                                buffer.line_content(source_line),
+                                                cell_layout.col,
+                                            )
+                                        })
                                         .unwrap_or_default();
                                     let cell_source_start = buffer.line_start(source_line)
                                         + cell_layout.cell_range.start;
                                     let cell_source_end =
                                         buffer.line_start(source_line) + cell_layout.cell_range.end;
 
-                                    let cell_text: SharedString =
-                                        if cell_layout.display_text.is_empty() {
-                                            " ".into()
-                                        } else {
-                                            cell_layout.display_text.clone().into()
-                                        };
-
-                                    let cell_active_ranges = helpers::active_table_cell_ranges(
-                                        buffer.line_start(source_line),
-                                        &cell_layout.cell_range,
-                                        syntax_cursor_offsets,
-                                        syntax_marked_range,
-                                    );
                                     let mut cell_decoration = helpers::table_cell_decoration(
                                         &decorations[source_line],
                                         &cell_content,
@@ -5709,137 +6602,171 @@ impl Element for EditorElement {
                                         body_space_width,
                                     );
 
-                                    let mut cell_runs = helpers::build_text_runs_for_display(
-                                        &cell_layout.display_text,
-                                        &cell_content,
-                                        &cell_layout.display_to_buffer,
+                                    let mut cell_active_ranges = helpers::table_cell_active_ranges(
+                                        buffer.line_start(source_line),
+                                        &cell_layout.cell_range,
+                                        &table_syntax_focus,
                                         &cell_decoration,
-                                        &cell_active_ranges,
-                                        false,
-                                        cell_layout.prefix_collapsed,
-                                        &body_font,
-                                        &body_cjk_font,
-                                        &monospace_font,
-                                        &heading_font,
-                                        &heading_cjk_font,
-                                        &italic_font,
-                                        &italic_cjk_font,
-                                        0,
-                                        font_size,
-                                        theme,
-                                        editor.styles.selection.selection_diff_added_inline_bg,
-                                        editor.styles.selection.selection_diff_removed_inline_bg,
-                                        editor.styles.wiki_link.wiki_link_text_color,
-                                        editor.styles.wiki_link.wiki_link_text_weight,
-                                        editor.styles.editor.editor_list_marker_text_color,
-                                        editor.styles.editor.editor_list_marker_font_weight,
-                                        editor.styles.editor.editor_heading_marker_text_color,
-                                        None,
-                                        false,
                                     );
-                                    helpers::apply_search_match_text_styles(
-                                        &mut cell_runs,
-                                        &cell_layout.display_text,
-                                        &cell_layout.display_to_buffer,
-                                        cell_source_start,
-                                        &editor.search_matches,
-                                        editor.search_current_index,
-                                        editor.styles.search.search_match_text_color,
-                                        editor.styles.search.search_match_active_text_color,
-                                    );
-                                    if editor.current_file_path
-                                        == editor.workspace_search_highlight_path
-                                    {
+                                    let build_cell = |active: &[Range<usize>]| {
+                                        let columns = super::table_cell_render::task_prefix_columns(
+                                            base_char_width + letter_spacing,
+                                            checkbox_size_px + letter_spacing.max(0.0),
+                                            checkbox_text_gap_px,
+                                        );
+                                        let (raw, d2b, b2d, collapsed) =
+                                            helpers::build_display_text(
+                                                &cell_content,
+                                                &cell_decoration,
+                                                active,
+                                                false,
+                                                None,
+                                                0,
+                                                columns,
+                                                columns,
+                                                task_source_indent_step_chars,
+                                                0,
+                                                editor
+                                                    .styles
+                                                    .editor
+                                                    .editor_superscript_scale_factor,
+                                                editor.styles.editor.editor_subscript_scale_factor,
+                                                editor
+                                                    .styles
+                                                    .editor
+                                                    .editor_superscript_scale_factor,
+                                            );
+                                        let range = helpers::table_cell_display_range(
+                                            &raw,
+                                            &cell_content,
+                                            &cell_decoration,
+                                            &b2d,
+                                        );
+                                        let display = raw[range.clone()].to_owned();
+                                        let d2b = d2b[range.clone()].to_vec();
+                                        let b2d = b2d
+                                            .iter()
+                                            .map(|index| {
+                                                index.saturating_sub(range.start).min(range.len())
+                                            })
+                                            .collect::<Vec<_>>();
+                                        let mut cell_runs = helpers::build_text_runs_for_display(
+                                            &display,
+                                            &cell_content,
+                                            &d2b,
+                                            &cell_decoration,
+                                            active,
+                                            false,
+                                            collapsed,
+                                            &body_font,
+                                            &body_cjk_font,
+                                            &monospace_font,
+                                            &heading_font,
+                                            &heading_cjk_font,
+                                            &italic_font,
+                                            &italic_cjk_font,
+                                            0,
+                                            font_size,
+                                            theme,
+                                            editor.styles.selection.selection_diff_added_inline_bg,
+                                            editor
+                                                .styles
+                                                .selection
+                                                .selection_diff_removed_inline_bg,
+                                            editor.styles.wiki_link.wiki_link_text_color,
+                                            editor.styles.wiki_link.wiki_link_text_weight,
+                                            editor.styles.editor.editor_list_marker_text_color,
+                                            editor.styles.editor.editor_list_marker_font_weight,
+                                            editor.styles.editor.editor_heading_marker_text_color,
+                                            None,
+                                            false,
+                                        );
                                         helpers::apply_search_match_text_styles(
                                             &mut cell_runs,
-                                            &cell_layout.display_text,
-                                            &cell_layout.display_to_buffer,
+                                            &display,
+                                            &d2b,
                                             cell_source_start,
-                                            &editor.workspace_search_highlight_ranges,
-                                            editor.workspace_search_highlight_current_index,
+                                            &editor.search_matches,
+                                            editor.search_current_index,
                                             editor.styles.search.search_match_text_color,
                                             editor.styles.search.search_match_active_text_color,
                                         );
-                                    }
-                                    if editor.current_file_path
-                                        == editor.outline_flash_highlight_path
-                                    {
-                                        helpers::apply_search_match_text_styles(
-                                            &mut cell_runs,
-                                            &cell_layout.display_text,
-                                            &cell_layout.display_to_buffer,
-                                            cell_source_start,
-                                            &editor.outline_flash_highlight_ranges,
-                                            editor.outline_flash_highlight_current_index,
-                                            editor.styles.search.search_match_text_color,
-                                            editor.styles.search.search_match_active_text_color,
-                                        );
-                                    }
+                                        if editor.current_file_path
+                                            == editor.workspace_search_highlight_path
+                                        {
+                                            helpers::apply_search_match_text_styles(
+                                                &mut cell_runs,
+                                                &display,
+                                                &d2b,
+                                                cell_source_start,
+                                                &editor.workspace_search_highlight_ranges,
+                                                editor.workspace_search_highlight_current_index,
+                                                editor.styles.search.search_match_text_color,
+                                                editor.styles.search.search_match_active_text_color,
+                                            );
+                                        }
+                                        if editor.current_file_path
+                                            == editor.outline_flash_highlight_path
+                                        {
+                                            helpers::apply_search_match_text_styles(
+                                                &mut cell_runs,
+                                                &display,
+                                                &d2b,
+                                                cell_source_start,
+                                                &editor.outline_flash_highlight_ranges,
+                                                editor.outline_flash_highlight_current_index,
+                                                editor.styles.search.search_match_text_color,
+                                                editor.styles.search.search_match_active_text_color,
+                                            );
+                                        }
 
-                                    // Apply table/front-matter text styling
-                                    let cell_runs =
-                                        if layout.is_header.get(vi).copied().unwrap_or(false) {
-                                            cell_runs
-                                                .into_iter()
-                                                .map(|mut r| {
-                                                    r.font.weight = gpui::FontWeight::BOLD;
-                                                    r
-                                                })
-                                                .collect()
-                                        } else {
-                                            cell_runs
-                                        };
+                                        // Apply table/front-matter text styling
+                                        let cell_runs =
+                                            if layout.is_header.get(vi).copied().unwrap_or(false) {
+                                                cell_runs
+                                                    .into_iter()
+                                                    .map(|mut r| {
+                                                        r.font.weight = gpui::FontWeight::BOLD;
+                                                        r
+                                                    })
+                                                    .collect()
+                                            } else {
+                                                cell_runs
+                                            };
+
+                                        (display, d2b, b2d, collapsed, cell_runs)
+                                    };
 
                                     let cell_content_x =
                                         table_left + cell_layout.x + layout.cell_padding_x;
                                     let cell_text_y = row_y + layout.cell_padding_y;
 
-                                    let wrap_width = (cell_layout.width
-                                        - layout.cell_padding_x * 2.0)
-                                        .max(base_char_width);
-                                    let shape_width = wrap_width;
+                                    let wrap_width =
+                                        (cell_layout.width - layout.cell_padding_x * 2.0).max(1.0);
 
-                                    if let Ok(mut shaped_lines) = window.text_system().shape_text(
-                                        cell_text,
-                                        px(font_size),
-                                        &cell_runs,
-                                        Some(px(shape_width)),
-                                        None,
+                                    if let Ok(prepared) = super::table_cell_render::prepare_cell(
+                                        window,
+                                        &cell_content,
+                                        &cell_decoration,
+                                        &mut cell_active_ranges,
+                                        wrap_width,
+                                        font_size,
+                                        letter_spacing,
+                                        line_height,
+                                        image_cache,
+                                        build_cell,
                                     ) {
-                                        if letter_spacing != 0.0 {
-                                            for shaped in shaped_lines.iter_mut() {
-                                                helpers::apply_letter_spacing(
-                                                    shaped,
-                                                    letter_spacing,
-                                                );
-                                            }
-                                        }
-                                        let hard_line_ranges = helpers::hard_line_byte_ranges(
-                                            &cell_layout.display_text,
-                                        );
+                                        let cell_runs = prepared.display.4;
                                         let mut hard_line_y = cell_text_y;
-                                        for (mut shaped, hard_line_range) in
-                                            shaped_lines.into_iter().zip(hard_line_ranges)
+                                        for (((shaped, hard_line_range), fragment_info), hanging) in
+                                            prepared
+                                                .lines
+                                                .into_iter()
+                                                .zip(prepared.hard_ranges)
+                                                .zip(&cell_decoration.table_cell_fragments)
+                                                .zip(prepared.wraps)
                                         {
-                                            helpers::keep_inline_math_placeholders_unwrapped(
-                                                &mut shaped,
-                                                &cell_decoration,
-                                                &cell_content,
-                                                &cell_layout.buffer_to_display,
-                                                &cell_active_ranges,
-                                                image_cache,
-                                                hard_line_range.start,
-                                            );
-                                            helpers::apply_inline_math_row_heights(
-                                                &mut shaped,
-                                                &cell_decoration,
-                                                &cell_content,
-                                                &cell_layout.buffer_to_display,
-                                                &cell_active_ranges,
-                                                image_cache,
-                                                line_height,
-                                                hard_line_range.start,
-                                            );
+                                            let indent_px = hanging.indent;
                                             let hard_display_text = cell_layout
                                                 .display_text
                                                 .get(hard_line_range.clone())
@@ -5864,35 +6791,11 @@ impl Element for EditorElement {
                                                     wrap_width,
                                                     f32::from(shaped.unwrapped_layout.width),
                                                 );
-                                            let fragment_source = cell_layout
-                                                .display_to_buffer
-                                                .get(hard_line_range.start)
-                                                .copied()
-                                                .unwrap_or(0);
-                                            let breaks =
-                                                helpers::table_cell_break_ranges(&cell_content);
-                                            let fragment_start = breaks
-                                                .iter()
-                                                .take_while(|range| range.end <= fragment_source)
-                                                .last()
-                                                .map_or(0, |range| range.end);
-                                            let fragment_end = breaks
-                                                .iter()
-                                                .find(|range| range.start >= fragment_start)
-                                                .map_or(cell_content.len(), |range| range.start);
+                                            let fragment_start = fragment_info.range.start;
+                                            let fragment_end = fragment_info.range.end;
                                             let fragment =
-                                                &cell_content[fragment_start..fragment_end];
-                                            let fragment_decoration = if fragment_start == 0 {
-                                                cell_decoration.clone()
-                                            } else {
-                                                helpers::table_cell_decoration(
-                                                    &decorations[source_line],
-                                                    fragment,
-                                                    &(cell_layout.cell_range.start + fragment_start
-                                                        ..cell_layout.cell_range.start
-                                                            + fragment_end),
-                                                )
-                                            };
+                                                &cell_content[fragment_info.range.clone()];
+
                                             let fragment_buffer_to_display = cell_layout
                                                 .buffer_to_display
                                                 [fragment_start..=fragment_end]
@@ -5903,29 +6806,15 @@ impl Element for EditorElement {
                                                         .min(hard_line_range.len())
                                                 })
                                                 .collect::<Vec<_>>();
-                                            let fragment_prefix_collapsed = if fragment_start == 0 {
-                                                cell_layout.prefix_collapsed
-                                            } else {
-                                                let prefix_end = fragment_start + fragment.len()
-                                                    - fragment
-                                                        .trim_start_matches([' ', '\t'])
-                                                        .len()
-                                                    + if matches!(
-                                                        fragment_decoration.block_type,
-                                                        BlockType::TaskList(_)
-                                                    ) {
-                                                        6
-                                                    } else {
-                                                        2
-                                                    };
-                                                !helpers::active_ranges_intersect(
+                                            let fragment_prefix_collapsed =
+                                                helpers::table_cell_fragment_prefix_is_folded(
+                                                    &cell_content,
+                                                    fragment_info,
                                                     &cell_active_ranges,
-                                                    &(fragment_start
-                                                        ..prefix_end.min(cell_content.len())),
-                                                )
-                                            };
-                                            if hard_line_range.start == 0 || fragment_start > 0 {
-                                                if fragment_decoration.block_type
+                                                );
+                                            let mut ordered_marker = None;
+                                            if fragment_prefix_collapsed {
+                                                if fragment_info.block_type
                                                     == BlockType::OrderedList
                                                 {
                                                     let leading = fragment.len()
@@ -5933,51 +6822,83 @@ impl Element for EditorElement {
                                                             .trim_start_matches([' ', '\t'])
                                                             .len();
                                                     let prefix_len =
-                                                        crate::markdown::ordered_list_prefix_len(
-                                                            &fragment[leading..],
-                                                        );
+                                                        fragment_info.prefix_len - leading;
                                                     let prefix_start = fragment_start + leading;
                                                     let prefix_end = prefix_start + prefix_len;
-                                                    let folded = prefix_len > 0
-                                                        && !helpers::active_ranges_intersect(
-                                                            &cell_active_ranges,
-                                                            &(prefix_start..prefix_end),
-                                                        );
-                                                    if folded {
+                                                    if prefix_len > 0 {
                                                         let display_start =
                                                             helpers::buffer_to_display_offset(
                                                                 &cell_layout.buffer_to_display,
                                                                 prefix_start,
                                                             )
                                                             .saturating_sub(hard_line_range.start);
-                                                        push_inline_text_overlay(
-                                                            &mut inline_overlays,
-                                                            window,
-                                                            &shaped,
-                                                            &cell_content[prefix_start..prefix_end],
-                                                            display_start
-                                                                ..display_start + prefix_len,
-                                                            &monospace_font,
-                                                            &body_cjk_font,
+                                                        let marker_text = cell_content
+                                                            [prefix_start..prefix_end]
+                                                            .trim_end_matches([' ', '\t']);
+                                                        let mut marker_font =
+                                                            monospace_font.clone();
+                                                        marker_font.style = gpui::FontStyle::Normal;
+                                                        marker_font.weight = if layout
+                                                            .is_header
+                                                            .get(vi)
+                                                            .copied()
+                                                            .unwrap_or(false)
+                                                        {
+                                                            FontWeight::BOLD
+                                                        } else {
                                                             editor
                                                                 .styles
                                                                 .editor
+                                                                .editor_list_marker_font_weight
+                                                        };
+                                                        let run = TextRun {
+                                                            len: marker_text.len(),
+                                                            font: marker_font,
+                                                            color: editor
+                                                                .styles
+                                                                .editor
                                                                 .editor_list_marker_text_color,
-                                                            font_size,
-                                                            1.0,
-                                                            InlineOverlayVerticalAlign::Offset(0.0),
-                                                            false,
-                                                            cell_x,
-                                                            hard_line_y,
-                                                            0.0,
-                                                            line_height,
-                                                        );
+                                                            background_color: None,
+                                                            underline: None,
+                                                            strikethrough: None,
+                                                        };
+                                                        if let Ok(mut markers) =
+                                                            window.text_system().shape_text(
+                                                                marker_text.to_owned().into(),
+                                                                px(font_size),
+                                                                &[run],
+                                                                None,
+                                                                None,
+                                                            )
+                                                            && let Some(mut marker) = markers.pop()
+                                                            && let Some(position) = shaped
+                                                                .position_for_index(
+                                                                    display_start,
+                                                                    px(line_height),
+                                                                )
+                                                        {
+                                                            helpers::apply_letter_spacing(
+                                                                &mut marker,
+                                                                letter_spacing,
+                                                            );
+                                                            marker.set_row_heights(vec![
+                                                                shaped
+                                                                    .row_height(0, px(line_height)),
+                                                            ]);
+                                                            ordered_marker = Some((
+                                                                marker,
+                                                                point(
+                                                                    px(cell_x) + position.x,
+                                                                    px(hard_line_y) + position.y,
+                                                                ),
+                                                            ));
+                                                        }
                                                     }
                                                 }
                                                 push_unordered_list_marker_paint(
                                                     editor,
                                                     fragment,
-                                                    &fragment_decoration.block_type,
+                                                    &fragment_info.block_type,
                                                     fragment_prefix_collapsed,
                                                     &shaped,
                                                     &fragment_buffer_to_display,
@@ -5992,7 +6913,7 @@ impl Element for EditorElement {
                                                 );
                                                 push_task_checkbox_paint(
                                                     editor,
-                                                    &fragment_decoration.block_type,
+                                                    &fragment_info.block_type,
                                                     fragment_prefix_collapsed,
                                                     hard_display_text,
                                                     &shaped,
@@ -6001,8 +6922,13 @@ impl Element for EditorElement {
                                                     cell_x,
                                                     hard_line_y,
                                                     hard_line_y,
-                                                    line_height,
+                                                    f32::from(
+                                                        shaped.row_height(0, px(line_height)),
+                                                    ),
                                                     3,
+                                                    fragment_buffer_to_display
+                                                        .get(fragment_info.prefix_len)
+                                                        .copied(),
                                                     checkbox_text_gap_px,
                                                     Some(source_line),
                                                     &mut gutter_quads,
@@ -6083,7 +7009,7 @@ impl Element for EditorElement {
                                                         false,
                                                         cell_x,
                                                         hard_line_y,
-                                                        0.0,
+                                                        indent_px,
                                                         line_height,
                                                     );
                                                 }
@@ -6132,23 +7058,23 @@ impl Element for EditorElement {
                                                     false,
                                                     cell_x,
                                                     hard_line_y,
-                                                    0.0,
+                                                    indent_px,
                                                     line_height,
                                                 );
                                             }
                                             push_inline_code_background_quads(
                                                 &mut diff_inline_quads,
-                                                &fragment_decoration,
+                                                &cell_decoration,
                                                 hard_display_text,
-                                                fragment.len(),
-                                                &fragment_buffer_to_display,
+                                                cell_content.len(),
+                                                &hard_buffer_to_display,
                                                 &hard_cell_runs,
                                                 &shaped,
                                                 cell_x,
                                                 hard_line_y,
                                                 line_height,
                                                 font_size,
-                                                0.0,
+                                                indent_px,
                                                 editor.styles.editor.editor_inline_code_bg,
                                                 px(editor.scaled(
                                                     editor
@@ -6171,20 +7097,20 @@ impl Element for EditorElement {
                                                 letter_spacing,
                                                 window,
                                             );
-                                            if !fragment_decoration.highlight_spans.is_empty() {
+                                            if !cell_decoration.highlight_spans.is_empty() {
                                                 push_diff_inline_highlight_quads(
                                                     &mut diff_inline_quads,
-                                                    &fragment_decoration.highlight_spans,
+                                                    &cell_decoration.highlight_spans,
                                                     hard_display_text,
-                                                    fragment.len(),
-                                                    &fragment_buffer_to_display,
+                                                    cell_content.len(),
+                                                    &hard_buffer_to_display,
                                                     &hard_cell_runs,
                                                     &shaped,
                                                     cell_x,
                                                     hard_line_y,
                                                     line_height,
                                                     font_size,
-                                                    0.0,
+                                                    indent_px,
                                                     editor.styles.editor.editor_inline_highlight_bg,
                                                     gpui::transparent_black(),
                                                     0.0,
@@ -6211,32 +7137,71 @@ impl Element for EditorElement {
                                                 );
                                             }
                                             if editor.command_held {
-                                                for span in cell_decoration
+                                                let mut link_ranges = cell_decoration
                                                     .inline_spans
                                                     .iter()
                                                     .filter(|span| {
                                                         span.kind
                                                             == crate::markdown::InlineKind::Link
                                                     })
+                                                    .map(|span| span.range.clone())
+                                                    .collect::<Vec<_>>();
+                                                for wiki in &cell_decoration.wiki_links {
+                                                    if editor.markdown_target_is_navigable(
+                                                        &wiki.target_path,
+                                                    ) {
+                                                        link_ranges.push(
+                                                            if helpers::active_ranges_intersect(
+                                                                &cell_active_ranges,
+                                                                &wiki.full_range,
+                                                            ) {
+                                                                wiki.full_range.clone()
+                                                            } else {
+                                                                wiki.collapsed_range.clone()
+                                                            },
+                                                        );
+                                                    }
+                                                }
+                                                for reference in
+                                                    &cell_decoration.footnote_references
                                                 {
-                                                    let global_start = if span.range.start
+                                                    if editor
+                                                        .find_footnote_definition_line(
+                                                            &reference.label,
+                                                        )
+                                                        .is_some()
+                                                    {
+                                                        link_ranges.push(
+                                                            if helpers::active_ranges_intersect(
+                                                                &cell_active_ranges,
+                                                                &reference.full_range,
+                                                            ) {
+                                                                reference.full_range.clone()
+                                                            } else {
+                                                                reference.collapsed_range.clone()
+                                                            },
+                                                        );
+                                                    }
+                                                }
+                                                for range in link_ranges {
+                                                    let global_start = if range.start
                                                         >= cell_layout.buffer_to_display.len()
                                                     {
                                                         cell_layout.display_text.len()
                                                     } else {
                                                         helpers::buffer_to_display_offset(
                                                             &cell_layout.buffer_to_display,
-                                                            span.range.start,
+                                                            range.start,
                                                         )
                                                     };
-                                                    let global_end = if span.range.end
+                                                    let global_end = if range.end
                                                         >= cell_layout.buffer_to_display.len()
                                                     {
                                                         cell_layout.display_text.len()
                                                     } else {
                                                         helpers::buffer_to_display_offset(
                                                             &cell_layout.buffer_to_display,
-                                                            span.range.end,
+                                                            range.end,
                                                         )
                                                     };
                                                     let display_start = global_start
@@ -6256,7 +7221,7 @@ impl Element for EditorElement {
                                                             hard_line_y,
                                                             line_height,
                                                             font_size,
-                                                            0.0,
+                                                            indent_px,
                                                             0.0,
                                                             letter_spacing,
                                                             window,
@@ -6327,7 +7292,7 @@ impl Element for EditorElement {
                                                             hard_line_y,
                                                             line_height,
                                                             font_size,
-                                                            0.0,
+                                                            indent_px,
                                                             if active_index == Some(match_index) {
                                                                 editor
                                                                     .styles
@@ -6376,8 +7341,8 @@ impl Element for EditorElement {
                                                 );
                                             }
 
-                                            if let Some(cell_range) = row_ti
-                                                .and_then(|t| t.cell_ranges.get(cell_layout.col))
+                                            if let Some(cell_range) =
+                                                row_ti.map(|_| &cell_layout.cell_range)
                                             {
                                                 let line_start_off = buffer.line_start(source_line);
                                                 let cell_buf_start =
@@ -6441,22 +7406,21 @@ impl Element for EditorElement {
                                                             ));
                                                         }
                                                         selection_quads.extend(
-                                                            helpers::build_selection_quads(
-                                                                hard_display_text,
-                                                                &hard_cell_runs,
-                                                                &shaped,
-                                                                disp_start,
-                                                                disp_end,
-                                                                cell_x,
-                                                                hard_line_y,
-                                                                line_height,
-                                                                font_size,
-                                                                0.0,
-                                                                0.0,
-                                                                theme.selection,
-                                                                letter_spacing,
-                                                                window,
-                                                            ),
+                                                            hanging
+                                                                .selection_bounds(
+                                                                    &shaped,
+                                                                    hard_display_text,
+                                                                    disp_start..disp_end,
+                                                                    point(
+                                                                        px(cell_x),
+                                                                        px(hard_line_y),
+                                                                    ),
+                                                                    line_height,
+                                                                )
+                                                                .into_iter()
+                                                                .map(|bounds| {
+                                                                    fill(bounds, theme.selection)
+                                                                }),
                                                         );
                                                     }
                                                 }
@@ -6510,16 +7474,11 @@ impl Element for EditorElement {
                                                                         hard_line_range.start,
                                                                     )
                                                                     .min(hard_line_range.len());
-                                                                if let Some(pos) = EditorView::visual_position_for_wrapped_display(
-                                                                    &shaped,
-                                                                    hard_display_text,
-                                                                    disp_col,
-                                                                    line_height,
-                                                                    0.0,
-                                                                    &HashMap::new(),
-                                                                    editor.wrap_boundary_affinity_for_offset(cur_off),
-                                                                )
                                                                 {
+                                                                    let pos = hanging.position(
+                                                                        &shaped, hard_display_text, disp_col, line_height,
+                                                                        editor.wrap_boundary_affinity_for_offset(cur_off),
+                                                                    );
                                                                     let row_height = f32::from(
                                                                         shaped.row_height(
                                                                             shaped.row_for_y(
@@ -6575,7 +7534,9 @@ impl Element for EditorElement {
                                                 }
                                             }
 
-                                            if editor.app_settings.show_whitespace {
+                                            if editor.app_settings.show_whitespace
+                                                && indent_px == 0.0
+                                            {
                                                 push_whitespace_dot_quads(
                                                     &mut whitespace_dots,
                                                     hard_display_text,
@@ -6607,7 +7568,7 @@ impl Element for EditorElement {
                                                 image_cache,
                                                 cell_x,
                                                 hard_line_y,
-                                                0.0,
+                                                indent_px,
                                                 line_height,
                                                 Some(Bounds::new(
                                                     point(
@@ -6632,26 +7593,77 @@ impl Element for EditorElement {
                                                 &mut text_baseline_cache,
                                                 window,
                                             );
-                                            let paint_origin =
-                                                helpers::baseline_aligned_text_origin(
-                                                    &shaped,
-                                                    point(px(cell_x), px(hard_line_y)),
+                                            if let Some((marker, origin)) = ordered_marker {
+                                                let origin = helpers::baseline_aligned_text_origin(
+                                                    &marker,
+                                                    origin,
                                                     px(line_height),
                                                     cell_baseline,
                                                 );
-                                            table_cell_texts.push((
-                                                shaped,
-                                                paint_origin,
-                                                px(line_height),
-                                            ));
-                                            hard_line_y += f32::from(
-                                                table_cell_texts
-                                                    .last()
-                                                    .expect("cell line was just appended")
-                                                    .0
-                                                    .size(px(line_height))
-                                                    .height,
-                                            );
+                                                table_cell_texts.push((
+                                                    marker,
+                                                    origin,
+                                                    px(line_height),
+                                                ));
+                                            }
+                                            let hard_height =
+                                                f32::from(shaped.size(px(line_height)).height);
+                                            if indent_px > 0.0
+                                                && !shaped.wrap_boundaries().is_empty()
+                                            {
+                                                if let Ok(segments) =
+                                                    super::table_cell_render::paint_segments(
+                                                        window,
+                                                        &shaped,
+                                                        &hard_cell_runs,
+                                                        hanging,
+                                                        line_height,
+                                                    )
+                                                {
+                                                    for (segment, offset) in segments {
+                                                        let height =
+                                                            segment.row_height(0, px(line_height));
+                                                        let origin =
+                                                            helpers::baseline_aligned_text_origin(
+                                                                &segment,
+                                                                point(px(cell_x), px(hard_line_y))
+                                                                    + offset,
+                                                                height,
+                                                                cell_baseline
+                                                                    + (height - px(line_height))
+                                                                        / 2.0,
+                                                            );
+                                                        if editor.app_settings.show_whitespace {
+                                                            push_whitespace_dot_quads(
+                                                                &mut whitespace_dots, &segment.text, &segment,
+                                                                point(px(cell_x), px(hard_line_y)) + offset,
+                                                                f32::from(height),
+                                                                editor.scaled(editor.styles.editor.editor_whitespace_dot_size_px),
+                                                                editor.styles.editor.editor_whitespace_dot_color, 0,
+                                                            );
+                                                        }
+                                                        table_cell_texts.push((
+                                                            segment,
+                                                            origin,
+                                                            px(line_height),
+                                                        ));
+                                                    }
+                                                }
+                                            } else {
+                                                let paint_origin =
+                                                    helpers::baseline_aligned_text_origin(
+                                                        &shaped,
+                                                        point(px(cell_x), px(hard_line_y)),
+                                                        px(line_height),
+                                                        cell_baseline,
+                                                    );
+                                                table_cell_texts.push((
+                                                    shaped,
+                                                    paint_origin,
+                                                    px(line_height),
+                                                ));
+                                            }
+                                            hard_line_y += hard_height;
                                         }
                                     }
 
@@ -6955,6 +7967,7 @@ impl Element for EditorElement {
 
             // HR line: `***` renders dashed, `---`/`___` render solid.
             if *block_type == BlockType::HorizontalRule
+                && !editor.search_reveals_line(line_idx)
                 && (!is_cursor_line || !syntax_expansion_allowed)
             {
                 let hr_y = text_line_top + text_line_height / 2.0;
@@ -7080,9 +8093,19 @@ impl Element for EditorElement {
                 }
             }
 
-            // Gutter decorations
-            let fold_range = if hidden_lines.contains(&line_idx) {
+            // Presentation can move the control, never the source fold anchor.
+            let front_matter_fold_anchor =
+                (front_matter_fold_control_line == Some(line_idx)).then_some(0);
+            let fold_anchor = front_matter_fold_anchor.unwrap_or(line_idx);
+            let fold_range = if hidden_lines.contains(&line_idx)
+                || super::fold::front_matter_opener_hides_fold_control(
+                    &editor.decorations,
+                    line_idx,
+                    front_matter_fold_control_line,
+                ) {
                 None
+            } else if front_matter_fold_anchor.is_some() {
+                editor.fold_range_for_line(0)
             } else {
                 editor.fold_range_for_line(line_idx)
             };
@@ -7199,8 +8222,28 @@ impl Element for EditorElement {
                 line_top,
                 total_line_height,
                 collapsed_task_prefix_display_columns,
+                None,
                 checkbox_text_gap_px,
                 Some(line_idx),
+                &mut gutter_quads,
+                &mut gutter_svgs,
+                &mut checkbox_hit_areas,
+            );
+
+            push_front_matter_boolean_paint(
+                editor,
+                render_decoration,
+                line_content,
+                &active_ranges,
+                &display_text,
+                &buffer_to_display,
+                wrapped,
+                font_size,
+                line_height,
+                content_x,
+                text_line_top,
+                indent_px,
+                line_idx,
                 &mut gutter_quads,
                 &mut gutter_svgs,
                 &mut checkbox_hit_areas,
@@ -7219,11 +8262,13 @@ impl Element for EditorElement {
                     editor.scaled(LINE_FORMAT_ICON_GAP_PX) * 0.5
                 };
                 let format_icon_size = editor.scaled(LINE_FORMAT_ICON_SIZE_PX);
-                let format_icon_x = editor_left + editor.padding_left()
-                    - format_icon_size
-                    - editor.scaled(LINE_FORMAT_ICON_GAP_PX)
-                    - fi_size
-                    - editor.scaled(LINE_FORMAT_CONTENT_GAP_PX);
+                let format_icon_x = line_format_trigger_left(
+                    editor_left + editor.padding_left(),
+                    format_icon_size,
+                    Some(fi_size),
+                    editor.scaled(LINE_FORMAT_ICON_GAP_PX),
+                    editor.scaled(LINE_FORMAT_CONTENT_GAP_PX),
+                );
                 let fold_icon_expanded_x = if editor.active_tab_is_non_markdown_text() {
                     editor.gutter_icon_x(editor_left, fi_size)
                 } else {
@@ -7238,7 +8283,7 @@ impl Element for EditorElement {
                         .is_some_and(|preview| {
                             editor.folded_sections.contains(&preview.start_line)
                         })
-                        || editor.folded_sections.contains(&line_idx);
+                        || editor.folded_sections.contains(&fold_anchor);
                     let fold_icon_x = fold_icon_expanded_x;
                     let is_hovered = if editor.active_tab_is_non_markdown_text() {
                         editor.hovering_fold_line == Some(line_idx)
@@ -7249,16 +8294,23 @@ impl Element for EditorElement {
                                 total_line_height,
                             )
                     } else {
-                        editor.format_trigger_line == Some(line_idx)
+                        editor.format_trigger_line == Some(property_line)
                     };
                     let fi_y = text_line_top
                         + (f32::from(wrapped.row_height(0, px(line_height))) - fi_size) / 2.0;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
-                    let fold_hovered = editor.hovering_fold_line == Some(line_idx);
-                    let fi_alpha = if !editor.active_tab_is_non_markdown_text() && fold_hovered {
-                        selection_toolbar::FORMAT_TRIGGER_HOVER_OPACITY
-                    } else if !editor.active_tab_is_non_markdown_text() && is_hovered {
-                        editor.format_trigger_opacity
+                    let fold_hovered = editor.hovering_fold_line == Some(fold_anchor);
+                    let fi_alpha = if !editor.active_tab_is_non_markdown_text() {
+                        markdown_fold_opacity(
+                            fold_hovered,
+                            is_hovered,
+                            editor.format_trigger_opacity,
+                            if is_folded && front_matter_fold_anchor.is_none() {
+                                gs.gutter_fold_folded_opacity
+                            } else {
+                                0.0
+                            },
+                        )
                     } else if is_folded {
                         gs.gutter_fold_folded_opacity
                     } else if is_hovered {
@@ -7299,6 +8351,14 @@ impl Element for EditorElement {
                                     px(total_line_height),
                                 ),
                             )
+                        } else if front_matter_fold_anchor.is_some() {
+                            front_matter_fold_hit_bounds(
+                                fold_icon_x - markdown_fold_left_padding,
+                                editor_left + editor.padding_left(),
+                                line_top,
+                                total_line_height,
+                                bounds.intersect(&window.content_mask().bounds),
+                            )
                         } else {
                             Bounds::new(
                                 point(px(fold_icon_x - markdown_fold_left_padding), px(line_top)),
@@ -7311,7 +8371,7 @@ impl Element for EditorElement {
                                 ),
                             )
                         },
-                        line_idx,
+                        fold_anchor,
                         false,
                     ));
                 }
@@ -7756,6 +8816,7 @@ impl Element for EditorElement {
                                 row_top,
                                 row_height,
                                 collapsed_task_prefix_display_columns,
+                                None,
                                 checkbox_text_gap_px,
                                 None,
                                 &mut gutter_quads,
@@ -8999,6 +10060,7 @@ impl Element for EditorElement {
                     cursor.offset,
                     &all_sel_ranges,
                     syntax_expansion_allowed,
+                    search_reveal_range.as_ref(),
                 );
                 if code_mode && let Some(Some(img_data)) = image_cache.get(&preview.cache_key) {
                     let img_size = img_data.size(0);
@@ -9114,9 +10176,10 @@ impl Element for EditorElement {
                 .is_some_and(|preview| editor.folded_sections.contains(&preview.start_line));
             let preview_is_active = preview_anchor.is_some_and(|preview| {
                 helpers::block_preview_is_active(preview, cursor_line, &all_sel_ranges)
+                    || editor.search_reveals_source_range(&preview.source_range)
             });
-            let group_syntax_active =
-                code_block_group_range(*start_line).is_some_and(|(group_start, group_end)| {
+            let group_syntax_active = editor.search_reveals_code_fence_group(*start_line)
+                || code_block_group_range(*start_line).is_some_and(|(group_start, group_end)| {
                     active_code_fence_group.is_some_and(|(active_start, active_end)| {
                         group_start == active_start && group_end == active_end
                     })
@@ -10032,10 +11095,33 @@ impl Element for EditorElement {
             }
             editor.sync_code_block_horizontal_scrollbar(cx);
             editor.apply_line_display_info_updates(line_count, display_info_updates);
+            if editor.front_matter_group_geometry_dirty
+                && editor
+                    .decorations
+                    .first()
+                    .and_then(|d| d.table_info.as_ref())
+                    .filter(|table| table.is_front_matter)
+                    .is_none_or(|table| {
+                        (table.table_start_line..table.table_end_line).all(|line| {
+                            editor.front_matter_line_is_hidden(line)
+                                || editor
+                                    .line_display_info
+                                    .get(line)
+                                    .is_some_and(|info| info.is_some())
+                        })
+                    })
+            {
+                editor.front_matter_group_geometry_dirty = false;
+            }
             editor.visible_line_geometry = inline_diff_line_geometry.clone();
             editor.last_viewport_height = viewport_height;
             editor.last_viewport_width = viewport_width;
             editor.checkbox_areas = checkbox_hit_areas.clone();
+            editor.front_matter_type_areas = front_matter_type_areas_local.clone();
+            editor.front_matter_text_areas = front_matter_text_areas;
+            editor.front_matter_delete_areas = front_matter_delete_areas.clone();
+            editor.front_matter_list_scroll_areas = front_matter_list_scroll_areas;
+
             editor.image_click_areas = image_hit_areas.clone();
             editor.image_preview_zoom_areas = image_preview_zoom_areas_local.clone();
             editor.generated_preview_click_areas = generated_preview_hit_areas.clone();
@@ -10109,8 +11195,35 @@ impl Element for EditorElement {
             }
             editor.last_text_width = text_width;
             editor.last_window_scale_factor = window_scale_factor;
+            let center_requested =
+                editor.pending_center_cursor_in_view || editor.center_cursor_confirm_frames > 0;
+            // The animation epoch is shared, unlike the guards swapped into
+            // this pane. A background pane must not consume another pane's request.
+            let mut navigation_in_progress = editor.current_pane_id() == editor.focused_pane_id
+                && outline::outline_navigation_in_progress(
+                    editor.outline_navigation_epoch,
+                    editor.scroll_anim_epoch,
+                );
+            if center_requested {
+                editor.pending_click_anchor = None;
+                editor.pending_typing_scroll_guard = None;
+            } else if (editor.pending_click_anchor.is_some()
+                || editor.pending_typing_scroll_guard.is_some())
+                && navigation_in_progress
+            {
+                // These guards arrived after navigation started: a newer user
+                // click/edit supersedes it, unlike a passive preview refresh.
+                editor.scroll_anim_epoch = editor.scroll_anim_epoch.wrapping_add(1);
+                editor.outline_navigation_epoch = None;
+                navigation_in_progress = false;
+            }
+            let explicit_navigation = center_requested || navigation_in_progress;
+            if explicit_navigation {
+                editor.pending_preview_reveal = None;
+            }
             let scroll_before_anchor = editor.scroll_offset;
             if scroll_anchor_delta.abs() > 0.5
+                && !explicit_navigation
                 && editor.pending_preview_reveal.is_none()
                 && !editor.pending_center_cursor_in_view
                 && !editor.pending_scroll_to_cursor
@@ -10180,7 +11293,10 @@ impl Element for EditorElement {
             {
                 cx.notify();
             }
-            if caret_was_visible && editor.keep_previously_visible_cursor_in_view() {
+            if !explicit_navigation
+                && caret_was_visible
+                && editor.keep_previously_visible_cursor_in_view()
+            {
                 cx.notify();
             }
             // Reset the rendered view (zoom/pan) whenever the cursor enters or
@@ -10244,6 +11360,19 @@ impl Element for EditorElement {
             .map(|(bounds, line)| (window.insert_hitbox(*bounds, HitboxBehavior::Normal), *line))
             .collect::<Vec<_>>();
 
+        let front_matter_delete_hitboxes = front_matter_delete_areas
+            .iter()
+            .map(|(bounds, _, _)| window.insert_hitbox(*bounds, HitboxBehavior::Normal))
+            .collect();
+        let front_matter_type_hitboxes = front_matter_type_areas_local
+            .iter()
+            .map(|(bounds, line)| {
+                let hitbox = window.insert_hitbox(*bounds, HitboxBehavior::Normal);
+
+                (hitbox, *line)
+            })
+            .collect::<Vec<_>>();
+
         // Tooltips must be requested during prepaint (gpui asserts the phase).
         for (_, tooltip_bounds, tooltip_title) in &generated_preview_tooltips {
             tooltip::request_tooltip_for_hitbox(
@@ -10302,6 +11431,10 @@ impl Element for EditorElement {
             inline_svgs,
             gutter_fold_icons,
             format_icons,
+            front_matter_type_icons,
+
+            front_matter_group_texts,
+            front_matter_delete_hitboxes,
             hr_lines,
             image_previews,
             image_borders,
@@ -10314,6 +11447,7 @@ impl Element for EditorElement {
             inline_diff_revert_buttons,
             code_block_copy_hitboxes,
             format_trigger_hitboxes,
+            front_matter_type_hitboxes,
             preview_zoom_buttons,
             preview_zoom_hitboxes,
             tooltips: generated_preview_tooltips,
@@ -10401,9 +11535,18 @@ impl Element for EditorElement {
         }
         let editor = self.editor.read(cx);
         let focus_handle = editor.focus_handle.clone();
-        let cursor_style = match editor.hovering_handle {
-            _ if editor.table_drag.is_some() => CursorStyle::ClosedHand,
+        let table_handles_enabled = !editor.active_tab_is_read_only();
+        let hovering_handle = editor.hovering_handle.filter(|_| table_handles_enabled);
+        let cursor_style = match hovering_handle {
+            _ if table_handles_enabled && editor.table_drag.is_some() => CursorStyle::ClosedHand,
             Some(_) => CursorStyle::OpenHand,
+            None if editor
+                .front_matter_type_areas
+                .iter()
+                .any(|(bounds, _)| bounds.contains(&window.mouse_position())) =>
+            {
+                CursorStyle::Arrow
+            }
             None if editor.hovering_checkbox_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_fold_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_image_edit_line.is_some() => CursorStyle::Arrow,
@@ -10433,6 +11576,34 @@ impl Element for EditorElement {
         }
         for (hitbox, _) in &prepaint.format_trigger_hitboxes {
             window.set_cursor_style(CursorStyle::OpenHand, hitbox);
+        }
+        for (hitbox, _) in &prepaint.front_matter_type_hitboxes {
+            window.set_cursor_style(CursorStyle::Arrow, hitbox);
+        }
+        for hitbox in &prepaint.front_matter_delete_hitboxes {
+            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        }
+        if !prepaint.front_matter_delete_hitboxes.is_empty() {
+            let hitboxes = prepaint.front_matter_delete_hitboxes.clone();
+            let editor_entity = self.editor.clone();
+            let pane_id = self.pane_id;
+            window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Capture
+                    || event.button != gpui::MouseButton::Left
+                    || !hitboxes.iter().any(|hitbox| hitbox.is_hovered(window))
+                {
+                    return;
+                }
+                let handled = editor_entity.update(cx, |this, cx| {
+                    this.with_pane(pane_id, |this| {
+                        this.remove_front_matter_list_item_for_position(event.position, cx)
+                    })
+                });
+                if handled {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            });
         }
         for hitbox in &prepaint.preview_zoom_hitboxes {
             window.set_cursor_style(CursorStyle::Arrow, hitbox);
@@ -10480,6 +11651,50 @@ impl Element for EditorElement {
                 });
             }
         });
+        if !prepaint.front_matter_type_hitboxes.is_empty() {
+            let hover_hitboxes = prepaint.front_matter_type_hitboxes.clone();
+            let hovered = std::cell::Cell::new(
+                hover_hitboxes
+                    .iter()
+                    .position(|(hitbox, _)| hitbox.bounds.contains(&window.mouse_position())),
+            );
+            let hover_editor = self.editor.clone();
+            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Bubble {
+                    return;
+                }
+                let next = hover_hitboxes
+                    .iter()
+                    .position(|(hitbox, _)| hitbox.is_hovered(window));
+                if hovered.replace(next) != next {
+                    hover_editor.update(cx, |_, cx| cx.notify());
+                }
+            });
+            let front_matter_type_hitboxes = prepaint.front_matter_type_hitboxes.clone();
+            let editor_entity = self.editor.clone();
+            let pane_id = self.pane_id;
+
+            window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Capture || event.button != gpui::MouseButton::Left
+                {
+                    return;
+                }
+                if front_matter_type_hitboxes
+                    .iter()
+                    .any(|(hitbox, _)| hitbox.is_hovered(window))
+                {
+                    let handled = editor_entity.update(cx, |this, cx| {
+                        this.with_pane(pane_id, |this| {
+                            this.open_front_matter_type_menu_for_position(event.position, cx)
+                        })
+                    });
+                    if handled {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }
+            });
+        }
         // IME/text input is routed to the focused pane only.
         if is_focused_pane {
             window.handle_input(
@@ -10671,6 +11886,31 @@ impl Element for EditorElement {
                     cx,
                 )
                 .ok();
+        }
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: bounds.intersect(&window.content_mask().bounds),
+            }),
+            |window| {
+                for (icon_bounds, icon_path, color) in &prepaint.front_matter_type_icons {
+                    window
+                        .paint_svg(
+                            *icon_bounds,
+                            (*icon_path).into(),
+                            TransformationMatrix::default(),
+                            *color,
+                            cx,
+                        )
+                        .ok();
+                }
+            },
+        );
+        for (clip, shaped, origin, height) in &prepaint.front_matter_group_texts {
+            window.with_content_mask(Some(ContentMask { bounds: *clip }), |window| {
+                shaped
+                    .paint(*origin, *height, TextAlign::Left, None, window, cx)
+                    .ok();
+            });
         }
         for (icon_bounds, icon_path, color) in &prepaint.inline_svgs {
             window

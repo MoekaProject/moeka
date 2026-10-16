@@ -4,6 +4,7 @@ use crate::actions::*;
 use crate::markdown::{self, BlockType};
 
 use super::profiler::{RuntimeProfilePaths, RuntimeProfiler};
+use super::table_cell_list_edit::DeleteAction;
 use super::*;
 
 fn page_down_row_fits(remaining_height: f32, step_distance: f32, first_step: bool) -> bool {
@@ -419,36 +420,6 @@ impl EditorView {
         );
     }
 
-    fn delete_adjacent_table_cell_break(
-        &mut self,
-        backwards: bool,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.cursor.has_selection() || self.has_extra_cursors() {
-            return false;
-        }
-        let Some(cell_range) = self.table_cursor_cell_range() else {
-            return false;
-        };
-        let Some(delete_range) =
-            adjacent_html_break_range(self.buffer.text(), self.cursor.offset, backwards)
-        else {
-            return false;
-        };
-        if delete_range.start < cell_range.start || delete_range.end > cell_range.end {
-            return false;
-        }
-
-        self.checkpoint();
-        self.queue_non_markdown_line_display_transfer(&delete_range, "");
-        self.buffer.delete(delete_range.clone());
-        self.cursor.move_to(delete_range.start, &self.buffer);
-        self.reparse();
-        self.scroll_to_cursor();
-        self.pause_blinking(cx);
-        true
-    }
-
     pub(crate) fn on_backspace(
         &mut self,
         _: &Backspace,
@@ -480,17 +451,26 @@ impl EditorView {
             cx.notify();
             return;
         }
-        if !self.cursor.has_selection()
-            && !self.has_extra_cursors()
-            && self
-                .table_cursor_cell_range()
-                .is_some_and(|range| self.cursor.offset <= range.start)
-        {
-            let _ = self.move_table_cursor_horizontal(false);
+        if self.semantic_delete_touches_table(DeleteAction::Backward) {
+            self.capture_typing_scroll_guard();
+            self.checkpoint();
+            self.apply_semantic_delete(DeleteAction::Backward);
+            self.scroll_to_cursor();
             self.pause_blinking(cx);
+            if let Some(start) = self.slash_menu_start {
+                if self.cursor.offset <= start {
+                    self.dismiss_slash_menu(cx);
+                } else {
+                    self.update_slash_filter(cx);
+                }
+            } else if self.wiki_link_start.is_some() {
+                self.sync_wiki_link_menu(cx);
+            } else {
+                self.maybe_open_wiki_link_menu_after_edit(cx);
+            }
             return;
         }
-        if self.delete_adjacent_table_cell_break(true, cx) {
+        if self.backspace_empty_front_matter_row(cx) {
             return;
         }
         self.capture_typing_scroll_guard();
@@ -690,17 +670,12 @@ impl EditorView {
             cx.notify();
             return;
         }
-        if !self.cursor.has_selection()
-            && !self.has_extra_cursors()
-            && self
-                .table_cursor_cell_range()
-                .is_some_and(|range| self.cursor.offset >= range.end)
-        {
-            let _ = self.move_table_cursor_horizontal(true);
+        if self.semantic_delete_touches_table(DeleteAction::Forward) {
+            self.capture_typing_scroll_guard();
+            self.checkpoint();
+            self.apply_semantic_delete(DeleteAction::Forward);
+            self.scroll_to_cursor();
             self.pause_blinking(cx);
-            return;
-        }
-        if self.delete_adjacent_table_cell_break(false, cx) {
             return;
         }
         self.capture_typing_scroll_guard();
@@ -809,12 +784,15 @@ impl EditorView {
             self.finish_horizontal_cursor_move(cx);
             return;
         }
+        let prev_offset = self.cursor.offset;
         if !had_selection && self.move_table_cursor_horizontal(false) {
+            if self.table_boundary_caret.is_none() && self.cursor.offset != prev_offset {
+                self.maybe_auto_select_link_url(prev_offset, false, cx);
+            }
             self.finish_horizontal_cursor_move(cx);
             return;
         }
         self.table_boundary_caret = None;
-        let prev_offset = self.cursor.offset;
         let (line, _col) = self.buffer.offset_to_line_col(self.cursor.offset);
         let cell_ranges = self
             .decorations
@@ -876,12 +854,15 @@ impl EditorView {
             self.finish_horizontal_cursor_move(cx);
             return;
         }
+        let prev_offset = self.cursor.offset;
         if !had_selection && self.move_table_cursor_horizontal(true) {
+            if self.table_boundary_caret.is_none() && self.cursor.offset != prev_offset {
+                self.maybe_auto_select_link_url(prev_offset, false, cx);
+            }
             self.finish_horizontal_cursor_move(cx);
             return;
         }
         self.table_boundary_caret = None;
-        let prev_offset = self.cursor.offset;
         let (line, _col) = self.buffer.offset_to_line_col(self.cursor.offset);
         let cell_ranges = self
             .decorations
@@ -1072,6 +1053,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let previous = [self.cursor];
         self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
         let in_table = self.table_cell_for_offset(self.cursor.offset).is_some();
@@ -1083,6 +1065,8 @@ impl EditorView {
         } else if !in_table {
             self.cursor.select_left(&self.buffer);
         }
+        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.dedup_cursors();
         self.finish_horizontal_cursor_move(cx);
     }
 
@@ -1092,6 +1076,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let previous = [self.cursor];
         self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
         let in_table = self.table_cell_for_offset(self.cursor.offset).is_some();
@@ -1103,6 +1088,8 @@ impl EditorView {
         } else if !in_table {
             self.cursor.select_right(&self.buffer);
         }
+        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.dedup_cursors();
         self.finish_horizontal_cursor_move(cx);
     }
 
@@ -1112,6 +1099,7 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let previous = [self.cursor];
         self.table_boundary_caret = None;
         if self.has_extra_cursors() {
             self.reset_cursor_visual_targeting();
@@ -1139,6 +1127,8 @@ impl EditorView {
                 self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
             }
         }
+        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.dedup_cursors();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -1149,6 +1139,7 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let previous = [self.cursor];
         self.table_boundary_caret = None;
         if self.has_extra_cursors() {
             self.reset_cursor_visual_targeting();
@@ -1167,6 +1158,12 @@ impl EditorView {
                 let offset = self.apply_table_cursor_target(target);
                 self.cursor.select_to(offset, &self.buffer);
             } else if !in_table
+                && self
+                    .collapsed_front_matter_range()
+                    .is_some_and(|hidden| hidden.end >= self.buffer.line_count())
+            {
+                self.cursor.select_to(self.buffer.len(), &self.buffer);
+            } else if !in_table
                 && let Some(offset) = self.offset_for_visual_down(self.cursor.offset)
             {
                 self.cursor.select_to(offset, &self.buffer);
@@ -1177,6 +1174,8 @@ impl EditorView {
                 self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
             }
         }
+        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.dedup_cursors();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -1197,7 +1196,7 @@ impl EditorView {
             self.pause_blinking(cx);
             return;
         }
-        if self.move_table_cursor_to_cell_edge(true) {
+        if self.move_table_cursors_to_cell_edge(true, false) {
             self.finish_horizontal_cursor_move(cx);
             return;
         }
@@ -1217,7 +1216,7 @@ impl EditorView {
             self.pause_blinking(cx);
             return;
         }
-        if self.move_table_cursor_to_cell_edge(false) {
+        if self.move_table_cursors_to_cell_edge(false, false) {
             self.finish_horizontal_cursor_move(cx);
             return;
         }
@@ -1237,6 +1236,14 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.table_boundary_caret.is_some() {
+            self.pause_blinking(cx);
+            return;
+        }
+        if self.move_table_cursors_to_cell_edge(true, true) {
+            self.finish_horizontal_cursor_move(cx);
+            return;
+        }
         self.table_boundary_caret = None;
         if self.has_extra_cursors() {
             self.multi_cursor_select_to_line_start();
@@ -1247,6 +1254,14 @@ impl EditorView {
     }
 
     pub(crate) fn on_select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        if self.table_boundary_caret.is_some() {
+            self.pause_blinking(cx);
+            return;
+        }
+        if self.move_table_cursors_to_cell_edge(false, true) {
+            self.finish_horizontal_cursor_move(cx);
+            return;
+        }
         self.table_boundary_caret = None;
         if self.has_extra_cursors() {
             self.multi_cursor_select_to_line_end();
@@ -1284,22 +1299,18 @@ impl EditorView {
         true
     }
 
-    fn insert_table_cell_break(&mut self, cx: &mut Context<Self>) -> bool {
+    fn insert_table_cell_break(&mut self, soft: bool, cx: &mut Context<Self>) -> bool {
         if self.has_extra_cursors() {
             return false;
         }
-        let Some(cell_range) = self.table_cursor_cell_range() else {
+        let Some(plan) = self.table_cell_enter_plan(self.cursor, soft) else {
             return false;
         };
-        let selection = self.cursor.selection_range();
-        if selection.start < cell_range.start || selection.end > cell_range.end {
-            return false;
-        }
 
+        self.pending_code_fence = None;
         self.checkpoint();
-        self.queue_non_markdown_line_display_transfer(&selection, "<br>");
-        self.cursor.insert(&mut self.buffer, "<br>");
-        self.reparse();
+        self.queue_non_markdown_line_display_transfer(&plan.range, &plan.text);
+        self.apply_table_aware_cursor_plans(vec![(plan, true)]);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
         true
@@ -1316,6 +1327,9 @@ impl EditorView {
         }
         if self.table_boundary_caret.is_some() {
             if !self.begin_content_edit(cx) {
+                return;
+            }
+            if self.insert_front_matter_break(cx) {
                 return;
             }
             if self.insert_line_at_table_boundary(cx) {
@@ -1340,7 +1354,10 @@ impl EditorView {
             self.commit_sidebar_edit(cx);
             return;
         }
-        if self.insert_table_cell_break(cx) {
+        if self.insert_front_matter_break(cx) {
+            return;
+        }
+        if self.insert_table_cell_break(false, cx) {
             return;
         }
         let pending_fence = self
@@ -1574,16 +1591,19 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if self.insert_front_matter_break(cx) {
+            return;
+        }
         if self.table_boundary_caret.is_some() {
             let _ = self.insert_line_at_table_boundary(cx);
             return;
         }
-        if self.insert_table_cell_break(cx) {
+        if self.insert_table_cell_break(true, cx) {
             return;
         }
         self.pending_code_fence = None;
         self.checkpoint();
-        self.multi_cursor_enter();
+        self.multi_cursor_insert("\n");
         self.reparse();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -1597,6 +1617,9 @@ impl EditorView {
             let _ = self.move_table_cursor_horizontal(true);
             self.pause_blinking(cx);
             cx.notify();
+            return;
+        }
+        if self.indent_table_cell_lists(true, cx) {
             return;
         }
         if self.table_move_to_adjacent_cell(true, cx) {
@@ -1635,6 +1658,9 @@ impl EditorView {
             let _ = self.move_table_cursor_horizontal(false);
             self.pause_blinking(cx);
             cx.notify();
+            return;
+        }
+        if self.indent_table_cell_lists(false, cx) {
             return;
         }
         if self.table_move_to_adjacent_cell(false, cx) {
@@ -1761,6 +1787,7 @@ impl EditorView {
         if self.has_extra_cursors() {
             self.multi_cursor_move_word_left();
         } else {
+            let previous = [self.cursor];
             let current = self.cursor.offset;
             let mut probe = self.cursor;
             probe.move_word_left(&self.buffer);
@@ -1769,6 +1796,7 @@ impl EditorView {
             } else if self.table_cell_for_offset(current).is_none() {
                 self.cursor = probe;
             }
+            self.skip_front_matter_caret_navigation(&previous);
         }
         self.finish_horizontal_cursor_move(cx);
     }
@@ -1788,6 +1816,7 @@ impl EditorView {
         if self.has_extra_cursors() {
             self.multi_cursor_move_word_right();
         } else {
+            let previous = [self.cursor];
             let current = self.cursor.offset;
             let mut probe = self.cursor;
             probe.move_word_right(&self.buffer);
@@ -1796,6 +1825,7 @@ impl EditorView {
             } else if self.table_cell_for_offset(current).is_none() {
                 self.cursor = probe;
             }
+            self.skip_front_matter_caret_navigation(&previous);
         }
         self.finish_horizontal_cursor_move(cx);
     }
@@ -1806,6 +1836,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let previous = self.all_cursors_snapshot();
         self.clear_phantom_selection();
         self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
@@ -1820,6 +1851,7 @@ impl EditorView {
         for cursor in &mut self.extra_cursors {
             cursor.select_word_left(&self.buffer);
         }
+        self.skip_folded_front_matter_selection_navigation(&previous);
         self.dedup_cursors();
         self.finish_horizontal_cursor_move(cx);
     }
@@ -1830,6 +1862,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let previous = self.all_cursors_snapshot();
         self.clear_phantom_selection();
         self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
@@ -1844,6 +1877,7 @@ impl EditorView {
         for cursor in &mut self.extra_cursors {
             cursor.select_word_right(&self.buffer);
         }
+        self.skip_folded_front_matter_selection_navigation(&previous);
         self.dedup_cursors();
         self.finish_horizontal_cursor_move(cx);
     }
@@ -1926,56 +1960,12 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
-        if self.table_boundary_caret.is_some() || self.table_cursor_cell().is_some() {
+        if self.table_boundary_caret.is_some() {
             self.pause_blinking(cx);
             return;
         }
         self.checkpoint();
-        let mut targets = self.cursor_states_with_primary_flag();
-        targets.sort_by_key(|(cursor, _)| std::cmp::Reverse(cursor.selection_range().start));
-        let mut edits = Vec::with_capacity(targets.len());
-        let mut killed: Vec<String> = Vec::new();
-        for (cursor, is_primary) in targets {
-            let range = if cursor.has_selection() {
-                cursor.selection_range()
-            } else {
-                let (line, _) = self.buffer.offset_to_line_col(cursor.offset);
-                if to_start {
-                    self.buffer.line_start(line)..cursor.offset
-                } else {
-                    let line_end = self.buffer.line_end(line);
-                    // Emacs kill semantics: at line end, kill the newline.
-                    if kill && cursor.offset >= line_end && line_end < self.buffer.len() {
-                        cursor.offset..(line_end + 1).min(self.buffer.len())
-                    } else {
-                        cursor.offset..line_end
-                    }
-                }
-            };
-            if kill {
-                killed.push(self.buffer.text_for_range(range.clone()).to_string());
-            }
-            let start = range.start;
-            let removed = range.end.saturating_sub(range.start);
-            self.buffer.delete(range);
-            edits.push(MultiCursorResolvedEdit {
-                start,
-                cursor_after: start,
-                delta: -(removed as isize),
-                is_primary,
-                ordered_list_update: None,
-            });
-        }
-        if kill {
-            // Targets iterate in reverse document order; restore it.
-            killed.reverse();
-            let text = killed.join("\n");
-            if !text.is_empty() {
-                self.kill_ring = Some(text);
-            }
-        }
-        self.apply_multi_cursor_resolved_edits(edits);
-        self.reparse();
+        self.apply_semantic_delete(DeleteAction::LineBoundary { to_start, kill });
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -2032,17 +2022,15 @@ impl EditorView {
             let _ = self.insert_line_at_table_boundary(cx);
             return;
         }
+        let Some(plan) = self.semantic_open_line_plan() else {
+            self.pause_blinking(cx);
+            return;
+        };
         self.checkpoint();
-        self.clear_extra_cursors();
-        if self.cursor.has_selection() {
-            let range = self.cursor.selection_range();
-            self.cursor.move_to(range.start, &self.buffer);
-            self.buffer.delete(range);
-        }
-        let offset = self.cursor.offset;
-        self.buffer.insert(offset, "\n");
-        self.cursor.move_to(offset, &self.buffer);
-        self.reparse();
+        self.queue_non_markdown_line_display_transfer(&plan.range, &plan.text);
+        // Ctrl-O has always acted only on the primary cursor. The single plan
+        // clears extras on success, but a protected selection remains intact.
+        self.apply_table_aware_cursor_plans(vec![(plan, true)]);
         self.scroll_to_cursor();
         self.pause_blinking(cx);
     }
@@ -2184,18 +2172,14 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
-        if self.table_boundary_caret.is_some() || self.table_cursor_cell().is_some() {
+        if self.table_boundary_caret.is_some() {
             self.pause_blinking(cx);
             return;
         }
         self.checkpoint();
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
-        if self.has_extra_cursors() {
-            self.multi_cursor_delete_word_left();
-        } else {
-            self.cursor.delete_word_left(&mut self.buffer);
-        }
+        self.multi_cursor_delete_word_left();
         self.reparse();
         if !cursor_had_inline_headroom || self.cursor_line() != cursor_line_before {
             self.scroll_to_cursor();
@@ -2212,18 +2196,14 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
-        if self.table_boundary_caret.is_some() || self.table_cursor_cell().is_some() {
+        if self.table_boundary_caret.is_some() {
             self.pause_blinking(cx);
             return;
         }
         self.checkpoint();
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
-        if self.has_extra_cursors() {
-            self.multi_cursor_delete_word_right();
-        } else {
-            self.cursor.delete_word_right(&mut self.buffer);
-        }
+        self.multi_cursor_delete_word_right();
         self.reparse();
         if !cursor_had_inline_headroom || self.cursor_line() != cursor_line_before {
             self.scroll_to_cursor();
@@ -2237,6 +2217,11 @@ impl EditorView {
         self.active_tab_is_markdown()
             && self.begin_content_edit(cx)
             && (self.table_boundary_caret.is_none() || self.insert_line_at_table_boundary(cx))
+    }
+
+    fn begin_markdown_block_format_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        (self.table_boundary_caret.is_some() || self.table_block_format_allowed(false))
+            && self.begin_markdown_format_edit(cx)
     }
 
     pub(crate) fn on_toggle_bold(
@@ -2345,7 +2330,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.begin_markdown_format_edit(cx) {
+        if !self.begin_markdown_block_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2414,7 +2399,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.begin_markdown_format_edit(cx) {
+        if !self.begin_markdown_block_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2428,7 +2413,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.begin_markdown_format_edit(cx) {
+        if !self.begin_markdown_block_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2442,7 +2427,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.begin_markdown_format_edit(cx) {
+        if !self.begin_markdown_block_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2455,7 +2440,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.begin_markdown_format_edit(cx) {
+        if !self.begin_markdown_block_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2468,7 +2453,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.begin_markdown_format_edit(cx) {
+        if !self.begin_markdown_block_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2481,7 +2466,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.begin_markdown_format_edit(cx) {
+        if !self.begin_markdown_block_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2494,7 +2479,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.begin_markdown_format_edit(cx) {
+        if !self.begin_markdown_block_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2507,7 +2492,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.begin_markdown_format_edit(cx) {
+        if !self.begin_markdown_block_format_edit(cx) {
             return;
         }
         self.checkpoint();
@@ -2521,7 +2506,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.begin_markdown_format_edit(cx) {
+        if !self.begin_markdown_block_format_edit(cx) {
             return;
         }
         if let Some(level) = self
@@ -2866,31 +2851,13 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if self.table_boundary_caret.is_some() {
+            self.pause_blinking(cx);
+            return;
+        }
         self.checkpoint();
-        let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
-        let should_normalize_ordered_lists = ordered_list_near_line(&self.decorations, line);
-        let start = self.buffer.line_start(line);
-        let end = self.buffer.line_end(line);
-        let delete_end = if end < self.buffer.len() {
-            end + 1
-        } else {
-            end
-        };
-        let delete_start = if start == delete_end && start > 0 {
-            start - 1
-        } else {
-            start
-        };
-        self.queue_non_markdown_line_display_transfer(&(delete_start..delete_end), "");
-        self.buffer.delete(delete_start..delete_end);
-        self.cursor.offset = delete_start.min(self.buffer.len());
-        self.cursor.anchor = self.cursor.offset;
-        self.mark_active_tab_dirty();
-        self.reparse();
-        if should_normalize_ordered_lists
-            && self.normalize_ordered_list_near_line(self.cursor_line(), false)
-        {
-            self.reparse();
+        if self.apply_semantic_delete(DeleteAction::Line) {
+            self.mark_active_tab_dirty();
         }
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -3039,6 +3006,88 @@ impl EditorView {
         text
     }
 
+    pub(super) fn persist_saved_tab_history(
+        &mut self,
+        tab_id: &str,
+        path: &std::path::Path,
+        snapshot: &EditorSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let history = &mut self.tabs[index].history;
+        let journal_path = history
+            .journal_path
+            .get_or_insert_with(|| history_store::default_journal_path(tab_id, Some(path)))
+            .clone();
+        history
+            .source_identity
+            .get_or_insert_with(|| history_store::default_source_identity(tab_id, Some(path)));
+        let mut history = history.clone();
+        let tab_id = tab_id.to_string();
+        let path = path.to_path_buf();
+        let snapshot = snapshot.clone();
+        let save = file_ops::DocumentSave::new(journal_path.clone());
+        let token = save.clone();
+        cx.spawn(async move |this, cx| {
+            let result = crate::platform::fs_task::run(
+                "save undo history",
+                journal_path.clone(),
+                move || {
+                    save.write_with(&[], |_, _| {
+                        history_store::persist_tab_history(
+                            &tab_id,
+                            Some(&path),
+                            &mut history,
+                            &snapshot,
+                        )
+                        .map(|_| ())
+                    })
+                },
+            )
+            .await;
+            token.observe_result(&result);
+            if token.is_latest()
+                && let Err(error) = result
+            {
+                this.update(cx, |editor, cx| {
+                    editor.notify_error(
+                        format!(
+                            "{} ({}): {error}",
+                            editor.t(crate::i18n::TextKey::FileOperationFailed),
+                            journal_path.display()
+                        ),
+                        cx,
+                    );
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn notify_document_save_failed(
+        &mut self,
+        tab_id: &str,
+        path: &std::path::Path,
+        error: &std::io::Error,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.all_tabs_mut().find(|tab| tab.id == tab_id) {
+            tab.is_dirty = true;
+        }
+        self.persist_recovery_for_tab(tab_id);
+        self.notify_error(
+            format!(
+                "{} ({}): {error}",
+                self.t(crate::i18n::TextKey::SaveFailed),
+                path.display()
+            ),
+            cx,
+        );
+    }
+
     fn finish_text_save(
         &mut self,
         tab_id: &str,
@@ -3048,8 +3097,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         if let Err(error) = result {
-            let message = format!("{}: {error}", self.t(crate::i18n::TextKey::SaveFailed));
-            self.notify_error(message, cx);
+            self.notify_document_save_failed(tab_id, path, &error, cx);
             return;
         }
         let Some(owner) = self.pane_id_for_tab(tab_id) else {
@@ -3076,13 +3124,7 @@ impl EditorView {
             editor.tabs[index].is_dirty = false;
             editor.tabs[index].snapshot = saved_snapshot.clone();
             editor.clear_temp_file_for_tab(tab_id);
-            let source_path = editor.tabs[index].path.clone();
-            let _ = history_store::persist_tab_history(
-                tab_id,
-                source_path.as_deref(),
-                &mut editor.tabs[index].history,
-                &saved_snapshot,
-            );
+            editor.persist_saved_tab_history(tab_id, path, &saved_snapshot, cx);
         });
         session_store::persist_session(self);
         if path == crate::editor::config_paths::settings_file_path() {
@@ -3125,10 +3167,11 @@ impl EditorView {
             let token = save.clone();
             cx.spawn(async move |this, cx| {
                 let write_text = text.clone();
-                let result = cx
-                    .background_executor()
-                    .spawn(async move { save.write(write_text.as_bytes()) })
-                    .await;
+                let result = crate::platform::fs_task::run("save", path.clone(), move || {
+                    save.write(write_text.as_bytes())
+                })
+                .await;
+                token.observe_result(&result);
                 if !token.is_latest() || matches!(result, Ok(false)) {
                     return;
                 }
@@ -3167,18 +3210,18 @@ impl EditorView {
                 };
                 let save = this.update(cx, |_, _| file_ops::DocumentSave::new(path.clone()));
                 let Ok(save) = save else { return };
-                let result = cx
-                    .background_executor()
-                    .spawn(async move { save.write(text.as_bytes()) })
-                    .await;
-                if matches!(result, Ok(false)) {
+                let token = save.clone();
+                let result = crate::platform::fs_task::run("save", path.clone(), move || {
+                    save.write(text.as_bytes())
+                })
+                .await;
+                token.observe_result(&result);
+                if !token.is_latest() || matches!(result, Ok(false)) {
                     return;
                 }
                 if let Err(error) = result {
                     this.update(cx, |editor, cx| {
-                        let message =
-                            format!("{}: {error}", editor.t(crate::i18n::TextKey::SaveFailed));
-                        editor.notify_error(message, cx);
+                        editor.notify_document_save_failed(&tab_id, &path, &error, cx);
                     })
                     .ok();
                     return;
@@ -3191,6 +3234,9 @@ impl EditorView {
                         let Some(idx) = editor.tabs.iter().position(|tab| tab.id == tab_id) else {
                             return;
                         };
+                        if editor.tabs[idx].path.is_some() {
+                            return;
+                        }
                         editor.tabs[idx].path = Some(path.clone());
                         editor.tabs[idx].title = EditorView::title_for_path(&path);
                         if editor.active_tab_id.as_deref() == Some(&tab_id) {
@@ -3213,6 +3259,7 @@ impl EditorView {
             return;
         };
         let tab_id = self.tabs[index].id.clone();
+        let original_path = self.tabs[index].path.clone();
         let is_whiteboard = self.tabs[index]
             .file_kind
             .as_ref()
@@ -3270,18 +3317,18 @@ impl EditorView {
             let contents_for_kind = contents.clone();
             let save = this.update(cx, |_, _| file_ops::DocumentSave::new(path.clone()));
             let Ok(save) = save else { return };
-            let result = cx
-                .background_executor()
-                .spawn(async move { save.write(contents.as_bytes()) })
-                .await;
-            if matches!(result, Ok(false)) {
+            let token = save.clone();
+            let result = crate::platform::fs_task::run("save as", path.clone(), move || {
+                save.write(contents.as_bytes())
+            })
+            .await;
+            token.observe_result(&result);
+            if !token.is_latest() || matches!(result, Ok(false)) {
                 return;
             }
             if let Err(error) = result {
                 this.update(cx, |editor, cx| {
-                    let message =
-                        format!("{}: {error}", editor.t(crate::i18n::TextKey::SaveFailed));
-                    editor.notify_error(message, cx);
+                    editor.notify_document_save_failed(&tab_id, &path, &error, cx);
                 })
                 .ok();
                 return;
@@ -3295,7 +3342,14 @@ impl EditorView {
                     let Some(index) = editor.tabs.iter().position(|tab| tab.id == tab_id) else {
                         return;
                     };
-                    let unchanged = if editor.active_tab_id.as_deref() == Some(&tab_id) {
+                    if editor.tabs[index].path != original_path {
+                        return;
+                    }
+                    let unchanged = if is_whiteboard {
+                        editor.tabs[index].whiteboard.as_ref().is_some_and(|state| {
+                            state.document.to_json_string() == contents_for_kind
+                        })
+                    } else if editor.active_tab_id.as_deref() == Some(&tab_id) {
                         editor.buffer.text() == contents_for_kind
                     } else {
                         editor.tabs[index].snapshot.text == contents_for_kind
@@ -3319,12 +3373,7 @@ impl EditorView {
                         history_store::default_journal_path(&tab_id, Some(path.as_path())),
                     );
                     if unchanged {
-                        let _ = history_store::persist_tab_history(
-                            &tab_id,
-                            Some(path.as_path()),
-                            &mut editor.tabs[index].history,
-                            &snapshot,
-                        );
+                        editor.persist_saved_tab_history(&tab_id, &path, &snapshot, cx);
                     }
                     if editor.active_tab_index() == Some(index) {
                         editor.current_file_path = Some(path);
@@ -3353,13 +3402,16 @@ impl EditorView {
         let tab_id = self.tabs[index].id.clone();
         if let Some(path) = self.tabs[index].path.clone() {
             let save = file_ops::DocumentSave::new(path.clone());
+            let token = save.clone();
             cx.spawn(async move |this, cx| {
                 let write_json = json.clone();
-                let result = cx
-                    .background_executor()
-                    .spawn(async move { save.write(write_json.as_bytes()) })
+                let result =
+                    crate::platform::fs_task::run("save whiteboard", path.clone(), move || {
+                        save.write(write_json.as_bytes())
+                    })
                     .await;
-                if matches!(result, Ok(false)) {
+                token.observe_result(&result);
+                if !token.is_latest() || matches!(result, Ok(false)) {
                     return;
                 }
                 this.update(cx, |editor, cx| {
@@ -3393,19 +3445,20 @@ impl EditorView {
                 };
                 let save = this.update(cx, |_, _| file_ops::DocumentSave::new(path.clone()));
                 let Ok(save) = save else { return };
+                let token = save.clone();
                 let write_json = json.clone();
-                let result = cx
-                    .background_executor()
-                    .spawn(async move { save.write(write_json.as_bytes()) })
+                let result =
+                    crate::platform::fs_task::run("save whiteboard", path.clone(), move || {
+                        save.write(write_json.as_bytes())
+                    })
                     .await;
-                if matches!(result, Ok(false)) {
+                token.observe_result(&result);
+                if !token.is_latest() || matches!(result, Ok(false)) {
                     return;
                 }
                 if let Err(error) = result {
                     this.update(cx, |editor, cx| {
-                        let message =
-                            format!("{}: {error}", editor.t(crate::i18n::TextKey::SaveFailed));
-                        editor.notify_error(message, cx);
+                        editor.notify_document_save_failed(&tab_id, &path, &error, cx);
                     })
                     .ok();
                     return;
@@ -3428,8 +3481,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         if let Err(error) = result {
-            let message = format!("{}: {error}", self.t(crate::i18n::TextKey::SaveFailed));
-            self.notify_error(message, cx);
+            self.notify_document_save_failed(tab_id, &path, &error, cx);
             return;
         }
         let Some(owner) = self.pane_id_for_tab(tab_id) else {
@@ -3450,8 +3502,13 @@ impl EditorView {
                 .whiteboard
                 .as_ref()
                 .is_some_and(|state| state.document.to_json_string() == saved_json);
+            editor.tabs[index].history.saved_text = Some(saved_json.clone());
             if unchanged {
                 editor.tabs[index].is_dirty = false;
+                editor.clear_temp_file_for_tab(tab_id);
+            } else {
+                editor.tabs[index].recovery.source_content_hash =
+                    Some(file_ops::content_hash(saved_json.as_bytes()));
             }
             if editor.active_tab_id.as_deref() == Some(tab_id) {
                 editor.current_file_path = Some(path);
@@ -3553,7 +3610,7 @@ impl EditorView {
             .focused_sidebar_path
             .clone()
             .unwrap_or_else(|| self.sidebar_root.clone());
-        if target.is_dir() {
+        if self.sidebar_cached_path_is_dir(&target) == Some(true) {
             target
         } else {
             target

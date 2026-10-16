@@ -19,6 +19,13 @@ impl EditorView {
     }
 
     fn push_notification(&mut self, message: String, cx: &mut Context<Self>) {
+        if self
+            .notifications
+            .iter()
+            .any(|notification| notification.message == message)
+        {
+            return;
+        }
         let id = self.next_notification_id;
         self.next_notification_id = self.next_notification_id.wrapping_add(1);
         self.notifications.push(Notification { id, message });
