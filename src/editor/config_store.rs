@@ -103,7 +103,7 @@ pub(crate) struct TabSessionRecord {
     pub history: TabHistoryIndex,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct TabViewState {
     #[serde(default)]
     pub cursor_offset: usize,
@@ -116,7 +116,30 @@ pub(crate) struct TabViewState {
     #[serde(default)]
     pub reading_mode: bool,
     #[serde(default)]
+    pub source_mode: bool,
+    #[serde(default = "default_source_word_wrap")]
+    pub source_word_wrap: bool,
+    #[serde(default)]
     pub extra_cursors: Vec<(usize, usize)>,
+}
+
+impl Default for TabViewState {
+    fn default() -> Self {
+        Self {
+            cursor_offset: 0,
+            cursor_anchor: 0,
+            scroll_offset: 0.0,
+            editor_left_aligned: false,
+            reading_mode: false,
+            source_mode: false,
+            source_word_wrap: default_source_word_wrap(),
+            extra_cursors: Vec::new(),
+        }
+    }
+}
+
+pub(crate) fn default_source_word_wrap() -> bool {
+    true
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
@@ -350,6 +373,103 @@ mod tests {
     }
 
     #[test]
+    fn session_roundtrip_preserves_source_mode_and_source_word_wrap_in_flat_and_split_tabs() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sessions.yaml");
+        let source_tab = TabSessionRecord {
+            id: "tab-source".into(),
+            kind: "editor".into(),
+            view: TabViewState {
+                source_mode: true,
+                source_word_wrap: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let reading_tab = TabSessionRecord {
+            id: "tab-reading".into(),
+            kind: "editor".into(),
+            view: TabViewState {
+                editor_left_aligned: true,
+                reading_mode: true,
+                source_word_wrap: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config = SessionsFile {
+            sessions: SessionConfig {
+                tabs: vec![source_tab.clone(), reading_tab.clone()],
+                pane_layout: Some(PaneLayoutRecord::Split {
+                    axis: "horizontal".into(),
+                    flexes: vec![1.0, 1.0],
+                    children: vec![
+                        PaneLayoutRecord::Leaf {
+                            active_tab_id: Some(source_tab.id.clone()),
+                            tabs: vec![source_tab],
+                        },
+                        PaneLayoutRecord::Leaf {
+                            active_tab_id: Some(reading_tab.id.clone()),
+                            tabs: vec![reading_tab],
+                        },
+                    ],
+                }),
+                focused_pane_leaf: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        save_yaml_file(&path, &config).unwrap();
+        let loaded = load_yaml_file::<SessionsFile>(&path).unwrap();
+
+        assert_eq!(loaded, config);
+        assert!(loaded.sessions.tabs[0].view.source_mode);
+        assert!(!loaded.sessions.tabs[0].view.reading_mode);
+        assert!(!loaded.sessions.tabs[0].view.source_word_wrap);
+        assert!(!loaded.sessions.tabs[0].view.editor_left_aligned);
+        assert!(!loaded.sessions.tabs[1].view.source_mode);
+        assert!(loaded.sessions.tabs[1].view.reading_mode);
+        assert!(loaded.sessions.tabs[1].view.source_word_wrap);
+        assert!(loaded.sessions.tabs[1].view.editor_left_aligned);
+    }
+
+    #[test]
+    fn legacy_session_view_defaults_source_mode_to_false() {
+        let config: SessionsFile = serde_yaml::from_str(
+            "sessions:\n  tabs:\n    - id: tab-reading\n      kind: editor\n      view:\n        reading_mode: true\n    - id: tab-edit\n      kind: editor\n",
+        )
+        .unwrap();
+
+        assert!(config.sessions.tabs[0].view.reading_mode);
+        assert!(!config.sessions.tabs[0].view.source_mode);
+        assert!(!config.sessions.tabs[1].view.reading_mode);
+        assert!(!config.sessions.tabs[1].view.source_mode);
+        assert!(!TabViewState::default().source_mode);
+    }
+
+    #[test]
+    fn source_word_wrap_defaults_to_true_for_new_and_legacy_tab_views() {
+        assert!(TabViewState::default().source_word_wrap);
+        assert!(TabSessionRecord::default().view.source_word_wrap);
+        for yaml in ["{}", "source_mode: true", "editor_left_aligned: true"] {
+            let view: TabViewState = serde_yaml::from_str(yaml).unwrap();
+            assert!(view.source_word_wrap);
+        }
+
+        let config: SessionsFile = serde_yaml::from_str(
+            "sessions:\n  tabs:\n    - id: tab-source\n      kind: editor\n      view:\n        source_mode: true\n    - id: tab-edit\n      kind: editor\n  pane_layout: !Leaf\n    tabs:\n      - id: tab-pane\n        kind: editor\n        view: {}\n",
+        )
+        .unwrap();
+        assert!(config.sessions.tabs[0].view.source_word_wrap);
+        assert!(config.sessions.tabs[1].view.source_word_wrap);
+        let Some(PaneLayoutRecord::Leaf { tabs, .. }) = config.sessions.pane_layout else {
+            panic!("expected a pane leaf");
+        };
+        assert!(tabs[0].view.source_word_wrap);
+    }
+
+    #[test]
     fn load_partial_yaml_fills_missing_fields_with_defaults() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.yaml");
@@ -440,6 +560,8 @@ mod tests {
                     scroll_offset: 25.5,
                     editor_left_aligned: true,
                     reading_mode: true,
+                    source_mode: false,
+                    source_word_wrap: true,
                     extra_cursors: vec![(9, 3)],
                 },
                 recovery: TabRecoveryState {

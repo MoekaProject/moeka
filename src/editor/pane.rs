@@ -328,6 +328,7 @@ pane_state! {
     (extra_cursors, Vec<Cursor>, Vec::new()),
     (decorations, Vec<LineDecoration>, Vec::new()),
     (lazy_markdown_decorations, Option<LazyMarkdownDecorations>, None),
+    (source_syntax_context, RefCell<input_ime::SourceContextCache>, RefCell::new(input_ime::SourceContextCache::default())),
     (markdown_outline_index, RefCell<Option<MarkdownOutlineIndex>>, RefCell::new(None)),
     (markdown_outline_build_task, Option<Task<()>>, None),
     (markdown_outline_epoch, usize, 0),
@@ -353,6 +354,7 @@ pane_state! {
     (pending_preview_reveal, Option<PendingPreviewReveal>, None),
     (pending_typing_scroll_guard, Option<PendingTypingScrollGuard>, None),
     (pending_click_anchor, Option<ClickScrollAnchor>, None),
+    (document_mode_scroll_anchor, Option<DocumentModeScrollAnchor>, None),
     (pending_history_transaction, Option<PendingHistoryTransaction>, None),
     (code_mode_preview_key, Option<String>, None),
     (generated_preview_rerender_task, Option<Task<()>>, None),
@@ -449,6 +451,8 @@ pane_state! {
     (tab_bar_scroll_handle, ScrollHandle, ScrollHandle::new()),
     (editor_left_aligned, bool, false),
     (reading_mode, bool, false),
+    (source_mode, bool, false),
+    (source_word_wrap, bool, true),
     // ── Layout geometry from the last prepaint ──
     (last_editor_left, f32, 0.0),
     (last_editor_width, f32, 800.0),
@@ -1095,7 +1099,33 @@ impl EditorView {
 
 #[cfg(test)]
 mod tests {
-    use super::{PaneLayout, SplitAxis, SplitDirection};
+    use super::{Pane, PaneLayout, SplitAxis, SplitDirection};
+
+    #[test]
+    fn new_panes_start_in_edit_mode_and_keep_mode_flags_independent() {
+        let mut source_pane = Pane::new(0);
+        let reading_pane = Pane::new(1);
+        assert!(!source_pane.state.reading_mode);
+        assert!(!source_pane.state.source_mode);
+        source_pane.state.source_mode = true;
+        assert!(!reading_pane.state.source_mode);
+        assert!(!reading_pane.state.reading_mode);
+    }
+
+    #[test]
+    fn source_word_wrap_defaults_to_true_and_stays_independent_between_panes() {
+        let mut source_pane = Pane::new(0);
+        let other_pane = Pane::new(1);
+        assert!(source_pane.state.source_word_wrap);
+        assert!(other_pane.state.source_word_wrap);
+        source_pane.state.source_mode = true;
+        source_pane.state.source_word_wrap = false;
+        assert!(other_pane.state.source_word_wrap);
+        assert!(!source_pane.state.editor_left_aligned);
+        assert!(!other_pane.state.source_mode);
+        source_pane.state.source_mode = false;
+        assert!(!source_pane.state.source_word_wrap);
+    }
 
     #[test]
     fn split_leaf_creates_axis() {

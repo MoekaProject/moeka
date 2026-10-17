@@ -6,6 +6,55 @@ use crate::theme::with_alpha;
 use super::chat_panel::TerminalStatusSummary;
 use super::*;
 
+#[derive(Default)]
+pub(crate) struct GitBranchStatus {
+    base_dir: Option<PathBuf>,
+    label: Option<String>,
+    dirty: bool,
+    epoch: usize,
+    scanned_at: Option<SystemTime>,
+    task: Option<Task<()>>,
+}
+
+impl GitBranchStatus {
+    fn invalidate(&mut self) {
+        self.dirty = true;
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
+    fn set_base_dir(&mut self, base_dir: Option<PathBuf>) -> bool {
+        if self.base_dir == base_dir {
+            return false;
+        }
+        self.base_dir = base_dir;
+        self.label = None;
+        self.scanned_at = None;
+        self.invalidate();
+        true
+    }
+
+    fn request_is_current(&self, base_dir: &Path, epoch: usize) -> bool {
+        self.base_dir.as_deref() == Some(base_dir) && self.epoch == epoch
+    }
+
+    fn finish(&mut self, result: std::io::Result<Option<String>>) {
+        // An optional status-bar label must not retry or toast on every render.
+        // The Git panel still reports genuine repository errors when opened.
+        self.label = result.ok().flatten();
+        self.dirty = false;
+        self.scanned_at = Some(SystemTime::now());
+    }
+}
+
+fn collect_status_bar_git_branch(base_dir: &Path) -> Result<Option<String>, String> {
+    match super::git_ops::run_git(base_dir, &["branch", "--show-current"]) {
+        Ok(branch) if !branch.is_empty() => Ok(Some(branch)),
+        Ok(_) => super::git_ops::run_git(base_dir, &["rev-parse", "--short", "HEAD"]).map(Some),
+        Err(error) if error.to_ascii_lowercase().contains("not a git repository") => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IndentKind {
     Spaces,
@@ -181,6 +230,84 @@ impl EditorView {
         self.close_context_menu(cx);
     }
 
+    pub(crate) fn invalidate_status_bar_git_branch(&mut self) {
+        self.git_branch_status.invalidate();
+    }
+
+    pub(crate) fn update_status_bar_git_branch(&mut self, base_dir: &Path, label: Option<String>) {
+        self.git_branch_status
+            .set_base_dir(Some(base_dir.to_path_buf()));
+        self.git_branch_status.invalidate();
+        self.git_branch_status.finish(Ok(label));
+    }
+
+    pub(crate) fn status_bar_git_branch_label(&self) -> Option<String> {
+        (self.git_branch_status.base_dir == self.git_panel_base_dir())
+            .then(|| self.git_branch_status.label.clone())
+            .flatten()
+    }
+
+    pub(crate) fn refresh_status_bar_git_branch(&mut self, cx: &mut Context<Self>) {
+        let base_dir = self.git_panel_base_dir();
+        if self.git_branch_status.set_base_dir(base_dir.clone()) {
+            self.git_panel_snapshot = None;
+            self.git_panel_status_scanned_at = None;
+            self.invalidate_git_panel_status();
+        }
+        if !crate::platform::capabilities::CHILD_PROCESSES
+            || !self.git_branch_status.dirty
+            || self.git_branch_status.task.is_some()
+        {
+            return;
+        }
+        let Some(base_dir) = base_dir else { return };
+        if file_watch::operation_suppressed("Read Git branch", &base_dir) {
+            return;
+        }
+        let epoch = self.git_branch_status.epoch;
+        let delay = remaining_refresh_delay(self.git_branch_status.scanned_at, 350);
+        let task = cx.spawn(async move |this, cx| {
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+            let should_run = this
+                .update(cx, |this, cx| {
+                    if !this.git_branch_status.request_is_current(&base_dir, epoch)
+                        || this.git_panel_base_dir().as_ref() != Some(&base_dir)
+                    {
+                        this.git_branch_status.task = None;
+                        this.refresh_status_bar_git_branch(cx);
+                        return false;
+                    }
+                    true
+                })
+                .unwrap_or(false);
+            if !should_run {
+                return;
+            }
+            let background_base_dir = base_dir.clone();
+            let result =
+                crate::platform::fs_task::run("Read Git branch", base_dir.clone(), move || {
+                    collect_status_bar_git_branch(&background_base_dir)
+                        .map_err(std::io::Error::other)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.git_branch_status.task = None;
+                if !this.git_branch_status.request_is_current(&base_dir, epoch)
+                    || this.git_panel_base_dir().as_ref() != Some(&base_dir)
+                {
+                    this.refresh_status_bar_git_branch(cx);
+                    return;
+                }
+                this.git_branch_status.finish(result);
+                cx.notify();
+            })
+            .ok();
+        });
+        self.git_branch_status.task = Some(task);
+    }
+
     pub(crate) fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         // Light themes get the paler bar color; dark themes keep the elevated
         // surface. The border matches the tab bar so the two chrome strips
@@ -217,10 +344,7 @@ impl EditorView {
         let cursor_label = self.cursor_status_label();
         let (indent_title, indent_value) = self.indent_settings.status_parts(self.ui_language);
         let language_value = self.language_status_label();
-        let branch_label = self
-            .git_panel_repo_status()
-            .map(|status| status.branch_label())
-            .filter(|label| !label.is_empty());
+        let branch_label = self.status_bar_git_branch_label();
 
         div()
             .id("editor-status-bar")
@@ -527,6 +651,83 @@ enum StatusBarAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn branch_cache_discards_previous_workspace_and_stale_requests() {
+        let mut status = GitBranchStatus::default();
+        let first = PathBuf::from("first");
+        let second = PathBuf::from("second");
+        assert!(status.set_base_dir(Some(first.clone())));
+        let first_epoch = status.epoch;
+        status.finish(Ok(Some("main".into())));
+        assert!(!status.dirty);
+        assert!(!status.set_base_dir(Some(first.clone())));
+        assert_eq!(status.label.as_deref(), Some("main"));
+        assert!(status.request_is_current(&first, first_epoch));
+        status.invalidate();
+        assert!(!status.request_is_current(&first, first_epoch));
+        let second_epoch = status.epoch;
+        assert!(status.set_base_dir(Some(second.clone())));
+        assert!(status.label.is_none());
+        assert!(status.scanned_at.is_none());
+        assert!(status.dirty);
+        assert!(!status.request_is_current(&first, second_epoch));
+        assert!(status.request_is_current(&second, status.epoch));
+        assert!(status.set_base_dir(None));
+        assert!(status.label.is_none());
+    }
+
+    #[test]
+    fn branch_lookup_failure_consumes_invalidation_without_render_retries() {
+        let mut status = GitBranchStatus::default();
+        status.set_base_dir(Some(PathBuf::from("repo")));
+        status.finish(Err(std::io::Error::other("unavailable")));
+        assert!(!status.dirty);
+        assert!(status.scanned_at.is_some());
+        assert!(status.label.is_none());
+        status.invalidate();
+        assert!(status.dirty);
+    }
+
+    #[cfg(not(feature = "mas"))]
+    #[test]
+    fn branch_label_is_independent_of_remote_upstream_and_worktree_status() {
+        use super::super::git_ops::run_git;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        assert_eq!(collect_status_bar_git_branch(root).unwrap(), None);
+        run_git(root, &["init", "-q", "--initial-branch=main"]).unwrap();
+        assert_eq!(
+            collect_status_bar_git_branch(root).unwrap().as_deref(),
+            Some("main")
+        );
+        run_git(root, &["config", "user.name", "Moeka Test"]).unwrap();
+        run_git(root, &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(
+            root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        )
+        .unwrap();
+        run_git(root, &["config", "branch.main.remote", "missing"]).unwrap();
+        run_git(root, &["config", "branch.main.merge", "refs/heads/main"]).unwrap();
+        std::fs::write(root.join(".git/index"), b"invalid index").unwrap();
+        assert_eq!(
+            collect_status_bar_git_branch(root).unwrap().as_deref(),
+            Some("main")
+        );
+        std::fs::remove_file(root.join(".git/index")).unwrap();
+        run_git(root, &["checkout", "--detach", "HEAD"]).unwrap();
+        let hash = run_git(root, &["rev-parse", "--short", "HEAD"]).unwrap();
+        assert_eq!(collect_status_bar_git_branch(root).unwrap(), Some(hash));
+        assert!(collect_status_bar_git_branch(&root.join("missing")).is_err());
+    }
 
     #[test]
     fn converts_space_indentation_to_tabs() {

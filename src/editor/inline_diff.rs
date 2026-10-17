@@ -7,6 +7,7 @@
 //! highlights, and expandable read-only "phantom" rows for removed lines while
 //! the added/modified lines stay fully editable.
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::time::Duration;
 
@@ -180,7 +181,59 @@ fn compute_inline_diff_hunks(
     hunks
 }
 
+/// Project existing diff rows without changing their stored HEAD decorations.
+pub(super) fn phantom_row_decoration(
+    decoration: &crate::markdown::LineDecoration,
+    source_mode: bool,
+) -> Cow<'_, crate::markdown::LineDecoration> {
+    if source_mode {
+        let mut projected = decoration.clone();
+        helpers::source_markdown_decoration(&mut projected);
+        Cow::Owned(projected)
+    } else {
+        Cow::Borrowed(decoration)
+    }
+}
+
+/// Geometry needs only the role, not a clone of the preview's source strings.
+fn phantom_row_block_type(decoration: &LineDecoration, source_mode: bool) -> &BlockType {
+    if source_mode
+        && (matches!(
+            decoration.block_type,
+            BlockType::CodeBlock | BlockType::CodeBlockFence | BlockType::Table
+        ) || decoration.block_preview.is_some()
+            || decoration.front_matter.is_some())
+    {
+        &BlockType::Normal
+    } else {
+        &decoration.block_type
+    }
+}
+
+fn phantom_reserved_height(
+    has_rows: bool,
+    measured: Option<f32>,
+    estimate: impl FnOnce() -> f32,
+) -> f32 {
+    if has_rows {
+        measured.unwrap_or_else(estimate)
+    } else {
+        // Measurements survive hunk collapse/recompute, but no longer reserve
+        // space until this line actually anchors expanded removed rows again.
+        0.0
+    }
+}
+
 impl EditorView {
+    /// Clear presentation-dependent measurements before a document-mode reflow.
+    pub(crate) fn clear_inline_diff_phantom_layout_cache(&mut self) {
+        self.inline_diff_phantom_height_above.clear();
+        self.inline_diff_phantom_height_below.clear();
+        self.phantom_row_hits.clear();
+        self.invalidate_line_geometry_cache();
+        self.layout_dirty = true;
+    }
+
     /// The inline diff state for the active editor tab, if any.
     pub(crate) fn active_inline_diff(&self) -> Option<&InlineDiffState> {
         self.active_tab_id
@@ -282,27 +335,21 @@ impl EditorView {
     /// line no longer anchors phantom rows, so any stale cache entry left behind
     /// after a recompute is harmless.
     pub(crate) fn inline_diff_phantom_reserved_above(&self, line: usize) -> f32 {
-        let estimate = self.estimate_inline_diff_phantom_height(line, false);
-        if estimate == 0.0 {
-            return 0.0;
-        }
-        self.inline_diff_phantom_height_above
-            .get(&line)
-            .copied()
-            .unwrap_or(estimate)
+        phantom_reserved_height(
+            self.inline_diff_phantom_rows_above(line) > 0,
+            self.inline_diff_phantom_height_above.get(&line).copied(),
+            || self.estimate_inline_diff_phantom_height(line, false),
+        )
     }
 
     /// Vertical space reserved below `line` for a trailing deletion's removed
     /// rows (see [`inline_diff_phantom_reserved_above`]).
     pub(crate) fn inline_diff_phantom_reserved_below(&self, line: usize) -> f32 {
-        let estimate = self.estimate_inline_diff_phantom_height(line, true);
-        if estimate == 0.0 {
-            return 0.0;
-        }
-        self.inline_diff_phantom_height_below
-            .get(&line)
-            .copied()
-            .unwrap_or(estimate)
+        phantom_reserved_height(
+            self.inline_diff_phantom_rows_below(line) > 0,
+            self.inline_diff_phantom_height_below.get(&line).copied(),
+            || self.estimate_inline_diff_phantom_height(line, true),
+        )
     }
 
     fn estimate_inline_diff_phantom_height(&self, line: usize, trailing: bool) -> f32 {
@@ -325,7 +372,10 @@ impl EditorView {
             };
             if matches {
                 for removed in &hunk.removed_lines {
-                    height += self.line_height_for_block(&removed.decoration.block_type);
+                    height += self.line_height_for_block(phantom_row_block_type(
+                        &removed.decoration,
+                        self.source_mode,
+                    ));
                 }
             }
         }
@@ -730,6 +780,279 @@ impl EditorView {
 mod tests {
     use super::*;
     use crate::markdown::BlockPreviewKind;
+
+    #[test]
+    fn phantom_reserved_height_prefers_measurements_without_estimating() {
+        for measured in [0.0, 23.0, 147.5] {
+            assert_eq!(
+                phantom_reserved_height(true, Some(measured), || panic!(
+                    "measured rows must not be estimated"
+                )),
+                measured
+            );
+            assert_eq!(
+                phantom_reserved_height(false, Some(measured), || panic!(
+                    "collapsed or removed anchors must not be estimated"
+                )),
+                0.0
+            );
+        }
+        let calls = std::cell::Cell::new(0);
+        assert_eq!(
+            phantom_reserved_height(true, None, || {
+                calls.set(calls.get() + 1);
+                42.0
+            }),
+            42.0
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            phantom_reserved_height(false, None, || panic!("non-anchors have no estimate")),
+            0.0
+        );
+        // A preserved measurement is reused after the hunk is re-expanded.
+        assert_eq!(
+            phantom_reserved_height(true, Some(147.5), || panic!(
+                "re-expanded rows retain their measurement"
+            )),
+            147.5
+        );
+    }
+
+    #[test]
+    fn phantom_block_role_matches_projection_without_copying_preview_payloads() {
+        for source in [
+            "# Heading **bold**\n\n- [x] task\n\n> quote\n",
+            "---\ntitle: Metadata\n---\n",
+            "```rust\nlet x = 1;\n```\n",
+            "| A | B |\n| --- | --- |\n| 1 | 2 |\n",
+            "$$\nx^2\n$$\n",
+            "\\[\nx^2\n\\]\n",
+            "```mermaid\ngraph TD\nA-->B\n```\n",
+            "![alt](image.png)\n",
+        ] {
+            for row in crate::markdown::parse_decorations(source) {
+                for source_mode in [false, true] {
+                    let role = phantom_row_block_type(&row, source_mode);
+                    assert_eq!(*role, phantom_row_decoration(&row, source_mode).block_type);
+                    if !source_mode || *role != BlockType::Normal {
+                        assert!(std::ptr::eq(role, &row.block_type));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_phantom_projection_is_raw_and_reversible_for_existing_rows() {
+        for base in [
+            "---\ntitle: '**YAML**'\nitems: [one, two]\n---\n",
+            "# Heading 中🙂\n\n- [x] **task**\n\n[link](target.md) and `code`\n",
+            "| A | B |\n| --- | --- |\n| ~~value~~ | a<br>b |\n",
+            "```rust\nlet title = \"中🙂\";\n\n```\n",
+            "~~~python\nreturn \"中🙂\"\n~~~\n",
+            "```mermaid\ngraph TD\nA[中🙂]-->B\n```\n",
+            "$$\n\\frac{x^2}{2}\n$$\n\n![alt](image.png)\n",
+            "\\[\n\\frac{x^2}{2}\n\\]\n",
+            "$$\\alpha + x$$\n",
+        ] {
+            let state = compute_inline_diff_state(base, "", &FileKind::Markdown);
+            assert!(!state.hunks.is_empty());
+            for removed in state.hunks.iter().flat_map(|hunk| &hunk.removed_lines) {
+                let original = removed.clone();
+                for source_mode in [false, true, false] {
+                    let decoration = phantom_row_decoration(&removed.decoration, source_mode);
+                    if source_mode {
+                        if matches!(
+                            removed.decoration.block_type,
+                            BlockType::Heading(_) | BlockType::TaskList(_)
+                        ) {
+                            assert_eq!(decoration.block_type, removed.decoration.block_type);
+                            assert_eq!(decoration.inline_spans, removed.decoration.inline_spans);
+                        }
+                        assert!(decoration.table_info.is_none());
+                        assert!(decoration.block_preview.is_none());
+                        assert!(decoration.image_path.is_none());
+                        let mut shared_projection = removed.decoration.clone();
+                        helpers::source_markdown_decoration(&mut shared_projection);
+                        assert_eq!(decoration.as_ref(), &shared_projection);
+                        if removed
+                            .decoration
+                            .block_preview
+                            .as_ref()
+                            .is_some_and(|preview| preview.kind == BlockPreviewKind::Math)
+                        {
+                            assert_eq!(
+                                decoration.code_language.as_deref(),
+                                Some(helpers::SOURCE_MATH_HIGHLIGHT_LANGUAGE)
+                            );
+                        } else if removed.decoration.code_language.as_deref() == Some("table") {
+                            assert_eq!(decoration.code_language.as_deref(), Some("markdown"));
+                        } else if let Some(language) = removed.decoration.code_language.as_ref() {
+                            assert_eq!(decoration.code_language.as_ref(), Some(language));
+                        }
+                        let mut active_ranges = Vec::new();
+                        helpers::expand_source_syntax(true, removed.text.len(), &mut active_ranges);
+                        let (display, display_to_buffer, buffer_to_display, collapsed) =
+                            helpers::build_display_text(
+                                &removed.text,
+                                &decoration,
+                                &active_ranges,
+                                false,
+                                None,
+                                1,
+                                3,
+                                3,
+                                2,
+                                0,
+                                0.7,
+                                0.7,
+                                0.7,
+                            );
+                        assert_eq!(display, removed.text);
+                        assert_eq!(
+                            display_to_buffer,
+                            (0..removed.text.len()).collect::<Vec<_>>()
+                        );
+                        assert_eq!(
+                            buffer_to_display,
+                            (0..=removed.text.len()).collect::<Vec<_>>()
+                        );
+                        assert!(!collapsed);
+                    } else {
+                        assert!(std::ptr::eq(decoration.as_ref(), &removed.decoration));
+                        assert_eq!(decoration.as_ref(), &original.decoration);
+                    }
+                }
+                assert_eq!(removed.text, original.text);
+                assert_eq!(removed.removed_spans, original.removed_spans);
+                assert_eq!(removed.decoration, original.decoration);
+            }
+            assert_eq!(state.base_text, base);
+        }
+    }
+
+    #[test]
+    fn source_phantom_geometry_preserves_markdown_roles_and_baselines() {
+        let body = gpui::font("Test Body");
+        let heading = gpui::font("Test Heading");
+        let mono = gpui::font("Test Mono");
+        let mut decoration = LineDecoration::default();
+        decoration.block_type = BlockType::Heading(1);
+
+        for source_mode in [false, true, false] {
+            let projected = phantom_row_decoration(&decoration, source_mode);
+            assert_eq!(projected.block_type, BlockType::Heading(1));
+            assert_eq!(
+                helpers::line_baseline_font(&projected, false, &body, &heading, &mono),
+                heading.clone().bold(),
+            );
+        }
+        for source in ["```rust\nlet x = 1;\n```", "$$\nx^2\n$$"] {
+            for row in crate::markdown::parse_decorations(source) {
+                let projected = phantom_row_decoration(&row, true);
+                assert_eq!(projected.block_type, BlockType::Normal);
+                assert_eq!(
+                    helpers::line_baseline_font(&projected, false, &body, &heading, &mono),
+                    body,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_phantom_table_and_mermaid_syntax_reaches_text_runs() {
+        let base = "| **bold** | `code` |\n| :--- | ---: |\n| 中🙂 | value |\n\n```mermaid\nsequenceDiagram\nAlice->>Bob: Hello 中🙂\n```\n";
+        let state = compute_inline_diff_state(base, "", &FileKind::Markdown);
+        let theme = crate::theme::Theme::one_dark();
+        let font = gpui::font("Test Body");
+        for removed in state.hunks.iter().flat_map(|hunk| &hunk.removed_lines) {
+            let decoration = phantom_row_decoration(&removed.decoration, true);
+            let line = &removed.text;
+            let mut active = Vec::new();
+            helpers::expand_source_syntax(true, line.len(), &mut active);
+            let (display, d2b, b2d, collapsed) = helpers::build_display_text(
+                line,
+                &decoration,
+                &active,
+                false,
+                None,
+                0,
+                3,
+                3,
+                2,
+                0,
+                0.7,
+                0.7,
+                0.7,
+            );
+            assert_eq!(&display, line);
+            assert_eq!(d2b, (0..line.len()).collect::<Vec<_>>());
+            assert_eq!(b2d, (0..=line.len()).collect::<Vec<_>>());
+            assert!(!collapsed);
+            assert!(decoration.table_info.is_none());
+            assert!(decoration.block_preview.is_none());
+            let runs = helpers::build_text_runs_for_display(
+                &display,
+                line,
+                &d2b,
+                &decoration,
+                &active,
+                false,
+                collapsed,
+                &font,
+                &font,
+                &font,
+                &font,
+                &font,
+                &font,
+                &font,
+                3,
+                16.0,
+                &theme,
+                theme.git_status_added,
+                theme.text_danger,
+                theme.link,
+                gpui::FontWeight::NORMAL,
+                theme.list_marker,
+                gpui::FontWeight::BOLD,
+                theme.syntax_marker,
+                None,
+                false,
+            );
+            let color_at = |offset: usize| {
+                let mut end = 0;
+                runs.iter()
+                    .find_map(|run| {
+                        end += run.len;
+                        (offset < end).then_some(run.color)
+                    })
+                    .expect("highlighted byte has a native text run")
+            };
+            for (token, color) in [
+                ("bold", theme.code_palette.number),
+                ("code", theme.code_palette.string),
+                (":---", theme.code_palette.keyword),
+                ("sequenceDiagram", theme.code_palette.keyword),
+                ("->>", theme.code_palette.operator),
+                ("Hello 中🙂", theme.code_palette.string),
+            ] {
+                if let Some(offset) = line.find(token) {
+                    assert_eq!(
+                        color_at(offset),
+                        gpui::rgb(color).into(),
+                        "{line:?}: {token}"
+                    );
+                }
+            }
+            if line.starts_with('|') {
+                assert_eq!(decoration.code_language.as_deref(), Some("markdown"));
+                assert_eq!(color_at(0), gpui::rgb(theme.code_palette.operator).into());
+            } else if line == "```" || line == "```mermaid" {
+                assert_eq!(color_at(0), theme.syntax_marker);
+            }
+        }
+    }
 
     #[test]
     fn removed_rows_keep_generated_preview_decorations() {

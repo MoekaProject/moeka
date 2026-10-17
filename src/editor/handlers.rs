@@ -433,6 +433,34 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if self.source_mode {
+            self.capture_typing_scroll_guard();
+            self.pending_code_fence = None;
+            self.checkpoint();
+            if self.active_file_kind().is_some_and(FileKind::is_markdown) {
+                self.apply_source_action(source_edit::SourceAction::Backspace);
+            } else if self.has_extra_cursors() {
+                self.multi_cursor_backspace();
+            } else if let Some(range) = self.auto_paired_backspace_range() {
+                self.queue_non_markdown_line_display_transfer(&range, "");
+                self.buffer.delete(range.clone());
+                self.cursor.move_to(range.start, &self.buffer);
+            } else {
+                let range = if self.cursor.has_selection() {
+                    self.cursor.selection_range()
+                } else {
+                    self.buffer.prev_grapheme_boundary(self.cursor.offset)..self.cursor.offset
+                };
+                self.queue_non_markdown_line_display_transfer(&range, "");
+                self.cursor.backspace(&mut self.buffer);
+            }
+            if !self.active_file_kind().is_some_and(FileKind::is_markdown) {
+                self.reparse();
+            }
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
+        }
         if self.delete_table_cell_selection(cx) {
             return;
         }
@@ -650,6 +678,30 @@ impl EditorView {
             return;
         }
         if !self.begin_content_edit(cx) {
+            return;
+        }
+        if self.source_mode {
+            self.capture_typing_scroll_guard();
+            self.pending_code_fence = None;
+            self.checkpoint();
+            if self.active_file_kind().is_some_and(FileKind::is_markdown) {
+                self.apply_source_action(source_edit::SourceAction::Delete);
+            } else if self.has_extra_cursors() {
+                self.multi_cursor_delete();
+            } else {
+                let range = if self.cursor.has_selection() {
+                    self.cursor.selection_range()
+                } else {
+                    self.cursor.offset..self.buffer.next_grapheme_boundary(self.cursor.offset)
+                };
+                self.queue_non_markdown_line_display_transfer(&range, "");
+                self.cursor.delete(&mut self.buffer);
+            }
+            if !self.active_file_kind().is_some_and(FileKind::is_markdown) {
+                self.reparse();
+            }
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
             return;
         }
         if self.delete_table_cell_selection(cx) {
@@ -1325,7 +1377,7 @@ impl EditorView {
             }
             return;
         }
-        if self.table_boundary_caret.is_some() {
+        if !self.source_mode && self.table_boundary_caret.is_some() {
             if !self.begin_content_edit(cx) {
                 return;
             }
@@ -1337,6 +1389,23 @@ impl EditorView {
             }
         }
         if !self.begin_content_edit(cx) {
+            return;
+        }
+        if self.source_mode {
+            if self.sidebar_edit.is_some() {
+                self.commit_sidebar_edit(cx);
+                return;
+            }
+            self.pending_code_fence = None;
+            self.checkpoint();
+            if self.active_file_kind().is_some_and(FileKind::is_markdown) {
+                self.apply_source_action(source_edit::SourceAction::Enter);
+            } else {
+                self.multi_cursor_insert("\n");
+                self.reparse();
+            }
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
             return;
         }
         if self.wiki_link_start.is_some() {
@@ -1589,6 +1658,15 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         if !self.begin_content_edit(cx) {
+            return;
+        }
+        if self.source_mode {
+            self.pending_code_fence = None;
+            self.checkpoint();
+            self.multi_cursor_insert("\n");
+            self.reparse();
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
             return;
         }
         if self.insert_front_matter_break(cx) {
@@ -2635,7 +2713,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_non_markdown_text() {
+        if self.editor_uses_code_gutter() {
             self.toggle_editor_alignment(cx);
         }
     }

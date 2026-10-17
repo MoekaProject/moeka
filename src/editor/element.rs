@@ -829,6 +829,12 @@ fn non_markdown_horizontal_extent_keeps_right_padding_and_caret_visible() {
         non_markdown_horizontal_max_offset(200.0, 320.0, 20.0, 2.0),
         0.0
     );
+    // Source retains Markdown quote/list insets within the global text clip.
+    let content_inset = 48.0;
+    let width = 500.0;
+    let max_offset = non_markdown_horizontal_max_offset(content_inset + width, 320.0, 20.0, 2.0);
+    assert_eq!(max_offset, 250.0);
+    assert_eq!(content_inset + width - max_offset + 20.0 + 2.0, 320.0);
 }
 
 struct CodeBlockCopyButtonPaint {
@@ -3133,58 +3139,192 @@ fn non_markdown_cached_line_can_reuse(
     }
 }
 
-impl Element for EditorElement {
-    type RequestLayoutState = ();
-    type PrepaintState = EditorPrepaintState;
+// Retain shaping measurements across attempts, but never paint or publish the
+// intermediate frame. Three passes bound reflow work even for large documents.
+struct EditorPrepaintFrame {
+    preserve_mode_scroll: bool,
+    pass: usize,
+    previews_prepared: bool,
+    offscreen_wrap_reflows: usize,
+}
 
-    fn id(&self) -> Option<ElementId> {
-        Some(ElementId::Name(
-            format!("editor-element-{}", self.pane_id).into(),
-        ))
+impl EditorPrepaintFrame {
+    const MAX_PASSES: usize = 3;
+    const OFFSCREEN_WRAP_REFLOW_BUDGET: usize = 48;
+
+    fn can_retry(&self) -> bool {
+        self.preserve_mode_scroll && self.pass + 1 < Self::MAX_PASSES
     }
 
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
+    fn should_retry(
+        &self,
+        painted_scroll: f32,
+        target_scroll: f32,
+        geometry_changed: bool,
+    ) -> bool {
+        self.can_retry() && (geometry_changed || (target_scroll - painted_scroll).abs() > 0.5)
     }
+}
 
-    fn request_layout(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&gpui::InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&gpui::InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        // Bring this pane's document state into the root fields for the whole
-        // layout pass (no-op for the focused pane).
-        let pane_swapped = self
-            .editor
-            .update(cx, |editor, _| editor.begin_pane_swap(self.pane_id));
-        let caret_was_visible = self.editor.update(cx, |editor, _| {
-            editor.focused_pane_id == self.pane_id
-                && (editor.cursor_visible_in_viewport()
-                    || editor.pending_typing_scroll_guard.is_some())
-        });
-        self.editor.update(cx, |editor, _| {
-            if editor.focused_pane_id == self.pane_id {
-                editor.begin_large_document_frame_work();
+fn reconciled_editor_prepaint<T>(
+    preserve_mode_scroll: bool,
+    mut prepaint: impl FnMut(&mut EditorPrepaintFrame) -> Result<T, ()>,
+) -> T {
+    let mut frame = EditorPrepaintFrame {
+        preserve_mode_scroll,
+        pass: 0,
+        previews_prepared: false,
+        offscreen_wrap_reflows: EditorPrepaintFrame::OFFSCREEN_WRAP_REFLOW_BUDGET,
+    };
+    loop {
+        match prepaint(&mut frame) {
+            Ok(state) => return state,
+            Err(()) => {
+                assert!(frame.can_retry(), "final editor prepaint must be accepted");
+                frame.pass += 1;
             }
-            editor.refresh_front_matter_input_geometry(window, bounds);
+        }
+    }
+}
+
+#[cfg(test)]
+mod mode_prepaint_tests {
+    use super::*;
+
+    #[test]
+    fn document_mode_prepaint_publishes_only_reconciled_paint_and_input_geometry() {
+        // All of these coordinates are produced together by the real prepaint
+        // pass. A late scroll correction must discard the entire collection,
+        // not translate just text while leaving hit areas or the caret behind.
+        let mut scroll = 1000.0;
+        let mut attempts = 0;
+        let mut publications = 0;
+        let (paint_bounds, hit_bounds, selection_bounds, caret) =
+            reconciled_editor_prepaint(true, |frame| {
+                attempts += 1;
+                let painted_scroll = scroll;
+                let bounds = Bounds::new(
+                    point(px(80.0), px(2200.0 - painted_scroll)),
+                    size(px(600.0), px(28.0)),
+                );
+                let caret = super::super::caret::CaretGeometrySnapshot {
+                    cursor_offset: 42,
+                    scroll_offset: painted_scroll,
+                    paints: vec![super::super::caret::CaretPaint {
+                        bounds,
+                        color: gpui::transparent_black(),
+                        force_visible: true,
+                    }],
+                    ..Default::default()
+                };
+                // Measured wrapping moves the source row; the desired visual
+                // position (300px) was captured before changing presentation.
+                scroll = 1900.0;
+                if frame.should_retry(painted_scroll, scroll, false) {
+                    return Err(());
+                }
+                publications += 1;
+                Ok((bounds, bounds, bounds, caret))
+            });
+        assert_eq!(attempts, 2);
+        assert_eq!(publications, 1);
+        assert_eq!(paint_bounds.origin.y, px(300.0));
+        assert_eq!(hit_bounds, paint_bounds);
+        assert_eq!(selection_bounds, paint_bounds);
+        assert_eq!(caret.paints[0].bounds, paint_bounds);
+        assert_eq!(caret.scroll_offset, scroll);
+    }
+
+    #[test]
+    fn document_mode_prepaint_remeasures_phantom_padding_without_a_scroll_delta() {
+        let mut measured_phantom_height = 0.0;
+        let mut attempts = 0;
+        let painted_height = reconciled_editor_prepaint(true, |frame| {
+            attempts += 1;
+            let height_used_by_layout = measured_phantom_height;
+            let changed = measured_phantom_height != 84.0;
+            measured_phantom_height = 84.0;
+            if frame.should_retry(900.0, 900.0, changed) {
+                return Err(());
+            }
+            Ok(height_used_by_layout)
         });
+        assert_eq!(attempts, 2);
+        assert_eq!(painted_height, 84.0);
+    }
+
+    #[test]
+    fn document_mode_prepaint_bounds_attempts_and_retains_per_frame_work_budget() {
+        let mut attempts = 0;
+        let mut preview_builds = 0;
+        let mut offscreen_reflows = 0;
+        let mut scroll = 0.0;
+        let painted_scroll = reconciled_editor_prepaint(true, |frame| {
+            attempts += 1;
+            if !frame.previews_prepared {
+                preview_builds += 1;
+                frame.previews_prepared = true;
+            }
+            let reflows = frame.offscreen_wrap_reflows.min(32);
+            offscreen_reflows += reflows;
+            frame.offscreen_wrap_reflows -= reflows;
+            let painted_scroll = scroll;
+            // Model an unstable layout. The last pass must keep the offset it
+            // actually painted; unfinished correction waits for another frame.
+            if frame.can_retry() {
+                scroll += 120.0;
+            }
+            if frame.should_retry(painted_scroll, scroll, true) {
+                return Err(());
+            }
+            Ok(painted_scroll)
+        });
+        assert_eq!(attempts, EditorPrepaintFrame::MAX_PASSES);
+        assert_eq!(preview_builds, 1);
+        assert_eq!(
+            offscreen_reflows,
+            EditorPrepaintFrame::OFFSCREEN_WRAP_REFLOW_BUDGET
+        );
+        assert_eq!(painted_scroll, scroll);
+    }
+
+    #[test]
+    fn document_mode_prepaint_does_not_retry_ordinary_frames_or_pending_previews() {
+        for mode_anchor in [false, true] {
+            let mut attempts = 0;
+            reconciled_editor_prepaint(mode_anchor, |frame| {
+                attempts += 1;
+                // No geometry changed while an async preview is in flight.
+                assert!(!frame.should_retry(900.0, 900.0, false));
+                if !mode_anchor {
+                    assert!(!frame.should_retry(900.0, 1100.0, true));
+                }
+                Ok(())
+            });
+            assert_eq!(attempts, 1);
+        }
+    }
+
+    #[test]
+    fn document_mode_prepaint_ignores_subpixel_corrections() {
+        reconciled_editor_prepaint(true, |frame| {
+            assert!(!frame.should_retry(900.0, 900.5, false));
+            assert!(frame.should_retry(900.0, 900.51, false));
+            assert!(frame.should_retry(900.0, 899.49, false));
+            Ok(())
+        });
+    }
+}
+
+impl EditorElement {
+    fn prepaint_document(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        frame: &mut EditorPrepaintFrame,
+        caret_was_visible: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<EditorPrepaintState, ()> {
         // Resolve a deferred scroll-to-cursor before reading layout state, when
         // the per-line geometry cache is already valid (the common case after an
         // edit like pasting long text). Otherwise the layout loop below positions
@@ -3258,6 +3398,17 @@ impl Element for EditorElement {
             editor.record_large_document_syntax_viewport(start..end);
         });
 
+        // Preview creation may synchronously replace placeholder geometry. Do it
+        // before shaping, once per frame rather than once per retry.
+        if frame.preserve_mode_scroll && !frame.previews_prepared {
+            self.editor.update(cx, |editor, cx| {
+                editor.last_viewport_height = bounds.size.height.into();
+                editor.last_viewport_width = bounds.size.width.into();
+                editor.ensure_visible_generated_block_previews(cx);
+            });
+            frame.previews_prepared = true;
+        }
+
         let editor = self.editor.read(cx);
         let front_matter_group_plans =
             editor.front_matter_group_plan_for_width(f32::from(bounds.size.width));
@@ -3296,8 +3447,7 @@ impl Element for EditorElement {
         let text_width = (editor_width - editor.padding_left() - editor.padding_right())
             .max(editor.scaled(120.0));
         let wrap_width = text_width;
-        let non_markdown_nowrap =
-            editor.active_tab_is_non_markdown_text() && !editor.editor_wraps_to_available_width();
+        let non_markdown_nowrap = editor.editor_uses_horizontal_text_scroll();
         let non_markdown_horizontal_state = editor.non_markdown_horizontal_scroll_state();
         let non_markdown_horizontal_offset = if non_markdown_nowrap {
             non_markdown_horizontal_state.offset
@@ -3341,14 +3491,15 @@ impl Element for EditorElement {
         let has_valid_cache = editor.line_display_info.len() == line_count
             && (editor.last_text_width - text_width).abs() < 0.5;
         let wrap_width_changed = (editor.last_text_width - text_width).abs() >= 0.5;
-        const OFFSCREEN_WRAP_REFLOW_BUDGET_PER_FRAME: usize = 48;
+        const OFFSCREEN_WRAP_REFLOW_BUDGET_PER_FRAME: usize =
+            EditorPrepaintFrame::OFFSCREEN_WRAP_REFLOW_BUDGET;
         const WINDOWED_PREPAINT_OVERSCAN_FACTOR: f32 = 0.75;
         const WINDOWED_PREPAINT_CURSOR_CONTEXT_LINES: usize = 8;
         let active_file_kind = editor.active_file_kind();
-        let active_tab_is_markdown = active_file_kind.is_some_and(FileKind::is_markdown);
+        let active_tab_is_markdown = editor.active_tab_uses_markdown_editor();
         let use_windowed_prepaint = (!wrap_width_changed || editor.uses_sparse_line_geometry())
             && active_file_kind.is_some_and(|file_kind| {
-                if file_kind.is_markdown() {
+                if active_tab_is_markdown {
                     has_valid_cache || editor.uses_lazy_markdown_decorations()
                 } else {
                     file_kind.supports_text_buffer()
@@ -3457,6 +3608,7 @@ impl Element for EditorElement {
         let mut _last_line_height = 0.0_f32;
         let mut scroll_anchor_delta = 0.0_f32;
         let suppress_scroll_anchor_compensation = editor.pending_preview_reveal.is_some()
+            || editor.document_mode_scroll_anchor_is_current()
             || editor.pending_click_anchor.is_some()
             || editor.pending_center_cursor_in_view
             || (editor.pending_scroll_to_cursor && editor.pending_typing_scroll_guard.is_none());
@@ -3764,10 +3916,11 @@ impl Element for EditorElement {
             && editor.editor_wraps_to_available_width()
             && !wrap_width_changed
         {
-            OFFSCREEN_WRAP_REFLOW_BUDGET_PER_FRAME
+            frame.offscreen_wrap_reflows
         } else {
             0
         };
+        let initial_offscreen_wrap_reflows = remaining_offscreen_wrap_reflows;
 
         let image_cache = &editor.image_cache;
         let window_scale_factor = window.scale_factor().max(1.0);
@@ -4190,6 +4343,11 @@ impl Element for EditorElement {
                 active_ranges.push(0..line_content.len());
             }
             editor.append_search_reveal_range(line_idx, &mut active_ranges);
+            helpers::expand_source_syntax(
+                editor.source_mode,
+                line_content.len(),
+                &mut active_ranges,
+            );
 
             // Hide all non-first-row table lines (rendered as block on the first row)
             let hide_table_line = matches!(block_type, BlockType::Table)
@@ -5180,10 +5338,7 @@ impl Element for EditorElement {
                     editor.styles.editor.editor_heading_marker_text_color,
                     Some(editor.styles.table.front_matter_key_text_color),
                     editor.active_tab_is_non_markdown_text(),
-                    match editor.active_file_kind() {
-                        Some(FileKind::Code { language }) => Some(language.as_str()),
-                        _ => None,
-                    },
+                    editor.source_highlight_language(),
                 );
                 if front_matter_summary.is_some() {
                     for run in &mut runs {
@@ -5497,18 +5652,6 @@ impl Element for EditorElement {
                         .horizontal_offset
                 })
                 .unwrap_or(0.0);
-            if non_markdown_nowrap {
-                let caret_width = editor.styles.cursor.cursor_width_px.max(1.0);
-                let right_padding =
-                    editor.scaled(editor.styles.editor.editor_wrap_right_padding_px);
-                non_markdown_horizontal_extent =
-                    non_markdown_horizontal_extent.max(non_markdown_horizontal_max_offset(
-                        f32::from(wrapped.unwrapped_layout.width),
-                        text_width,
-                        right_padding,
-                        caret_width,
-                    ));
-            }
             if metadata_indent.is_some() {
                 super::front_matter_layout::align_stacked_padding_hits(
                     wrapped,
@@ -5739,6 +5882,20 @@ impl Element for EditorElement {
             } else {
                 base_content_x
             };
+            if non_markdown_nowrap {
+                let caret_width = editor.styles.cursor.cursor_width_px.max(1.0);
+                let right_padding =
+                    editor.scaled(editor.styles.editor.editor_wrap_right_padding_px);
+                let right_edge = content_x - non_markdown_content_left
+                    + f32::from(wrapped.unwrapped_layout.width);
+                non_markdown_horizontal_extent =
+                    non_markdown_horizontal_extent.max(non_markdown_horizontal_max_offset(
+                        right_edge,
+                        text_width,
+                        right_padding,
+                        caret_width,
+                    ));
+            }
             let content_x =
                 content_x - code_block_horizontal_offset - non_markdown_horizontal_offset;
             // Image-only lines render their syntax as a caption under the
@@ -8109,7 +8266,7 @@ impl Element for EditorElement {
             } else {
                 editor.fold_range_for_line(line_idx)
             };
-            if editor.active_tab_is_non_markdown_text() {
+            if editor.editor_uses_code_gutter() {
                 let gutter_styles = &editor.styles.gutter;
                 push_gutter_line_number_label(
                     &mut gutter_labels,
@@ -8269,7 +8426,7 @@ impl Element for EditorElement {
                     editor.scaled(LINE_FORMAT_ICON_GAP_PX),
                     editor.scaled(LINE_FORMAT_CONTENT_GAP_PX),
                 );
-                let fold_icon_expanded_x = if editor.active_tab_is_non_markdown_text() {
+                let fold_icon_expanded_x = if editor.editor_uses_code_gutter() {
                     editor.gutter_icon_x(editor_left, fi_size)
                 } else {
                     format_icon_x + format_icon_size + editor.scaled(LINE_FORMAT_ICON_GAP_PX)
@@ -8285,7 +8442,7 @@ impl Element for EditorElement {
                         })
                         || editor.folded_sections.contains(&fold_anchor);
                     let fold_icon_x = fold_icon_expanded_x;
-                    let is_hovered = if editor.active_tab_is_non_markdown_text() {
+                    let is_hovered = if editor.editor_uses_code_gutter() {
                         editor.hovering_fold_line == Some(line_idx)
                             || gutter_fold_row_hovered(
                                 editor.hovering_gutter_fold_area,
@@ -8300,7 +8457,7 @@ impl Element for EditorElement {
                         + (f32::from(wrapped.row_height(0, px(line_height))) - fi_size) / 2.0;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
                     let fold_hovered = editor.hovering_fold_line == Some(fold_anchor);
-                    let fi_alpha = if !editor.active_tab_is_non_markdown_text() {
+                    let fi_alpha = if !editor.editor_uses_code_gutter() {
                         markdown_fold_opacity(
                             fold_hovered,
                             is_hovered,
@@ -8323,14 +8480,13 @@ impl Element for EditorElement {
                             point(px(fold_icon_x), px(fi_y)),
                             size(px(fi_size), px(fi_size)),
                         );
-                        let mut fi_color =
-                            if !editor.active_tab_is_non_markdown_text() && is_hovered {
-                                editor.styles.format_toolbar.format_toolbar_icon_color
-                            } else if is_folded {
-                                gs.gutter_fold_folded_color
-                            } else {
-                                gs.gutter_fold_hover_color
-                            };
+                        let mut fi_color = if !editor.editor_uses_code_gutter() && is_hovered {
+                            editor.styles.format_toolbar.format_toolbar_icon_color
+                        } else if is_folded {
+                            gs.gutter_fold_folded_color
+                        } else {
+                            gs.gutter_fold_hover_color
+                        };
                         fi_color.a = fi_alpha;
                         gutter_fold_icons.push((
                             icon_bounds,
@@ -8343,7 +8499,7 @@ impl Element for EditorElement {
                         ));
                     }
                     gutter_fold_hit_areas_local.push((
-                        if editor.active_tab_is_non_markdown_text() {
+                        if editor.editor_uses_code_gutter() {
                             Bounds::new(
                                 point(px(gutter_icon_column_left - fi_hit_padding), px(line_top)),
                                 size(
@@ -8559,8 +8715,8 @@ impl Element for EditorElement {
             // Read-only phantom rows: an expanded inline-diff hunk's removed
             // lines render in the padding band reserved by `block_padding_for_line`
             // (above the anchor line, or below the last line for a trailing
-            // deletion). They carry the HEAD line's markdown decoration and
-            // soft-wrap like live lines, but are reference-only and never enter
+            // deletion). Their HEAD decorations are projected into the current
+            // document mode. They soft-wrap like live lines, but never enter
             // the buffer. The painted band is top-aligned at the reserved height
             // so the anchor's geometry stays consistent; the measured height is
             // recorded for the next frame.
@@ -8576,7 +8732,17 @@ impl Element for EditorElement {
                      -> f32 {
                         let mut row_top = band_top;
                         for (hunk_base_start, row_in_hunk, removed) in rows {
-                            let r_decoration = &removed.decoration;
+                            let projected_decoration = super::inline_diff::phantom_row_decoration(
+                                &removed.decoration,
+                                editor.source_mode,
+                            );
+                            let r_decoration = projected_decoration.as_ref();
+                            let mut r_active_ranges = Vec::new();
+                            helpers::expand_source_syntax(
+                                editor.source_mode,
+                                removed.text.len(),
+                                &mut r_active_ranges,
+                            );
                             let r_font_size = editor.font_size_for_block(&r_decoration.block_type);
                             let r_line_height =
                                 editor.line_height_for_block(&r_decoration.block_type);
@@ -8636,7 +8802,7 @@ impl Element for EditorElement {
                                 helpers::build_display_text(
                                     &removed.text,
                                     r_decoration,
-                                    &[],
+                                    &r_active_ranges,
                                     false,
                                     None,
                                     table_cell_padding_chars,
@@ -8665,12 +8831,12 @@ impl Element for EditorElement {
                                     strikethrough: None,
                                 }]
                             } else {
-                                helpers::build_text_runs_for_display(
+                                helpers::build_text_runs_for_display_with_language(
                                     &display_text,
                                     &removed.text,
                                     &display_to_buffer,
                                     r_decoration,
-                                    &[],
+                                    &r_active_ranges,
                                     false,
                                     prefix_collapsed,
                                     &body_font,
@@ -8693,6 +8859,7 @@ impl Element for EditorElement {
                                     row_is_front_matter
                                         .then_some(editor.styles.table.front_matter_key_text_color),
                                     false,
+                                    None,
                                 )
                             };
                             let shared: SharedString = if display_text.is_empty() {
@@ -11081,6 +11248,9 @@ impl Element for EditorElement {
             let hitbox = window.insert_hitbox(tooltip_bounds, HitboxBehavior::Normal);
             generated_preview_tooltips.push((hitbox, tooltip_bounds, tooltip_title));
         }
+        frame.offscreen_wrap_reflows -=
+            initial_offscreen_wrap_reflows - remaining_offscreen_wrap_reflows;
+        let mut mode_geometry_changed = false;
         self.editor.update(cx, |editor, cx| {
             editor.release_retired_images(cx);
             editor.code_block_horizontal_scrollbars =
@@ -11189,6 +11359,7 @@ impl Element for EditorElement {
                     }
                 }
             }
+            mode_geometry_changed = phantom_heights_changed;
             if phantom_heights_changed {
                 editor.invalidate_line_geometry_cache();
                 cx.notify();
@@ -11224,6 +11395,7 @@ impl Element for EditorElement {
             let scroll_before_anchor = editor.scroll_offset;
             if scroll_anchor_delta.abs() > 0.5
                 && !explicit_navigation
+                && !editor.document_mode_scroll_anchor_is_current()
                 && editor.pending_preview_reveal.is_none()
                 && !editor.pending_center_cursor_in_view
                 && !editor.pending_scroll_to_cursor
@@ -11237,7 +11409,14 @@ impl Element for EditorElement {
             if deferred_offscreen_wrap_lines {
                 cx.notify();
             }
-            editor.ensure_visible_generated_block_previews(cx);
+            if !frame.preserve_mode_scroll {
+                editor.ensure_visible_generated_block_previews(cx);
+            }
+            if (!frame.preserve_mode_scroll || frame.can_retry())
+                && editor.restore_document_mode_scroll_anchor(true)
+            {
+                cx.notify();
+            }
             let mut did_adjust_click_anchor = false;
             if let Some(anchor) = editor.pending_click_anchor.take() {
                 let line = anchor.line.min(editor.buffer.line_count());
@@ -11294,6 +11473,7 @@ impl Element for EditorElement {
                 cx.notify();
             }
             if !explicit_navigation
+                && !editor.document_mode_scroll_anchor_is_current()
                 && caret_was_visible
                 && editor.keep_previously_visible_cursor_in_view()
             {
@@ -11322,6 +11502,24 @@ impl Element for EditorElement {
             if editor.generated_preview_rerender_pending {
                 editor.generated_preview_rerender_pending = false;
                 editor.schedule_generated_preview_rerender(cx);
+            }
+        });
+
+        if frame.should_retry(
+            scroll_offset,
+            self.editor.read(cx).scroll_offset,
+            mode_geometry_changed,
+        ) {
+            // Window::transact removes this attempt's hitboxes/tooltips. Keep
+            // the measured line caches and offset for the next attempt, but do
+            // not publish stale caret, drag, menu or input geometry.
+            return Err(());
+        }
+        self.editor.update(cx, |editor, cx| {
+            if frame.preserve_mode_scroll {
+                // On budget exhaustion defer any further correction, rather
+                // than exposing an offset different from the geometry painted.
+                editor.scroll_offset = scroll_offset;
             }
             editor.sync_slash_menu_anchor_after_layout(cx);
             editor.sync_table_input_menu_after_layout(window, cx);
@@ -11509,11 +11707,83 @@ impl Element for EditorElement {
                 table_boundary_caret: self.editor.read(cx).table_boundary_caret,
                 paints: cursor_paints,
             });
-        if pane_swapped {
-            self.editor
-                .update(cx, |editor, _| editor.end_pane_swap(self.pane_id));
-        }
-        prepaint_state
+        Ok(prepaint_state)
+    }
+}
+
+impl Element for EditorElement {
+    type RequestLayoutState = ();
+    type PrepaintState = EditorPrepaintState;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(ElementId::Name(
+            format!("editor-element-{}", self.pane_id).into(),
+        ))
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        // Keep pane-local caches and anchors active for the entire transaction,
+        // including retries and final caret/confirmation publication.
+        let pane_swapped = self
+            .editor
+            .update(cx, |editor, _| editor.begin_pane_swap(self.pane_id));
+        let (caret_was_visible, preserve_mode_scroll) = self.editor.update(cx, |editor, cx| {
+            let caret_was_visible = editor.focused_pane_id == self.pane_id
+                && (editor.cursor_visible_in_viewport()
+                    || editor.pending_typing_scroll_guard.is_some());
+            if editor.focused_pane_id == self.pane_id {
+                editor.begin_large_document_frame_work();
+            }
+            editor.schedule_large_markdown_outline_index(cx);
+            editor.refresh_front_matter_input_geometry(window, bounds);
+            (
+                caret_was_visible,
+                editor.document_mode_scroll_anchor_is_current(),
+            )
+        });
+        let state = reconciled_editor_prepaint(preserve_mode_scroll, |frame| {
+            if frame.preserve_mode_scroll {
+                window.transact(|window| {
+                    self.prepaint_document(bounds, frame, caret_was_visible, window, cx)
+                })
+            } else {
+                self.prepaint_document(bounds, frame, caret_was_visible, window, cx)
+            }
+        });
+        self.editor.update(cx, |editor, cx| {
+            if editor.confirm_document_mode_scroll_anchor() {
+                cx.notify();
+            }
+            if pane_swapped {
+                editor.end_pane_swap(self.pane_id);
+            }
+        });
+        state
     }
 
     fn paint(

@@ -346,18 +346,21 @@ fn region_fold_range_for_line<'a, F>(
     line_content: F,
 ) -> Option<Range<usize>>
 where
-    F: Fn(usize) -> &'a str,
+    F: Fn(usize) -> Option<&'a str>,
 {
     if line + 1 >= line_count {
         return None;
     }
-    if classify_region_marker(line_content(line).trim()) != Some(RegionMarker::Start) {
+    if classify_region_marker(line_content(line)?.trim()) != Some(RegionMarker::Start) {
         return None;
     }
 
     let mut depth = 1usize;
     for candidate_line in line + 1..line_count {
-        match classify_region_marker(line_content(candidate_line).trim()) {
+        let Some(content) = line_content(candidate_line) else {
+            break;
+        };
+        match classify_region_marker(content.trim()) {
             Some(RegionMarker::Start) => depth += 1,
             Some(RegionMarker::End) => {
                 depth = depth.saturating_sub(1);
@@ -455,16 +458,19 @@ fn markup_fold_range_for_line<'a, F>(
     line_content: F,
 ) -> Option<Range<usize>>
 where
-    F: Fn(usize) -> &'a str,
+    F: Fn(usize) -> Option<&'a str>,
 {
     if line + 1 >= line_count {
         return None;
     }
 
-    let tag = opening_markup_tag_name(line_content(line).trim_end())?;
-    let mut depth = markup_tag_delta(line_content(line), &tag);
+    let tag = opening_markup_tag_name(line_content(line)?.trim_end())?;
+    let mut depth = markup_tag_delta(line_content(line)?, &tag);
     for candidate_line in line + 1..line_count {
-        depth += markup_tag_delta(line_content(candidate_line), &tag);
+        let Some(content) = line_content(candidate_line) else {
+            break;
+        };
+        depth += markup_tag_delta(content, &tag);
         if depth <= 0 {
             return (candidate_line + 1 > line + 1).then_some(line + 1..candidate_line + 1);
         }
@@ -480,7 +486,7 @@ fn brace_fold_range_for_line_impl<'a, F>(
     line_content: F,
 ) -> Option<Range<usize>>
 where
-    F: Fn(usize) -> &'a str,
+    F: Fn(usize) -> Option<&'a str>,
 {
     let (open, close) = if trimmed.ends_with('{') {
         ('{', '}')
@@ -494,7 +500,9 @@ where
 
     let mut depth = 1usize;
     for candidate_line in line + 1..line_count {
-        let candidate = line_content(candidate_line);
+        let Some(candidate) = line_content(candidate_line) else {
+            break;
+        };
         for ch in candidate.chars() {
             if ch == open {
                 depth += 1;
@@ -516,24 +524,29 @@ fn indent_fold_range_for_line<'a, F>(
     line_content: F,
 ) -> Option<Range<usize>>
 where
-    F: Fn(usize) -> &'a str,
+    F: Fn(usize) -> Option<&'a str>,
 {
     if line + 1 >= line_count {
         return None;
     }
 
-    let content = line_content(line);
-    let indent = leading_indent_columns(content);
-    let next_line = (line + 1..line_count).find(|&idx| !line_content(idx).trim().is_empty())?;
-    let next_indent = leading_indent_columns(line_content(next_line));
-    if next_indent <= indent {
+    let indent = leading_indent_columns(line_content(line)?);
+    let mut next_line = line + 1;
+    while line_content(next_line)?.trim().is_empty() {
+        next_line += 1;
+        if next_line >= line_count {
+            return None;
+        }
+    }
+    if leading_indent_columns(line_content(next_line)?) <= indent {
         return None;
     }
 
     let end = (next_line..line_count)
         .find(|&idx| {
-            let candidate = line_content(idx);
-            !candidate.trim().is_empty() && leading_indent_columns(candidate) <= indent
+            line_content(idx).is_none_or(|candidate| {
+                !candidate.trim().is_empty() && leading_indent_columns(candidate) <= indent
+            })
         })
         .unwrap_or(line_count);
 
@@ -546,14 +559,26 @@ fn generic_code_fold_range_for_line_impl<'a, F>(
     line_content: F,
 ) -> Option<Range<usize>>
 where
-    F: Fn(usize) -> &'a str,
-    F: std::marker::Copy,
+    F: Fn(usize) -> &'a str + std::marker::Copy,
+{
+    bounded_code_fold_range_for_line(line_count, line, |idx| Some(line_content(idx)))
+}
+
+/// `None` is a structural boundary, not an empty row. This lets Source reuse
+/// code folding without scanning for the end of a code block on every row.
+fn bounded_code_fold_range_for_line<'a, F>(
+    line_count: usize,
+    line: usize,
+    line_content: F,
+) -> Option<Range<usize>>
+where
+    F: Fn(usize) -> Option<&'a str> + std::marker::Copy,
 {
     if line + 1 >= line_count {
         return None;
     }
 
-    let content = line_content(line);
+    let content = line_content(line)?;
     let trimmed = content.trim_end();
     if trimmed.trim().is_empty() {
         return None;
@@ -563,6 +588,76 @@ where
         .or_else(|| brace_fold_range_for_line_impl(line_count, line, trimmed, line_content))
         .or_else(|| markup_fold_range_for_line(line_count, line, line_content))
         .or_else(|| indent_fold_range_for_line(line_count, line, line_content))
+}
+
+/// Source folds hide complete source rows, never a rich preview or metadata
+/// summary. Heading boundaries are cached by the outline collector; only a
+/// candidate block opener or a code-fold candidate scans its own body.
+fn source_fold_range_for_line(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    outline: &outline::SourceOutline,
+    line: usize,
+) -> Option<Range<usize>> {
+    let headings = &outline.headings;
+    let math_ranges = &outline.math_ranges;
+    let line_count = buffer.line_count();
+    let decoration = decorations.get(line)?;
+    if let Some(range) = front_matter_fold_range(decorations, line) {
+        return Some(range);
+    }
+    if let Ok(index) = headings.binary_search_by_key(&line, |heading| heading.line) {
+        let level = headings[index].level;
+        let end = headings[index + 1..]
+            .iter()
+            .find(|heading| heading.level <= level)
+            .map_or(line_count, |heading| heading.line);
+        return (end > line + 1).then_some(line + 1..end);
+    }
+    let math_index = math_ranges.partition_point(|range| range.end <= line);
+    if let Some(range) = math_ranges.get(math_index)
+        && range.contains(&line)
+    {
+        return (range.start == line && range.end > line + 1).then_some(line + 1..range.end);
+    }
+    if let Some(preview) = decoration.block_preview.as_ref() {
+        if preview.start_line == line {
+            let end = preview.end_line.saturating_add(1).min(line_count);
+            return (end > line + 1).then_some(line + 1..end);
+        }
+        // Math is literal in Source but is not a programming-language block.
+        if preview.kind == crate::markdown::BlockPreviewKind::Math {
+            return None;
+        }
+    }
+    if let Ok(index) = outline
+        .code_ranges
+        .binary_search_by_key(&line, |range| range.start)
+    {
+        let end = outline.code_ranges[index].end;
+        return (end > line + 1).then_some(line + 1..end);
+    }
+    match decoration.block_type {
+        // Closing fences can have quote/list syntax ranges too; those do not
+        // make them openers. The cached source spans own that distinction.
+        BlockType::CodeBlockFence => None,
+        BlockType::CodeBlock => bounded_code_fold_range_for_line(line_count, line, |row| {
+            decorations
+                .get(row)
+                .filter(|decoration| decoration.block_type == BlockType::CodeBlock)
+                .map(|_| buffer.line_content(row))
+        }),
+        BlockType::UnorderedList | BlockType::OrderedList | BlockType::TaskList(_) => {
+            indent_fold_range_for_line(line_count, line, |row| Some(buffer.line_content(row)))
+        }
+        BlockType::Blockquote => {
+            let end = (line + 1..line_count)
+                .find(|&row| !buffer.line_content(row).trim_start().starts_with('>'))
+                .unwrap_or(line_count);
+            (end > line + 1).then_some(line + 1..end)
+        }
+        _ => None,
+    }
 }
 
 /// Search needs source ownership (including the anchor), not just hidden rows.
@@ -642,13 +737,15 @@ fn search_fold_anchors_to_unfold(
         .collect()
 }
 
-fn search_fold_structural_content(content: &str) -> Option<&str> {
+fn source_fold_structural_content(content: &str) -> Option<(&str, usize)> {
     let leading = content.bytes().take_while(|byte| *byte == b' ').count();
     if leading > 3 {
         return None;
     }
     let mut content = &content[leading..];
+    let mut quote_depth = 0;
     while let Some(rest) = content.strip_prefix('>') {
+        quote_depth += 1;
         content = rest.strip_prefix([' ', '\t']).unwrap_or(rest);
         let leading = content.bytes().take_while(|byte| *byte == b' ').count();
         if leading > 3 {
@@ -656,7 +753,30 @@ fn search_fold_structural_content(content: &str) -> Option<&str> {
         }
         content = &content[leading..];
     }
+    Some((content, quote_depth))
+}
+
+/// Strip only the containers that owned the opener. Additional `>` characters
+/// inside a fence are literal code, not permission to close a different fence.
+fn source_fold_quote_content(mut content: &str, quote_depth: usize) -> Option<&str> {
+    for _ in 0..quote_depth {
+        let leading = content.bytes().take_while(|byte| *byte == b' ').count();
+        if leading > 3 {
+            return None;
+        }
+        content = content[leading..].strip_prefix('>')?;
+        content = content.strip_prefix([' ', '\t']).unwrap_or(content);
+    }
     Some(content)
+}
+
+#[derive(Clone, Copy)]
+struct SourceCodeFence {
+    marker: u8,
+    run: usize,
+    indent: usize,
+    quote_depth: usize,
+    start: usize,
 }
 
 fn search_fold_list_prefix_len(content: &str) -> usize {
@@ -688,11 +808,22 @@ fn search_fold_code_fence(content: &str) -> Option<(u8, usize)> {
 /// fences, but YAML/math can contain both fake headings and fake code fences.
 /// Scan source structure only; never decorate the anchor-to-match interval or
 /// publish context-filtered headings into the shared incremental outline cache.
-fn search_fold_heading_boundaries(
+pub(super) fn search_fold_heading_boundaries(
     buffer: &Buffer,
     decorations: &[LineDecoration],
 ) -> Vec<(usize, u8)> {
+    source_fold_structure(buffer, decorations).0
+}
+
+/// A cached Source index also needs closed math spans: a viewport fragment can
+/// end before the closer, and its local parser metadata is not a block boundary.
+pub(super) fn source_fold_structure(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+) -> (Vec<(usize, u8)>, Vec<Range<usize>>, Vec<Range<usize>>) {
     let mut headings = Vec::new();
+    let mut math_ranges = Vec::new();
+    let mut code_ranges = Vec::new();
     // Match the editor parser's pending four-tilde policy, not just CommonMark.
     let mut pending_tilde = None;
     for line in 0..buffer.line_count() {
@@ -709,20 +840,50 @@ fn search_fold_heading_boundaries(
             };
         }
     }
-    let mut code_fence = None;
-    let mut math: Option<(&str, usize)> = None;
+    let mut code_fence: Option<SourceCodeFence> = None;
+    let mut math: Option<(&str, usize, usize)> = None;
     let mut previous_text_line = None;
     let mut preview_end = 0;
-    let first_line = front_matter_fold_range(decorations, 0).map_or(0, |range| range.end);
+    let first_line = front_matter_fold_range(decorations, 0).map_or_else(
+        || {
+            // Line zero need not have been visited yet. Resolve only a closed
+            // leading metadata block, never the gap to an offscreen heading.
+            let Some(range) = leading_front_matter_line_range(buffer) else {
+                return 0;
+            };
+            if range.end < 2 {
+                return 0;
+            }
+            let closer = buffer.line_content(range.end - 1).trim_end();
+            let compact = buffer.line_content(0).trim_start_matches('\u{feff}').trim() == "-";
+            if !(if compact {
+                closer == "-"
+            } else {
+                matches!(closer, "---" | "...")
+            }) {
+                return 0;
+            }
+            let end = if range.end < buffer.line_count() {
+                buffer.line_start(range.end)
+            } else {
+                buffer.len()
+            };
+            let mut leading = crate::markdown::parse_decorations(&buffer.text()[..end]);
+            decorate_empty_front_matter(buffer, &mut leading);
+            front_matter_fold_range(&leading, 0).map_or(0, |range| range.end)
+        },
+        |range| range.end,
+    );
     for line in first_line..buffer.line_count() {
         if line < preview_end {
             continue;
         }
         let source = buffer.line_content(line);
+        let structural = source_fold_structural_content(source);
         let content = if pending_tilde == Some(line) {
             Some("text")
         } else {
-            search_fold_structural_content(source)
+            structural.map(|(content, _)| content)
         };
         if code_fence.is_none()
             && math.is_none()
@@ -732,33 +893,50 @@ fn search_fold_heading_boundaries(
             && preview.start_line == line
         {
             preview_end = preview.end_line.saturating_add(1);
-            previous_text_line = None;
-            continue;
-        }
-        if let Some((_, _, indent)) = code_fence
-            && !source.trim().is_empty()
-            && source.len() - source.trim_start_matches(' ').len() < indent
-        {
-            // A fence opened in a list cannot consume a following outer block.
-            code_fence = None;
-        }
-        if let Some((marker, run, _)) = code_fence {
-            if let Some(content) = content
-                && search_fold_code_fence(content)
-                    .is_some_and(|(next, count)| next == marker && count >= run)
-                && content
-                    .trim_end_matches([' ', '\t', '\r'])
-                    .bytes()
-                    .all(|byte| byte == marker)
-            {
-                code_fence = None;
+            if preview.kind == crate::markdown::BlockPreviewKind::Math {
+                math_ranges.push(line..preview_end);
+            } else {
+                code_ranges.push(line..preview_end);
             }
             previous_text_line = None;
             continue;
         }
-        if let Some((closer, heading_count)) = math {
+        if let Some(fence) = code_fence {
+            let body = source_fold_quote_content(source, fence.quote_depth);
+            let container_ended = body.is_none_or(|body| {
+                !body.trim().is_empty()
+                    && body.len() - body.trim_start_matches(' ').len() < fence.indent
+            });
+            if container_ended {
+                code_ranges.push(fence.start..line);
+                code_fence = None;
+            } else {
+                let closer = body
+                    .filter(|_| pending_tilde != Some(line))
+                    .and_then(|body| {
+                        let content = body.get(fence.indent..)?;
+                        let leading = content.bytes().take_while(|byte| *byte == b' ').count();
+                        (leading <= 3).then_some(&content[leading..])
+                    });
+                if let Some(content) = closer
+                    && search_fold_code_fence(content)
+                        .is_some_and(|(next, count)| next == fence.marker && count >= fence.run)
+                    && content
+                        .trim_end_matches([' ', '\t', '\r'])
+                        .bytes()
+                        .all(|byte| byte == fence.marker)
+                {
+                    code_ranges.push(fence.start..line + 1);
+                    code_fence = None;
+                }
+                previous_text_line = None;
+                continue;
+            }
+        }
+        if let Some((closer, heading_count, start)) = math {
             if source.trim() == closer {
                 headings.truncate(heading_count);
+                math_ranges.push(start..line + 1);
                 math = None;
                 previous_text_line = None;
                 continue;
@@ -772,12 +950,20 @@ fn search_fold_heading_boundaries(
             if let Some((marker, run)) = search_fold_code_fence(fence_content)
                 && (marker != b'`' || !fence_content[run..].contains('`'))
             {
+                let quote_depth = structural.map_or(0, |(_, depth)| depth);
+                let body = source_fold_quote_content(source, quote_depth).unwrap_or(source);
                 let indent = if list_prefix == 0 {
                     0
                 } else {
-                    source.len() - source.trim_start_matches(' ').len() + list_prefix
+                    body.len() - body.trim_start_matches(' ').len() + list_prefix
                 };
-                code_fence = Some((marker, run, indent));
+                code_fence = Some(SourceCodeFence {
+                    marker,
+                    run,
+                    indent,
+                    quote_depth,
+                    start: line,
+                });
                 previous_text_line = None;
                 continue;
             }
@@ -787,6 +973,7 @@ fn search_fold_heading_boundaries(
                 math = Some((
                     if source.trim() == "$$" { "$$" } else { "\\]" },
                     headings.len(),
+                    line,
                 ));
                 previous_text_line = None;
                 continue;
@@ -857,10 +1044,28 @@ fn search_fold_heading_boundaries(
             previous_text_line.get_or_insert(line);
         }
     }
-    headings
+    if let Some(fence) = code_fence {
+        code_ranges.push(fence.start..buffer.line_count());
+    }
+    (headings, math_ranges, code_ranges)
 }
 
 impl EditorView {
+    /// Keep the RefCell guard alive for the entire metadata read. A mapped Ref
+    /// cannot also borrow the fallback slice from `self` outside that RefCell.
+    pub(super) fn with_canonical_markdown_decorations<T>(
+        &self,
+        read: impl FnOnce(&[LineDecoration]) -> T,
+    ) -> T {
+        let cache = self.source_syntax_context.borrow();
+        read(
+            cache
+                .markdown_decorations
+                .as_deref()
+                .unwrap_or(&self.decorations),
+        )
+    }
+
     /// Resolve every container before removing any fold. Only folded anchors
     /// need Markdown decoration; intervening headings use a lexical source scan.
     pub(super) fn unfold_search_match(&mut self, lines: Range<usize>) {
@@ -879,31 +1084,81 @@ impl EditorView {
         for &anchor in &anchors {
             self.ensure_lazy_markdown_decorations(anchor..anchor + 1);
         }
-        let headings = if self.active_tab_is_markdown() && self.uses_lazy_markdown_decorations() {
-            // Metadata is document-leading and can contain fence-like scalars.
-            // Resolve only its anchor, rather than parsing intervening chunks.
-            self.ensure_lazy_markdown_decorations(0..1);
-            Some(search_fold_heading_boundaries(
-                &self.buffer,
-                &self.decorations,
-            ))
+        // A structural edit can leave the worker snapshot pending. Resolve it
+        // on explicit search/outline navigation, never from a gutter/layout read.
+        let pending_source = if self.source_mode
+            && self.active_tab_uses_markdown_editor()
+            && self
+                .markdown_outline_index
+                .borrow()
+                .as_ref()
+                .is_none_or(|index| index.source.is_none())
+        {
+            Some(self.with_canonical_markdown_decorations(|decorations| {
+                outline::source_outline_data(
+                    &self.buffer,
+                    decorations,
+                    self.uses_lazy_markdown_decorations(),
+                )
+            }))
         } else {
             None
         };
-        let unfold = search_fold_anchors_to_unfold(
-            &self.buffer,
-            &self.decorations,
-            &anchors,
-            &lines,
-            headings.as_deref(),
-            |anchor| self.fold_range_for_line(anchor),
-        );
+        let headings = if self.source_mode && self.active_tab_uses_markdown_editor() {
+            let index = self.markdown_outline_index.borrow();
+            pending_source
+                .as_ref()
+                .or_else(|| index.as_ref()?.source.as_ref())
+                .map(|source| {
+                    source
+                        .headings
+                        .iter()
+                        .map(|heading| (heading.line, heading.level))
+                        .collect()
+                })
+        } else if self.active_tab_uses_markdown_editor() && self.uses_lazy_markdown_decorations() {
+            // Metadata is document-leading and can contain fence-like scalars.
+            // Resolve only its anchor, rather than parsing intervening chunks.
+            self.ensure_lazy_markdown_decorations(0..1);
+            Some(self.with_canonical_markdown_decorations(|decorations| {
+                search_fold_heading_boundaries(&self.buffer, decorations)
+            }))
+        } else {
+            None
+        };
+        let unfold = self.with_canonical_markdown_decorations(|decorations| {
+            search_fold_anchors_to_unfold(
+                &self.buffer,
+                decorations,
+                &anchors,
+                &lines,
+                headings.as_deref(),
+                |anchor| {
+                    if let Some(source) = pending_source.as_ref() {
+                        source_fold_range_for_line(&self.buffer, decorations, source, anchor)
+                    } else {
+                        self.fold_range_for_line(anchor)
+                    }
+                },
+            )
+        });
         for anchor in unfold {
             self.folded_sections.remove(&anchor);
         }
     }
 
     pub(crate) fn fold_range_for_line(&self, line: usize) -> Option<std::ops::Range<usize>> {
+        if self.source_mode && self.active_tab_uses_markdown_editor() {
+            return self.with_canonical_markdown_decorations(|decorations| {
+                let index = self.markdown_outline_index.borrow();
+                source_fold_range_for_line(
+                    &self.buffer,
+                    decorations,
+                    index.as_ref()?.source.as_ref()?,
+                    line,
+                )
+            });
+        }
         if self.active_tab_is_markdown()
             && let Some(range) = front_matter_fold_range(&self.decorations, line)
         {
@@ -1086,7 +1341,9 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_fold(&mut self, line: usize, cx: &mut Context<Self>) {
-        let is_front_matter = front_matter_fold_range(&self.decorations, line).is_some();
+        self.ensure_lazy_markdown_decorations(line..line.saturating_add(1));
+        let is_front_matter = self.active_tab_is_markdown()
+            && front_matter_fold_range(&self.decorations, line).is_some();
         let mut cursor_moved = false;
         if self.folded_sections.contains(&line) {
             self.folded_sections.remove(&line);
@@ -2306,6 +2563,269 @@ mod tests {
             &mut cursor
         ));
         assert_eq!(cursor.selection_range(), opener..buffer.len());
+    }
+
+    fn source_folds(
+        text: &str,
+    ) -> (
+        Buffer,
+        Vec<super::LineDecoration>,
+        super::outline::SourceOutline,
+    ) {
+        let buffer = Buffer::from_text(text);
+        let mut decorations = parse_decorations(text);
+        decorate_empty_front_matter(&buffer, &mut decorations);
+        let headings = super::outline::source_outline_data(&buffer, &decorations, false);
+        (buffer, decorations, headings)
+    }
+
+    #[test]
+    fn source_fold_ranges_use_canonical_blocks_not_the_literal_projection() {
+        let text = "---\ntitle: Note\n---\n# A\n```rust\nfn a() {\n    run();\n}\n```\n$$\nx + y\n$$\n```mermaid\ngraph TD\n A --> B\n```\n## Child\nbody\n# B\nlast";
+        let (buffer, decorations, headings) = source_folds(text);
+        let fold = |line| super::source_fold_range_for_line(&buffer, &decorations, &headings, line);
+        assert_eq!(fold(0), Some(1..3));
+        assert_eq!(fold(3), Some(4..18));
+        assert_eq!(fold(4), Some(5..9));
+        assert_eq!(fold(5), Some(6..8));
+        assert_eq!(fold(8), None);
+        assert_eq!(fold(9), Some(10..12));
+        assert_eq!(fold(11), None);
+        assert_eq!(fold(12), Some(13..16));
+        assert_eq!(fold(15), None);
+        assert_eq!(fold(16), Some(17..18));
+        assert_eq!(fold(18), Some(19..20));
+
+        let mut presentation = decorations.clone();
+        for decoration in &mut presentation {
+            helpers::source_markdown_decoration(decoration);
+        }
+        for line in [4, 9, 12] {
+            assert_eq!(presentation[line].block_type, super::BlockType::Normal);
+            assert!(fold(line).is_some());
+        }
+    }
+
+    #[test]
+    fn source_fold_ranges_handle_adjacent_unclosed_and_empty_fences() {
+        for (text, expected) in [
+            (
+                "```rust\na\n```\n```python\nb\n```",
+                vec![(0, Some(1..3)), (2, None), (3, Some(4..6)), (5, None)],
+            ),
+            (
+                "~~~~\na\n~~~~\n~~~\nb",
+                vec![(0, Some(1..3)), (2, None), (3, Some(4..5))],
+            ),
+            ("```\n```", vec![(0, Some(1..2)), (1, None)]),
+            ("```", vec![(0, None)]),
+        ] {
+            let (buffer, decorations, headings) = source_folds(text);
+            for (line, range) in expected {
+                assert_eq!(
+                    super::source_fold_range_for_line(&buffer, &decorations, &headings, line),
+                    range,
+                    "{text:?}, line {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_fenced_folds_resolve_quote_and_list_openers_not_closing_prefixes() {
+        for (text, opener, closer, end) in [
+            ("> ```\n> code\n> ```\n# Next", 0, 2, 3),
+            ("- ```\n  code\n  ```\n\n# Next", 0, 2, 3),
+            ("```\na\n```\n```\nb\n```", 3, 5, 6),
+        ] {
+            let (buffer, decorations, outline) = source_folds(text);
+            assert_eq!(
+                super::source_fold_range_for_line(&buffer, &decorations, &outline, opener),
+                Some(opener + 1..end),
+                "{text:?}"
+            );
+            assert_eq!(
+                super::source_fold_range_for_line(&buffer, &decorations, &outline, closer),
+                None,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_fence_closers_keep_the_openers_quote_container_eager_and_lazy() {
+        for text in [
+            "```md\n> ```\n# literal\n```\n# Real",
+            "> ```md\n> > ```\n> # literal\n> ```\n# Real",
+            ">> ```md\n>>> ```\n>> # literal\n>> ```\n# Real",
+            "> - ```md\n>   > ```\n>   # literal\n>   ```\n# Real",
+        ] {
+            let buffer = Buffer::from_text(text);
+            let canonical = parse_decorations(text);
+            let unparsed = super::super::new_lazy_markdown_decorations(buffer.line_count()).0;
+            for (lazy, decorations) in [(false, &canonical), (true, &unparsed)] {
+                let outline = super::outline::source_outline_data(&buffer, decorations, lazy);
+                assert_eq!(outline.code_ranges, vec![0..4], "lazy={lazy}: {text:?}");
+                assert_eq!(
+                    outline
+                        .headings
+                        .iter()
+                        .map(|heading| (heading.line, heading.text.as_ref()))
+                        .collect::<Vec<_>>(),
+                    vec![(4, "Real")],
+                    "lazy={lazy}: {text:?}"
+                );
+                assert_eq!(
+                    super::source_fold_range_for_line(&buffer, decorations, &outline, 0),
+                    Some(1..4)
+                );
+                assert_eq!(
+                    super::source_fold_range_for_line(&buffer, decorations, &outline, 1),
+                    None
+                );
+                assert_eq!(
+                    super::source_fold_range_for_line(&buffer, decorations, &outline, 3),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_quote_fence_stops_when_its_opener_container_ends() {
+        let text = "> ```md\n> # literal\n# Real";
+        let buffer = Buffer::from_text(text);
+        for lazy in [false, true] {
+            let decorations = if lazy {
+                vec![super::LineDecoration::default(); buffer.line_count()]
+            } else {
+                parse_decorations(text)
+            };
+            let outline = super::outline::source_outline_data(&buffer, &decorations, lazy);
+            assert_eq!(outline.code_ranges, vec![0..2]);
+            assert_eq!(
+                outline
+                    .headings
+                    .iter()
+                    .map(|heading| heading.line)
+                    .collect::<Vec<_>>(),
+                vec![2]
+            );
+        }
+    }
+
+    #[test]
+    fn source_code_folds_cannot_escape_their_block_or_fold_markdown_prose() {
+        let text = "```python\ndef f():\n    pass\n```\nprose {\n  indented prose\n}\n\n```js\nfunction broken() {\n  call();\n```\n}";
+        let (buffer, decorations, headings) = source_folds(text);
+        let fold = |line| super::source_fold_range_for_line(&buffer, &decorations, &headings, line);
+        assert_eq!(fold(1), Some(2..3));
+        assert_eq!(fold(4), None);
+        assert_eq!(fold(9), Some(10..11));
+        assert_ne!(fold(9), Some(10..13));
+    }
+
+    #[test]
+    fn source_lazy_heading_folds_and_unfold_use_offscreen_source_boundaries() {
+        let mut rows = vec![""; 4096];
+        rows[0] = "# A";
+        rows[1024] = "```md";
+        rows[1025] = "# Literal code heading";
+        rows[1030] = "```";
+        rows[2048] = "# B";
+        rows[3072] = "target";
+        let buffer = Buffer::from_text(&rows.join("\n"));
+        let (mut decorations, mut lazy) =
+            super::super::new_lazy_markdown_decorations(buffer.line_count());
+        super::super::parse_lazy_markdown_range(&buffer, &mut decorations, &mut lazy, 0..1);
+        let headings = super::outline::source_outline_data(&buffer, &decorations, true);
+        assert_eq!(
+            super::source_fold_range_for_line(&buffer, &decorations, &headings, 0),
+            Some(1..2048)
+        );
+        assert_eq!(
+            super::source_fold_range_for_line(&buffer, &decorations, &headings, 2048),
+            Some(2049..4096)
+        );
+        assert_eq!(decorations[2048].block_type, super::BlockType::Normal);
+        assert!(!lazy.is_parsed(2048 / super::super::LARGE_MARKDOWN_CHUNK_LINES));
+        let boundaries = super::search_fold_heading_boundaries(&buffer, &decorations);
+        assert_eq!(
+            super::search_fold_anchors_to_unfold(
+                &buffer,
+                &decorations,
+                &[0, 2048],
+                &(3072..3073),
+                Some(&boundaries),
+                |line| {
+                    super::source_fold_range_for_line(&buffer, &decorations, &headings, line)
+                }
+            ),
+            vec![2048]
+        );
+    }
+
+    #[test]
+    fn source_lazy_math_fold_uses_the_closed_span_not_a_local_fragment() {
+        for (opener, closer) in [("$$", "$$"), ("\\[", "\\]")] {
+            let mut rows = vec![""; 8192];
+            rows[0] = "# A";
+            rows[1024] = opener;
+            rows[2048] = "# Literal math heading";
+            rows[3072] = "target";
+            rows[4096] = closer;
+            rows[5120] = "# B";
+            let buffer = Buffer::from_text(&rows.join("\n"));
+            let decorations = super::super::new_lazy_markdown_decorations(buffer.line_count()).0;
+            let outline = super::outline::source_outline_data(&buffer, &decorations, true);
+            assert_eq!(outline.math_ranges, vec![1024..4097]);
+            assert_eq!(
+                super::source_fold_range_for_line(&buffer, &decorations, &outline, 1024),
+                Some(1025..4097)
+            );
+            assert_eq!(
+                super::source_fold_range_for_line(&buffer, &decorations, &outline, 2048),
+                None
+            );
+            assert_eq!(
+                super::source_fold_range_for_line(&buffer, &decorations, &outline, 4096),
+                None
+            );
+            assert_eq!(
+                super::search_fold_anchors_to_unfold(
+                    &buffer,
+                    &decorations,
+                    &[0, 1024],
+                    &(3072..3073),
+                    None,
+                    |line| {
+                        super::source_fold_range_for_line(&buffer, &decorations, &outline, line)
+                    }
+                ),
+                vec![0, 1024]
+            );
+        }
+    }
+
+    #[test]
+    fn source_search_unfold_includes_front_matter_math_and_diagram_closers() {
+        let text = "---\ntitle: Note\n---\n$$\nx\n$$\n```mermaid\ngraph TD\n```";
+        let (buffer, decorations, headings) = source_folds(text);
+        for (line, anchor) in [(2, 0), (5, 3), (8, 6)] {
+            assert_eq!(
+                super::search_fold_anchors_to_unfold(
+                    &buffer,
+                    &decorations,
+                    &[0, 3, 6],
+                    &(line..line + 1),
+                    None,
+                    |line| {
+                        super::source_fold_range_for_line(&buffer, &decorations, &headings, line)
+                    }
+                ),
+                vec![anchor]
+            );
+        }
     }
 
     #[test]

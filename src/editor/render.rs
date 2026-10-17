@@ -518,9 +518,8 @@ impl Render for EditorView {
         }
         self.refresh_chat_terminal_metrics(window, cx);
         self.process_pending_inline_diff(cx);
-        // Keeps the status-bar branch label and panel badges fresh; only
-        // schedules background work when the snapshot is dirty.
-        self.refresh_git_panel_status_if_needed(cx);
+        // The status bar only needs HEAD, not a scan of the worktree or upstream.
+        self.refresh_status_bar_git_branch(cx);
         if self.pending_editor_focus {
             window.focus(&self.focus_handle(cx));
             self.pending_editor_focus = false;

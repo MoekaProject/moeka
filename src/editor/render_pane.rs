@@ -824,13 +824,13 @@ impl EditorView {
                                 toolbar_top,
                                 secondary_btn_size,
                             );
-                            let align_tooltip = if self.active_tab_is_non_markdown_text() {
+                            let align_tooltip = if self.editor_uses_code_gutter() {
                                 self.t(crate::i18n::TextKey::ToolbarWrapTooltip)
                             } else {
                                 self.t(crate::i18n::TextKey::ToolbarAlignTooltip)
                             };
                             let align_shortcut = self
-                                .active_tab_is_non_markdown_text()
+                                .editor_uses_code_gutter()
                                 .then_some(crate::editor::shortcut::hint("alt-z"))
                                 .or(Some(crate::editor::shortcut::hint("secondary-alt-l")));
                             let sidebar_tooltip = if self.workspaces.is_empty() {
@@ -876,7 +876,7 @@ impl EditorView {
                                         secondary_btn_size,
                                         secondary_btn_size,
                                         secondary_icon_size,
-                                        if self.editor_left_aligned { 1.0 } else { 0.55 },
+                                        if if self.source_mode { !self.source_word_wrap } else { self.editor_left_aligned } { 1.0 } else { 0.55 },
                                         secondary_hover,
                                         EDITOR_ALIGN_LEFT_SVG_PATH,
                                         align_anchor,
@@ -933,7 +933,7 @@ impl EditorView {
                                 .items_center()
                                 .gap(px(toolbar_gap))
                                 .opacity(self.toolbar_opacity)
-                                .when(self.active_tab_is_markdown(), |this| {
+                                .when(self.active_tab_uses_markdown_editor(), |this| {
                                     this.child(self.render_toolbar_button(
                                         "toolbar-outline-toggle",
                                         secondary_btn_width,

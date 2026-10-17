@@ -443,6 +443,9 @@ impl EditorView {
         range_utf16: &mut Option<Range<usize>>,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.source_mode {
+            return true;
+        }
         let Some(boundary) = self.table_boundary_caret else {
             return true;
         };
@@ -523,6 +526,9 @@ impl EditorView {
     }
 
     fn ime_range_touches_folded_front_matter(&self, range_utf16: &Range<usize>) -> bool {
+        if self.source_mode {
+            return false;
+        }
         let range = self.range_from_utf16(range_utf16);
         ime_lines_touch_protected_front_matter(
             self.collapsed_front_matter_range(),
@@ -744,7 +750,27 @@ impl EntityInputHandler for EditorView {
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
         // Typing into the buffer dismisses any read-only phantom-row selection.
         self.clear_phantom_selection();
-        if !self.cursor.has_selection()
+        if self.source_mode
+            && self.active_file_kind().is_some_and(FileKind::is_markdown)
+            && range_utf16.is_none()
+            && self.marked_range.is_none()
+            && self.extra_marked_ranges.is_empty()
+            && self.ime_composition_snapshot.is_none()
+            && !new_text.is_empty()
+        {
+            // Native replacement ranges and IME composition stay literal. Only
+            // direct typing uses the same source planner as editing actions,
+            // including every caret and exact (possibly reversed) selections.
+            self.capture_typing_scroll_guard();
+            self.pending_code_fence = None;
+            self.checkpoint_for_typing(new_text);
+            self.apply_source_action(source_edit::SourceAction::Insert(new_text));
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
+        }
+        if !self.source_mode
+            && !self.cursor.has_selection()
             && self.marked_range.is_none()
             && range_utf16.is_none()
             && !self.has_extra_cursors()
@@ -753,12 +779,13 @@ impl EntityInputHandler for EditorView {
             self.cursor
                 .move_to(self.cursor.offset + new_text.len(), &self.buffer);
             self.pause_blinking(cx);
-            if self.wiki_link_start.is_some() {
+            if !self.source_mode && self.wiki_link_start.is_some() {
                 self.sync_wiki_link_menu(cx);
             }
             return;
         }
-        if new_text == "/"
+        if self.active_tab_is_markdown()
+            && new_text == "/"
             && !self.cursor.has_selection()
             && !self.has_extra_cursors()
             && self.marked_range.is_none()
@@ -783,7 +810,9 @@ impl EntityInputHandler for EditorView {
         let native_range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range));
-        if self.replace_table_cell_native_newlines(native_range, new_text, None, false, cx) {
+        if !self.source_mode
+            && self.replace_table_cell_native_newlines(native_range, new_text, None, false, cx)
+        {
             if had_ime_composition {
                 self.finish_ime_composition();
             }
@@ -827,24 +856,30 @@ impl EntityInputHandler for EditorView {
             return;
         }
 
-        if self.cursor.has_selection() && self.marked_range.is_none() && range_utf16.is_none() {
+        if !self.source_mode
+            && self.cursor.has_selection()
+            && self.marked_range.is_none()
+            && range_utf16.is_none()
+        {
             if let Some((prefix, suffix)) = input_ime::paired_delimiter(new_text) {
                 self.apply_wrap(prefix, suffix);
                 self.pause_blinking(cx);
                 return;
             }
-            let in_code = self.offset_in_code_context(self.cursor.selection_range().start);
-            let wrap = match new_text {
-                "*" if !in_code => Some(("**", "**")),
-                "~" if !in_code => Some(("~~", "~~")),
-                "+" if !in_code => Some(("++", "++")),
-                "`" => Some(("`", "`")),
-                _ => None,
-            };
-            if let Some((prefix, suffix)) = wrap {
-                self.apply_wrap(prefix, suffix);
-                self.pause_blinking(cx);
-                return;
+            if !self.source_mode {
+                let in_code = self.offset_in_code_context(self.cursor.selection_range().start);
+                let wrap = match new_text {
+                    "*" if !in_code => Some(("**", "**")),
+                    "~" if !in_code => Some(("~~", "~~")),
+                    "+" if !in_code => Some(("++", "++")),
+                    "`" => Some(("`", "`")),
+                    _ => None,
+                };
+                if let Some((prefix, suffix)) = wrap {
+                    self.apply_wrap(prefix, suffix);
+                    self.pause_blinking(cx);
+                    return;
+                }
             }
         }
 
@@ -883,7 +918,11 @@ impl EntityInputHandler for EditorView {
         let (range_start_line, _) = self.buffer.offset_to_line_col(range.start);
         let (range_end_line, _) = self.buffer.offset_to_line_col(range.end);
         let range_spans_multiple_lines = range_start_line != range_end_line;
-        let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
+        let touched_ordered_prefix = if self.active_tab_is_markdown() {
+            self.ordered_list_prefix_touched_by_range(&range)
+        } else {
+            None
+        };
         let markdown_syntax_edit = self.active_tab_is_markdown()
             && (new_text.contains(['=', '*', '_', '~', '`', '+', '[', ']', '(', ')'])
                 || self
@@ -892,11 +931,15 @@ impl EntityInputHandler for EditorView {
                     .get(range.clone())
                     .is_some_and(|text| text.contains(['=', '*', '_', '~', '`', '+'])));
 
-        if range.is_empty() && self.marked_range.is_none() && range_utf16.is_none() {
-            if !(matches!(new_text, "*" | "_" | "~" | "+" | "=")
-                && self.offset_in_code_context(range.start))
-                && let Some((open, close)) =
-                    input_ime::paired_delimiter_at(self.buffer.text(), range.start, new_text)
+        if !self.source_mode
+            && range.is_empty()
+            && self.marked_range.is_none()
+            && range_utf16.is_none()
+        {
+            if let Some((open, close)) =
+                input_ime::paired_delimiter_at(self.buffer.text(), range.start, new_text)
+                && !(matches!(new_text, "*" | "_" | "~" | "+" | "=")
+                    && self.offset_in_code_context(range.start))
             {
                 let mut paired_text = String::with_capacity(open.len() + close.len());
                 paired_text.push_str(open);
@@ -966,32 +1009,34 @@ impl EntityInputHandler for EditorView {
         {
             self.scroll_to_cursor();
         }
-        if self.slash_menu_start.is_some() {
-            self.update_slash_filter(cx);
-        } else if self.wiki_link_start.is_some() {
-            self.sync_wiki_link_menu(cx);
-        } else if self.table_source.is_some() {
-        } else if new_text == "[" && new_offset >= 2 {
-            let text = self.buffer.text();
-            if text.get(new_offset - 2..new_offset) == Some("[[") {
-                let closer = input_ime::missing_wiki_link_closer(text, new_offset);
-                if !closer.is_empty() {
-                    self.buffer.replace(new_offset..new_offset, closer);
-                    self.reparse();
+        if !self.source_mode {
+            if self.slash_menu_start.is_some() {
+                self.update_slash_filter(cx);
+            } else if self.wiki_link_start.is_some() {
+                self.sync_wiki_link_menu(cx);
+            } else if self.table_source.is_some() {
+            } else if new_text == "[" && new_offset >= 2 {
+                let text = self.buffer.text();
+                if text.get(new_offset - 2..new_offset) == Some("[[") {
+                    let closer = input_ime::missing_wiki_link_closer(text, new_offset);
+                    if !closer.is_empty() {
+                        self.buffer.replace(new_offset..new_offset, closer);
+                        self.reparse();
+                    }
+                    self.cursor.move_to(new_offset, &self.buffer);
+                    self.ensure_wiki_link_menu_for_cursor(cx);
                 }
-                self.cursor.move_to(new_offset, &self.buffer);
-                self.ensure_wiki_link_menu_for_cursor(cx);
-            }
-        } else if self.maybe_open_wiki_link_menu_after_edit(cx) {
-        } else if new_text == "/" && self.active_tab_is_markdown() && !self.embedded_editor {
-            let (line, col) = self.buffer.offset_to_line_col(new_offset);
-            let line_content = self.buffer.line_content(line);
-            if input_ime::slash_menu_trigger(
-                line_content,
-                col,
-                self.offset_in_code_context(new_offset),
-            ) {
-                self.open_slash_menu(cx);
+            } else if self.maybe_open_wiki_link_menu_after_edit(cx) {
+            } else if new_text == "/" && self.active_tab_is_markdown() && !self.embedded_editor {
+                let (line, col) = self.buffer.offset_to_line_col(new_offset);
+                let line_content = self.buffer.line_content(line);
+                if input_ime::slash_menu_trigger(
+                    line_content,
+                    col,
+                    self.offset_in_code_context(new_offset),
+                ) {
+                    self.open_slash_menu(cx);
+                }
             }
         }
         self.pause_blinking(cx);
@@ -1057,13 +1102,15 @@ impl EntityInputHandler for EditorView {
         let native_range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range));
-        if self.replace_table_cell_native_newlines(
-            native_range,
-            new_text,
-            new_selected_range_utf16.as_ref(),
-            true,
-            cx,
-        ) {
+        if !self.source_mode
+            && self.replace_table_cell_native_newlines(
+                native_range,
+                new_text,
+                new_selected_range_utf16.as_ref(),
+                true,
+                cx,
+            )
+        {
             return;
         }
 
@@ -1124,7 +1171,11 @@ impl EntityInputHandler for EditorView {
         let (range_start_line, _) = self.buffer.offset_to_line_col(range.start);
         let (range_end_line, _) = self.buffer.offset_to_line_col(range.end);
         let range_spans_multiple_lines = range_start_line != range_end_line;
-        let touched_ordered_prefix = self.ordered_list_prefix_touched_by_range(&range);
+        let touched_ordered_prefix = if self.active_tab_is_markdown() {
+            self.ordered_list_prefix_touched_by_range(&range)
+        } else {
+            None
+        };
 
         self.queue_non_markdown_line_display_transfer(&range, new_text);
         self.buffer.replace(range.clone(), new_text);

@@ -6,6 +6,118 @@ use crate::markdown::BlockType;
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DocumentMode {
+    #[default]
+    Edit,
+    Reading,
+    Source,
+}
+
+impl DocumentMode {
+    pub(crate) fn from_flags(reading: bool, source: bool) -> Self {
+        if source {
+            Self::Source
+        } else if reading {
+            Self::Reading
+        } else {
+            Self::Edit
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Edit => Self::Reading,
+            Self::Reading => Self::Source,
+            Self::Source => Self::Edit,
+        }
+    }
+
+    pub(crate) fn icon_path(self) -> &'static str {
+        match self {
+            Self::Edit => FMT_PARAGRAPH_SVG,
+            Self::Reading => DOC_SVG_PATH,
+            Self::Source => FMT_CODE_SVG,
+        }
+    }
+
+    fn left_aligned(self, preference: bool) -> bool {
+        self == Self::Source || preference
+    }
+
+    fn word_wrap(self, source_word_wrap: bool, non_markdown: bool, left_aligned: bool) -> bool {
+        if self == Self::Source {
+            source_word_wrap
+        } else {
+            !non_markdown || !left_aligned
+        }
+    }
+
+    pub(crate) fn tooltip(self, language: UiLanguage) -> &'static str {
+        crate::i18n::document_mode_tooltip(
+            language,
+            match self {
+                Self::Edit => "edit",
+                Self::Reading => "reading",
+                Self::Source => "source",
+            },
+        )
+    }
+}
+
+pub(crate) struct DocumentModeScrollAnchor {
+    tab_id: String,
+    cursor: Cursor,
+    offset: usize,
+    screen_y: f32,
+    epoch: usize,
+    remaining_frames: u8,
+    deadline: std::time::Instant,
+    confirmation: CursorCenterConfirmation,
+}
+
+impl DocumentModeScrollAnchor {
+    fn is_current(&self, tab_id: Option<&str>, cursor: Cursor, epoch: usize) -> bool {
+        tab_id == Some(self.tab_id.as_str())
+            && self.cursor == cursor
+            && self.epoch == epoch
+            && std::time::Instant::now() < self.deadline
+    }
+
+    fn confirm_painted_layout(
+        &mut self,
+        target: f32,
+        painted_scroll: f32,
+        measured: bool,
+        previews_need_rendering: bool,
+        previews_in_flight: bool,
+    ) -> bool {
+        let measured_target =
+            (measured && !previews_need_rendering && (target - painted_scroll).abs() <= 0.5)
+                .then_some(painted_scroll);
+        self.needs_another_layout(
+            measured_target,
+            previews_in_flight && !previews_need_rendering,
+        )
+    }
+
+    fn needs_another_layout(
+        &mut self,
+        measured_target: Option<f32>,
+        previews_pending: bool,
+    ) -> bool {
+        if !previews_pending {
+            self.remaining_frames = self.remaining_frames.saturating_sub(1);
+        }
+        let settled = self.confirmation.observe(measured_target, previews_pending);
+        !settled && self.remaining_frames > 0 && std::time::Instant::now() < self.deadline
+    }
+}
+
+fn screen_anchored_scroll_target(content_y: f32, screen_y: f32) -> f32 {
+    (content_y - screen_y).max(0.0)
+}
+
 fn caret_vertical_overflow(
     cursor_top: f32,
     cursor_bottom: f32,
@@ -343,6 +455,12 @@ impl EditorView {
         if next_panel == Some(RightUtilityPanel::GitHistory) {
             self.invalidate_git_history_cache();
         }
+        if previous_panel != next_panel
+            && (previous_panel == Some(RightUtilityPanel::GitHistory)
+                || next_panel == Some(RightUtilityPanel::GitHistory))
+        {
+            self.invalidate_git_panel_status();
+        }
 
         // Switching directly between two visible utility panels is a panel-type
         // switch: apply the width change instantly. Only animate when a panel is
@@ -470,7 +588,7 @@ impl EditorView {
     }
 
     pub(crate) fn gutter_left_inset(&self) -> f32 {
-        if self.active_tab_is_non_markdown_text() {
+        if self.editor_uses_code_gutter() {
             0.0
         } else {
             self.scaled(self.styles.editor.editor_padding_left_px)
@@ -478,7 +596,7 @@ impl EditorView {
     }
 
     pub(crate) fn gutter_line_number_width(&self) -> f32 {
-        if !self.active_tab_is_non_markdown_text() {
+        if !self.editor_uses_code_gutter() {
             return 0.0;
         }
         let gutter_styles = &self.styles.gutter;
@@ -492,7 +610,7 @@ impl EditorView {
     }
 
     pub(crate) fn gutter_column_gap(&self) -> f32 {
-        if self.active_tab_is_non_markdown_text() {
+        if self.editor_uses_code_gutter() {
             self.scaled(self.styles.gutter.gutter_column_gap_px)
         } else {
             0.0
@@ -526,7 +644,7 @@ impl EditorView {
     }
 
     pub(crate) fn padding_left(&self) -> f32 {
-        if self.active_tab_is_non_markdown_text() {
+        if self.editor_uses_code_gutter() {
             self.gutter_left_inset()
                 + self.gutter_line_number_width()
                 + self.gutter_column_gap()
@@ -563,11 +681,16 @@ impl EditorView {
     }
 
     pub(crate) fn editor_uses_expanded_layout(&self) -> bool {
-        self.active_tab_is_non_markdown_text() || self.editor_left_aligned
+        self.active_tab_is_non_markdown_text()
+            || self.document_mode().left_aligned(self.editor_left_aligned)
     }
 
     pub(crate) fn editor_wraps_to_available_width(&self) -> bool {
-        !self.active_tab_is_non_markdown_text() || !self.editor_left_aligned
+        self.document_mode().word_wrap(
+            self.source_word_wrap,
+            self.active_tab_is_non_markdown_text(),
+            self.editor_left_aligned,
+        )
     }
 
     pub(crate) fn tab_bar_height(&self) -> f32 {
@@ -1044,8 +1167,7 @@ impl EditorView {
                 }
                 self.layout_dirty = true;
             }
-        } else if self.active_tab_is_non_markdown_text() && !self.editor_wraps_to_available_width()
-        {
+        } else if self.editor_uses_horizontal_text_scroll() {
             let state = self.non_markdown_horizontal_scroll_state();
             let base_content_x = self
                 .line_display_info
@@ -1754,6 +1876,32 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_editor_alignment(&mut self, cx: &mut Context<Self>) {
+        if self.source_mode {
+            let mut anchor = self.capture_document_mode_scroll_anchor();
+            self.cancel_outline_navigation();
+            self.pending_click_anchor = None;
+            self.pending_typing_scroll_guard = None;
+            self.pending_scroll_to_cursor = false;
+            self.pending_center_cursor_in_view = false;
+            self.pending_center_cursor_in_view_immediately = false;
+            self.center_cursor_confirm_frames = 0;
+            self.source_word_wrap = !self.source_word_wrap;
+            if let Some(tab_id) = self.active_tab_id.as_ref() {
+                self.non_markdown_horizontal_scroll_states.remove(tab_id);
+            }
+            self.clear_inline_diff_phantom_layout_cache();
+            self.clear_active_tab_layout_cache();
+            if let Some(anchor) = anchor.as_mut() {
+                anchor.epoch = self.scroll_anim_epoch;
+            }
+            self.document_mode_scroll_anchor = anchor;
+            self.restore_document_mode_scroll_anchor(false);
+            self.persist_active_tab_state();
+            session_store::persist_session(self);
+            self.sync_code_block_horizontal_scrollbar(cx);
+            cx.notify();
+            return;
+        }
         self.editor_left_aligned = !self.editor_left_aligned;
         if !self.editor_left_aligned
             && let Some(tab_id) = self.active_tab_id.as_ref()
@@ -1768,20 +1916,302 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn toggle_reading_mode(&mut self, cx: &mut Context<Self>) {
-        self.reading_mode = !self.reading_mode;
+    pub(crate) fn document_mode(&self) -> DocumentMode {
+        DocumentMode::from_flags(self.reading_mode, self.source_mode)
+    }
+
+    pub(crate) fn cycle_document_mode(&mut self, cx: &mut Context<Self>) {
+        self.set_document_mode(self.document_mode().next(), cx);
+    }
+
+    pub(crate) fn set_document_mode(&mut self, mode: DocumentMode, cx: &mut Context<Self>) {
+        if self.document_mode() == mode || !self.active_tab_supports_text_buffer() {
+            return;
+        }
+        self.finish_ime_composition();
+        self.commit_history_transaction();
+        let mut scroll_anchor = self.capture_document_mode_scroll_anchor();
+        self.cancel_outline_navigation();
+        self.pending_click_anchor = None;
+        self.pending_typing_scroll_guard = None;
+        self.pending_scroll_to_cursor = false;
+        self.pending_center_cursor_in_view = false;
+        self.pending_center_cursor_in_view_immediately = false;
+        self.center_cursor_confirm_frames = 0;
+        self.reading_mode = mode == DocumentMode::Reading;
+        self.source_mode = mode == DocumentMode::Source;
+        // Keep the saved alignment preference untouched. Source presentation
+        // forces left alignment independently and releases it on exit.
         if let Some(index) = self.active_tab_index() {
             self.tabs[index].reading_mode = self.reading_mode;
+            self.tabs[index].source_mode = self.source_mode;
         }
-        if self.reading_mode {
-            self.reset_table_handles();
-            self.hovering_table_start = None;
-            self.table_border_segment_areas.clear();
-            self.code_mode_preview_key = None;
+        self.reset_table_handles();
+        self.hovering_table_start = None;
+        self.table_border_segment_areas.clear();
+        self.table_boundary_caret = None;
+        self.table_boundary_drag_origin = None;
+        self.table_source = None;
+        self.pending_code_fence = None;
+        self.code_mode_preview_key = None;
+        self.pending_preview_reveal = None;
+        self.close_preview_overlay();
+        self.cancel_line_drag(cx);
+        self.dismiss_line_format_toolbar(cx);
+        self.dismiss_slash_menu(cx);
+        self.wiki_link_start = None;
+        self.clear_marked_ranges();
+        self.pending_line_display_transfer = None;
+        self.clear_inline_diff_phantom_layout_cache();
+        self.clear_active_tab_layout_cache();
+        self.reparse();
+        self.table_cursor_paint_bounds = None;
+        if let Some(anchor) = scroll_anchor.as_mut() {
+            anchor.epoch = self.scroll_anim_epoch;
         }
-        self.layout_dirty = true;
+        self.document_mode_scroll_anchor = scroll_anchor;
+        // Bootstrap at the new estimated source position before prepaint; exact
+        // soft-row/table geometry is reconciled after shaping, without centering.
+        self.restore_document_mode_scroll_anchor(false);
         self.close_context_menu_immediately(cx);
+        self.persist_active_tab_state();
+        session_store::persist_session(self);
         cx.notify();
+    }
+
+    pub(crate) fn document_mode_scroll_anchor_is_current(&self) -> bool {
+        self.document_mode_scroll_anchor
+            .as_ref()
+            .is_some_and(|anchor| {
+                anchor.is_current(
+                    self.active_tab_id.as_deref(),
+                    self.cursor,
+                    self.scroll_anim_epoch,
+                )
+            })
+    }
+
+    fn document_mode_anchor_content_y(&self, offset: usize) -> (f32, bool) {
+        let line = self
+            .buffer
+            .offset_to_line_col(offset.min(self.buffer.len()))
+            .0;
+        let decoration = self.decorations.get(line);
+        if let Some(preview) = decoration.and_then(|row| row.block_preview.as_ref())
+            && self.focused_code_mode_preview_key().as_deref() != Some(preview.cache_key.as_str())
+        {
+            // A hidden source row is represented by the rendered block. Its top
+            // is the closest stable visual counterpart when entering Reading.
+            let start = preview.start_line;
+            let measured = !self.layout_dirty
+                && self
+                    .line_display_info
+                    .get(start)
+                    .is_some_and(Option::is_some);
+            return (
+                self.line_y_offset(start) + self.block_padding_for_line(start).0,
+                measured,
+            );
+        }
+        if offset == self.cursor.offset
+            && !self.layout_dirty
+            && let Some((top, _)) = self.cursor_vertical_bounds()
+        {
+            return (top, true);
+        }
+        if let Some(table) = decoration.and_then(|row| row.table_info.as_ref()) {
+            if !self.layout_dirty
+                && let Some((table_start, source_line, column)) = self.table_cell_for_offset(offset)
+                && let Some(row) = self.table_visual_row_for_source_line(table_start, source_line)
+                && let Some((bounds, ..)) = self
+                    .table_click_areas
+                    .iter()
+                    .find(|(_, t, r, c)| *t == table_start && *r == row && *c == column)
+            {
+                let padding_y = self.scaled(self.styles.table.table_cell_padding_px) * 0.6;
+                return (
+                    f32::from(bounds.origin.y - self.content_origin.y)
+                        + self.scroll_offset
+                        + padding_y,
+                    true,
+                );
+            }
+            return (self.text_y_offset_for_line(table.table_start_line), false);
+        }
+        let row = (!self.layout_dirty)
+            .then(|| self.visual_row_vertical_bounds_for_offset(offset))
+            .flatten();
+        (
+            self.text_y_offset_for_line(line) + row.map_or(0.0, |(top, _)| top),
+            row.is_some(),
+        )
+    }
+
+    fn capture_document_mode_scroll_anchor(&self) -> Option<DocumentModeScrollAnchor> {
+        if self.last_viewport_height <= 0.0 {
+            return None;
+        }
+        let tab_id = self.active_tab_id.clone()?;
+        let existing = self
+            .document_mode_scroll_anchor
+            .as_ref()
+            .filter(|_| self.document_mode_scroll_anchor_is_current());
+        let (offset, screen_y) = if let Some(anchor) = existing {
+            // Rapid repeated clicks must retain the original screen position,
+            // not a transient estimate from the previous mode's first frame.
+            (anchor.offset, anchor.screen_y)
+        } else {
+            let (content_y, _) = self.document_mode_anchor_content_y(self.cursor.offset);
+            let screen_y = content_y - self.scroll_offset;
+            if (0.0..self.editor_visible_height()).contains(&screen_y) {
+                (self.cursor.offset, screen_y)
+            } else {
+                // A caret scrolled out of view must not yank the document back.
+                self.document_mode_viewport_anchor()
+            }
+        };
+        Some(DocumentModeScrollAnchor {
+            tab_id,
+            cursor: self.cursor,
+            offset,
+            screen_y,
+            epoch: self.scroll_anim_epoch,
+            remaining_frames: 8,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(3),
+            confirmation: CursorCenterConfirmation::default(),
+        })
+    }
+
+    fn document_mode_viewport_anchor(&self) -> (usize, f32) {
+        let viewport_y = self.content_origin.y;
+        if !self.layout_dirty
+            && let Some((bounds, table, row, column)) = self
+                .table_click_areas
+                .iter()
+                .find(|(bounds, ..)| bounds.origin.y <= viewport_y && bounds.bottom() > viewport_y)
+            && let Some(line) = self.table_source_line_for_visual_row(*table, *row)
+            && let Some(cell) = self
+                .decorations
+                .get(line)
+                .and_then(|row| row.table_info.as_ref())
+                .and_then(|table| table.cell_ranges.get(*column))
+        {
+            let padding_y = self.scaled(self.styles.table.table_cell_padding_px) * 0.6;
+            return (
+                self.buffer.line_start(line) + cell.start,
+                f32::from(bounds.origin.y - viewport_y) + padding_y,
+            );
+        }
+        let line = self.line_at_y(self.scroll_offset);
+        let text_y = self.text_y_offset_for_line(line);
+        if !self.layout_dirty
+            && let Some(Some(info)) = self.line_display_info.get(line)
+            && info.visual_line_count > 0
+        {
+            let local_y = (self.scroll_offset - text_y).max(0.0);
+            let row = info
+                .wrapped_line
+                .row_for_y(gpui::px(local_y), gpui::px(info.line_height));
+            let top = info.wrapped_line.row_top(row, gpui::px(info.line_height));
+            let height = info
+                .wrapped_line
+                .row_height(row, gpui::px(info.line_height));
+            let index = info
+                .wrapped_line
+                .closest_index_for_position(
+                    gpui::point(gpui::px(0.0), top + height * 0.5),
+                    gpui::px(info.line_height),
+                )
+                .unwrap_or_else(|index| index);
+            return (
+                self.disp_to_buffer_offset(info, line, index),
+                text_y + f32::from(top) - self.scroll_offset,
+            );
+        }
+        let offset = self.buffer.line_start(line);
+        let (content_y, _) = self.document_mode_anchor_content_y(offset);
+        (offset, content_y - self.scroll_offset)
+    }
+
+    fn document_mode_images_pending(&self) -> bool {
+        let (start, end) = self.generated_preview_priority_line_range();
+        self.decorations.get(start..=end).is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row.image_path
+                    .as_ref()
+                    .is_some_and(|path| self.image_cache.get(path).is_none_or(Option::is_none))
+            })
+        })
+    }
+
+    /// Measure without advancing the frame confirmation: prepaint may discard
+    /// this attempt and reconcile its geometry again before anything is painted.
+    pub(crate) fn restore_document_mode_scroll_anchor(&mut self, after_layout: bool) -> bool {
+        let Some(anchor) = self.document_mode_scroll_anchor.take() else {
+            return false;
+        };
+        if !anchor.is_current(
+            self.active_tab_id.as_deref(),
+            self.cursor,
+            self.scroll_anim_epoch,
+        ) || self.pending_click_anchor.is_some()
+            || self.pending_typing_scroll_guard.is_some()
+            || self.pending_center_cursor_in_view
+            || self.pending_scroll_to_cursor
+            || self.editor_scrollbar_drag.is_some()
+        {
+            return false;
+        }
+        let (content_y, _) = self.document_mode_anchor_content_y(anchor.offset);
+        let target = screen_anchored_scroll_target(content_y, anchor.screen_y);
+        let previous_scroll = self.scroll_offset;
+        self.scroll_offset = target;
+        if after_layout {
+            self.clamp_scroll();
+        }
+        let changed = (self.scroll_offset - previous_scroll).abs() > 0.5;
+        if changed {
+            self.table_cursor_paint_bounds = None;
+        }
+        self.pending_preview_reveal = None;
+        self.document_mode_scroll_anchor = Some(anchor);
+        changed
+    }
+
+    /// Observe only accepted frames. Async image/preview completions wake the
+    /// anchor themselves; waiting for them must not poll or consume frame budget.
+    pub(crate) fn confirm_document_mode_scroll_anchor(&mut self) -> bool {
+        let Some(mut anchor) = self.document_mode_scroll_anchor.take() else {
+            return false;
+        };
+        if !anchor.is_current(
+            self.active_tab_id.as_deref(),
+            self.cursor,
+            self.scroll_anim_epoch,
+        ) {
+            return false;
+        }
+        let (content_y, measured) = self.document_mode_anchor_content_y(anchor.offset);
+        let target =
+            screen_anchored_scroll_target(content_y, anchor.screen_y).min(self.max_scroll_offset());
+        let previews_need_rendering = self.visible_generated_previews_need_rendering();
+        let previews_in_flight = self.generated_preview_rerender_pending
+            || self.generated_preview_rerender_task.is_some()
+            || self.document_mode_images_pending();
+        // Missing generated previews are synchronous work for the next frame,
+        // not async work whose completion can wake us. Keep that work bounded,
+        // and never count a capped/unfinished layout as settled.
+        if !anchor.confirm_painted_layout(
+            target,
+            self.scroll_offset,
+            measured,
+            previews_need_rendering,
+            previews_in_flight,
+        ) {
+            return false;
+        }
+        self.document_mode_scroll_anchor = Some(anchor);
+        previews_need_rendering || !previews_in_flight
     }
 
     pub(crate) fn toggle_outline_visibility(&mut self, cx: &mut Context<Self>) {
@@ -1970,6 +2400,182 @@ pub(crate) fn apply_macos_content_corner_radius(window: &mut Window, radius: f64
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn document_modes_cycle_without_overwriting_alignment_preference() {
+        use super::DocumentMode;
+        assert_eq!(DocumentMode::from_flags(false, false), DocumentMode::Edit);
+        assert_eq!(DocumentMode::from_flags(true, false), DocumentMode::Reading);
+        assert_eq!(DocumentMode::from_flags(false, true), DocumentMode::Source);
+        assert_eq!(DocumentMode::from_flags(true, true), DocumentMode::Source);
+        for preference in [false, true] {
+            let mut mode = DocumentMode::Edit;
+            for expected in [
+                DocumentMode::Reading,
+                DocumentMode::Source,
+                DocumentMode::Edit,
+            ] {
+                mode = mode.next();
+                assert_eq!(mode, expected);
+                assert_eq!(
+                    mode.left_aligned(preference),
+                    mode == DocumentMode::Source || preference
+                );
+            }
+            assert_eq!(mode.left_aligned(preference), preference);
+        }
+    }
+
+    #[test]
+    fn source_word_wrap_is_independent_of_markdown_alignment_and_other_modes() {
+        use super::DocumentMode;
+        for left_aligned in [false, true] {
+            for non_markdown in [false, true] {
+                for source_wrap in [false, true] {
+                    assert_eq!(
+                        DocumentMode::Source.word_wrap(source_wrap, non_markdown, left_aligned),
+                        source_wrap
+                    );
+                    assert!(DocumentMode::Source.left_aligned(left_aligned));
+                    for mode in [DocumentMode::Edit, DocumentMode::Reading] {
+                        assert_eq!(
+                            mode.word_wrap(source_wrap, non_markdown, left_aligned),
+                            !non_markdown || !left_aligned
+                        );
+                        assert_eq!(mode.left_aligned(left_aligned), left_aligned);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn document_mode_scroll_keeps_the_visual_row_at_its_previous_screen_height() {
+        use super::screen_anchored_scroll_target;
+        for (old_content_y, old_scroll, new_content_y, expected) in [
+            (1400.0, 1100.0, 2200.0, 1900.0),
+            (2200.0, 1900.0, 1400.0, 1100.0),
+            (1400.0, 1100.0, 1432.0, 1132.0),
+            (1400.0, 1100.0, 1400.0, 1100.0),
+            (1400.0, 1450.0, 900.0, 950.0),
+        ] {
+            let screen_y = old_content_y - old_scroll;
+            let target = screen_anchored_scroll_target(new_content_y, screen_y);
+            assert_eq!(target, expected);
+            assert_eq!(new_content_y - target, screen_y);
+        }
+        // A shorter document cannot scroll past its beginning to preserve a row.
+        assert_eq!(screen_anchored_scroll_target(100.0, 300.0), 0.0);
+    }
+
+    fn document_mode_anchor() -> super::DocumentModeScrollAnchor {
+        super::DocumentModeScrollAnchor {
+            tab_id: "document".into(),
+            cursor: crate::cursor::Cursor {
+                offset: 12,
+                anchor: 4,
+            },
+            offset: 12,
+            screen_y: 200.0,
+            epoch: 7,
+            remaining_frames: 8,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(3),
+            confirmation: super::CursorCenterConfirmation::default(),
+        }
+    }
+
+    #[test]
+    fn document_mode_scroll_anchor_yields_to_newer_user_actions() {
+        let anchor = document_mode_anchor();
+        assert!(anchor.is_current(Some("document"), anchor.cursor, 7));
+        assert!(!anchor.is_current(Some("other-tab"), anchor.cursor, 7));
+        assert!(!anchor.is_current(None, anchor.cursor, 7));
+        assert!(!anchor.is_current(Some("document"), anchor.cursor, 8));
+        assert!(!anchor.is_current(
+            Some("document"),
+            crate::cursor::Cursor {
+                offset: 13,
+                ..anchor.cursor
+            },
+            7
+        ));
+        assert!(!anchor.is_current(
+            Some("document"),
+            crate::cursor::Cursor {
+                anchor: 5,
+                ..anchor.cursor
+            },
+            7
+        ));
+    }
+
+    #[test]
+    fn document_mode_confirmation_observes_only_geometry_painted_at_the_target() {
+        let mut anchor = document_mode_anchor();
+        for _ in 0..3 {
+            assert!(anchor.confirm_painted_layout(1100.0, 900.0, true, false, false));
+        }
+        assert_eq!(anchor.remaining_frames, 5);
+        // Rejected same-frame attempts never reach confirmation. Once an
+        // accepted frame reaches the target it still needs stable observations.
+        assert!(anchor.confirm_painted_layout(1100.0, 1100.0, true, false, false));
+        assert!(anchor.confirm_painted_layout(1100.0, 1100.0, true, false, false));
+        assert!(!anchor.confirm_painted_layout(1100.0, 1100.0, true, false, false));
+    }
+
+    #[test]
+    fn document_mode_missing_previews_request_bounded_followup_layouts() {
+        // A resized/reflowed viewport can expose previews after this frame's
+        // synchronous preview budget was spent. They need another frame rather
+        // than an async completion notification that will never arrive. A slow
+        // image alongside this work must not bypass the active-frame budget.
+        for previews_in_flight in [false, true] {
+            let mut anchor = document_mode_anchor();
+            for _ in 0..7 {
+                assert!(anchor.confirm_painted_layout(
+                    900.0,
+                    900.0,
+                    true,
+                    true,
+                    previews_in_flight,
+                ));
+            }
+            assert!(!anchor.confirm_painted_layout(900.0, 900.0, true, true, previews_in_flight,));
+            assert_eq!(anchor.remaining_frames, 0);
+        }
+        let mut anchor = document_mode_anchor();
+        for _ in 0..12 {
+            assert!(anchor.confirm_painted_layout(900.0, 900.0, true, false, true));
+        }
+        assert_eq!(anchor.remaining_frames, 8);
+    }
+
+    #[test]
+    fn document_mode_scroll_confirmation_settles_and_bounds_preview_work() {
+        let mut anchor = document_mode_anchor();
+        assert!(anchor.needs_another_layout(Some(900.0), false));
+        assert!(anchor.needs_another_layout(Some(900.0), false));
+        assert!(!anchor.needs_another_layout(Some(900.0), false));
+        let mut anchor = document_mode_anchor();
+        for _ in 0..7 {
+            assert!(anchor.needs_another_layout(None, false));
+        }
+        assert!(!anchor.needs_another_layout(None, false));
+        // Image completion wakes reconciliation, without burning frame budget
+        // or polling while the decoder is still in flight.
+        let mut anchor = document_mode_anchor();
+        for _ in 0..12 {
+            assert!(anchor.needs_another_layout(Some(900.0), true));
+        }
+        assert_eq!(anchor.remaining_frames, 8);
+        assert!(anchor.needs_another_layout(Some(1100.0), false));
+        assert!(anchor.needs_another_layout(Some(1100.0), false));
+        assert!(!anchor.needs_another_layout(Some(1100.0), false));
+        let mut anchor = document_mode_anchor();
+        anchor.deadline = std::time::Instant::now() - std::time::Duration::from_millis(1);
+        assert!(!anchor.needs_another_layout(Some(900.0), true));
+        assert!(!anchor.is_current(Some("document"), anchor.cursor, 7));
+    }
+
     #[cfg(target_os = "macos")]
     use super::{EditorView, traffic_light_offsets_for_layout};
     use super::{

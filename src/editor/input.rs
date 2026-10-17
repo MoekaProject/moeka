@@ -2268,7 +2268,7 @@ impl EditorView {
         }
         let toolbar_hover_changed = self.update_toolbar_corner_hover(event.position, cx);
         let track_precise_hover_position = event.modifiers.secondary()
-            || (self.active_tab_is_non_markdown_text() && !self.editor_wraps_to_available_width())
+            || self.editor_uses_horizontal_text_scroll()
             || !self.code_block_hover_areas.is_empty()
             || self.preview_overlay.is_some();
         if track_precise_hover_position {
@@ -2282,7 +2282,7 @@ impl EditorView {
         let scrollbar_hovered =
             dragging_scrollbar || self.editor_scrollbar_region_contains(event.position);
         self.set_editor_scrollbar_hovered(scrollbar_hovered, cx);
-        if self.active_tab_is_non_markdown_text() && !self.editor_wraps_to_available_width() {
+        if self.editor_uses_horizontal_text_scroll() {
             self.sync_code_block_horizontal_scrollbar(cx);
         }
         if dragging_scrollbar || dragging_code_block_scrollbar {
@@ -3819,6 +3819,7 @@ impl EditorView {
         if group_plan.is_some_and(|plan| plan.active) {
             active_ranges.push(0..line_content.len());
         }
+        helpers::expand_source_syntax(self.source_mode, line_content.len(), &mut active_ranges);
         helpers::apply_front_matter_group_display(
             &mut decoration,
             line_idx,
@@ -3908,10 +3909,7 @@ impl EditorView {
             self.styles.editor.editor_heading_marker_text_color,
             Some(self.styles.table.front_matter_key_text_color),
             self.active_tab_is_non_markdown_text(),
-            match self.active_file_kind() {
-                Some(FileKind::Code { language }) => Some(language.as_str()),
-                _ => None,
-            },
+            self.source_highlight_language(),
         );
 
         if front_matter_summary.is_some() {
@@ -4338,7 +4336,7 @@ impl EditorView {
         if self.context_menu.is_some() {
             return;
         }
-        if self.active_tab_is_non_markdown_text() && !self.editor_wraps_to_available_width() {
+        if self.editor_uses_horizontal_text_scroll() {
             let delta = event.delta.pixel_delta(px(40.0));
             let delta_x = f32::from(delta.x);
             let delta_y = f32::from(delta.y);

@@ -82,7 +82,11 @@ impl EditorView {
                     let repo_root = git_repo_root_result(&read_dir)
                         .map_err(std::io::Error::other)?
                         .ok_or_else(|| std::io::Error::other("Not a Git repository"))?;
-                    collect_local_branches(&repo_root).map_err(std::io::Error::other)
+                    let branches =
+                        collect_local_branches(&repo_root).map_err(std::io::Error::other)?;
+                    let current = run_git(&repo_root, &["branch", "--show-current"])
+                        .map_err(std::io::Error::other)?;
+                    Ok((branches, (!current.is_empty()).then_some(current)))
                 })
                 .await;
             this.update(cx, |editor, cx| {
@@ -93,8 +97,9 @@ impl EditorView {
                     return;
                 }
                 match branches {
-                    Ok(branches) => {
+                    Ok((branches, current)) => {
                         editor.branch_picker_all = branches;
+                        editor.branch_picker_current = current;
                         editor.update_branch_picker_results(cx);
                     }
                     Err(error) => editor.notify_fs_error("List Git branches", &base_dir, error, cx),
@@ -123,9 +128,7 @@ impl EditorView {
         self.branch_picker_query.clear();
         self.branch_picker_selected_index = 0;
         self.branch_picker_all.clear();
-        self.branch_picker_current = self
-            .git_panel_repo_status()
-            .map(|status| status.branch_label());
+        self.branch_picker_current = self.status_bar_git_branch_label();
         self.update_branch_picker_results(cx);
 
         if self.branch_picker_editor.is_none() {

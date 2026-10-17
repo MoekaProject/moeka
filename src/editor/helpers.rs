@@ -111,6 +111,7 @@ struct CodeHighlightCacheKey {
     language: String,
     line_content: String,
     palette: CodeSyntaxPalette,
+    math_context: bool,
 }
 
 #[derive(Clone)]
@@ -1015,6 +1016,114 @@ fn build_front_matter_display_text(
     }
     mapping.copy(value_range.end..source.len());
     mapping.finish(!active && !info.display_prefix.is_empty())
+}
+
+// Retain math-preview provenance after removing rich metadata. A canonical fence
+// language is only its first info-string word, so it cannot produce this tag.
+// The leading `latex` also keeps grammar lookup valid for the projected row.
+pub(super) const SOURCE_MATH_HIGHLIGHT_LANGUAGE: &str = "latex (source math)";
+
+/// Source is expanded Markdown, not a code editor. Remove rich block presentation
+/// but retain its syntax language; ordinary Markdown keeps its roles and spans.
+pub(super) fn source_markdown_decoration(decoration: &mut LineDecoration) {
+    if matches!(
+        decoration.block_type,
+        BlockType::CodeBlock | BlockType::CodeBlockFence | BlockType::Table
+    ) || decoration.block_preview.is_some()
+        || decoration.front_matter.is_some()
+    {
+        let preview_language =
+            decoration
+                .block_preview
+                .as_ref()
+                .map(|preview| match preview.kind {
+                    BlockPreviewKind::Math => SOURCE_MATH_HIGHLIGHT_LANGUAGE,
+                    BlockPreviewKind::Mermaid => "mermaid",
+                });
+        let is_table = decoration.front_matter.is_none()
+            && decoration.table_info.as_ref().map_or(
+                decoration.block_type == BlockType::Table
+                    || decoration.code_language.as_deref() == Some("table"),
+                |table| !table.is_front_matter,
+            );
+        let language = if is_table {
+            // Keep ink, not table ownership: native text shaping must see raw
+            // pipes/cells without invoking rich layout or hiding separator rows.
+            Some("markdown".to_string())
+        } else if let Some(language) = preview_language {
+            Some(language.to_string())
+        } else if decoration.table_info.is_none()
+            && decoration.front_matter.is_none()
+            && matches!(
+                decoration.block_type,
+                BlockType::CodeBlock | BlockType::CodeBlockFence
+            )
+        {
+            // Closing fences may lack a parser language. Markdown is sufficient
+            // for their literal markers; never infer a language for code bodies.
+            decoration.code_language.take().or_else(|| {
+                (decoration.block_type == BlockType::CodeBlockFence).then(|| "markdown".to_string())
+            })
+        } else {
+            None
+        };
+        let added = std::mem::take(&mut decoration.diff_added_spans);
+        let removed = std::mem::take(&mut decoration.diff_removed_spans);
+        *decoration = LineDecoration::default();
+        if language.is_some() || !added.is_empty() || !removed.is_empty() {
+            decoration.code_language = language;
+            decoration.diff_added_spans = added;
+            decoration.diff_removed_spans = removed;
+        }
+    } else if let Some(payload) = decoration.payload_mut() {
+        payload.image_path = None;
+        // Some replacements (notably HTML breaks) survive even a full active
+        // range. Source must keep their exact bytes and identity source maps.
+        payload.display_replacements.clear();
+        payload.inline_math_spans.clear();
+    }
+}
+
+/// Language grammars do not consistently color Markdown fences or standalone
+/// math delimiters. This is ink only, on projected source rows, never rich UI.
+fn apply_source_block_marker_colors(
+    line: &str,
+    language: &str,
+    theme: &Theme,
+    colors: &mut [Hsla],
+) {
+    let trimmed = line.trim();
+    let start = line.len() - line.trim_start().len();
+    if let Some(marker @ (b'`' | b'~')) = trimmed.bytes().next() {
+        let count = trimmed.bytes().take_while(|byte| *byte == marker).count();
+        if count >= 3 {
+            colors[start..start + count].fill(theme.syntax_marker);
+            return;
+        }
+    }
+    if language == SOURCE_MATH_HIGHLIGHT_LANGUAGE {
+        for marker in ["$$", "\\[", "\\]"] {
+            if trimmed.starts_with(marker) {
+                colors[start..start + marker.len()].fill(theme.syntax_marker);
+            }
+            if trimmed.ends_with(marker) {
+                let end = start + trimmed.len();
+                colors[end - marker.len()..end].fill(theme.syntax_marker);
+            }
+        }
+    }
+}
+
+/// Expansion state is presentation-only: never synthesize a cursor selection.
+pub(super) fn expand_source_syntax(
+    source_mode: bool,
+    line_len: usize,
+    active_ranges: &mut Vec<Range<usize>>,
+) {
+    if source_mode {
+        active_ranges.clear();
+        active_ranges.push(0..line_len);
+    }
 }
 
 /// Build display text by selectively hiding syntax ranges.
@@ -3076,7 +3185,59 @@ fn apply_highlight_range(
 }
 
 fn is_mermaid_word_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')
+    ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.')
+}
+
+/// Arrow runs are recognized before identifiers, including adjacent endpoints.
+/// A single hyphen/dot still belongs to an ID such as `my-node.v2`.
+fn mermaid_link_len(source: &str) -> usize {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while bytes.get(index) == Some(&b'<') {
+        index += 1;
+    }
+    if index == 0
+        && ["o--o", "o--x", "x--o", "x--x", "o---", "x---"]
+            .iter()
+            .any(|prefix| source.starts_with(prefix))
+    {
+        index += 1;
+    }
+    let body = &source[index..];
+    if !["--", "-.", "->", "-x", "-)", "==", "~~~"]
+        .iter()
+        .any(|prefix| body.starts_with(prefix))
+    {
+        return 0;
+    }
+    while matches!(bytes.get(index), Some(b'-' | b'.' | b'=' | b'~')) {
+        index += 1;
+    }
+    if matches!(bytes.get(index), Some(b'>' | b'<')) {
+        while matches!(bytes.get(index), Some(b'>' | b'<')) {
+            index += 1;
+        }
+    } else if matches!(bytes.get(index), Some(b'o' | b'x' | b')')) {
+        index += 1;
+    }
+    while matches!(bytes.get(index), Some(b'+' | b'-')) {
+        index += 1;
+    }
+    index
+}
+
+/// Quoted labels may contain escaped quotes and syntax-looking Unicode text.
+fn mermaid_quoted_end(source: &str, start: usize) -> usize {
+    let quote = source.as_bytes()[start];
+    let mut chars = source[start + 1..].char_indices();
+    while let Some((offset, ch)) = chars.next() {
+        if ch == '\\' {
+            chars.next();
+        } else if ch as u32 == quote as u32 {
+            return start + 1 + offset + ch.len_utf8();
+        }
+    }
+    source.len()
 }
 
 fn is_mermaid_language(language: &str) -> bool {
@@ -3111,6 +3272,7 @@ fn apply_mermaid_block_highlighting(
     let string_color = code_palette_hsla(palette.string);
     let operator_color = code_palette_hsla(palette.operator);
     let number_color = code_palette_hsla(palette.number);
+    let identifier_color = code_palette_hsla(palette.variable);
 
     let trimmed = line_content.trim_start();
     if trimmed.starts_with("%%") && !trimmed.starts_with("%%{") {
@@ -3126,61 +3288,18 @@ fn apply_mermaid_block_highlighting(
         return;
     }
 
-    let mut string_ranges = Vec::new();
-    let mut byte_index = 0usize;
-    while byte_index < line_content.len() {
-        let mut chars = line_content[byte_index..].char_indices();
-        let Some((_, ch)) = chars.next() else {
-            break;
-        };
-        let ch_len = ch.len_utf8();
-        if matches!(ch, '"' | '\'') {
-            let start = byte_index;
-            byte_index += ch_len;
-            while byte_index < line_content.len() {
-                let mut inner_chars = line_content[byte_index..].char_indices();
-                let Some((_, next_ch)) = inner_chars.next() else {
-                    break;
-                };
-                byte_index += next_ch.len_utf8();
-                if next_ch == ch {
-                    break;
-                }
-            }
-            let range = start..byte_index.min(line_content.len());
-            apply_highlight_range(
-                range.clone(),
-                string_color,
-                FontWeight::NORMAL,
-                FontStyle::Normal,
-                colors,
-                weights,
-                styles,
-            );
-            string_ranges.push(range);
-            continue;
-        }
-        byte_index += ch_len;
-    }
-
-    let range_contains = |byte: usize| {
-        string_ranges
-            .iter()
-            .any(|range| byte >= range.start && byte < range.end)
-    };
-
+    // Rows are independent so viewport/lazy/incremental shaping never depends
+    // on which neighbouring rows happened to be painted first.
+    let first_word = trimmed.split_whitespace().next().unwrap_or_default();
+    let colon_label = matches!(
+        first_word.to_ascii_lowercase().as_str(),
+        "note" | "title" | "acctitle" | "accdescr"
+    );
+    let participant_alias = trimmed.to_ascii_lowercase().contains("participant ")
+        || trimmed.to_ascii_lowercase().starts_with("actor ");
+    let mut saw_link = false;
     let mut index = 0usize;
     while index < line_content.len() {
-        if range_contains(index) {
-            if let Some(range) = string_ranges
-                .iter()
-                .find(|range| index >= range.start && index < range.end)
-            {
-                index = range.end;
-                continue;
-            }
-        }
-
         let mut chars = line_content[index..].char_indices();
         let Some((_, ch)) = chars.next() else {
             break;
@@ -3192,33 +3311,194 @@ fn apply_mermaid_block_highlighting(
             continue;
         }
 
-        if ch.is_ascii_digit() {
-            let start = index;
-            index += ch_len;
-            while index < line_content.len() {
-                let mut inner_chars = line_content[index..].char_indices();
-                let Some((_, next_ch)) = inner_chars.next() else {
-                    break;
-                };
-                if next_ch.is_ascii_digit() || matches!(next_ch, '.' | '_') {
-                    index += next_ch.len_utf8();
-                } else {
-                    break;
-                }
-            }
+        if line_content[index..].starts_with("%%") {
             apply_highlight_range(
-                start..index,
-                number_color,
+                index..line_content.len(),
+                comment_color,
+                FontWeight::NORMAL,
+                FontStyle::Italic,
+                colors,
+                weights,
+                styles,
+            );
+            break;
+        }
+
+        if matches!(ch, '"' | '\'' | '`') {
+            let end = mermaid_quoted_end(line_content, index);
+            apply_highlight_range(
+                index..end,
+                string_color,
                 FontWeight::NORMAL,
                 FontStyle::Normal,
                 colors,
                 weights,
                 styles,
             );
+            index = end;
             continue;
         }
 
-        if is_mermaid_word_char(ch) {
+        // Node shapes and edge labels protect their contents from keyword,
+        // number, arrow and comment recognition (e.g. A["end --> 中"]).
+        if matches!(ch, '[' | '{' | '(' | '|') {
+            let start = index;
+            let closing = match ch {
+                '[' => ']',
+                '{' => '}',
+                '(' => ')',
+                _ => '|',
+            };
+            let slanted =
+                ch == '[' && matches!(line_content.as_bytes().get(index + 1), Some(b'/' | b'\\'));
+            let opening_len = ch_len + usize::from(slanted);
+            let mut stack = vec![(closing, slanted)];
+            let mut delimiters = vec![index..index + opening_len];
+            index += opening_len;
+            while index < line_content.len() {
+                let inner = line_content[index..].chars().next().unwrap();
+                // In [/...\\] and [\\...\\], the backslash is part of the
+                // shape closer, not an escape of the closing bracket.
+                if stack.last() == Some(&(']', true))
+                    && matches!(inner, '/' | '\\')
+                    && line_content.as_bytes().get(index + 1) == Some(&b']')
+                {
+                    delimiters.push(index..index + 2);
+                    stack.pop();
+                    index += 2;
+                    if stack.is_empty() {
+                        break;
+                    }
+                    continue;
+                }
+                if matches!(inner, '"' | '`')
+                    || inner == '\''
+                        && !line_content[..index].ends_with(|ch: char| ch.is_alphanumeric())
+                {
+                    index = mermaid_quoted_end(line_content, index);
+                    continue;
+                }
+                if inner == '\\' {
+                    index += 1;
+                    if let Some(escaped) = line_content[index..].chars().next() {
+                        index += escaped.len_utf8();
+                    }
+                    continue;
+                }
+                let mut inner_len = inner.len_utf8();
+                if stack.last().is_some_and(|(closing, _)| inner == *closing) {
+                    delimiters.push(index..index + inner_len);
+                    stack.pop();
+                } else if ch != '|' && matches!(inner, '[' | '{' | '(') {
+                    let slanted = inner == '['
+                        && matches!(line_content.as_bytes().get(index + 1), Some(b'/' | b'\\'));
+                    stack.push((
+                        match inner {
+                            '[' => ']',
+                            '{' => '}',
+                            _ => ')',
+                        },
+                        slanted,
+                    ));
+                    inner_len += usize::from(slanted);
+                    delimiters.push(index..index + inner_len);
+                }
+                index += inner_len;
+                if stack.is_empty() {
+                    break;
+                }
+            }
+            apply_highlight_range(
+                start..index,
+                string_color,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                colors,
+                weights,
+                styles,
+            );
+            for delimiter in delimiters {
+                apply_highlight_range(
+                    delimiter,
+                    operator_color,
+                    FontWeight::NORMAL,
+                    FontStyle::Normal,
+                    colors,
+                    weights,
+                    styles,
+                );
+            }
+            continue;
+        }
+
+        let link_len = mermaid_link_len(&line_content[index..]);
+        if link_len > 0 {
+            let start = index;
+            index += link_len;
+            saw_link = true;
+            apply_highlight_range(
+                start..index,
+                operator_color,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                colors,
+                weights,
+                styles,
+            );
+            // Flowchart's alternative `-- text -->` / `-. text .->` /
+            // `== text ==>` label spellings have no brackets or pipe pair.
+            if matches!(&line_content[start..index], "--" | "-." | "==") {
+                let label_start = index;
+                let label_end = line_content[index..]
+                    .char_indices()
+                    .find_map(|(offset, _)| {
+                        let rest = &line_content[index + offset..];
+                        (mermaid_link_len(rest) > 0 || rest.starts_with(".->"))
+                            .then_some(index + offset)
+                    });
+                if let Some(end) = label_end {
+                    apply_highlight_range(
+                        label_start..end,
+                        string_color,
+                        FontWeight::NORMAL,
+                        FontStyle::Normal,
+                        colors,
+                        weights,
+                        styles,
+                    );
+                    index = end;
+                }
+            }
+            continue;
+        }
+
+        if ch == ':'
+            && (saw_link || colon_label)
+            && !line_content[index..].starts_with("::")
+            && !line_content[..index].ends_with(':')
+        {
+            apply_highlight_range(
+                index..index + 1,
+                operator_color,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                colors,
+                weights,
+                styles,
+            );
+            apply_highlight_range(
+                index + 1..line_content.len(),
+                string_color,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                colors,
+                weights,
+                styles,
+            );
+            break;
+        }
+
+        if is_mermaid_word_char(ch) && !matches!(ch, '-' | '.') {
             let start = index;
             index += ch_len;
             while index < line_content.len() {
@@ -3226,7 +3506,7 @@ fn apply_mermaid_block_highlighting(
                 let Some((_, next_ch)) = inner_chars.next() else {
                     break;
                 };
-                if is_mermaid_word_char(next_ch) {
+                if is_mermaid_word_char(next_ch) && mermaid_link_len(&line_content[index..]) == 0 {
                     index += next_ch.len_utf8();
                 } else {
                     break;
@@ -3298,31 +3578,62 @@ fn apply_mermaid_block_highlighting(
                     | "fork"
                     | "join"
                     | "as"
+                    | "right"
+                    | "left"
+                    | "of"
+                    | "over"
                     | "accdescr"
                     | "acctitle"
             );
             let is_direction = matches!(lowered.as_str(), "tb" | "td" | "bt" | "lr" | "rl");
-            if is_keyword || is_direction {
+            let is_number = token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.');
+            apply_highlight_range(
+                start..index,
+                if is_direction {
+                    direction_color
+                } else if is_keyword {
+                    keyword_color
+                } else if is_number {
+                    number_color
+                } else {
+                    identifier_color
+                },
+                if is_keyword || is_direction {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::NORMAL
+                },
+                FontStyle::Normal,
+                colors,
+                weights,
+                styles,
+            );
+            if participant_alias && lowered == "as"
+                || start == line_content.len() - trimmed.len()
+                    && matches!(
+                        lowered.as_str(),
+                        "loop" | "alt" | "else" | "opt" | "section" | "title"
+                    )
+            {
                 apply_highlight_range(
-                    start..index,
-                    if is_direction {
-                        direction_color
-                    } else {
-                        keyword_color
-                    },
-                    FontWeight::BOLD,
+                    index..line_content.len(),
+                    string_color,
+                    FontWeight::NORMAL,
                     FontStyle::Normal,
                     colors,
                     weights,
                     styles,
                 );
+                break;
             }
             continue;
         }
 
         if matches!(
             ch,
-            '[' | ']' | '{' | '}' | '(' | ')' | '|' | ':' | ';' | ','
+            '[' | ']' | '{' | '}' | '(' | ')' | '|' | ':' | ';' | ',' | '&'
         ) {
             apply_highlight_range(
                 index..(index + ch_len),
@@ -6146,6 +6457,952 @@ mod tests {
             );
             assert_eq!((width, height), (60.0, 20.0));
             assert_eq!((background_width, background_height), (84.0, 36.0));
+        }
+    }
+
+    #[test]
+    fn source_markdown_shaping_matches_fully_expanded_markdown_styles() {
+        let theme = Theme::one_dark();
+        for line in [
+            "plain **bold** *italic* ~~gone~~ ==mark== `code` [link](note.md)",
+            "# title **bold**",
+            "- **bold** and `code`",
+            "1. **bold** and *italic*",
+            "- [x] **bold**",
+            "> quote *italic*",
+        ] {
+            let canonical = markdown::parse_decorations(line).remove(0);
+            let mut projected = canonical.clone();
+            super::source_markdown_decoration(&mut projected);
+            let mut source_active = vec![2..2];
+            super::expand_source_syntax(true, line.len(), &mut source_active);
+            assert_eq!(source_active, vec![0..line.len()]);
+            let shape = |decoration: &LineDecoration, active: &[Range<usize>]| {
+                let (display, d2b, b2d, collapsed) = build_display_text(
+                    line, decoration, active, false, None, 0, 3, 3, 2, 0, 0.7, 0.7, 0.7,
+                );
+                assert_eq!(display, line);
+                assert_eq!(d2b, (0..line.len()).collect::<Vec<_>>());
+                assert_eq!(b2d, (0..=line.len()).collect::<Vec<_>>());
+                assert!(!collapsed);
+                build_text_runs_for_display(
+                    &display,
+                    line,
+                    &d2b,
+                    decoration,
+                    active,
+                    false,
+                    collapsed,
+                    &font("Test Body"),
+                    &font("Test CJK"),
+                    &font("Test Mono"),
+                    &font("Test Heading"),
+                    &font("Test Heading CJK"),
+                    &font("Test Italic"),
+                    &font("Test Italic CJK"),
+                    3,
+                    16.0,
+                    &theme,
+                    theme.git_status_added,
+                    theme.text_danger,
+                    theme.link,
+                    FontWeight::NORMAL,
+                    theme.list_marker,
+                    FontWeight::BOLD,
+                    theme.syntax_marker,
+                    None,
+                    false,
+                )
+            };
+            let source_runs = shape(&projected, &source_active);
+            let selected_runs = shape(&canonical, &[0..line.len()]);
+            assert_eq!(source_runs.len(), selected_runs.len());
+            for (source, selected) in source_runs.iter().zip(&selected_runs) {
+                assert_eq!(source.len, selected.len);
+                assert_eq!(source.font, selected.font);
+                assert_eq!(source.color, selected.color);
+                assert_eq!(source.background_color, selected.background_color);
+                assert_eq!(source.underline, selected.underline);
+                assert_eq!(source.strikethrough, selected.strikethrough);
+            }
+            if line.starts_with("plain") {
+                assert_eq!(
+                    run_at_byte(&source_runs, 0).font.family.as_ref(),
+                    "Test Body"
+                );
+                assert_eq!(
+                    run_at_byte(&source_runs, line.find("bold").unwrap())
+                        .font
+                        .weight,
+                    FontWeight::EXTRA_BOLD
+                );
+                assert_eq!(
+                    run_at_byte(&source_runs, line.find("italic").unwrap())
+                        .font
+                        .family
+                        .as_ref(),
+                    "Test Italic"
+                );
+                assert_eq!(
+                    run_at_byte(&source_runs, line.find("code").unwrap())
+                        .font
+                        .family
+                        .as_ref(),
+                    "Test Mono"
+                );
+            } else if line.starts_with('#') {
+                assert_eq!(
+                    run_at_byte(&source_runs, line.find("title").unwrap())
+                        .font
+                        .family
+                        .as_ref(),
+                    "Test Heading"
+                );
+            }
+        }
+        let mut unchanged = vec![2..2];
+        super::expand_source_syntax(false, 10, &mut unchanged);
+        assert_eq!(unchanged, vec![2..2]);
+    }
+
+    fn source_syntax_runs(
+        line: &str,
+        canonical: &LineDecoration,
+        theme: &Theme,
+    ) -> (LineDecoration, Vec<TextRun>) {
+        let mut projected = canonical.clone();
+        super::source_markdown_decoration(&mut projected);
+        assert_eq!(projected.block_type, markdown::BlockType::Normal);
+        assert!(projected.block_preview.is_none());
+        assert!(projected.table_info.is_none());
+        assert!(projected.front_matter.is_none());
+        assert!(projected.inline_spans.is_empty());
+        assert!(projected.inline_math_spans.is_empty());
+        assert!(projected.syntax_ranges.is_empty());
+        let mut active = Vec::new();
+        super::expand_source_syntax(true, line.len(), &mut active);
+        let (display, d2b, b2d, collapsed) = build_display_text(
+            line, &projected, &active, false, None, 0, 3, 3, 2, 0, 0.7, 0.7, 0.7,
+        );
+        assert_eq!(display, line);
+        assert_eq!(d2b, (0..line.len()).collect::<Vec<_>>());
+        assert_eq!(b2d, (0..=line.len()).collect::<Vec<_>>());
+        assert!(!collapsed);
+        let runs = build_text_runs_for_display(
+            &display,
+            line,
+            &d2b,
+            &projected,
+            &active,
+            false,
+            collapsed,
+            &font("Test Body"),
+            &font("Test CJK"),
+            &font("Test Mono"),
+            &font("Test Heading"),
+            &font("Test Heading CJK"),
+            &font("Test Italic"),
+            &font("Test Italic CJK"),
+            3,
+            16.0,
+            theme,
+            theme.git_status_added,
+            theme.text_danger,
+            theme.link,
+            FontWeight::NORMAL,
+            theme.list_marker,
+            FontWeight::BOLD,
+            theme.syntax_marker,
+            None,
+            false,
+        );
+        if !line.is_empty() {
+            assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), line.len());
+        }
+        assert!(runs.iter().all(|run| run.background_color.is_none()));
+        (projected, runs)
+    }
+
+    #[test]
+    fn source_table_syntax_reaches_text_runs_without_rich_ui_or_hidden_bytes() {
+        for theme in [
+            Theme::one_dark(),
+            Theme::one_light(),
+            Theme::moeka_print_light(),
+        ] {
+            for source in [
+                "| **bold** | *italic* | `code` | [link](note.md) |\n| :--- | :---: | ---: | --- |\n| 中🙂 \\| literal | `a|b` | [[Page|alias]] | a<br>b |",
+                "**bold** | *italic* | `code` | [link](note.md)\n:--- | :---: | ---: | ---\n中🙂 | normal | plain | a<br>b",
+            ] {
+                let canonical = markdown::parse_decorations(source);
+                let saved = canonical.clone();
+                for (index, line) in source.lines().enumerate() {
+                    assert_eq!(canonical[index].block_type, markdown::BlockType::Table);
+                    let (projected, runs) = source_syntax_runs(line, &canonical[index], &theme);
+                    assert_eq!(projected.code_language.as_deref(), Some("markdown"));
+                    assert!(projected.display_replacements.is_empty());
+                    for offset in markdown::table_pipe_offsets(line) {
+                        assert_eq!(
+                            run_at_byte(&runs, offset).color,
+                            gpui::rgb(theme.code_palette.operator).into(),
+                            "{line:?}"
+                        );
+                    }
+                    if index == 1 {
+                        for (offset, ch) in line.char_indices() {
+                            if matches!(ch, '-' | ':') {
+                                assert_eq!(
+                                    run_at_byte(&runs, offset).color,
+                                    gpui::rgb(theme.code_palette.keyword).into(),
+                                    "{line:?}"
+                                );
+                            }
+                        }
+                    }
+                    for (token, color) in [
+                        ("bold", theme.code_palette.number),
+                        ("italic", theme.code_palette.keyword),
+                        ("code", theme.code_palette.string),
+                        ("note.md", theme.code_palette.function),
+                    ] {
+                        if let Some(offset) = line.find(token) {
+                            assert_eq!(
+                                run_at_byte(&runs, offset).color,
+                                gpui::rgb(color).into(),
+                                "{line:?}: {token}"
+                            );
+                        }
+                    }
+                    if let Some(offset) = line.find("bold") {
+                        assert_eq!(run_at_byte(&runs, offset).font.weight, FontWeight::BOLD);
+                    }
+                }
+                assert_eq!(canonical, saved);
+            }
+        }
+    }
+
+    #[test]
+    fn source_mermaid_flowchart_and_sequence_tokens_reach_text_runs() {
+        for theme in [Theme::one_dark(), Theme::one_light()] {
+            let p = theme.code_palette;
+            let cases = [
+                (
+                    "flowchart LR",
+                    vec![("flowchart", p.keyword), ("LR", p.number)],
+                ),
+                (
+                    "my-node.v2[中🙂 end 42] -->|yes end| other-node{Done?}",
+                    vec![
+                        ("my-node.v2", p.variable),
+                        ("中🙂 end 42", p.string),
+                        ("-->", p.operator),
+                        ("yes end", p.string),
+                        ("other-node", p.variable),
+                        ("Done?", p.string),
+                    ],
+                ),
+                (
+                    "A-.->B==>C<-->D~~~E",
+                    vec![
+                        ("A", p.variable),
+                        ("-.->", p.operator),
+                        ("B", p.variable),
+                        ("==>", p.operator),
+                        ("C", p.variable),
+                        ("<-->", p.operator),
+                        ("D", p.variable),
+                        ("~~~", p.operator),
+                        ("E", p.variable),
+                    ],
+                ),
+                (
+                    "A -- end label --> B",
+                    vec![
+                        ("--", p.operator),
+                        ("end label", p.string),
+                        ("B", p.variable),
+                    ],
+                ),
+                (
+                    "A -. dotted text .-> B",
+                    vec![
+                        ("dotted text", p.string),
+                        (".->", p.operator),
+                        ("B", p.variable),
+                    ],
+                ),
+                (
+                    "A == thick text ==> B",
+                    vec![
+                        ("thick text", p.string),
+                        ("==>", p.operator),
+                        ("B", p.variable),
+                    ],
+                ),
+                (
+                    "A o--o B & C x--x D",
+                    vec![
+                        ("o--o", p.operator),
+                        ("B", p.variable),
+                        ("x--x", p.operator),
+                        ("D", p.variable),
+                    ],
+                ),
+                (
+                    "x-->y",
+                    vec![("x", p.variable), ("-->", p.operator), ("y", p.variable)],
+                ),
+                (
+                    "开始[Don't stop]-->结束((完成🙂))",
+                    vec![
+                        ("开始", p.variable),
+                        ("Don't stop", p.string),
+                        ("-->", p.operator),
+                        ("结束", p.variable),
+                        ("完成🙂", p.string),
+                    ],
+                ),
+                (
+                    r#"A["say \"end\" %% --> 中"] --> B"#,
+                    vec![(r#"say \"end\" %% --> 中"#, p.string), ("B", p.variable)],
+                ),
+                (
+                    "A[unfinished 中🙂",
+                    vec![("A", p.variable), ("unfinished 中🙂", p.string)],
+                ),
+                (
+                    "A-->B %% comment 中🙂",
+                    vec![
+                        ("A", p.variable),
+                        ("-->", p.operator),
+                        ("B", p.variable),
+                        ("%% comment 中🙂", p.comment),
+                    ],
+                ),
+                ("sequenceDiagram", vec![("sequenceDiagram", p.keyword)]),
+                (
+                    "participant Alice as Client 中🙂",
+                    vec![
+                        ("participant", p.keyword),
+                        ("Alice", p.variable),
+                        ("as", p.keyword),
+                        ("Client 中🙂", p.string),
+                    ],
+                ),
+                ("actor Bob", vec![("actor", p.keyword), ("Bob", p.variable)]),
+                (
+                    "Alice->>+Bob: Hello end 42 **中🙂**",
+                    vec![
+                        ("Alice", p.variable),
+                        ("->>+", p.operator),
+                        ("Bob", p.variable),
+                        ("Hello end 42 **中🙂**", p.string),
+                    ],
+                ),
+                (
+                    "Bob-->>-Alice: Done!",
+                    vec![
+                        ("Bob", p.variable),
+                        ("-->>-", p.operator),
+                        ("Alice", p.variable),
+                        ("Done!", p.string),
+                    ],
+                ),
+                (
+                    "Alice--xBob: failure",
+                    vec![
+                        ("--x", p.operator),
+                        ("Bob", p.variable),
+                        ("failure", p.string),
+                    ],
+                ),
+                (
+                    "Alice-)Bob: async",
+                    vec![("-)", p.operator), ("Bob", p.variable), ("async", p.string)],
+                ),
+                (
+                    "Note right of Alice,Bob: end --> 中🙂",
+                    vec![
+                        ("Note", p.keyword),
+                        ("right", p.keyword),
+                        ("Alice", p.variable),
+                        ("Bob", p.variable),
+                        ("end --> 中🙂", p.string),
+                    ],
+                ),
+                (
+                    "loop Every minute",
+                    vec![("loop", p.keyword), ("Every minute", p.string)],
+                ),
+                (
+                    "alt success",
+                    vec![("alt", p.keyword), ("success", p.string)],
+                ),
+                (
+                    "else failure",
+                    vec![("else", p.keyword), ("failure", p.string)],
+                ),
+                ("end", vec![("end", p.keyword)]),
+            ];
+            for fence in ["```mermaid", "~~~mmd", "```Mermaid"] {
+                let marker = &fence[..3];
+                let source = format!(
+                    "{fence}\n{}\n{marker}",
+                    cases
+                        .iter()
+                        .map(|(line, _)| *line)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                let canonical = markdown::parse_decorations(&source);
+                for (index, line) in source.lines().enumerate() {
+                    let (_, runs) = source_syntax_runs(line, &canonical[index], &theme);
+                    if index == 0 || index == cases.len() + 1 {
+                        for offset in 0..3 {
+                            assert_eq!(run_at_byte(&runs, offset).color, theme.syntax_marker);
+                        }
+                    } else {
+                        for (token, color) in &cases[index - 1].1 {
+                            let offset = line.rfind(token).unwrap();
+                            for byte in offset..offset + token.len() {
+                                assert_eq!(
+                                    run_at_byte(&runs, byte).color,
+                                    super::code_palette_hsla(*color),
+                                    "{line:?}: {token}"
+                                );
+                            }
+                        }
+                    }
+                    let mut offset = 0;
+                    for run in &runs {
+                        assert!(line.is_char_boundary(offset));
+                        offset += run.len;
+                        assert!(line.is_char_boundary(offset));
+                        assert!(run.color.a > 0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_highlighting_mermaid_slanted_shapes_keep_delimiters_and_following_syntax() {
+        for theme in [Theme::one_dark(), Theme::one_light()] {
+            for (open, close) in [("[/", "/]"), ("[\\", "\\]"), ("[/", "\\]"), ("[\\", "/]")] {
+                for label in ["Input", "Input 中🙂", r#""say \"end\" \] 中🙂""#] {
+                    let line = format!("A{open}{label}{close} --> B[Done]");
+                    let source = format!("```mermaid\nflowchart TD\n{line}\n```");
+                    let canonical = markdown::parse_decorations(&source);
+                    let saved = canonical.clone();
+                    let (_, runs) = source_syntax_runs(&line, &canonical[2], &theme);
+                    for (offset, len, color) in [
+                        (0, 1, theme.code_palette.variable),
+                        (1, open.len(), theme.code_palette.operator),
+                        (1 + open.len(), label.len(), theme.code_palette.string),
+                        (
+                            1 + open.len() + label.len(),
+                            close.len(),
+                            theme.code_palette.operator,
+                        ),
+                        (line.find("-->").unwrap(), 3, theme.code_palette.operator),
+                        (line.rfind("B[").unwrap(), 1, theme.code_palette.variable),
+                        (line.find("Done").unwrap(), 4, theme.code_palette.string),
+                    ] {
+                        for byte in offset..offset + len {
+                            assert_eq!(
+                                run_at_byte(&runs, byte).color,
+                                super::code_palette_hsla(color),
+                                "{line:?}: byte {byte}"
+                            );
+                        }
+                    }
+                    assert_eq!(run_at_byte(&runs, 0).font.family.as_ref(), "Test Body");
+                    assert_eq!(canonical, saved);
+                }
+            }
+            // An ordinary label's escaped bracket must not become a shape closer.
+            let line = r#"A[escaped \] and \"quotes\" 中🙂] --> B[Done]"#;
+            let source = format!("```mermaid\nflowchart TD\n{line}\n```");
+            let canonical = markdown::parse_decorations(&source);
+            let (_, runs) = source_syntax_runs(line, &canonical[2], &theme);
+            for (token, color) in [
+                (r#"\] and \"quotes\" 中🙂"#, theme.code_palette.string),
+                ("-->", theme.code_palette.operator),
+                ("B", theme.code_palette.variable),
+            ] {
+                let offset = line.find(token).unwrap();
+                for byte in offset..offset + token.len() {
+                    assert_eq!(
+                        run_at_byte(&runs, byte).color,
+                        super::code_palette_hsla(color),
+                        "{line:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_mermaid_complete_common_diagrams_keep_canonical_languages_and_colors() {
+        let theme = Theme::one_dark();
+        let p = theme.code_palette;
+        for (source, tokens) in [
+            (
+                "```mermaid\nflowchart TD\n    Start([开始🙂]) --> Gate{Ready?}\n    Gate -->|Yes| Finish[Done]\n    Gate -.->|No| Start\n```",
+                vec![
+                    ("flowchart", p.keyword),
+                    ("Start", p.variable),
+                    ("Gate", p.variable),
+                    ("开始🙂", p.string),
+                    ("Ready?", p.string),
+                    ("Yes", p.string),
+                    ("Done", p.string),
+                    ("No", p.string),
+                    ("-->", p.operator),
+                    ("-.->", p.operator),
+                ],
+            ),
+            (
+                "~~~mermaid\nsequenceDiagram\n    participant Alice as Client\n    participant Bob\n    Alice->>+Bob: Hello 中🙂\n    Note over Alice,Bob: A friendly note\n    alt success\n        Bob-->>-Alice: OK\n    else retry\n        Alice-)Bob: Try again\n    end\n~~~",
+                vec![
+                    ("sequenceDiagram", p.keyword),
+                    ("participant", p.keyword),
+                    ("Alice", p.variable),
+                    ("Bob", p.variable),
+                    ("Client", p.string),
+                    ("Hello 中🙂", p.string),
+                    ("A friendly note", p.string),
+                    ("Try again", p.string),
+                    ("->>+", p.operator),
+                    ("-->>-", p.operator),
+                    ("-)", p.operator),
+                ],
+            ),
+        ] {
+            let canonical = markdown::parse_decorations(source);
+            for (row, line) in source.lines().enumerate() {
+                assert!(canonical[row].block_preview.is_some());
+                let (projected, runs) = source_syntax_runs(line, &canonical[row], &theme);
+                assert_eq!(projected.code_language.as_deref(), Some("mermaid"));
+                for (token, color) in &tokens {
+                    for (offset, _) in line.match_indices(token) {
+                        assert_eq!(
+                            run_at_byte(&runs, offset).color,
+                            super::code_palette_hsla(*color),
+                            "{line:?}: {token}"
+                        );
+                    }
+                }
+                if line.starts_with("```") || line.starts_with("~~~") {
+                    assert_eq!(run_at_byte(&runs, 0).color, theme.syntax_marker);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_table_and_mermaid_lazy_projection_matches_eager_text_runs() {
+        use crate::buffer::Buffer;
+        use crate::editor::{
+            new_lazy_markdown_decorations, parse_lazy_markdown_range, source_markdown_presentation,
+        };
+
+        let source = format!(
+            "# Lead **heading**\n\n{}| **bold** | `code` |\n| :--- | ---: |\n| 中🙂 | value |\n\n{}\n```mermaid\nsequenceDiagram\n{}\n```\n",
+            "plain\n\n".repeat(500),
+            "more\n\n".repeat(500),
+            "Alice->>Bob: Hello 中🙂\n\n".repeat(300),
+        );
+        let buffer = Buffer::from_text(&source);
+        let (mut canonical, mut lazy) = new_lazy_markdown_decorations(buffer.line_count());
+        let initial = parse_lazy_markdown_range(&buffer, &mut canonical, &mut lazy, 0..1).unwrap();
+        let mut presentation = source_markdown_presentation(Vec::new(), &canonical, None, initial);
+        let heading_spans = presentation[0].inline_spans.as_ptr();
+        let eager = markdown::parse_decorations(&source);
+        let theme = Theme::one_dark();
+        for needle in ["| **bold**", "| :---", "Alice->>Bob"] {
+            let row = (0..buffer.line_count())
+                .rfind(|&row| buffer.line_content(row).starts_with(needle))
+                .unwrap();
+            if let Some(parsed) =
+                parse_lazy_markdown_range(&buffer, &mut canonical, &mut lazy, row..row + 1)
+            {
+                presentation = source_markdown_presentation(presentation, &canonical, None, parsed);
+            }
+            assert_eq!(canonical[row], eager[row]);
+            let (projected, runs) =
+                source_syntax_runs(buffer.line_content(row), &canonical[row], &theme);
+            let (_, eager_runs) = source_syntax_runs(buffer.line_content(row), &eager[row], &theme);
+            assert_eq!(presentation[row], projected);
+            assert_eq!(presentation[0].inline_spans.as_ptr(), heading_spans);
+            assert!(runs.iter().any(|run| run.color != theme.text_primary));
+            for (lazy, eager) in runs.iter().zip(&eager_runs) {
+                assert_eq!(lazy.len, eager.len);
+                assert_eq!(lazy.color, eager.color);
+                assert_eq!(lazy.font, eager.font);
+            }
+            assert_eq!(runs.len(), eager_runs.len());
+            assert!(
+                parse_lazy_markdown_range(&buffer, &mut canonical, &mut lazy, row..row + 1)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn source_table_and_mermaid_incremental_projection_matches_eager_text_runs() {
+        use crate::buffer::Buffer;
+        use crate::editor::{
+            PendingLineDisplayTransfer, compute_incremental_markdown_decorations,
+            line_display_transfer_line_bounds, source_markdown_presentation,
+        };
+
+        let before = "# Lead **heading**\n\n| A | B |\n| :--- | ---: |\n| **old** | `code` |\n\n```mermaid\nflowchart TD\nA[old]-->B\n```\n\nTail\n";
+        for (old, inserted) in [
+            ("**old**", "**new 中🙂**"),
+            (
+                "| **old** | `code` |",
+                "| **new** | `code` |\n| extra | 中🙂 |",
+            ),
+            (":--- | ---:", ":---: | ---"),
+            ("A[old]-->B", "A[中🙂]-.->B\nB==>|yes|C"),
+        ] {
+            let old_buffer = Buffer::from_text(before);
+            let old_canonical = markdown::parse_decorations(before);
+            let previous = source_markdown_presentation(
+                Vec::new(),
+                &old_canonical,
+                None,
+                0..old_canonical.len(),
+            );
+            let heading_spans = previous[0].inline_spans.as_ptr();
+            let start = before.find(old).unwrap();
+            let range = start..start + old.len();
+            let (start_line, old_end_line_exclusive, new_end_line_exclusive) =
+                line_display_transfer_line_bounds(&old_buffer, &range, inserted);
+            let after = before.replacen(old, inserted, 1);
+            let buffer = Buffer::from_text(&after);
+            let byte_delta = after.len() as isize - before.len() as isize;
+            let (canonical, parsed) = compute_incremental_markdown_decorations(
+                old_canonical,
+                &buffer,
+                new_end_line_exclusive,
+                old_end_line_exclusive,
+                start_line,
+                new_end_line_exclusive,
+                byte_delta,
+            )
+            .expect("small table/diagram edits parse at canonical block boundaries");
+            let transfer = PendingLineDisplayTransfer {
+                cached_lines: Vec::new(),
+                start_line,
+                old_end_line_exclusive,
+                new_end_line_exclusive,
+                dirty_start_line: parsed.start,
+                dirty_end_line_exclusive: parsed.end,
+                markdown_plain_decoration_transfer: false,
+                force_full_markdown_reparse: false,
+                byte_delta,
+            };
+            let presentation =
+                source_markdown_presentation(previous, &canonical, Some(&transfer), parsed);
+            let eager = markdown::parse_decorations(&after);
+            assert_eq!(canonical, eager);
+            assert_eq!(
+                presentation,
+                source_markdown_presentation(Vec::new(), &eager, None, 0..eager.len())
+            );
+            assert_eq!(presentation[0].inline_spans.as_ptr(), heading_spans);
+            let theme = Theme::one_dark();
+            for row in start_line..new_end_line_exclusive {
+                let (projected, runs) =
+                    source_syntax_runs(buffer.line_content(row), &canonical[row], &theme);
+                assert_eq!(presentation[row], projected);
+                assert!(runs.iter().any(|run| run.color != theme.text_primary));
+                let (_, eager_runs) =
+                    source_syntax_runs(buffer.line_content(row), &eager[row], &theme);
+                assert_eq!(runs.len(), eager_runs.len());
+                for (incremental, eager) in runs.iter().zip(&eager_runs) {
+                    assert_eq!(incremental.len, eager.len);
+                    assert_eq!(incremental.color, eager.color);
+                    assert_eq!(incremental.font, eager.font);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_code_and_diagram_syntax_has_colors_with_identity_maps() {
+        for theme in [Theme::one_dark(), Theme::one_light()] {
+            for (source, language, tokens) in [
+                (
+                    "```rust\nlet title = \"中🙂\";\n\n```",
+                    "rust",
+                    vec![
+                        ("let", theme.code_palette.keyword),
+                        ("\"中🙂\"", theme.code_palette.string),
+                    ],
+                ),
+                (
+                    "~~~python\nreturn \"中🙂\"\n~~~",
+                    "python",
+                    vec![
+                        ("return", theme.code_palette.keyword),
+                        ("\"中🙂\"", theme.code_palette.string),
+                    ],
+                ),
+                (
+                    "```mermaid\nflowchart TD\nA[中🙂] --> B[End]\nA-->B\nA-.->B\nmy-node-->other-node\n```",
+                    "mermaid",
+                    vec![
+                        ("flowchart", theme.code_palette.keyword),
+                        ("-->", theme.code_palette.operator),
+                    ],
+                ),
+            ] {
+                let canonical = markdown::parse_decorations(source);
+                let saved = canonical.clone();
+                for (index, line) in source.lines().enumerate() {
+                    let (projected, runs) = source_syntax_runs(line, &canonical[index], &theme);
+                    assert_eq!(
+                        projected.code_language.as_deref(),
+                        Some(if index == canonical.len() - 1 && language != "mermaid" {
+                            "markdown"
+                        } else {
+                            language
+                        }),
+                        "{line:?}",
+                    );
+                    for (token, color) in &tokens {
+                        if let Some(offset) = line.find(token) {
+                            assert_eq!(
+                                run_at_byte(&runs, offset).color,
+                                gpui::rgb(*color).into(),
+                                "{line:?}: {token}"
+                            );
+                        }
+                    }
+                    if line.starts_with("```") || line.starts_with("~~~") {
+                        assert_eq!(run_at_byte(&runs, 0).color, theme.syntax_marker);
+                    }
+                }
+                assert_eq!(canonical, saved);
+            }
+        }
+    }
+
+    #[test]
+    fn source_math_syntax_and_delimiters_have_colors_with_identity_maps() {
+        for theme in [Theme::one_dark(), Theme::one_light()] {
+            for source in [
+                "$$\n\\frac{x^2}{2} + \\alpha\n\\text{中🙂}\n$$",
+                "\\[\n\\frac{x^2}{2} + \\alpha\n\\text{中🙂}\n\\]",
+                "$$\\frac{x^2}{2} + \\alpha$$",
+                "\\[\\frac{x^2}{2} + \\alpha\\]",
+            ] {
+                let canonical = markdown::parse_decorations(source);
+                let saved = canonical.clone();
+                for (index, line) in source.lines().enumerate() {
+                    let (projected, runs) = source_syntax_runs(line, &canonical[index], &theme);
+                    assert_eq!(
+                        projected.code_language.as_deref(),
+                        Some(super::SOURCE_MATH_HIGHLIGHT_LANGUAGE)
+                    );
+                    for (token, color) in [
+                        ("frac", theme.code_palette.function),
+                        ("alpha", theme.code_palette.keyword),
+                        ("^", theme.code_palette.operator),
+                        ("2", theme.code_palette.number),
+                    ] {
+                        if let Some(offset) = line.find(token) {
+                            assert_eq!(
+                                run_at_byte(&runs, offset).color,
+                                gpui::rgb(color).into(),
+                                "{line:?}: {token}",
+                            );
+                        }
+                    }
+                    for marker in ["$$", "\\[", "\\]"] {
+                        for (offset, _) in line.match_indices(marker) {
+                            assert_eq!(
+                                run_at_byte(&runs, offset).color,
+                                theme.syntax_marker,
+                                "{line:?}"
+                            );
+                        }
+                    }
+                }
+                assert_eq!(canonical, saved);
+            }
+        }
+    }
+
+    #[test]
+    fn source_highlighting_fenced_latex_keeps_document_context_distinct_from_math_previews() {
+        let body = "x^2 + \\alpha + \\text{中🙂}";
+        for theme in [Theme::one_dark(), Theme::one_light()] {
+            // Repeat after math shaping to exercise both warm-cache directions.
+            for _ in 0..2 {
+                for language in ["latex", "tex"] {
+                    let source =
+                        format!("```{language}\n{body}\n\\[\n{body}\n\\]\n$$\n{body}\n$$\n```");
+                    let canonical = markdown::parse_decorations(&source);
+                    let saved = canonical.clone();
+                    for (row, line) in source.lines().enumerate() {
+                        assert!(canonical[row].block_preview.is_none());
+                        let (_, runs) = source_syntax_runs(line, &canonical[row], &theme);
+                        if row == 0 || row == canonical.len() - 1 {
+                            assert_eq!(run_at_byte(&runs, 0).color, theme.syntax_marker);
+                            continue;
+                        }
+                        let mut colors = vec![theme.text_primary; line.len()];
+                        let mut weights = vec![FontWeight::NORMAL; line.len()];
+                        let mut styles = vec![FontStyle::Normal; line.len()];
+                        super::apply_code_block_highlighting(
+                            line,
+                            language,
+                            &theme,
+                            &mut colors,
+                            &mut weights,
+                            &mut styles,
+                        );
+                        for byte in 0..line.len() {
+                            let run = run_at_byte(&runs, byte);
+                            assert_eq!(
+                                run.color, colors[byte],
+                                "{language}: {line:?}: byte {byte}"
+                            );
+                            assert_eq!(run.font.weight, weights[byte]);
+                            assert_eq!(run.font.style, styles[byte]);
+                        }
+                        if line == body {
+                            assert_eq!(run_at_byte(&runs, 0).font.family.as_ref(), "Test Body");
+                            assert_eq!(
+                                run_at_byte(&runs, line.find('中').unwrap())
+                                    .font
+                                    .family
+                                    .as_ref(),
+                                "Test CJK"
+                            );
+                        }
+                    }
+                    assert_eq!(canonical, saved);
+                }
+                for source in [format!("$$\n{body}\n$$"), format!("\\[\n{body}\n\\]")] {
+                    let canonical = markdown::parse_decorations(&source);
+                    let saved = canonical.clone();
+                    for (row, line) in source.lines().enumerate() {
+                        assert!(
+                            canonical[row]
+                                .block_preview
+                                .as_ref()
+                                .is_some_and(
+                                    |preview| preview.kind == markdown::BlockPreviewKind::Math
+                                )
+                        );
+                        let (_, runs) = source_syntax_runs(line, &canonical[row], &theme);
+                        if line == body {
+                            assert_eq!(
+                                run_at_byte(&runs, line.find('^').unwrap()).color,
+                                super::code_palette_hsla(theme.code_palette.operator)
+                            );
+                            assert_eq!(
+                                run_at_byte(&runs, line.find('2').unwrap()).color,
+                                super::code_palette_hsla(theme.code_palette.number)
+                            );
+                            assert_eq!(
+                                run_at_byte(&runs, line.find("alpha").unwrap()).color,
+                                super::code_palette_hsla(theme.code_palette.keyword)
+                            );
+                            assert_eq!(run_at_byte(&runs, 0).font.family.as_ref(), "Test Body");
+                            assert_eq!(
+                                run_at_byte(&runs, line.find('中').unwrap())
+                                    .font
+                                    .family
+                                    .as_ref(),
+                                "Test CJK"
+                            );
+                        } else {
+                            assert_eq!(run_at_byte(&runs, 0).color, theme.syntax_marker);
+                        }
+                    }
+                    assert_eq!(canonical, saved);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_math_context_does_not_leak_into_cached_latex_document_highlighting() {
+        let theme = Theme::one_dark();
+        let line = "x^2 + \\alpha";
+        let colors = |source_math| {
+            let mut colors = vec![theme.text_primary; line.len()];
+            super::apply_language_highlighting(
+                line,
+                "latex",
+                &theme,
+                &mut colors,
+                &mut vec![FontWeight::NORMAL; line.len()],
+                &mut vec![FontStyle::Normal; line.len()],
+                source_math,
+            );
+            colors
+        };
+        let document = colors(false);
+        let source = colors(true);
+        assert_ne!(source[1], document[1]);
+        assert_eq!(source[1], gpui::rgb(theme.code_palette.operator).into());
+        assert_eq!(colors(false), document);
+        assert_eq!(colors(true), source);
+    }
+
+    #[test]
+    fn source_projection_keeps_diff_spans_and_normalizes_table_syntax_languages() {
+        for source in [
+            "```rust\nlet x = 1;\n```",
+            "```mermaid\nflowchart TD\nA --> B\n```",
+            "$$\n\\alpha\n$$",
+        ] {
+            for mut row in markdown::parse_decorations(source) {
+                row.diff_added_spans = vec![0..1];
+                row.diff_removed_spans = vec![1..2];
+                super::source_markdown_decoration(&mut row);
+                assert!(row.code_language.is_some());
+                assert_eq!(row.diff_added_spans, vec![0..1]);
+                assert_eq!(row.diff_removed_spans, vec![1..2]);
+                let projected = row.clone();
+                super::source_markdown_decoration(&mut row);
+                assert_eq!(row, projected);
+            }
+        }
+        for (source, language) in [
+            ("```mermaid\nflowchart TD\nA --> B\n```", "mermaid"),
+            ("$$\n\\alpha\n$$", super::SOURCE_MATH_HIGHLIGHT_LANGUAGE),
+        ] {
+            for mut row in markdown::parse_decorations(source) {
+                row.code_language = None;
+                super::source_markdown_decoration(&mut row);
+                assert_eq!(row.code_language.as_deref(), Some(language));
+            }
+        }
+        for mut row in
+            markdown::parse_decorations("| A | B |\n| --- | --- |\n| **value** | a<br>b |")
+        {
+            // Inline diff stores removed tables as code tagged `table`.
+            row.code_language = Some("table".to_string());
+            row.block_type = markdown::BlockType::CodeBlock;
+            super::source_markdown_decoration(&mut row);
+            let mut expected = LineDecoration::default();
+            expected.code_language = Some("markdown".to_string());
+            assert_eq!(row, expected);
+            super::source_markdown_decoration(&mut row);
+            assert_eq!(row, expected);
+        }
+        for mut row in markdown::parse_decorations("---\ntitle: '**YAML**'\n---") {
+            super::source_markdown_decoration(&mut row);
+            assert_eq!(row, LineDecoration::default());
         }
     }
 
@@ -9481,7 +10738,7 @@ fn build_syntect_theme(palette: CodeSyntaxPalette) -> SyntectTheme {
             rule("markup.heading", coral),
             rule_bold("markup.bold", whiskey),
             rule_italic("markup.italic", violet),
-            rule("markup.inline.raw", green),
+            rule("markup.inline.raw, markup.raw.inline", green),
             rule("markup.underline.link", fountain_blue),
             // ─── Diff ───────────────────────────────────────────
             rule("markup.inserted", green),
@@ -9556,7 +10813,15 @@ pub(crate) fn apply_code_block_highlighting(
     weights: &mut [FontWeight],
     styles: &mut [FontStyle],
 ) {
-    apply_language_highlighting(line_content, language, theme, colors, weights, styles);
+    apply_language_highlighting(
+        line_content,
+        language,
+        theme,
+        colors,
+        weights,
+        styles,
+        false,
+    );
     if matches!(
         language.trim().to_ascii_lowercase().as_str(),
         "markdown" | "md"
@@ -9606,6 +10871,7 @@ fn markdown_table_highlighting_preserves_escaped_and_code_pipes() {
         &mut baseline,
         &mut weights,
         &mut styles,
+        false,
     );
     apply_code_block_highlighting(
         content,
@@ -9634,6 +10900,7 @@ fn apply_language_highlighting(
     colors: &mut [Hsla],
     weights: &mut [FontWeight],
     styles: &mut [FontStyle],
+    math_context: bool,
 ) {
     if line_content.is_empty() {
         return;
@@ -9648,6 +10915,7 @@ fn apply_language_highlighting(
         language: language.to_string(),
         line_content: line_content.to_string(),
         palette: theme.code_palette,
+        math_context,
     };
     if let Ok(cache) = code_highlight_cache().lock()
         && let Some(segments) = cache.get(&cache_key).cloned()
@@ -9661,6 +10929,14 @@ fn apply_language_highlighting(
         find_syntax_for_language(language).unwrap_or_else(|| syntax_set.find_syntax_plain_text());
     let mut highlighter =
         HighlightLines::new(syntax, syntect_theme_for_palette(theme.code_palette));
+    if math_context
+        && !line_content.trim_start().starts_with("$$")
+        && !line_content.trim_start().starts_with("\\[")
+    {
+        // Each source row is highlighted independently. Seed body rows into
+        // TeX's math grammar without adding bytes to the text or source maps.
+        let _ = highlighter.highlight_line("$$\n", syntax_set);
+    }
     if let Ok(ranges) = highlighter.highlight_line(line_content, syntax_set) {
         let mut byte_pos = 0usize;
         let mut segments = Vec::with_capacity(ranges.len());
@@ -11108,14 +12384,31 @@ pub(crate) fn build_text_runs_for_display_with_language(
     if highlight_entire_line
         && let Some(language) = document_code_language.or(decoration.code_language.as_deref())
     {
-        apply_code_block_highlighting(
-            line_content,
-            language,
-            theme,
-            &mut buf_colors,
-            &mut buf_weights,
-            &mut buf_font_styles,
-        );
+        let is_source_block =
+            decoration.block_type == BlockType::Normal && document_code_language.is_none();
+        if is_source_block && language == SOURCE_MATH_HIGHLIGHT_LANGUAGE {
+            apply_language_highlighting(
+                line_content,
+                "latex",
+                theme,
+                &mut buf_colors,
+                &mut buf_weights,
+                &mut buf_font_styles,
+                true,
+            );
+        } else {
+            apply_code_block_highlighting(
+                line_content,
+                language,
+                theme,
+                &mut buf_colors,
+                &mut buf_weights,
+                &mut buf_font_styles,
+            );
+        }
+        if is_source_block {
+            apply_source_block_marker_colors(line_content, language, theme, &mut buf_colors);
+        }
     }
 
     for span in &decoration.inline_spans {

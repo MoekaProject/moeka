@@ -2801,6 +2801,8 @@ impl EditorView {
             file_kind: None,
             editor_left_aligned: false,
             reading_mode: false,
+            source_mode: false,
+            source_word_wrap: true,
             snapshot: EditorSnapshot {
                 text: String::new(),
                 cursor_offset: 0,

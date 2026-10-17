@@ -936,7 +936,9 @@ fn hydrate_active_tab_state(editor: &mut EditorView) {
     let active_tab = editor.tabs[index].clone();
     editor.current_file_path = active_tab.path.clone();
     editor.editor_left_aligned = active_tab.editor_left_aligned;
-    editor.reading_mode = active_tab.reading_mode;
+    editor.reading_mode = active_tab.reading_mode && !active_tab.source_mode;
+    editor.source_mode = active_tab.source_mode;
+    editor.source_word_wrap = active_tab.source_word_wrap;
     // Keep the file-kind cache in sync so the status bar (language label)
     // and file-kind-dependent paths work right after session restore.
     editor.active_file_kind_cache = active_tab.file_kind.clone();
@@ -983,7 +985,9 @@ fn pending_tab_to_record(tab: &OpenTab, pending: &PendingTabRestore) -> TabSessi
     record.is_preview = tab.is_preview;
     record.is_pinned = tab.is_pinned;
     record.view.editor_left_aligned = tab.editor_left_aligned;
-    record.view.reading_mode = tab.reading_mode;
+    record.view.reading_mode = tab.reading_mode && !tab.source_mode;
+    record.view.source_mode = tab.source_mode;
+    record.view.source_word_wrap = tab.source_word_wrap;
     if tab.path.is_some() {
         return tab_to_record(tab);
     }
@@ -1022,7 +1026,9 @@ fn tab_to_record(tab: &OpenTab) -> TabSessionRecord {
             cursor_anchor: tab.snapshot.cursor_anchor,
             scroll_offset: tab.snapshot.scroll_offset,
             editor_left_aligned: tab.editor_left_aligned,
-            reading_mode: tab.reading_mode,
+            reading_mode: tab.reading_mode && !tab.source_mode,
+            source_mode: tab.source_mode,
+            source_word_wrap: tab.source_word_wrap,
             extra_cursors: tab.snapshot.extra_cursors.clone(),
         },
         recovery: tab.recovery.clone(),
@@ -1089,7 +1095,9 @@ fn restore_tab_metadata(record: &TabSessionRecord, ui_language: UiLanguage) -> O
         path,
         file_kind,
         editor_left_aligned: record.view.editor_left_aligned,
-        reading_mode: record.view.reading_mode,
+        reading_mode: record.view.reading_mode && !record.view.source_mode,
+        source_mode: record.view.source_mode,
+        source_word_wrap: record.view.source_word_wrap,
         snapshot,
         image_view: ImageViewState::default(),
         whiteboard,
@@ -1414,6 +1422,8 @@ fn terminal_tab(record: &TabSessionRecord, agent_cli: ChatAgentCli) -> OpenTab {
         file_kind: None,
         editor_left_aligned: false,
         reading_mode: false,
+        source_mode: false,
+        source_word_wrap: true,
         snapshot: EditorSnapshot {
             text: String::new(),
             cursor_offset: 0,
@@ -1471,6 +1481,8 @@ fn settings_tab(id: String) -> OpenTab {
         file_kind: None,
         editor_left_aligned: false,
         reading_mode: false,
+        source_mode: false,
+        source_word_wrap: true,
         snapshot: EditorSnapshot {
             text: String::new(),
             cursor_offset: 0,
@@ -1678,6 +1690,177 @@ mod tests {
     }
 
     #[test]
+    fn source_mode_restore_and_roundtrip_prefer_source_over_reading() {
+        for reading_mode in [false, true] {
+            let mut record = text_tab_record(None, Some("draft"));
+            record.view.reading_mode = reading_mode;
+            record.view.source_mode = true;
+
+            let tab = restore_tab_from_record(&record, UiLanguage::English).unwrap();
+            assert!(tab.source_mode);
+            assert!(!tab.reading_mode);
+
+            let encoded = serde_yaml::to_string(&tab_to_record(&tab)).unwrap();
+            let decoded = serde_yaml::from_str(&encoded).unwrap();
+            let restored = restore_tab_from_record(&decoded, UiLanguage::English).unwrap();
+            assert!(restored.source_mode);
+            assert!(!restored.reading_mode);
+        }
+    }
+
+    #[test]
+    fn source_word_wrap_roundtrip_is_independent_of_mode_alignment_and_file_kind() {
+        for source_mode in [false, true] {
+            for source_word_wrap in [false, true] {
+                for editor_left_aligned in [false, true] {
+                    let mut record = text_tab_record(None, Some("# draft"));
+                    record.view.source_mode = source_mode;
+                    record.view.source_word_wrap = source_word_wrap;
+                    record.view.editor_left_aligned = editor_left_aligned;
+
+                    let tab = restore_tab_from_record(&record, UiLanguage::English).unwrap();
+                    assert_eq!(tab.source_word_wrap, source_word_wrap);
+                    assert_eq!(tab.editor_left_aligned, editor_left_aligned);
+                    assert_eq!(tab.file_kind, Some(FileKind::Markdown));
+                    let saved = tab_to_record(&tab);
+                    assert_eq!(saved.file_kind.as_deref(), Some("markdown"));
+                    let encoded = serde_yaml::to_string(&saved).unwrap();
+                    let decoded = serde_yaml::from_str(&encoded).unwrap();
+                    let restored = restore_tab_from_record(&decoded, UiLanguage::English).unwrap();
+                    assert_eq!(restored.source_mode, source_mode);
+                    assert_eq!(restored.source_word_wrap, source_word_wrap);
+                    assert_eq!(restored.editor_left_aligned, editor_left_aligned);
+                    assert_eq!(restored.file_kind, Some(FileKind::Markdown));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_session_restore_keeps_reading_mode_without_enabling_source() {
+        let record: TabSessionRecord = serde_yaml::from_str(
+            "id: tab-legacy\nkind: editor\nview:\n  reading_mode: true\nrecovery:\n  text: draft\n",
+        )
+        .unwrap();
+
+        let tab = restore_tab_from_record(&record, UiLanguage::English).unwrap();
+        assert!(tab.reading_mode);
+        assert!(!tab.source_mode);
+        assert!(!tab_to_record(&tab).view.source_mode);
+        assert!(tab.source_word_wrap);
+        assert!(tab_to_record(&tab).view.source_word_wrap);
+    }
+
+    #[test]
+    fn pending_restore_saves_source_word_wrap_without_changing_alignment_or_metadata() {
+        let record = text_tab_record(Some(PathBuf::from("/unavailable-share/note.md")), None);
+        let mut tab = restore_tab_metadata(&record, UiLanguage::English).unwrap();
+        let file_kind = tab.file_kind.clone();
+        let pending = PendingTabRestore {
+            record: record.clone(),
+            initial_text: String::new(),
+            loading: true,
+        };
+        for source_mode in [true, false] {
+            tab.source_mode = source_mode;
+            tab.reading_mode = false;
+            for source_word_wrap in [false, true] {
+                tab.source_word_wrap = source_word_wrap;
+                let saved = pending_tab_to_record(&tab, &pending);
+                assert_eq!(saved.view.source_word_wrap, source_word_wrap);
+                assert_eq!(
+                    saved.view.editor_left_aligned,
+                    record.view.editor_left_aligned
+                );
+                assert_eq!(saved.path, record.path);
+                assert_eq!(saved.file_kind, record.file_kind);
+                assert_eq!(saved.recovery, record.recovery);
+                assert_eq!(saved.history, record.history);
+                assert_eq!(saved.view.cursor_offset, record.view.cursor_offset);
+                let restored = restore_tab_metadata(&saved, UiLanguage::English).unwrap();
+                assert_eq!(restored.source_word_wrap, source_word_wrap);
+                assert_eq!(restored.source_mode, source_mode);
+                assert_eq!(restored.file_kind, file_kind);
+            }
+        }
+    }
+
+    #[test]
+    fn pending_restore_saves_source_mode_changes_without_losing_source_metadata() {
+        let record = text_tab_record(Some(PathBuf::from("/unavailable-share/note.md")), None);
+        let mut tab = restore_tab_metadata(&record, UiLanguage::English).unwrap();
+        let pending = PendingTabRestore {
+            record: record.clone(),
+            initial_text: String::new(),
+            loading: true,
+        };
+        tab.source_mode = true;
+        // Even invalid live flags must never persist both modes as enabled.
+        tab.reading_mode = true;
+        let saved = pending_tab_to_record(&tab, &pending);
+        assert!(saved.view.source_mode);
+        assert!(!saved.view.reading_mode);
+        assert_eq!(saved.path, record.path);
+        assert_eq!(saved.recovery, record.recovery);
+        assert_eq!(saved.history, record.history);
+        assert_eq!(saved.view.cursor_offset, record.view.cursor_offset);
+        let restored = restore_tab_metadata(&saved, UiLanguage::English).unwrap();
+        assert!(restored.source_mode);
+        assert!(!restored.reading_mode);
+
+        tab.source_mode = false;
+        tab.reading_mode = false;
+        let saved = pending_tab_to_record(&tab, &pending);
+        assert!(!saved.view.source_mode);
+        assert!(!saved.view.reading_mode);
+    }
+
+    #[test]
+    fn split_pane_restore_keeps_source_word_wrap_and_modes_independent() {
+        let mut source = text_tab_record(None, Some("source pane"));
+        source.id = "tab-source".into();
+        source.view.source_mode = true;
+        source.view.source_word_wrap = false;
+        source.view.editor_left_aligned = false;
+        let mut reading = text_tab_record(None, Some("reading pane"));
+        reading.id = "tab-reading".into();
+        let layout = PaneLayoutRecord::Split {
+            axis: "horizontal".into(),
+            flexes: vec![1.0, 2.0],
+            children: vec![
+                PaneLayoutRecord::Leaf {
+                    active_tab_id: Some(source.id.clone()),
+                    tabs: vec![source],
+                },
+                PaneLayoutRecord::Leaf {
+                    active_tab_id: Some(reading.id.clone()),
+                    tabs: vec![reading],
+                },
+            ],
+        };
+        let encoded = serde_yaml::to_string(&layout).unwrap();
+        let decoded = serde_yaml::from_str(&encoded).unwrap();
+        let mut panes = Vec::new();
+        let built = build_pane_layout(UiLanguage::English, &decoded, &mut panes).unwrap();
+
+        assert_eq!(built.leaf_ids(), vec![0, 1]);
+        assert_eq!(panes[0].state.active_tab_id.as_deref(), Some("tab-source"));
+        assert!(panes[0].state.tabs[0].source_mode);
+        assert!(!panes[0].state.tabs[0].reading_mode);
+        assert!(!panes[0].state.tabs[0].source_word_wrap);
+        assert!(!panes[0].state.tabs[0].editor_left_aligned);
+        assert_eq!(panes[1].state.active_tab_id.as_deref(), Some("tab-reading"));
+        assert!(!panes[1].state.tabs[0].source_mode);
+        assert!(panes[1].state.tabs[0].reading_mode);
+        assert!(panes[1].state.tabs[0].source_word_wrap);
+        assert!(panes[1].state.tabs[0].editor_left_aligned);
+        assert!(tab_to_record(&panes[0].state.tabs[0]).view.source_mode);
+        assert!(!tab_to_record(&panes[1].state.tabs[0]).view.source_mode);
+        assert!(!tab_to_record(&panes[0].state.tabs[0]).view.source_word_wrap);
+        assert!(tab_to_record(&panes[1].state.tabs[0]).view.source_word_wrap);
+    }
+
+    #[test]
     fn hydration_never_replaces_an_edit_or_a_save_as() {
         let record = text_tab_record(
             Some(PathBuf::from("/unavailable-share/note.md")),
@@ -1787,6 +1970,8 @@ mod tests {
                 scroll_offset: 42.0,
                 editor_left_aligned: true,
                 reading_mode: true,
+                source_mode: false,
+                source_word_wrap: true,
                 extra_cursors: vec![(80, 70)],
             },
             recovery: TabRecoveryState {
@@ -1869,6 +2054,8 @@ mod tests {
                 file_kind: Some(FileKind::Markdown),
                 editor_left_aligned: false,
                 reading_mode: false,
+                source_mode: false,
+                source_word_wrap: true,
                 snapshot: EditorSnapshot {
                     text: String::new(),
                     cursor_offset: 0,
@@ -1923,6 +2110,8 @@ mod tests {
                 scroll_offset: 7.0,
                 editor_left_aligned: false,
                 reading_mode: false,
+                source_mode: false,
+                source_word_wrap: true,
                 extra_cursors: Vec::new(),
             },
             recovery: TabRecoveryState::default(),

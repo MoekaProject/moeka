@@ -1030,7 +1030,10 @@ impl EditorView {
                         tab.editor_left_aligned = value;
                     }
                 }
-                if editor.active_tab_is_markdown() {
+                if editor
+                    .active_file_kind()
+                    .is_some_and(super::FileKind::is_markdown)
+                {
                     editor.editor_left_aligned = value;
                     editor.layout_dirty = true;
                 }

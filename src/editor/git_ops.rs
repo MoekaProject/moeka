@@ -15,6 +15,24 @@ use super::*;
 
 const GIT_PANEL_STATUS_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 
+fn git_panel_refresh_allowed(
+    panel: Option<RightUtilityPanel>,
+    child_processes: bool,
+    dirty: bool,
+) -> bool {
+    panel == Some(RightUtilityPanel::GitHistory) && child_processes && dirty
+}
+
+fn git_panel_refresh_is_current(
+    refresh_allowed: bool,
+    current_base_dir: Option<&Path>,
+    current_epoch: usize,
+    request_base_dir: &Path,
+    request_epoch: usize,
+) -> bool {
+    refresh_allowed && current_base_dir == Some(request_base_dir) && current_epoch == request_epoch
+}
+
 // ── Data types ─────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -541,6 +559,27 @@ pub(super) fn parse_git_status_entries(
     (staged, unstaged, conflicted)
 }
 
+fn parse_git_upstream_tracking(output: &str) -> Result<(bool, usize, usize), String> {
+    if output.is_empty() {
+        return Ok((false, 0, 0));
+    }
+    let invalid_output = || format!("Invalid Git upstream tracking output: {output:?}");
+    let (upstream, tracking) = output.split_once('\0').ok_or_else(invalid_output)?;
+    if upstream.is_empty() || tracking == "gone" {
+        return Ok((false, 0, 0));
+    }
+
+    let (mut ahead, mut behind) = (0, 0);
+    for part in tracking.split(", ").filter(|part| !part.is_empty()) {
+        match part.split_once(' ') {
+            Some(("ahead", count)) => ahead = count.parse().map_err(|_| invalid_output())?,
+            Some(("behind", count)) => behind = count.parse().map_err(|_| invalid_output())?,
+            _ => return Err(invalid_output()),
+        }
+    }
+    Ok((true, ahead, behind))
+}
+
 /// Builds the full panel snapshot inside the bounded filesystem runner.
 pub(super) fn collect_git_panel_snapshot(base_dir: &Path) -> Result<GitPanelSnapshot, String> {
     let Some(repo_root) = git_repo_root_result(base_dir)? else {
@@ -563,27 +602,24 @@ pub(super) fn collect_git_panel_snapshot(base_dir: &Path) -> Result<GitPanelSnap
     };
     let has_remote = !run_git(&repo_root, &["remote"])?.trim().is_empty();
 
-    let (has_upstream, ahead, behind) = if !has_head {
-        (false, 0, 0)
-    } else {
-        match run_git(
+    let (has_upstream, ahead, behind) = if let Some(branch) = branch.as_deref().filter(|_| has_head)
+    {
+        let branch_ref = format!("refs/heads/{branch}");
+        // Missing/unmapped upstreams are normal output, not fatal revision errors.
+        // NUL preserves an empty tracking field through run_git's trim_end().
+        let output = run_git(
             &repo_root,
-            &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
-        ) {
-            Ok(counts) => {
-                let mut parts = counts.split_whitespace();
-                let ahead = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-                let behind = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-                (true, ahead, behind)
-            }
-            Err(error)
-                if error.contains("no upstream configured")
-                    || error.contains("HEAD does not point to a branch") =>
-            {
-                (false, 0, 0)
-            }
-            Err(error) => return Err(error),
-        }
+            &[
+                "for-each-ref",
+                "--count=1",
+                "--format=%(upstream)%00%(upstream:track,nobracket)",
+                "--",
+                &branch_ref,
+            ],
+        )?;
+        parse_git_upstream_tracking(&output)?
+    } else {
+        (false, 0, 0)
     };
 
     let status_output = run_git(
@@ -838,16 +874,34 @@ impl EditorView {
         self.git_panel_status_epoch = self.git_panel_status_epoch.wrapping_add(1);
     }
 
-    /// Called from the Git panel render path; only schedules work when dirty.
+    fn git_panel_status_refresh_allowed(&self) -> bool {
+        git_panel_refresh_allowed(
+            self.utility_panel,
+            crate::platform::capabilities::CHILD_PROCESSES,
+            self.git_panel_status_dirty,
+        )
+    }
+
+    fn git_panel_status_request_is_current(&self, base_dir: &Path, epoch: usize) -> bool {
+        git_panel_refresh_is_current(
+            self.git_panel_status_refresh_allowed(),
+            self.git_panel_base_dir().as_deref(),
+            self.git_panel_status_epoch,
+            base_dir,
+            epoch,
+        )
+    }
+
+    /// Called from the Git panel render path; only schedules work when open and dirty.
     pub(crate) fn refresh_git_panel_status_if_needed(&mut self, cx: &mut Context<Self>) {
-        if !self.git_panel_status_dirty {
+        if !self.git_panel_status_refresh_allowed() {
             return;
         }
         self.schedule_git_panel_status_refresh(cx);
     }
 
     fn schedule_git_panel_status_refresh(&mut self, cx: &mut Context<Self>) {
-        if self.git_panel_status_task.is_some() {
+        if !self.git_panel_status_refresh_allowed() || self.git_panel_status_task.is_some() {
             return;
         }
         let Some(base_dir) = self.git_panel_base_dir() else {
@@ -869,6 +923,19 @@ impl EditorView {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
+            let should_run = this
+                .update(cx, |this, cx| {
+                    if !this.git_panel_status_request_is_current(&base_dir, epoch) {
+                        this.git_panel_status_task = None;
+                        this.schedule_git_panel_status_refresh(cx);
+                        return false;
+                    }
+                    true
+                })
+                .unwrap_or(false);
+            if !should_run {
+                return;
+            }
             let snapshot =
                 crate::platform::fs_task::run("Refresh Git status", base_dir.clone(), move || {
                     collect_git_panel_snapshot(&background_base_dir).map_err(std::io::Error::other)
@@ -876,22 +943,26 @@ impl EditorView {
                 .await;
             this.update(cx, |this, cx| {
                 this.git_panel_status_task = None;
-                let same_root = this.git_panel_base_dir().as_ref() == Some(&base_dir);
-                if this.git_panel_status_epoch != epoch || !same_root {
-                    if same_root && let Err(error) = snapshot {
-                        this.notify_fs_error("Refresh Git status", &base_dir, error, cx);
-                    }
-                    if this.git_panel_status_dirty {
-                        this.schedule_git_panel_status_refresh(cx);
-                    }
+                if !this.git_panel_status_request_is_current(&base_dir, epoch) {
+                    this.schedule_git_panel_status_refresh(cx);
                     return;
                 }
+                // Failed scans also consume this invalidation; only a new invalidation
+                // (including reopening the panel) should retry and report another error.
                 this.git_panel_status_dirty = false;
                 this.git_panel_status_scanned_at = Some(SystemTime::now());
                 match snapshot {
-                    Ok(snapshot) => this.git_panel_snapshot = Some(snapshot),
+                    Ok(snapshot) => {
+                        let branch_label = match &snapshot {
+                            GitPanelSnapshot::Repo(status) => {
+                                Some(status.branch_label()).filter(|label| !label.is_empty())
+                            }
+                            GitPanelSnapshot::NoRepo { .. } => None,
+                        };
+                        this.update_status_bar_git_branch(&base_dir, branch_label);
+                        this.git_panel_snapshot = Some(snapshot);
+                    }
                     Err(error) => {
-                        this.git_panel_status_dirty = true;
                         this.notify_fs_error("Refresh Git status", &base_dir, error, cx);
                     }
                 };
@@ -1054,6 +1125,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.invalidate_sidebar_git_statuses();
+        self.invalidate_status_bar_git_branch();
         self.invalidate_git_panel_status();
         self.invalidate_git_history_cache();
         self.mark_inline_diff_dirty(true);
@@ -1101,6 +1173,253 @@ impl EditorView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panel_refresh_requires_open_git_panel_child_processes_and_dirty_status() {
+        let root = Path::new("workspace");
+        for panel in [
+            None,
+            Some(RightUtilityPanel::Info),
+            Some(RightUtilityPanel::Outline),
+            Some(RightUtilityPanel::GitHistory),
+        ] {
+            for child_processes in [false, true] {
+                for dirty in [false, true] {
+                    let allowed = git_panel_refresh_allowed(panel, child_processes, dirty);
+                    assert_eq!(
+                        allowed,
+                        panel == Some(RightUtilityPanel::GitHistory) && child_processes && dirty,
+                        "panel={panel:?}, child_processes={child_processes}, dirty={dirty}"
+                    );
+                    assert_eq!(
+                        git_panel_refresh_is_current(allowed, Some(root), 3, root, 3),
+                        allowed,
+                        "the same gate must apply before execution and at completion"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn panel_refresh_rejects_stale_roots_and_epochs() {
+        let root = Path::new("workspace");
+        let other_root = Path::new("other-workspace");
+        for (current_root, current_epoch, expected) in [
+            (Some(root), 3, true),
+            (Some(root), 4, false),
+            (Some(other_root), 3, false),
+            (Some(other_root), 4, false),
+            (None, 3, false),
+        ] {
+            assert_eq!(
+                git_panel_refresh_is_current(true, current_root, current_epoch, root, 3),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn parses_upstream_tracking_without_revision_errors() {
+        for (output, expected) in [
+            ("", (false, 0, 0)),
+            ("\0", (false, 0, 0)),
+            ("refs/remotes/origin/main\0gone", (false, 0, 0)),
+            ("refs/remotes/origin/main\0", (true, 0, 0)),
+            ("refs/remotes/origin/main\0ahead 2", (true, 2, 0)),
+            ("refs/remotes/origin/main\0behind 3", (true, 0, 3)),
+            ("refs/remotes/origin/main\0ahead 2, behind 3", (true, 2, 3)),
+            ("refs/heads/base\0ahead 1", (true, 1, 0)),
+        ] {
+            assert_eq!(parse_git_upstream_tracking(output).unwrap(), expected);
+        }
+        for output in [
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/main\0ahead invalid",
+            "refs/remotes/origin/main\0behind -1",
+            "refs/remotes/origin/main\0unexpected 1",
+        ] {
+            assert!(parse_git_upstream_tracking(output).is_err(), "{output:?}");
+        }
+    }
+
+    #[cfg(not(feature = "mas"))]
+    fn git_snapshot_test_repository() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path();
+        run_git(repo, &["init", "-q", "--initial-branch=main"]).unwrap();
+        for (key, value) in [
+            ("user.email", "test@example.com"),
+            ("user.name", "Moeka Test"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", ".git/disabled-test-hooks"),
+            ("core.fsmonitor", "false"),
+        ] {
+            run_git(repo, &["config", "--local", key, value]).unwrap();
+        }
+        directory
+    }
+
+    #[cfg(not(feature = "mas"))]
+    fn commit_snapshot_test_revision(repo: &Path, message: &str) -> String {
+        run_git(repo, &["commit", "-q", "--allow-empty", "-m", message]).unwrap();
+        run_git(repo, &["rev-parse", "HEAD"]).unwrap()
+    }
+
+    #[cfg(not(feature = "mas"))]
+    fn assert_snapshot_tracking(
+        repo: &Path,
+        expected: (bool, usize, usize),
+    ) -> Box<GitPanelStatus> {
+        let GitPanelSnapshot::Repo(status) = collect_git_panel_snapshot(repo).unwrap() else {
+            panic!("expected repository snapshot");
+        };
+        assert_eq!((status.has_upstream, status.ahead, status.behind), expected);
+        status
+    }
+
+    #[cfg(not(feature = "mas"))]
+    #[test]
+    fn panel_snapshot_handles_no_remote_unborn_and_detached_head() {
+        let directory = git_snapshot_test_repository();
+        let repo = directory.path();
+        std::fs::write(repo.join("staged.md"), "draft\n").unwrap();
+        run_git(repo, &["add", "staged.md"]).unwrap();
+        std::fs::write(repo.join("untracked.md"), "new\n").unwrap();
+
+        let status = assert_snapshot_tracking(repo, (false, 0, 0));
+        assert!(!status.has_head);
+        assert!(!status.has_remote);
+        assert_eq!(status.branch.as_deref(), Some("main"));
+        assert_eq!(status.staged[0].rel_path, "staged.md");
+        assert_eq!(status.unstaged[0].rel_path, "untracked.md");
+
+        run_git(repo, &["config", "branch.main.remote", "origin"]).unwrap();
+        run_git(repo, &["config", "branch.main.merge", "refs/heads/main"]).unwrap();
+        assert!(!assert_snapshot_tracking(repo, (false, 0, 0)).has_head);
+
+        commit_snapshot_test_revision(repo, "initial");
+        run_git(repo, &["config", "--remove-section", "branch.main"]).unwrap();
+        let status = assert_snapshot_tracking(repo, (false, 0, 0));
+        assert!(status.has_head);
+        assert!(!status.has_remote);
+        assert_eq!(status.branch.as_deref(), Some("main"));
+
+        run_git(repo, &["checkout", "-q", "--detach"]).unwrap();
+        let status = assert_snapshot_tracking(repo, (false, 0, 0));
+        assert!(status.has_head);
+        assert!(status.branch.is_none());
+        assert!(status.detached_label.is_some());
+        assert_eq!(status.unstaged[0].rel_path, "untracked.md");
+
+        // An unborn ref must not accidentally query a matching descendant ref.
+        run_git(repo, &["branch", "unborn/child"]).unwrap();
+        run_git(repo, &["branch", "--set-upstream-to=main", "unborn/child"]).unwrap();
+        run_git(repo, &["checkout", "-q", "--orphan", "unborn"]).unwrap();
+        let status = assert_snapshot_tracking(repo, (false, 0, 0));
+        assert!(!status.has_head);
+        assert_eq!(status.branch.as_deref(), Some("unborn"));
+        assert!(status.detached_label.is_none());
+    }
+
+    #[cfg(not(feature = "mas"))]
+    #[test]
+    fn panel_snapshot_handles_missing_unmapped_and_pruned_upstream() {
+        let directory = git_snapshot_test_repository();
+        let repo = directory.path();
+        commit_snapshot_test_revision(repo, "initial");
+        std::fs::write(repo.join("staged.md"), "draft\n").unwrap();
+        run_git(repo, &["add", "staged.md"]).unwrap();
+        std::fs::write(repo.join("untracked.md"), "new\n").unwrap();
+        run_git(repo, &["config", "branch.main.remote", "origin"]).unwrap();
+        run_git(repo, &["config", "branch.main.merge", "refs/heads/main"]).unwrap();
+
+        let check_missing = |has_remote| {
+            let status = assert_snapshot_tracking(repo, (false, 0, 0));
+            assert!(status.has_head);
+            assert_eq!(status.has_remote, has_remote);
+            assert_eq!(status.staged[0].rel_path, "staged.md");
+            assert_eq!(status.unstaged[0].rel_path, "untracked.md");
+            assert!(status.unstaged[0].untracked);
+        };
+        check_missing(false);
+
+        let remote = repo.join("missing-remote");
+        run_git(repo, &["remote", "add", "origin", remote.to_str().unwrap()]).unwrap();
+        check_missing(true);
+        run_git(repo, &["config", "--unset-all", "remote.origin.fetch"]).unwrap();
+        check_missing(true);
+        run_git(
+            repo,
+            &[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/other:refs/remotes/origin/other",
+            ],
+        )
+        .unwrap();
+        check_missing(true);
+
+        run_git(
+            repo,
+            &[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+        )
+        .unwrap();
+        run_git(repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]).unwrap();
+        assert_snapshot_tracking(repo, (true, 0, 0));
+        run_git(repo, &["update-ref", "-d", "refs/remotes/origin/main"]).unwrap();
+        check_missing(true);
+    }
+
+    #[cfg(not(feature = "mas"))]
+    #[test]
+    fn panel_snapshot_counts_remote_and_local_upstreams() {
+        let directory = git_snapshot_test_repository();
+        let repo = directory.path();
+        let initial = commit_snapshot_test_revision(repo, "initial");
+        let remote = repo.join("missing-remote");
+        run_git(repo, &["remote", "add", "origin", remote.to_str().unwrap()]).unwrap();
+        run_git(repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]).unwrap();
+        run_git(repo, &["branch", "--set-upstream-to=origin/main", "main"]).unwrap();
+        assert_snapshot_tracking(repo, (true, 0, 0));
+
+        commit_snapshot_test_revision(repo, "local");
+        assert_snapshot_tracking(repo, (true, 1, 0));
+        run_git(repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]).unwrap();
+        run_git(repo, &["reset", "--hard", &initial]).unwrap();
+        assert_snapshot_tracking(repo, (true, 0, 1));
+        commit_snapshot_test_revision(repo, "divergent");
+        assert_snapshot_tracking(repo, (true, 1, 1));
+
+        run_git(repo, &["branch", "base", "refs/remotes/origin/main"]).unwrap();
+        run_git(repo, &["remote", "remove", "origin"]).unwrap();
+        run_git(repo, &["branch", "--set-upstream-to=base", "main"]).unwrap();
+        let status = assert_snapshot_tracking(repo, (true, 1, 1));
+        assert!(!status.has_remote);
+        run_git(repo, &["update-ref", "refs/heads/base", &initial]).unwrap();
+        assert_snapshot_tracking(repo, (true, 1, 0));
+        run_git(repo, &["branch", "-D", "base"]).unwrap();
+        assert_snapshot_tracking(repo, (false, 0, 0));
+    }
+
+    #[cfg(not(feature = "mas"))]
+    #[test]
+    fn panel_snapshot_preserves_corrupt_index_errors() {
+        let directory = git_snapshot_test_repository();
+        let repo = directory.path();
+        commit_snapshot_test_revision(repo, "initial");
+        run_git(repo, &["config", "branch.main.remote", "origin"]).unwrap();
+        run_git(repo, &["config", "branch.main.merge", "refs/heads/main"]).unwrap();
+        std::fs::write(repo.join(".git/index"), b"broken index").unwrap();
+
+        let error = collect_git_panel_snapshot(repo).unwrap_err();
+        assert!(error.contains("index"), "{error}");
+        assert!(error.contains("fatal:"), "{error}");
+    }
 
     #[test]
     fn parses_porcelain_status_sections() {

@@ -3382,6 +3382,8 @@ impl EditorView {
             file_kind: Some(file_kind),
             editor_left_aligned: false,
             reading_mode: false,
+            source_mode: false,
+            source_word_wrap: true,
             snapshot,
             image_view: ImageViewState::default(),
             whiteboard: None,

@@ -50,7 +50,7 @@ pub(crate) enum TextKey {
     ToolbarSidebarTooltip,
     ToolbarAlignTooltip,
     ToolbarWrapTooltip,
-    ToolbarReadingModeTooltip,
+
     ToolbarOutlineTooltip,
     ToolbarThemeTooltip,
     InlineDiffRevert,
@@ -428,6 +428,129 @@ pub(crate) fn translate(language: UiLanguage, key: TextKey) -> &'static str {
         UiLanguage::Russian => translate_russian(key),
         UiLanguage::Arabic => translate_arabic(key),
         UiLanguage::Hindi => translate_hindi(key),
+    }
+}
+
+pub(crate) fn document_mode_tooltip(language: UiLanguage, mode: &str) -> &'static str {
+    match language {
+        UiLanguage::English => match mode {
+            "reading" => "Reading mode · Click for source mode",
+            "source" => "Source mode · Click for editing mode",
+            _ => "Editing mode · Click for reading mode",
+        },
+        UiLanguage::ChineseSimplified => match mode {
+            "reading" => "阅读模式 · 点击切换为源码模式",
+            "source" => "源码模式 · 点击切换为编辑模式",
+            _ => "编辑模式 · 点击切换为阅读模式",
+        },
+        UiLanguage::ChineseTraditional => match mode {
+            "reading" => "閱讀模式 · 點擊切換為原始碼模式",
+            "source" => "原始碼模式 · 點擊切換為編輯模式",
+            _ => "編輯模式 · 點擊切換為閱讀模式",
+        },
+        UiLanguage::Japanese => match mode {
+            "reading" => "閲覧モード · クリックでソースモードへ",
+            "source" => "ソースモード · クリックで編集モードへ",
+            _ => "編集モード · クリックで閲覧モードへ",
+        },
+        UiLanguage::Korean => match mode {
+            "reading" => "읽기 모드 · 클릭하여 소스 모드로 전환",
+            "source" => "소스 모드 · 클릭하여 편집 모드로 전환",
+            _ => "편집 모드 · 클릭하여 읽기 모드로 전환",
+        },
+        UiLanguage::French => match mode {
+            "reading" => "Mode lecture · Cliquer pour le mode source",
+            "source" => "Mode source · Cliquer pour le mode édition",
+            _ => "Mode édition · Cliquer pour le mode lecture",
+        },
+        UiLanguage::German => match mode {
+            "reading" => "Lesemodus · Klicken für Quelltextmodus",
+            "source" => "Quelltextmodus · Klicken für Bearbeitungsmodus",
+            _ => "Bearbeitungsmodus · Klicken für Lesemodus",
+        },
+        UiLanguage::Spanish => match mode {
+            "reading" => "Modo lectura · Clic para modo fuente",
+            "source" => "Modo fuente · Clic para modo edición",
+            _ => "Modo edición · Clic para modo lectura",
+        },
+        UiLanguage::Portuguese => match mode {
+            "reading" => "Modo de leitura · Clique para o modo fonte",
+            "source" => "Modo fonte · Clique para o modo de edição",
+            _ => "Modo de edição · Clique para o modo de leitura",
+        },
+        UiLanguage::Russian => match mode {
+            "reading" => "Режим чтения · Нажмите для режима исходника",
+            "source" => "Режим исходника · Нажмите для режима редактирования",
+            _ => "Режим редактирования · Нажмите для режима чтения",
+        },
+        UiLanguage::Arabic => match mode {
+            "reading" => "وضع القراءة · انقر لوضع المصدر",
+            "source" => "وضع المصدر · انقر لوضع التحرير",
+            _ => "وضع التحرير · انقر لوضع القراءة",
+        },
+        UiLanguage::Hindi => match mode {
+            "reading" => "पठन मोड · स्रोत मोड के लिए क्लिक करें",
+            "source" => "स्रोत मोड · संपादन मोड के लिए क्लिक करें",
+            _ => "संपादन मोड · पठन मोड के लिए क्लिक करें",
+        },
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn document_mode_tooltips_are_nonempty_and_distinct_for_every_language_and_mode() {
+    let mut tooltips = std::collections::HashSet::new();
+    for &language in UiLanguage::supported() {
+        for mode in ["edit", "reading", "source"] {
+            let tooltip = document_mode_tooltip(language, mode);
+            let (current, action) = tooltip
+                .split_once(" · ")
+                .expect("mode tooltip must include current mode and next action");
+            assert!(!current.trim().is_empty(), "{language:?}: {mode}");
+            assert!(!action.trim().is_empty(), "{language:?}: {mode}");
+            assert!(tooltips.insert(tooltip), "duplicate: {language:?}: {mode}");
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn document_mode_tooltips_describe_the_edit_reading_source_cycle() {
+    for (language, expected) in [
+        (
+            UiLanguage::English,
+            [
+                "Editing mode · Click for reading mode",
+                "Reading mode · Click for source mode",
+                "Source mode · Click for editing mode",
+            ],
+        ),
+        (
+            UiLanguage::ChineseSimplified,
+            [
+                "编辑模式 · 点击切换为阅读模式",
+                "阅读模式 · 点击切换为源码模式",
+                "源码模式 · 点击切换为编辑模式",
+            ],
+        ),
+    ] {
+        for (mode, expected) in ["edit", "reading", "source"].into_iter().zip(expected) {
+            assert_eq!(document_mode_tooltip(language, mode), expected);
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn document_mode_tooltips_fall_back_to_edit_for_unknown_modes() {
+    for &language in UiLanguage::supported() {
+        for mode in ["", "unknown", "Reading", "SOURCE"] {
+            assert_eq!(
+                document_mode_tooltip(language, mode),
+                document_mode_tooltip(language, "edit"),
+                "{language:?}: {mode}"
+            );
+        }
     }
 }
 
@@ -3626,7 +3749,7 @@ fn translate_english(key: TextKey) -> &'static str {
         TextKey::ToolbarSidebarTooltip => "Show or hide sidebar",
         TextKey::ToolbarAlignTooltip => "Toggle left alignment",
         TextKey::ToolbarWrapTooltip => "Toggle automatic wrapping",
-        TextKey::ToolbarReadingModeTooltip => "Reading mode",
+
         TextKey::ToolbarOutlineTooltip => "Show or hide outline",
         TextKey::ToolbarThemeTooltip => "Switch light or dark theme",
         TextKey::InlineDiffRevert => "Revert",
@@ -3877,7 +4000,7 @@ fn translate_zh_cn(key: TextKey) -> &'static str {
         TextKey::ToolbarSidebarTooltip => "显示或隐藏边栏",
         TextKey::ToolbarAlignTooltip => "切换左对齐",
         TextKey::ToolbarWrapTooltip => "切换自动换行",
-        TextKey::ToolbarReadingModeTooltip => "阅读模式",
+
         TextKey::ToolbarOutlineTooltip => "显示或隐藏内容大纲",
         TextKey::ToolbarThemeTooltip => "切换浅色或深色主题",
         TextKey::InlineDiffRevert => "还原",
@@ -4124,7 +4247,7 @@ fn translate_zh_tw(key: TextKey) -> &'static str {
         TextKey::ToolbarSidebarTooltip => "顯示或隱藏側邊欄",
         TextKey::ToolbarAlignTooltip => "切換左對齊",
         TextKey::ToolbarWrapTooltip => "切換自動換行",
-        TextKey::ToolbarReadingModeTooltip => "閱讀模式",
+
         TextKey::ToolbarOutlineTooltip => "顯示或隱藏內容大綱",
         TextKey::ToolbarThemeTooltip => "切換淺色或深色主題",
         TextKey::InlineDiffRevert => "還原",
@@ -4365,7 +4488,7 @@ fn translate_japanese(key: TextKey) -> &'static str {
         TextKey::ToolbarSidebarTooltip => "サイドバー切替",
         TextKey::ToolbarAlignTooltip => "左揃えを切り替え",
         TextKey::ToolbarWrapTooltip => "自動折り返しを切り替え",
-        TextKey::ToolbarReadingModeTooltip => "閲覧モード",
+
         TextKey::ToolbarOutlineTooltip => "アウトライン切替",
         TextKey::ToolbarThemeTooltip => "テーマ切替",
         TextKey::InlineDiffRevert => "元に戻す",
@@ -4610,7 +4733,7 @@ fn translate_korean(key: TextKey) -> &'static str {
         TextKey::ToolbarSidebarTooltip => "사이드바 전환",
         TextKey::ToolbarAlignTooltip => "왼쪽 정렬 전환",
         TextKey::ToolbarWrapTooltip => "자동 줄바꿈 전환",
-        TextKey::ToolbarReadingModeTooltip => "읽기 모드",
+
         TextKey::ToolbarOutlineTooltip => "개요 전환",
         TextKey::ToolbarThemeTooltip => "테마 전환",
         TextKey::InlineDiffRevert => "되돌리기",
@@ -4853,7 +4976,7 @@ fn translate_french(key: TextKey) -> &'static str {
         TextKey::ToolbarSidebarTooltip => "Barre latérale",
         TextKey::ToolbarAlignTooltip => "Aligner à gauche",
         TextKey::ToolbarWrapTooltip => "Retour auto",
-        TextKey::ToolbarReadingModeTooltip => "Mode lecture",
+
         TextKey::ToolbarOutlineTooltip => "Plan",
         TextKey::ToolbarThemeTooltip => "Thème",
         TextKey::InlineDiffRevert => "Rétablir",
@@ -5098,7 +5221,7 @@ fn translate_german(key: TextKey) -> &'static str {
         TextKey::ToolbarSidebarTooltip => "Seitenleiste",
         TextKey::ToolbarAlignTooltip => "Links ausrichten",
         TextKey::ToolbarWrapTooltip => "Umbruch",
-        TextKey::ToolbarReadingModeTooltip => "Lesemodus",
+
         TextKey::ToolbarOutlineTooltip => "Gliederung",
         TextKey::ToolbarThemeTooltip => "Design",
         TextKey::InlineDiffRevert => "Zurücksetzen",
@@ -5345,7 +5468,7 @@ fn translate_spanish(key: TextKey) -> &'static str {
         TextKey::ToolbarSidebarTooltip => "Barra lateral",
         TextKey::ToolbarAlignTooltip => "Alinear izquierda",
         TextKey::ToolbarWrapTooltip => "Ajuste línea",
-        TextKey::ToolbarReadingModeTooltip => "Modo lectura",
+
         TextKey::ToolbarOutlineTooltip => "Esquema",
         TextKey::ToolbarThemeTooltip => "Tema",
         TextKey::InlineDiffRevert => "Revertir",
@@ -5592,7 +5715,7 @@ fn translate_portuguese(key: TextKey) -> &'static str {
         TextKey::ToolbarSidebarTooltip => "Barra lateral",
         TextKey::ToolbarAlignTooltip => "Alinhar à esquerda",
         TextKey::ToolbarWrapTooltip => "Quebra auto",
-        TextKey::ToolbarReadingModeTooltip => "Modo de leitura",
+
         TextKey::ToolbarOutlineTooltip => "Estrutura",
         TextKey::ToolbarThemeTooltip => "Tema",
         TextKey::InlineDiffRevert => "Reverter",
@@ -5837,7 +5960,7 @@ fn translate_russian(key: TextKey) -> &'static str {
         TextKey::ToolbarSidebarTooltip => "Боковая панель",
         TextKey::ToolbarAlignTooltip => "Влево",
         TextKey::ToolbarWrapTooltip => "Перенос",
-        TextKey::ToolbarReadingModeTooltip => "Режим чтения",
+
         TextKey::ToolbarOutlineTooltip => "Структура",
         TextKey::ToolbarThemeTooltip => "Тема",
         TextKey::InlineDiffRevert => "Откатить",
@@ -6084,7 +6207,7 @@ fn translate_arabic(key: TextKey) -> &'static str {
         TextKey::ToolbarSidebarTooltip => "الشريط الجانبي",
         TextKey::ToolbarAlignTooltip => "محاذاة اليسار",
         TextKey::ToolbarWrapTooltip => "التفاف",
-        TextKey::ToolbarReadingModeTooltip => "وضع القراءة",
+
         TextKey::ToolbarOutlineTooltip => "المخطط",
         TextKey::ToolbarThemeTooltip => "السمة",
         TextKey::InlineDiffRevert => "استرجاع",
@@ -6327,7 +6450,7 @@ fn translate_hindi(key: TextKey) -> &'static str {
         TextKey::ToolbarSidebarTooltip => "साइडबार",
         TextKey::ToolbarAlignTooltip => "बाएँ करें",
         TextKey::ToolbarWrapTooltip => "लाइन रैप",
-        TextKey::ToolbarReadingModeTooltip => "पठन मोड",
+
         TextKey::ToolbarOutlineTooltip => "आउटलाइन",
         TextKey::ToolbarThemeTooltip => "थीम",
         TextKey::InlineDiffRevert => "पूर्ववत करें",

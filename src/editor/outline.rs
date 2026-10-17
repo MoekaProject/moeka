@@ -102,10 +102,221 @@ impl OutlinePanelLayoutCache {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceLineKind {
+    Text,
+    Heading(u8),
+    Blank,
+    Structural,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SourceLineCheckpoint {
+    fingerprint: u64,
+    prefix: u64,
+    kind: SourceLineKind,
+    fence_candidate: bool,
+    math_candidate: bool,
+}
+
+impl SourceLineCheckpoint {
+    fn new(source: &str) -> Self {
+        use std::hash::{Hash, Hasher};
+        let fingerprint = |text: &str| {
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut hash);
+            hash.finish()
+        };
+        let mut content = source.trim_start_matches([' ', '\t']);
+        while let Some(rest) = content.strip_prefix('>') {
+            content = rest.trim_start_matches([' ', '\t']);
+        }
+        let prefix_len = source.len() - content.len();
+        let fence_content = content.trim_start_matches(['-', '+', '*', ' ', '\t']);
+        let fence_candidate = fence_content.starts_with(['`', '~'])
+            || content[crate::markdown::ordered_list_prefix_len(content)..].starts_with(['`', '~']);
+        let math_candidate =
+            source.contains("$$") || source.contains("\\[") || source.contains("\\]");
+        let kind = if content.trim().is_empty() {
+            SourceLineKind::Blank
+        } else if !math_candidate && let Some((level, _)) = atx_outline_heading(source) {
+            SourceLineKind::Heading(level)
+        } else if content.chars().next().is_some_and(|ch| {
+            ch.is_alphanumeric() || matches!(ch, '\'' | '"' | '(' | ')' | '{' | '}')
+        }) && crate::markdown::ordered_list_prefix_len(content) == 0
+            && !content.contains(['$', '\\', '`', '~', '<', '>', '[', ']', '|'])
+        {
+            SourceLineKind::Text
+        } else {
+            SourceLineKind::Structural
+        };
+        Self {
+            fingerprint: fingerprint(source),
+            prefix: fingerprint(&source[..prefix_len]),
+            kind,
+            fence_candidate,
+            math_candidate,
+        }
+    }
+}
+
+static EMPTY_SOURCE_HEADINGS: Vec<OutlineHeading> = Vec::new();
+
+#[derive(Clone, Default)]
+pub(super) struct SourceOutline {
+    pub(super) headings: Vec<OutlineHeading>,
+    pub(super) math_ranges: Vec<std::ops::Range<usize>>,
+    pub(super) code_ranges: Vec<std::ops::Range<usize>>,
+    line_checkpoints: Vec<SourceLineCheckpoint>,
+    front_matter_end: usize,
+    #[cfg(test)]
+    updated_lines: usize,
+}
+
+impl SourceOutline {
+    /// Reuse source ownership when changed rows cannot change Markdown block
+    /// structure. Checkpoints let a widened parser dirty range skip unchanged
+    /// fences without rereading the rest of the document or its canonical roles.
+    fn update_after_edit(
+        &mut self,
+        buffer: &Buffer,
+        start: usize,
+        old_end: usize,
+        new_end: usize,
+    ) -> bool {
+        if start > old_end
+            || start > new_end
+            || old_end > self.line_checkpoints.len()
+            || new_end > buffer.line_count()
+            || self.line_checkpoints.len() - old_end + new_end != buffer.line_count()
+        {
+            return false;
+        }
+        let replacements: Vec<_> = (start..new_end)
+            .map(|line| SourceLineCheckpoint::new(buffer.line_content(line)))
+            .collect();
+        #[cfg(test)]
+        {
+            self.updated_lines = replacements.len();
+        }
+        let old = &self.line_checkpoints[start..old_end];
+        let prefix = old
+            .iter()
+            .zip(&replacements)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(replacements[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let start = start + prefix;
+        let old_end = old_end - suffix;
+        let new_end = new_end - suffix;
+        let replacements = &replacements[prefix..replacements.len() - suffix];
+        if start == old_end && replacements.is_empty() {
+            return true;
+        }
+        if start < self.front_matter_end {
+            return false;
+        }
+        let removed = &self.line_checkpoints[start..old_end];
+        let reference = removed.first().or_else(|| replacements.first()).unwrap();
+        let same_prefix = removed
+            .iter()
+            .chain(replacements)
+            .all(|line| line.prefix == reference.prefix);
+        let within_body = |ranges: &[std::ops::Range<usize>]| {
+            let index = ranges.partition_point(|range| range.start < start);
+            index.checked_sub(1).is_some_and(|index| {
+                let range = &ranges[index];
+                start < range.end.saturating_sub(1) && old_end <= range.end.saturating_sub(1)
+            })
+        };
+        let in_math = within_body(&self.math_ranges);
+        let in_code = within_body(&self.code_ranges);
+        let literal_safe = (in_math || in_code)
+            && same_prefix
+            && removed
+                .iter()
+                .chain(replacements)
+                .all(|line| !line.fence_candidate && (!in_math || !line.math_candidate));
+        let ordinary_safe = same_prefix
+            && matches!(
+                reference.kind,
+                SourceLineKind::Text | SourceLineKind::Heading(_)
+            )
+            && removed
+                .iter()
+                .chain(replacements)
+                .all(|line| line.kind == reference.kind);
+        if !literal_safe && !ordinary_safe {
+            return false;
+        }
+        let delta = new_end as isize - old_end as isize;
+        if delta != 0 && !literal_safe {
+            if reference.kind != SourceLineKind::Text {
+                return false;
+            }
+            // Inserting paragraph rows beside a setext heading can make new
+            // rows part of that heading. Leave that structural change to rebuild.
+            let first = self
+                .headings
+                .partition_point(|heading| heading.line < start.saturating_sub(1));
+            if self.headings[first..]
+                .iter()
+                .take_while(|heading| heading.line <= old_end)
+                .any(|heading| {
+                    !matches!(
+                        self.line_checkpoints[heading.line].kind,
+                        SourceLineKind::Heading(_)
+                    )
+                })
+            {
+                return false;
+            }
+        }
+        let first = self
+            .headings
+            .partition_point(|heading| heading.line < start);
+        for heading in self.headings[first..]
+            .iter_mut()
+            .take_while(|heading| heading.line < old_end)
+        {
+            *heading = source_outline_heading(buffer, heading.line, heading.level);
+        }
+        if delta != 0 {
+            let first = self
+                .headings
+                .partition_point(|heading| heading.line < old_end);
+            for heading in &mut self.headings[first..] {
+                heading.line = heading.line.saturating_add_signed(delta);
+            }
+            for ranges in [&mut self.math_ranges, &mut self.code_ranges] {
+                let first = ranges.partition_point(|range| range.end <= start);
+                for range in &mut ranges[first..] {
+                    if range.start >= old_end {
+                        range.start = range.start.saturating_add_signed(delta);
+                    }
+                    range.end = range.end.saturating_add_signed(delta);
+                }
+            }
+        }
+        self.line_checkpoints
+            .splice(start..old_end, replacements.iter().copied());
+        true
+    }
+}
+
+const MAX_INLINE_OUTLINE_EDIT_LINES: usize = 64;
+
 #[derive(Clone, Default)]
 pub(crate) struct MarkdownOutlineIndex {
     pub(crate) headings: Vec<OutlineHeading>,
     fence_before_line: Vec<u16>,
+    pub(super) source: Option<SourceOutline>,
+    needs_rebuild: bool,
 }
 
 impl MarkdownOutlineIndex {
@@ -113,6 +324,8 @@ impl MarkdownOutlineIndex {
         let mut index = Self {
             headings: Vec::new(),
             fence_before_line: vec![0; buffer.line_count() + 1],
+            source: None,
+            needs_rebuild: false,
         };
         let mut state = 0;
         for line in 0..buffer.line_count() {
@@ -126,6 +339,7 @@ impl MarkdownOutlineIndex {
         index
     }
 
+    /// `start_line` is the actual edit start, not a parser-expanded dirty start.
     pub(crate) fn update_after_edit(
         &mut self,
         buffer: &Buffer,
@@ -134,6 +348,32 @@ impl MarkdownOutlineIndex {
         new_end_line_exclusive: usize,
     ) {
         let old_line_count = self.fence_before_line.len().saturating_sub(1);
+        if self.needs_rebuild
+            || old_end_line_exclusive
+                .max(new_end_line_exclusive)
+                .saturating_sub(start_line)
+                > MAX_INLINE_OUTLINE_EDIT_LINES
+            || start_line > old_end_line_exclusive
+            || start_line > new_end_line_exclusive
+            || old_end_line_exclusive > old_line_count
+            || new_end_line_exclusive > buffer.line_count()
+            || old_line_count - old_end_line_exclusive + new_end_line_exclusive
+                != buffer.line_count()
+        {
+            self.source = None;
+            self.needs_rebuild = true;
+            return;
+        }
+        if self.source.as_mut().is_some_and(|source| {
+            !source.update_after_edit(
+                buffer,
+                start_line,
+                old_end_line_exclusive,
+                new_end_line_exclusive,
+            )
+        }) {
+            self.source = None;
+        }
         let line_delta = new_end_line_exclusive as isize - old_end_line_exclusive as isize;
         let start = start_line.min(buffer.line_count());
         let old_end = old_end_line_exclusive.min(old_line_count).max(start);
@@ -148,9 +388,12 @@ impl MarkdownOutlineIndex {
         );
         self.fence_before_line.resize(buffer.line_count() + 1, 0);
 
-        for heading in &mut self.headings {
-            if heading.line >= old_end {
-                heading.line = (heading.line as isize + line_delta).max(0) as usize;
+        if line_delta != 0 {
+            let first = self
+                .headings
+                .partition_point(|heading| heading.line < old_end);
+            for heading in &mut self.headings[first..] {
+                heading.line = heading.line.saturating_add_signed(line_delta);
             }
         }
 
@@ -169,17 +412,24 @@ impl MarkdownOutlineIndex {
             if line >= new_end && next == previous_next {
                 break;
             }
+            if line - scan_start >= MAX_INLINE_OUTLINE_EDIT_LINES {
+                self.source = None;
+                self.needs_rebuild = true;
+                return;
+            }
         }
 
-        self.headings
-            .retain(|heading| heading.line < scan_start || heading.line >= scan_end);
+        let replace_start = self
+            .headings
+            .partition_point(|heading| heading.line < scan_start);
+        let replace_end = self
+            .headings
+            .partition_point(|heading| heading.line < scan_end);
         let replacement = (scan_start..scan_end)
             .filter_map(|line| outline_heading(buffer, line, self.fence_before_line[line + 1]))
             .collect::<Vec<_>>();
-        let insert_at = self
-            .headings
-            .partition_point(|heading| heading.line < scan_start);
-        self.headings.splice(insert_at..insert_at, replacement);
+        self.headings
+            .splice(replace_start..replace_end, replacement);
     }
 }
 
@@ -283,6 +533,76 @@ fn outline_heading(buffer: &Buffer, line: usize, state_after_line: u16) -> Optio
         level,
         text: SharedString::from(text.to_string()),
     })
+}
+
+/// Use canonical parser roles for eager Source documents and a cached lexical
+/// pass for lazy ones, whose offscreen rows intentionally remain undecorated.
+/// In particular, a literal `# heading` inside code must never enter the outline.
+pub(super) fn source_outline_data(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    lazy: bool,
+) -> SourceOutline {
+    let (boundaries, math_ranges, code_ranges) = if lazy {
+        fold::source_fold_structure(buffer, decorations)
+    } else {
+        let boundaries = decorations
+            .iter()
+            .enumerate()
+            .filter_map(|(line, decoration)| match decoration.block_type {
+                BlockType::Heading(level) => Some((line, level)),
+                _ => None,
+            })
+            .collect();
+        let math_ranges = decorations
+            .iter()
+            .filter_map(|decoration| decoration.block_preview.as_ref())
+            .filter(|preview| {
+                preview.is_anchor && preview.kind == crate::markdown::BlockPreviewKind::Math
+            })
+            .map(|preview| {
+                preview.start_line..preview.end_line.saturating_add(1).min(buffer.line_count())
+            })
+            .collect();
+        let code_ranges = fold::source_fold_structure(buffer, decorations).2;
+        (boundaries, math_ranges, code_ranges)
+    };
+    let headings = boundaries
+        .into_iter()
+        .map(|(line, level)| source_outline_heading(buffer, line, level))
+        .collect();
+    SourceOutline {
+        headings,
+        math_ranges,
+        code_ranges,
+        line_checkpoints: (0..buffer.line_count())
+            .map(|line| SourceLineCheckpoint::new(buffer.line_content(line)))
+            .collect(),
+        front_matter_end: leading_front_matter_line_range(buffer).map_or(0, |range| range.end),
+        #[cfg(test)]
+        updated_lines: 0,
+    }
+}
+
+fn source_outline_heading(buffer: &Buffer, line: usize, level: u8) -> OutlineHeading {
+    let raw = buffer.line_content(line);
+    let text = atx_outline_heading(raw)
+        .map(|(_, text)| text)
+        .unwrap_or_else(|| structural_line_content(raw).unwrap_or(raw).trim());
+    OutlineHeading {
+        line,
+        level,
+        text: SharedString::from(text.to_string()),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn source_outline_headings(
+    buffer: &Buffer,
+    decorations: &[LineDecoration],
+    lazy: bool,
+) -> Vec<OutlineHeading> {
+    source_outline_data(buffer, decorations, lazy).headings
 }
 
 fn outline_rail_row_top(
@@ -394,6 +714,242 @@ mod tests {
             headings,
             vec![(0, 1, "ATX"), (2, 2, "Quoted"), (4, 2, "Setext")]
         );
+    }
+
+    #[test]
+    fn source_outline_skips_literal_code_math_and_front_matter_headings() {
+        let text = "---\ntitle: Note\n# YAML comment\n---\n# Real\n```md\n# Literal fenced heading\nLiteral setext\n---\n```\n\n    # Literal indented heading\n\n$$\n# Literal math heading\n$$\n\n```mermaid\n# Literal diagram heading\n```\n\n> ## Quoted\n\nSetext\n===\n# Last";
+        let buffer = Buffer::from_text(text);
+        let decorations = crate::markdown::parse_decorations(text);
+        for lazy in [false, true] {
+            let headings = super::source_outline_headings(&buffer, &decorations, lazy);
+            let labels = headings
+                .iter()
+                .map(|heading| heading.text.as_ref())
+                .collect::<Vec<_>>();
+            assert_eq!(labels, ["Real", "Quoted", "Setext", "Last"], "lazy={lazy}");
+        }
+    }
+
+    #[test]
+    fn source_outline_lazy_unparsed_code_headings_remain_literal() {
+        let text = "# Real\n\n```markdown\n# Literal\nText\n---\n```\n\n    # Indented\n\n# Last";
+        let buffer = Buffer::from_text(text);
+        let decorations = vec![crate::markdown::LineDecoration::default(); buffer.line_count()];
+        let headings = super::source_outline_headings(&buffer, &decorations, true);
+        assert_eq!(
+            headings
+                .iter()
+                .map(|heading| (heading.line, heading.text.as_ref()))
+                .collect::<Vec<_>>(),
+            [(0, "Real"), (10, "Last")]
+        );
+    }
+
+    #[test]
+    fn source_outline_lazy_unvisited_front_matter_does_not_leak_headings_or_fences() {
+        let text = "---\nnote: |\n  ```\n  # YAML scalar\n# YAML comment\n---\n\n# Real\n\n# Last";
+        let buffer = Buffer::from_text(text);
+        let decorations = vec![crate::markdown::LineDecoration::default(); buffer.line_count()];
+        let headings = super::source_outline_headings(&buffer, &decorations, true);
+        assert_eq!(
+            headings
+                .iter()
+                .map(|heading| heading.text.as_ref())
+                .collect::<Vec<_>>(),
+            ["Real", "Last"]
+        );
+    }
+
+    fn source_test_index(buffer: &Buffer, lazy: bool) -> MarkdownOutlineIndex {
+        let mut index = MarkdownOutlineIndex::rebuild(buffer);
+        let decorations = if lazy {
+            Vec::new()
+        } else {
+            crate::markdown::parse_decorations(buffer.text())
+        };
+        index.source = Some(super::source_outline_data(buffer, &decorations, lazy));
+        index
+    }
+
+    fn assert_source_index_matches_rebuild(
+        buffer: &Buffer,
+        index: &MarkdownOutlineIndex,
+        lazy: bool,
+    ) {
+        let expected = source_test_index(buffer, lazy).source.unwrap();
+        let actual = index
+            .source
+            .as_ref()
+            .expect("safe edit must preserve the Source cache");
+        let headings = |source: &super::SourceOutline| {
+            source
+                .headings
+                .iter()
+                .map(|heading| (heading.line, heading.level, heading.text.to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(headings(actual), headings(&expected));
+        assert_eq!(actual.code_ranges, expected.code_ranges);
+        assert_eq!(actual.math_ranges, expected.math_ranges);
+        assert!(actual.line_checkpoints == expected.line_checkpoints);
+    }
+
+    #[test]
+    fn source_outline_safe_edits_reuse_canonical_code_math_and_heading_boundaries() {
+        let text =
+            "# A\n\n```rust\nlet text = \"`literal`\";\n```\n\n$$\n\\frac{a}{b}\n$$\n\n# B\nbody";
+        for lazy in [false, true] {
+            let mut buffer = Buffer::from_text(text);
+            let mut index = source_test_index(&buffer, lazy);
+            for (line, replacement) in [
+                (3, "let text = \"`updated`\";"),
+                (7, "\\frac{x}{y}"),
+                (0, "# Updated heading"),
+                (11, "updated body"),
+            ] {
+                buffer.replace(buffer.line_start(line)..buffer.line_end(line), replacement);
+                index.update_after_edit(&buffer, line.saturating_sub(8), line + 1, line + 1);
+                assert!(index.source.as_ref().unwrap().updated_lines <= 9);
+                assert_source_index_matches_rebuild(&buffer, &index, lazy);
+            }
+        }
+    }
+
+    #[test]
+    fn source_outline_safe_line_splices_shift_canonical_fences_and_headings() {
+        let text =
+            "# A\n\nintro words\n\n```rust\nlet value = 1;\n```\n\n$$\nx + y\n$$\n\n# B\nend";
+        for lazy in [false, true] {
+            let mut buffer = Buffer::from_text(text);
+            let mut index = source_test_index(&buffer, lazy);
+            buffer.replace(buffer.line_start(2)..buffer.line_end(2), "intro\nwords");
+            index.update_after_edit(&buffer, 0, 3, 4);
+            assert_source_index_matches_rebuild(&buffer, &index, lazy);
+            assert_eq!(index.source.as_ref().unwrap().code_ranges, vec![5..8]);
+            assert_eq!(index.source.as_ref().unwrap().math_ranges, vec![9..12]);
+
+            let line = index.source.as_ref().unwrap().code_ranges[0].start + 1;
+            buffer.replace(
+                buffer.line_start(line)..buffer.line_end(line),
+                "let a = 1;\nlet b = 2;",
+            );
+            index.update_after_edit(&buffer, line.saturating_sub(8), line + 1, line + 2);
+            assert_source_index_matches_rebuild(&buffer, &index, lazy);
+
+            let line = index.source.as_ref().unwrap().math_ranges[0].start + 1;
+            buffer.replace(
+                buffer.line_start(line)..buffer.line_end(line),
+                "x + y\nz + w",
+            );
+            index.update_after_edit(&buffer, line.saturating_sub(8), line + 1, line + 2);
+            assert_source_index_matches_rebuild(&buffer, &index, lazy);
+
+            buffer.replace(
+                buffer.line_start(line)..buffer.line_end(line + 1),
+                "x + y + z",
+            );
+            index.update_after_edit(&buffer, line.saturating_sub(8), line + 2, line + 1);
+            assert_source_index_matches_rebuild(&buffer, &index, lazy);
+        }
+    }
+
+    #[test]
+    fn source_outline_ordinary_keystrokes_only_checkpoint_the_dirty_window() {
+        let mut rows = vec!["ordinary prose"; 50_000];
+        rows[0] = "# A";
+        rows[49_999] = "# B";
+        let mut buffer = Buffer::from_text(&rows.join("\n"));
+        let mut index = source_test_index(&buffer, true);
+        let checkpoint_storage = index.source.as_ref().unwrap().line_checkpoints.as_ptr();
+        for edit in 0..32 {
+            buffer.replace(
+                buffer.line_start(25_000)..buffer.line_end(25_000),
+                &format!("ordinary prose {edit}"),
+            );
+            index.update_after_edit(&buffer, 24_992, 25_001, 25_001);
+            let source = index
+                .source
+                .as_ref()
+                .expect("typing must not schedule a full Source rebuild");
+            assert_eq!(source.updated_lines, 9);
+            assert_eq!(source.line_checkpoints.as_ptr(), checkpoint_storage);
+            assert_eq!(source.headings.len(), 2);
+        }
+        assert_source_index_matches_rebuild(&buffer, &index, true);
+    }
+
+    #[test]
+    fn source_outline_large_canonical_blocks_update_from_actual_edit_bounds() {
+        for (opener, closer) in [("$$", "$$"), ("```rust", "```"), ("```mermaid", "```")] {
+            for lazy in [false, true] {
+                let mut rows = vec!["literal text"; 4096];
+                rows[0] = opener;
+                rows[4095] = closer;
+                let mut buffer = Buffer::from_text(&rows.join("\n"));
+                let mut index = source_test_index(&buffer, lazy);
+                let ranges = {
+                    let source = index.source.as_ref().unwrap();
+                    (source.math_ranges.clone(), source.code_ranges.clone())
+                };
+                buffer.replace(
+                    buffer.line_start(3000)..buffer.line_end(3000),
+                    "updated literal text",
+                );
+                index.update_after_edit(&buffer, 3000, 3001, 3001);
+                let source = index
+                    .source
+                    .as_ref()
+                    .expect("ordinary edits inside large blocks remain incremental");
+                assert_eq!(source.updated_lines, 1);
+                assert_eq!(
+                    (&source.math_ranges, &source.code_ranges),
+                    (&ranges.0, &ranges.1)
+                );
+                assert_source_index_matches_rebuild(&buffer, &index, lazy);
+
+                // A legacy caller may still supply a parser-expanded start.
+                // Bound that work and defer, rather than reading 3001 rows.
+                buffer.replace(
+                    buffer.line_start(3000)..buffer.line_end(3000),
+                    "another literal edit",
+                );
+                index.update_after_edit(&buffer, 0, 3001, 3001);
+                assert!(index.needs_rebuild);
+                assert!(index.source.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn source_outline_structural_changes_invalidate_instead_of_reusing_stale_ranges() {
+        for (text, line, replacement) in [
+            ("```md\nbody\n```\n# Real", 2, "> ```"),
+            ("# A\n\nbody\n\n# B", 2, "## New heading"),
+            ("# A\n\nTitle\n===", 2, "Title\nmore title"),
+            ("---\ntitle: Note\n---\n# Real", 1, "title: Updated"),
+        ] {
+            let mut buffer = Buffer::from_text(text);
+            let mut index = source_test_index(&buffer, true);
+            buffer.replace(buffer.line_start(line)..buffer.line_end(line), replacement);
+            let added_lines = replacement.bytes().filter(|byte| *byte == b'\n').count();
+            index.update_after_edit(&buffer, 0, line + 1, line + 1 + added_lines);
+            assert!(index.source.is_none(), "{text:?}: {replacement:?}");
+        }
+    }
+
+    #[test]
+    fn source_outline_index_invalidates_cached_structure_after_edits() {
+        let mut buffer = Buffer::from_text("# A\n\n$$\nx\n$$\n\n# B");
+        let mut index = MarkdownOutlineIndex::rebuild(&buffer);
+        index.source = Some(super::source_outline_data(&buffer, &[], true));
+        assert_eq!(index.source.as_ref().unwrap().math_ranges, vec![2..5]);
+        buffer.replace(buffer.line_start(4)..buffer.line_end(4), "not a closer");
+        index.update_after_edit(&buffer, 4, 5, 5);
+        assert!(index.source.is_none());
+        let source = super::source_outline_data(&buffer, &[], true);
+        assert!(source.math_ranges.is_empty());
+        assert_eq!(source.headings.last().unwrap().text.as_ref(), "B");
     }
 
     #[test]
@@ -1180,9 +1736,15 @@ impl EditorView {
         let outline_visible = self.outline_rail_visible
             || self.utility_panel == Some(RightUtilityPanel::Outline)
             || self.displayed_utility_panel == Some(RightUtilityPanel::Outline);
-        if !outline_visible
-            || !self.uses_lazy_markdown_decorations()
-            || self.markdown_outline_index.borrow().is_some()
+        let source_mode = self.source_mode && self.active_tab_uses_markdown_editor();
+        let lazy = self.uses_lazy_markdown_decorations();
+        let ready = self
+            .markdown_outline_index
+            .borrow()
+            .as_ref()
+            .is_some_and(|index| !index.needs_rebuild && (!source_mode || index.source.is_some()));
+        if (!source_mode && (!outline_visible || !lazy))
+            || ready
             || self.markdown_outline_build_task.is_some()
         {
             return;
@@ -1192,17 +1754,34 @@ impl EditorView {
         let text = self.buffer.text().to_string();
         let build = cx.background_executor().spawn(async move {
             let buffer = Buffer::from_string(text);
-            MarkdownOutlineIndex::rebuild(&buffer)
+            let mut index = MarkdownOutlineIndex::rebuild(&buffer);
+            if source_mode {
+                index.source = Some(if lazy {
+                    source_outline_data(&buffer, &[], true)
+                } else {
+                    let mut decorations = crate::markdown::parse_decorations(buffer.text());
+                    fold::decorate_empty_front_matter(&buffer, &mut decorations);
+                    source_outline_data(&buffer, &decorations, false)
+                });
+            }
+            index
         });
         self.markdown_outline_build_task = Some(cx.spawn(async move |this, cx| {
             let index = build.await;
             this.update(cx, |this, cx| {
                 this.with_pane_if_alive(pane_id, |this| {
                     this.markdown_outline_build_task = None;
-                    if this.markdown_outline_epoch == epoch && this.uses_lazy_markdown_decorations()
+                    if this.markdown_outline_epoch == epoch
+                        && source_mode
+                            == (this.source_mode && this.active_tab_uses_markdown_editor())
+                        && lazy == this.uses_lazy_markdown_decorations()
                     {
                         *this.markdown_outline_index.borrow_mut() = Some(index);
+                        if source_mode {
+                            this.outline_headings_cache_dirty.set(false);
+                        }
                         this.invalidate_outline_layout_cache();
+                        this.invalidate_line_geometry_cache();
                     }
                 });
                 cx.notify();
@@ -1212,9 +1791,28 @@ impl EditorView {
     }
 
     pub(crate) fn collect_outline_headings(&self) -> Ref<'_, Vec<OutlineHeading>> {
-        if self.uses_lazy_markdown_decorations() && self.markdown_outline_index.borrow().is_some() {
+        if self.source_mode && self.active_tab_uses_markdown_editor() {
+            // Source validity is owned by update_after_edit, not the rendered
+            // headings dirty flag. Missing/structural snapshots rebuild on the
+            // worker even when Outline is closed; gutter reads never reparse.
             return Ref::map(self.markdown_outline_index.borrow(), |index| {
-                &index.as_ref().expect("checked above").headings
+                index
+                    .as_ref()
+                    .and_then(|index| index.source.as_ref())
+                    .map_or(&EMPTY_SOURCE_HEADINGS, |source| &source.headings)
+            });
+        }
+        if !self.source_mode
+            && self.uses_lazy_markdown_decorations()
+            && self.markdown_outline_index.borrow().is_some()
+        {
+            return Ref::map(self.markdown_outline_index.borrow(), |index| {
+                let index = index.as_ref().expect("checked above");
+                if index.needs_rebuild {
+                    &EMPTY_SOURCE_HEADINGS
+                } else {
+                    &index.headings
+                }
             });
         }
         if self.outline_headings_cache_dirty.get() {
@@ -1330,6 +1928,13 @@ impl EditorView {
     }
 
     pub(crate) fn scroll_to_line(&mut self, target_line: usize, cx: &mut Context<Self>) {
+        let target_line = target_line.min(self.buffer.line_count().saturating_sub(1));
+        self.ensure_lazy_markdown_decorations(target_line..target_line + 1);
+        let folded_count = self.folded_sections.len();
+        self.unfold_search_match(target_line..target_line + 1);
+        if self.folded_sections.len() != folded_count {
+            self.clear_line_display_info();
+        }
         let line_end = self.buffer.line_end(target_line);
         self.cursor.offset = line_end;
         self.cursor.anchor = line_end;
@@ -1453,7 +2058,7 @@ impl EditorView {
     }
 
     pub(crate) fn render_outline_rail(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.outline_rail_visible || !self.active_tab_is_markdown() {
+        if !self.outline_rail_visible || !self.active_tab_uses_markdown_editor() {
             self.outline_rail_zone_from_right.set(0.0);
             return None;
         }

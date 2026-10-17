@@ -402,17 +402,33 @@ impl EditorView {
         if closed_tab.snapshot.text.is_empty()
             && let Some(path) = closed_tab.path.as_ref()
         {
-            self.open_path_in_permanent_tab(path.clone(), true, cx);
+            let view = config_store::TabViewState {
+                editor_left_aligned: closed_tab.editor_left_aligned,
+                reading_mode: closed_tab.reading_mode && !closed_tab.source_mode,
+                source_mode: closed_tab.source_mode,
+                source_word_wrap: closed_tab.source_word_wrap,
+                ..Default::default()
+            };
+            self.open_path_in_permanent_tab_with_view(path.clone(), true, Some(view), cx);
             return;
         }
-        let tab = OpenTab {
-            id: self.next_tab_identity(),
+        let tab = Self::tab_for_reopen(self.next_tab_identity(), closed_tab);
+        self.tabs.push(tab);
+        let index = self.tabs.len() - 1;
+        self.activate_tab_by_index(index, cx);
+    }
+
+    fn tab_for_reopen(id: String, closed_tab: OpenTab) -> OpenTab {
+        OpenTab {
+            id,
             title: closed_tab.title,
             kind: TabKind::Editor,
             path: closed_tab.path,
             file_kind: closed_tab.file_kind,
             editor_left_aligned: closed_tab.editor_left_aligned,
-            reading_mode: closed_tab.reading_mode,
+            reading_mode: closed_tab.reading_mode && !closed_tab.source_mode,
+            source_mode: closed_tab.source_mode,
+            source_word_wrap: closed_tab.source_word_wrap,
             snapshot: closed_tab.snapshot,
             image_view: closed_tab.image_view,
             whiteboard: closed_tab.whiteboard,
@@ -424,10 +440,14 @@ impl EditorView {
             is_pinned: false,
             recovery: closed_tab.recovery,
             history: closed_tab.history,
-        };
-        self.tabs.push(tab);
-        let index = self.tabs.len() - 1;
-        self.activate_tab_by_index(index, cx);
+        }
+    }
+
+    fn apply_reopened_tab_view(tab: &mut OpenTab, view: &config_store::TabViewState) {
+        tab.editor_left_aligned = view.editor_left_aligned;
+        tab.reading_mode = view.reading_mode && !view.source_mode;
+        tab.source_mode = view.source_mode;
+        tab.source_word_wrap = view.source_word_wrap;
     }
 
     fn activate_tab_navigation_target(
@@ -579,6 +599,8 @@ impl EditorView {
             file_kind: Some(file_kind),
             editor_left_aligned: initial_left_aligned,
             reading_mode: false,
+            source_mode: false,
+            source_word_wrap: true,
             snapshot,
             image_view: ImageViewState::default(),
             whiteboard,
@@ -692,6 +714,16 @@ impl EditorView {
         focus_editor: bool,
         cx: &mut Context<Self>,
     ) {
+        self.open_path_in_permanent_tab_with_view(path, focus_editor, None, cx);
+    }
+
+    fn open_path_in_permanent_tab_with_view(
+        &mut self,
+        path: PathBuf,
+        focus_editor: bool,
+        reopen_view: Option<config_store::TabViewState>,
+        cx: &mut Context<Self>,
+    ) {
         self.focus_pane_containing_editor_path(&path, cx);
         self.preview_open_epoch = self.preview_open_epoch.wrapping_add(1);
         if let Some(index) = self.editor_tab_index_for_path(&path) {
@@ -710,13 +742,12 @@ impl EditorView {
             let read_path = path.clone();
             let loaded = fs_task::run("Open tab", path.clone(), move || {
                 let bytes = std::fs::read(&read_path)?;
-                Ok(Self::build_file_tab(
-                    tab_id,
-                    &read_path,
-                    &bytes,
-                    false,
-                    default_left_align,
-                ))
+                let mut tab =
+                    Self::build_file_tab(tab_id, &read_path, &bytes, false, default_left_align);
+                if let Some(view) = reopen_view {
+                    Self::apply_reopened_tab_view(&mut tab, &view);
+                }
+                Ok(tab)
             })
             .await;
             this.update(cx, |editor, cx| {
@@ -799,7 +830,9 @@ impl EditorView {
                     self.tabs[index].snapshot = self.current_snapshot();
                 }
                 self.tabs[index].editor_left_aligned = self.editor_left_aligned;
-                self.tabs[index].reading_mode = self.reading_mode;
+                self.tabs[index].reading_mode = self.reading_mode && !self.source_mode;
+                self.tabs[index].source_mode = self.source_mode;
+                self.tabs[index].source_word_wrap = self.source_word_wrap;
                 self.current_file_path = self.tabs[index].path.clone();
             }
         }
@@ -836,7 +869,9 @@ impl EditorView {
         let tab_file_kind = self.tabs[index].file_kind.clone();
         let tab_path = self.tabs[index].path.clone();
         let tab_left_aligned = self.tabs[index].editor_left_aligned;
-        let tab_reading_mode = self.tabs[index].reading_mode;
+        let tab_source_mode = self.tabs[index].source_mode;
+        let tab_source_word_wrap = self.tabs[index].source_word_wrap;
+        let tab_reading_mode = self.tabs[index].reading_mode && !tab_source_mode;
         let switching_tabs = self.active_tab_id.as_deref() != Some(tab_id.as_str());
         if switching_tabs {
             self.pending_code_fence = None;
@@ -854,7 +889,10 @@ impl EditorView {
         self.current_file_path = tab_path.clone();
         self.editor_left_aligned = tab_left_aligned;
         self.reading_mode = tab_reading_mode;
+        self.source_mode = tab_source_mode;
+        self.source_word_wrap = tab_source_word_wrap;
         if switching_tabs {
+            self.clear_inline_diff_phantom_layout_cache();
             self.restore_generated_preview_cache_for_tab(&tab_id);
         }
         if tab_kind.is_terminal() {
@@ -1310,6 +1348,8 @@ impl EditorView {
             file_kind: Some(FileKind::Markdown),
             editor_left_aligned: self.app_settings.default_left_align,
             reading_mode: false,
+            source_mode: false,
+            source_word_wrap: true,
             snapshot: EditorSnapshot {
                 text: String::new(),
                 cursor_offset: 0,
@@ -1411,6 +1451,8 @@ impl EditorView {
             file_kind: None,
             editor_left_aligned: false,
             reading_mode: false,
+            source_mode: false,
+            source_word_wrap: true,
             snapshot: EditorSnapshot {
                 text: String::new(),
                 cursor_offset: 0,
@@ -2699,6 +2741,7 @@ impl EditorView {
     pub(crate) fn render_tab_bar_toggle_actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let ts = &self.styles.tab_bar;
         let inner_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
+        let mode = self.document_mode();
 
         div()
             .id("tab-bar-actions")
@@ -2717,10 +2760,14 @@ impl EditorView {
                     this.child(self.render_tab_bar_action_button(
                         "tab-bar-align-toggle",
                         ALIGN_LEFT_MINI_SVG_PATH,
-                        self.editor_left_aligned,
+                        if self.source_mode {
+                            !self.source_word_wrap
+                        } else {
+                            self.editor_left_aligned
+                        },
                         true,
                         None,
-                        if self.active_tab_is_non_markdown_text() {
+                        if self.editor_uses_code_gutter() {
                             self.t(crate::i18n::TextKey::ToolbarWrapTooltip)
                         } else {
                             self.t(crate::i18n::TextKey::ToolbarAlignTooltip)
@@ -2734,14 +2781,14 @@ impl EditorView {
             .when(self.active_tab_supports_text_buffer(), |this| {
                 this.child(self.render_tab_bar_action_button(
                     "tab-bar-reading-mode-toggle",
-                    DOC_SVG_PATH,
-                    self.reading_mode,
+                    mode.icon_path(),
+                    mode != DocumentMode::Edit,
                     true,
                     None,
-                    self.t(crate::i18n::TextKey::ToolbarReadingModeTooltip),
+                    mode.tooltip(self.ui_language),
                     None,
                     cx,
-                    |this, cx| this.toggle_reading_mode(cx),
+                    |this, cx| this.cycle_document_mode(cx),
                 ))
             })
             .when(self.app_settings.simple_mode, |this| {
@@ -2758,7 +2805,7 @@ impl EditorView {
                 ))
             })
             .when(
-                self.app_settings.simple_mode && self.active_tab_is_markdown(),
+                self.app_settings.simple_mode && self.active_tab_uses_markdown_editor(),
                 |this| {
                     this.child(self.render_tab_bar_action_button(
                         "tab-bar-outline-toggle",
@@ -3347,6 +3394,8 @@ mod tests {
             file_kind: None,
             editor_left_aligned: false,
             reading_mode: false,
+            source_mode: false,
+            source_word_wrap: true,
             snapshot: EditorSnapshot {
                 text: text.to_string(),
                 ..Default::default()
@@ -3379,6 +3428,90 @@ mod tests {
             tab.history.saved_text.as_deref(),
             Some(tab.snapshot.text.as_str())
         );
+    }
+
+    #[test]
+    fn reopening_resident_tab_preserves_source_and_prefers_it_over_reading() {
+        for reading_mode in [false, true] {
+            let mut closed = closed_editor_tab("source text", Some(PathBuf::from("note.md")));
+            closed.editor_left_aligned = true;
+            closed.reading_mode = reading_mode;
+            closed.source_mode = true;
+
+            let reopened = EditorView::tab_for_reopen("tab-reopened".into(), closed);
+
+            assert_eq!(reopened.id, "tab-reopened");
+            assert_eq!(reopened.snapshot.text, "source text");
+            assert!(reopened.editor_left_aligned);
+            assert!(reopened.source_mode);
+            assert!(!reopened.reading_mode);
+        }
+    }
+
+    #[test]
+    fn reopening_disk_backed_tab_restores_source_view_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        for reading_mode in [false, true] {
+            let mut tab = EditorView::build_file_tab(
+                "tab-reopen-source".into(),
+                &path,
+                b"# Reloaded from disk\n",
+                false,
+                false,
+            );
+            assert!(!tab.source_mode);
+            let view = config_store::TabViewState {
+                editor_left_aligned: true,
+                reading_mode,
+                source_mode: true,
+                ..Default::default()
+            };
+
+            EditorView::apply_reopened_tab_view(&mut tab, &view);
+
+            assert_eq!(tab.snapshot.text, "# Reloaded from disk\n");
+            assert!(tab.editor_left_aligned);
+            assert!(tab.source_mode);
+            assert!(!tab.reading_mode);
+        }
+    }
+
+    #[test]
+    fn reopening_tabs_preserves_source_word_wrap_independently_of_alignment() {
+        for source_word_wrap in [false, true] {
+            for left_aligned in [false, true] {
+                let mut closed = closed_editor_tab("draft", None);
+                closed.source_mode = true;
+                closed.source_word_wrap = source_word_wrap;
+                closed.editor_left_aligned = left_aligned;
+                let reopened = EditorView::tab_for_reopen("tab-reopened".into(), closed);
+                assert_eq!(reopened.source_word_wrap, source_word_wrap);
+                assert_eq!(reopened.editor_left_aligned, left_aligned);
+
+                let mut disk_tab = closed_editor_tab("disk", None);
+                let view = config_store::TabViewState {
+                    source_mode: true,
+                    source_word_wrap,
+                    editor_left_aligned: left_aligned,
+                    ..Default::default()
+                };
+                EditorView::apply_reopened_tab_view(&mut disk_tab, &view);
+                assert_eq!(disk_tab.source_word_wrap, source_word_wrap);
+                assert_eq!(disk_tab.editor_left_aligned, left_aligned);
+            }
+        }
+    }
+
+    #[test]
+    fn reopening_edit_and_reading_tabs_does_not_enable_source_mode() {
+        for reading_mode in [false, true] {
+            let mut closed = closed_editor_tab("draft", None);
+            closed.reading_mode = reading_mode;
+            let reopened = EditorView::tab_for_reopen("tab-reopened".into(), closed);
+            assert_eq!(reopened.reading_mode, reading_mode);
+            assert!(!reopened.source_mode);
+        }
     }
 
     #[test]

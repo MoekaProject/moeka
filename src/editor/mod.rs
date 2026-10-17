@@ -62,6 +62,8 @@ mod sidebar_render;
 mod sidebar_state;
 mod sidebar_tree;
 mod sidebar_ui;
+mod source_edit;
+mod source_input;
 mod status_bar;
 mod table_cell_edit;
 mod table_cell_interaction;
@@ -96,6 +98,7 @@ pub(crate) use outline::MarkdownOutlineIndex;
 pub(crate) use pane::{
     Pane, PaneId, PaneLayout, PaneResizeDrag, PaneState, SplitAxis, SplitDirection,
 };
+pub(crate) use scaling::{DocumentMode, DocumentModeScrollAnchor};
 pub(crate) use scrollbar::{PanelScrollbarKind, PanelScrollbarState};
 pub(crate) use search_menu::{SearchMenuConfig, SearchMenuRow};
 pub(crate) use shortcut::{register_keybinding_overrides, set_application_menus};
@@ -1359,7 +1362,7 @@ fn compute_incremental_markdown_decorations(
     dirty_start_line: usize,
     dirty_end_line_exclusive: usize,
     byte_delta: isize,
-) -> Result<Vec<LineDecoration>, &'static str> {
+) -> Result<(Vec<LineDecoration>, Range<usize>), &'static str> {
     let new_line_count = buffer.line_count();
     if new_line_count == 0 {
         return Err("empty_buffer");
@@ -1550,7 +1553,7 @@ fn compute_incremental_markdown_decorations(
     if result.len() != new_line_count {
         return Err("result_len_mismatch");
     }
-    Ok(result)
+    Ok((result, win_start..win_end))
 }
 
 /// Upper bound on how far the incremental window may grow when searching for a
@@ -2229,6 +2232,7 @@ pub struct EditorView {
     pub(crate) styles: crate::style::Styles,
     pub(crate) decorations: Vec<LineDecoration>,
     pub(crate) lazy_markdown_decorations: Option<LazyMarkdownDecorations>,
+    pub(crate) source_syntax_context: RefCell<input_ime::SourceContextCache>,
     pub(crate) markdown_outline_index: RefCell<Option<MarkdownOutlineIndex>>,
     pub(crate) markdown_outline_build_task: Option<Task<()>>,
     pub(crate) markdown_outline_epoch: usize,
@@ -2258,6 +2262,7 @@ pub struct EditorView {
     pub(crate) pending_preview_reveal: Option<PendingPreviewReveal>,
     pub(crate) pending_typing_scroll_guard: Option<PendingTypingScrollGuard>,
     pub(crate) pending_click_anchor: Option<ClickScrollAnchor>,
+    pub(crate) document_mode_scroll_anchor: Option<DocumentModeScrollAnchor>,
     pub(crate) pending_history_transaction: Option<PendingHistoryTransaction>,
     /// Cache key of the generated preview currently shown in code (edit) mode,
     /// tracked so the rendered view (zoom/pan) can be reset whenever the cursor
@@ -2539,6 +2544,8 @@ pub struct EditorView {
     pub(crate) sidebar_visible: bool,
     pub(crate) editor_left_aligned: bool,
     pub(crate) reading_mode: bool,
+    pub(crate) source_mode: bool,
+    pub(crate) source_word_wrap: bool,
     pub(crate) indent_settings: IndentSettings,
     pub(crate) tab_drag_candidate_id: Option<String>,
     pub(crate) tab_drag_press_position: Option<gpui::Point<gpui::Pixels>>,
@@ -2670,6 +2677,7 @@ pub struct EditorView {
     pub(crate) git_history_refresh_epoch: usize,
     pub(crate) git_history_refresh_task: Option<Task<()>>,
     pub(crate) git_panel_tab: GitPanelTab,
+    pub(crate) git_branch_status: status_bar::GitBranchStatus,
     pub(crate) git_panel_snapshot: Option<GitPanelSnapshot>,
     pub(crate) git_panel_status_dirty: bool,
     pub(crate) git_panel_status_scanned_at: Option<SystemTime>,
@@ -3060,6 +3068,7 @@ impl EditorView {
             styles,
             decorations,
             lazy_markdown_decorations: None,
+            source_syntax_context: RefCell::new(input_ime::SourceContextCache::default()),
             markdown_outline_index: RefCell::new(None),
             markdown_outline_build_task: None,
             markdown_outline_epoch: 0,
@@ -3087,6 +3096,7 @@ impl EditorView {
             pending_preview_reveal: None,
             pending_typing_scroll_guard: None,
             pending_click_anchor: None,
+            document_mode_scroll_anchor: None,
             pending_history_transaction: None,
             code_mode_preview_key: None,
             generated_preview_rerender_task: None,
@@ -3327,6 +3337,8 @@ impl EditorView {
             sidebar_visible: false,
             editor_left_aligned: app_settings.default_left_align,
             reading_mode: false,
+            source_mode: false,
+            source_word_wrap: true,
             indent_settings: IndentSettings::default(),
             tab_drag_candidate_id: None,
             tab_drag_press_position: None,
@@ -3433,6 +3445,7 @@ impl EditorView {
             git_history_refresh_epoch: 0,
             git_history_refresh_task: None,
             git_panel_tab: GitPanelTab::Changes,
+            git_branch_status: status_bar::GitBranchStatus::default(),
             git_panel_snapshot: None,
             git_panel_status_dirty: true,
             git_panel_status_scanned_at: None,
@@ -4141,6 +4154,7 @@ impl EditorView {
         }
 
         self.cancel_outline_navigation();
+        self.document_mode_scroll_anchor = None;
         self.pending_preview_reveal = None;
         self.pending_click_anchor = None;
         self.pending_scroll_to_cursor = false;
@@ -4260,8 +4274,7 @@ impl EditorView {
         self.code_block_horizontal_scrollbar_drag
             .map(|drag| drag.start_line)
             .or_else(|| {
-                (self.active_tab_is_non_markdown_text()
-                    && !self.editor_wraps_to_available_width()
+                (self.editor_uses_horizontal_text_scroll()
                     && self.hovered_editor_position.is_some()
                     && self
                         .code_block_horizontal_scrollbars
@@ -4443,8 +4456,7 @@ impl EditorView {
             .map(|drag| drag.start_line)
             .or_else(|| {
                 let position = self.hovered_editor_position?;
-                if self.active_tab_is_non_markdown_text()
-                    && !self.editor_wraps_to_available_width()
+                if self.editor_uses_horizontal_text_scroll()
                     && self
                         .code_block_horizontal_scrollbars
                         .iter()
@@ -5819,6 +5831,11 @@ impl EditorView {
         }
         let git_status_changed =
             git_metadata_impact.affects_sidebar_status || !changed_paths_in_workspace.is_empty();
+        if git_status_changed || git_metadata_impact.affects_history {
+            // A subdirectory workspace or linked worktree may not watch .git;
+            // worktree changes can be the only observable sign of a checkout.
+            self.invalidate_status_bar_git_branch();
+        }
         if git_status_changed {
             self.invalidate_sidebar_git_statuses();
             self.invalidate_git_panel_status();
@@ -6849,6 +6866,10 @@ impl EditorView {
     }
 
     fn apply_multi_cursor_paste_segments(&mut self, segments: &[String]) {
+        if self.source_mode {
+            self.apply_source_paste_segments(segments);
+            return;
+        }
         let cursor_states = self.cursor_states_with_primary_flag();
         if cursor_states.len() != segments.len() {
             return;
@@ -7131,6 +7152,13 @@ impl EditorView {
     // ── Shared utilities ────────────────────────────────────────────
 
     pub(crate) fn reparse(&mut self) {
+        self.reparse_with_source_context(false);
+    }
+
+    /// Only validated Source batches may retain the scanner prefix without a
+    /// presentation transfer. Other buffer replacements still clear it safely.
+    pub(super) fn reparse_with_source_context(&mut self, preserve_source_context: bool) {
+        self.document_mode_scroll_anchor = None;
         let search_presentation_was_active =
             self.search_visible && self.search_current_index.is_some();
         self.front_matter_columns = None;
@@ -7162,9 +7190,46 @@ impl EditorView {
         let reparse_started = Instant::now();
         let file_kind = self
             .active_file_kind()
-            .cloned()
-            .unwrap_or(FileKind::Markdown);
+            .unwrap_or(&FileKind::Markdown)
+            .clone();
+        let canonical_source = self
+            .source_syntax_context
+            .get_mut()
+            .markdown_decorations
+            .take();
+        let source_presentation = if self.source_mode && file_kind.is_markdown() {
+            Some(canonical_source.map_or_else(Vec::new, |canonical| {
+                std::mem::replace(&mut self.decorations, canonical)
+            }))
+        } else {
+            if let Some(canonical) = canonical_source {
+                // Lazy chunks remain parsed when leaving Source. Restore their
+                // rich metadata too, not just the newly parsed viewport rows.
+                self.decorations = canonical;
+            }
+            None
+        };
+        let mut source_parsed_range = 0..self.buffer.line_count();
         let pending_line_display_transfer = self.pending_line_display_transfer.take();
+        // A decoration fallback (for example typing in math) may replace every
+        // row, but the source outline can still validate the small actual edit.
+        let preserved_source_outline =
+            if self.source_mode && pending_line_display_transfer.is_some() {
+                self.markdown_outline_index.get_mut().take()
+            } else {
+                None
+            };
+        if pending_line_display_transfer.is_none() && !preserve_source_context {
+            self.source_syntax_context.get_mut().clear();
+        }
+        let source_projection_transfer = source_presentation.as_ref().and_then(|_| {
+            pending_line_display_transfer
+                .as_ref()
+                .map(|transfer| PendingLineDisplayTransfer {
+                    cached_lines: Vec::new(),
+                    ..*transfer
+                })
+        });
         let stable_layout_candidates = pending_line_display_transfer
             .as_ref()
             .filter(|_| file_kind.is_markdown())
@@ -7319,12 +7384,20 @@ impl EditorView {
                     if transfer.markdown_plain_decoration_transfer =>
                 {
                     transfer.apply_plain_decoration_transfer(&mut self.decorations, None);
+                    source_parsed_range = transfer.start_line..transfer.new_end_line_exclusive;
                     self.invalidate_line_geometry_cache();
                     true
                 }
                 (FileKind::Markdown, Some(transfer)) => {
-                    !self.uses_lazy_markdown_decorations()
-                        && self.try_incremental_markdown_decorations(transfer).is_ok()
+                    if !self.uses_lazy_markdown_decorations()
+                        && let Ok(parsed_range) =
+                            self.try_incremental_markdown_decorations(transfer)
+                    {
+                        source_parsed_range = parsed_range;
+                        true
+                    } else {
+                        false
+                    }
                 }
                 _ => false,
             };
@@ -7369,7 +7442,9 @@ impl EditorView {
                     if let Some(lazy) = self.lazy_markdown_decorations.as_mut() {
                         lazy.invalidate_range(parse_range.clone());
                     }
-                    self.ensure_lazy_markdown_decorations(parse_range);
+                    source_parsed_range = self
+                        .ensure_lazy_markdown_decorations(parse_range)
+                        .unwrap_or(0..0);
                 } else {
                     self.set_decorations(parse_decorations_for_file_kind(
                         self.buffer.text(),
@@ -7395,14 +7470,17 @@ impl EditorView {
             fold::decorate_empty_front_matter(&self.buffer, &mut self.decorations);
         }
         let outline_started = Instant::now();
-        if file_kind.is_markdown() && self.uses_lazy_markdown_decorations() {
+        if let Some(index) = preserved_source_outline {
+            *self.markdown_outline_index.get_mut() = Some(index);
+        }
+        if file_kind.is_markdown() && (self.source_mode || self.uses_lazy_markdown_decorations()) {
             self.markdown_outline_epoch = self.markdown_outline_epoch.wrapping_add(1);
             self.outline_headings_cache_dirty.set(true);
             if let Some(transfer) = pending_line_display_transfer.as_ref() {
                 if let Some(index) = self.markdown_outline_index.borrow_mut().as_mut() {
                     index.update_after_edit(
                         &self.buffer,
-                        transfer.dirty_start_line,
+                        transfer.start_line,
                         transfer.old_end_line_exclusive,
                         transfer.new_end_line_exclusive,
                     );
@@ -7474,6 +7552,19 @@ impl EditorView {
             // offscreen layouts must not retain its source maps or row heights.
             self.invalidate_search_presentation();
         }
+        if let Some(previous) = source_presentation {
+            // All geometry and paint consumers see the same projection; only the
+            // parser uses canonical rich-block metadata, never a whole-frame clone.
+            let presentation = source_markdown_presentation(
+                previous,
+                &self.decorations,
+                source_projection_transfer.as_ref(),
+                source_parsed_range,
+            );
+            self.source_syntax_context.get_mut().markdown_decorations =
+                Some(std::mem::replace(&mut self.decorations, presentation));
+            self.invalidate_line_geometry_cache();
+        }
         if self.collapsed_front_matter_range().is_some() {
             self.invalidate_line_display_info_for_line(0);
             self.front_matter_group_geometry_dirty = true;
@@ -7538,7 +7629,11 @@ impl EditorView {
         let Some(tab_id) = self.active_tab_id.clone() else {
             return;
         };
-        let decorations = &self.decorations;
+        let source = self.source_syntax_context.borrow();
+        let decorations = source
+            .markdown_decorations
+            .as_deref()
+            .unwrap_or(&self.decorations);
         let is_code = |line: usize| {
             matches!(
                 decorations
@@ -7573,7 +7668,7 @@ impl EditorView {
     }
 
     pub(crate) fn horizontal_scroll_offset_for_line(&self, line: usize) -> f32 {
-        if self.active_tab_is_non_markdown_text() && !self.editor_wraps_to_available_width() {
+        if self.editor_uses_horizontal_text_scroll() {
             return self.non_markdown_horizontal_scroll_state().offset;
         }
         self.code_block_group_start(line)
@@ -7758,6 +7853,9 @@ impl EditorView {
         ) {
             return;
         }
+        if self.document_mode_scroll_anchor_is_current() {
+            return;
+        }
         self.scroll_anim_epoch = self.scroll_anim_epoch.wrapping_add(1);
         self.pending_click_anchor = None;
         self.pending_scroll_to_cursor = false;
@@ -7821,14 +7919,14 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn ensure_visible_generated_block_previews(&mut self, cx: &mut Context<Self>) {
+    fn visible_generated_previews_need_rendering(&self) -> bool {
         if self.decorations.is_empty() {
-            return;
+            return false;
         }
         let (visible_start, visible_end) = self.generated_preview_priority_line_range();
         let visible_start = visible_start.min(self.decorations.len().saturating_sub(1));
         let visible_end = visible_end.min(self.decorations.len().saturating_sub(1));
-        let needs_visible_preview = self.decorations[visible_start..=visible_end]
+        self.decorations[visible_start..=visible_end]
             .iter()
             .enumerate()
             .any(|(relative_line, decoration)| {
@@ -7848,8 +7946,11 @@ impl EditorView {
                     })
                 });
                 block_missing || inline_missing
-            });
-        if needs_visible_preview {
+            })
+    }
+
+    pub(crate) fn ensure_visible_generated_block_previews(&mut self, cx: &mut Context<Self>) {
+        if self.visible_generated_previews_need_rendering() {
             // Scrolling into an uncached preview must not queue a restoration of
             // this frame's offset: a later wheel event may already have moved on.
             // Prepaint compensates any newly measured height above the viewport.
@@ -8343,6 +8444,21 @@ impl EditorView {
             .is_some_and(|file_kind| file_kind.supports_text_buffer() && !file_kind.is_markdown())
     }
 
+    pub(crate) fn editor_uses_code_gutter(&self) -> bool {
+        self.source_mode || self.active_tab_is_non_markdown_text()
+    }
+
+    pub(crate) fn editor_uses_horizontal_text_scroll(&self) -> bool {
+        self.editor_uses_code_gutter() && !self.editor_wraps_to_available_width()
+    }
+
+    pub(crate) fn source_highlight_language(&self) -> Option<&str> {
+        match self.active_file_kind() {
+            Some(FileKind::Code { language }) => Some(language),
+            _ => None,
+        }
+    }
+
     /// Buffer ranges of all occurrences of the currently selected text, excluding
     /// the active selection itself. Returns empty for trivial/whitespace/multi-line
     /// selections to avoid visual noise.
@@ -8485,8 +8601,15 @@ impl EditorView {
         };
     }
 
-    pub(crate) fn active_tab_is_markdown(&self) -> bool {
+    /// Markdown editor identity, including Source (which is never a Code tab).
+    pub(crate) fn active_tab_uses_markdown_editor(&self) -> bool {
         self.active_file_kind().is_some_and(FileKind::is_markdown)
+    }
+
+    /// Rendered-Markdown input assistance. Keep this distinct from editor
+    /// identity so Source cannot trigger table formatting or list renumbering.
+    pub(crate) fn active_tab_is_markdown(&self) -> bool {
+        !self.source_mode && self.active_tab_uses_markdown_editor()
     }
 
     pub(crate) fn active_tab_is_image(&self) -> bool {
@@ -8540,7 +8663,7 @@ impl EditorView {
             return false;
         }
         if self.reading_mode {
-            self.toggle_reading_mode(cx);
+            self.set_document_mode(DocumentMode::Edit, cx);
         }
         if self.collapsed_front_matter_range().is_some_and(|range| {
             self.all_cursor_ranges().iter().any(|(head, anchor)| {
@@ -8554,7 +8677,8 @@ impl EditorView {
     }
 
     pub(crate) fn markdown_syntax_expansion_allowed(&self) -> bool {
-        markdown_syntax_expansion_allowed(self.embedded_read_only, self.reading_mode)
+        !self.source_mode
+            && markdown_syntax_expansion_allowed(self.embedded_read_only, self.reading_mode)
     }
 
     pub(crate) fn active_image_view_state(&self) -> Option<ImageViewState> {
@@ -8972,6 +9096,16 @@ impl EditorView {
     }
 
     fn collect_multi_cursor_targets_desc(&self) -> Vec<(usize, usize, bool)> {
+        if self.source_mode {
+            return source_input::normalize_targets(
+                self.cursor_states_with_primary_flag(),
+                &self.buffer,
+            )
+            .into_iter()
+            .rev()
+            .map(|(cursor, primary)| (cursor.offset, cursor.anchor, primary))
+            .collect();
+        }
         let mut all: Vec<(usize, usize, bool)> = Vec::with_capacity(1 + self.extra_cursors.len());
         all.push((self.cursor.offset, self.cursor.anchor, true));
         for cursor in &self.extra_cursors {
@@ -9058,6 +9192,10 @@ impl EditorView {
     /// Apply a text insertion across all cursors. Cursors are processed from end
     /// to start so that earlier offsets remain valid.
     pub(crate) fn multi_cursor_insert(&mut self, text: &str) {
+        if self.source_mode {
+            self.apply_source_literal_insert(text);
+            return;
+        }
         if self.extra_cursors.is_empty() {
             let text = self.table_cell_input_text(&self.cursor.selection_range(), text);
             self.cursor.insert(&mut self.buffer, &text);
@@ -11808,6 +11946,45 @@ fn resolve_markdown_target_path(
     index.resolve(current_file_path, path_part)
 }
 
+/// Refresh only parsed rows after an incremental edit or lazy viewport parse.
+/// The canonical decorations stay intact for subsequent parser boundary checks.
+fn source_markdown_presentation(
+    mut previous: Vec<LineDecoration>,
+    canonical: &[LineDecoration],
+    transfer: Option<&PendingLineDisplayTransfer>,
+    parsed_range: Range<usize>,
+) -> Vec<LineDecoration> {
+    let new_presentation = previous.is_empty();
+    if !new_presentation && let Some(transfer) = transfer {
+        let start = transfer.start_line.min(previous.len());
+        let end = transfer
+            .old_end_line_exclusive
+            .min(previous.len())
+            .max(start);
+        previous.splice(
+            start..end,
+            std::iter::repeat_with(LineDecoration::default).take(
+                transfer
+                    .new_end_line_exclusive
+                    .saturating_sub(transfer.start_line),
+            ),
+        );
+    }
+    previous.resize_with(canonical.len(), LineDecoration::default);
+    previous.truncate(canonical.len());
+    let range = if new_presentation {
+        0..canonical.len()
+    } else {
+        parsed_range.start.min(canonical.len())..parsed_range.end.min(canonical.len())
+    };
+    for line in range {
+        let mut decoration = canonical[line].clone();
+        helpers::source_markdown_decoration(&mut decoration);
+        previous[line] = decoration;
+    }
+    previous
+}
+
 pub(crate) fn parse_decorations_for_file_kind(
     text: &str,
     file_kind: &FileKind,
@@ -11902,9 +12079,11 @@ impl EditorView {
     /// allocation, which is what leaves a multi-hundred-megabyte document
     /// resident even though nothing is open.
     pub(crate) fn release_document_state(&mut self) {
+        self.document_mode_scroll_anchor = None;
         self.table_source = None;
         self.reset_table_handles();
         self.buffer = Buffer::from_text("");
+        self.source_syntax_context.get_mut().clear();
         self.cursor.offset = 0;
         self.cursor.anchor = 0;
         self.extra_cursors = Vec::new();
@@ -12018,7 +12197,7 @@ impl EditorView {
     }
 
     fn set_decorations(&mut self, mut decorations: Vec<LineDecoration>) {
-        if self.active_tab_is_markdown() {
+        if self.active_tab_uses_markdown_editor() {
             fold::decorate_empty_front_matter(&self.buffer, &mut decorations);
         }
         self.decorations = decorations;
@@ -12056,24 +12235,43 @@ impl EditorView {
         self.invalidate_line_geometry_cache();
     }
 
-    pub(crate) fn ensure_lazy_markdown_decorations(&mut self, range: Range<usize>) -> bool {
-        let parsed_range = {
-            let Some(lazy) = self.lazy_markdown_decorations.as_mut() else {
-                return false;
-            };
-            parse_lazy_markdown_range(&self.buffer, &mut self.decorations, lazy, range)
-        };
-        let Some(parsed_range) = parsed_range else {
-            return false;
-        };
+    pub(crate) fn ensure_lazy_markdown_decorations(
+        &mut self,
+        range: Range<usize>,
+    ) -> Option<Range<usize>> {
+        self.lazy_markdown_decorations.as_ref()?;
+        let canonical = self
+            .source_syntax_context
+            .get_mut()
+            .markdown_decorations
+            .take();
+        let presentation =
+            canonical.map(|canonical| std::mem::replace(&mut self.decorations, canonical));
+        let parsed_range = parse_lazy_markdown_range(
+            &self.buffer,
+            &mut self.decorations,
+            self.lazy_markdown_decorations.as_mut().unwrap(),
+            range,
+        );
+        if let Some(previous) = presentation {
+            let projected = source_markdown_presentation(
+                previous,
+                &self.decorations,
+                None,
+                parsed_range.clone().unwrap_or(0..0),
+            );
+            self.source_syntax_context.get_mut().markdown_decorations =
+                Some(std::mem::replace(&mut self.decorations, projected));
+        }
+        let parsed_range = parsed_range?;
         for line in parsed_range.clone() {
             if line < self.line_display_info.len() {
                 self.line_display_info[line] = None;
             }
         }
-        self.clear_sparse_line_geometry_range(parsed_range);
+        self.clear_sparse_line_geometry_range(parsed_range.clone());
         self.invalidate_line_geometry_cache();
-        true
+        Some(parsed_range)
     }
 
     pub(crate) fn begin_large_document_frame_bench_prepaint(&mut self) {
@@ -12456,6 +12654,24 @@ impl EditorView {
         replaced_range: &Range<usize>,
         inserted_text: &str,
     ) {
+        let canonical = self
+            .source_syntax_context
+            .get_mut()
+            .markdown_decorations
+            .take();
+        let presentation =
+            canonical.map(|canonical| std::mem::replace(&mut self.decorations, canonical));
+        self.queue_line_display_transfer(replaced_range, inserted_text);
+        if let Some(presentation) = presentation {
+            self.source_syntax_context.get_mut().markdown_decorations =
+                Some(std::mem::replace(&mut self.decorations, presentation));
+        }
+    }
+
+    fn queue_line_display_transfer(&mut self, replaced_range: &Range<usize>, inserted_text: &str) {
+        self.source_syntax_context
+            .get_mut()
+            .invalidate_from(self.buffer.offset_to_line_col(replaced_range.start).0);
         self.pending_line_display_transfer = None;
         let Some(file_kind) = self.active_file_kind().cloned() else {
             return;
@@ -12534,7 +12750,7 @@ impl EditorView {
     fn try_incremental_markdown_decorations(
         &mut self,
         transfer: &PendingLineDisplayTransfer,
-    ) -> Result<(), &'static str> {
+    ) -> Result<Range<usize>, &'static str> {
         if transfer.markdown_plain_decoration_transfer {
             return Err("plain_transfer");
         }
@@ -12552,13 +12768,13 @@ impl EditorView {
             transfer.dirty_end_line_exclusive,
             transfer.byte_delta,
         ) {
-            Ok(new_decorations) => {
+            Ok((new_decorations, parsed_range)) => {
                 self.decorations = new_decorations;
                 if self.decorations.is_empty() {
                     self.decorations.push(LineDecoration::default());
                 }
                 self.invalidate_line_geometry_cache();
-                Ok(())
+                Ok(parsed_range)
             }
             Err(reason) => Err(reason),
         }
@@ -12949,6 +13165,8 @@ pub(super) fn builtin_welcome_tab(ui_language: UiLanguage) -> OpenTab {
         file_kind: Some(FileKind::Markdown),
         editor_left_aligned: false,
         reading_mode: false,
+        source_mode: false,
+        source_word_wrap: true,
         snapshot: EditorSnapshot {
             text: initial_text,
             cursor_offset: first_line_end,
@@ -13453,6 +13671,192 @@ mod tests {
     }
 
     #[test]
+    fn source_mode_preserves_every_markdown_source_byte_and_uses_identity_maps() {
+        use super::FileKind;
+
+        let source = "---\ntitle: 文🙂\ntags:\n  - one\n---\n# Heading **bold**\n> quote\n- [x] task\n| a | b |\n| --- | --- |\n| $x+y$ | first<br>second |\n![image](image.png) [link](note.md)\n```mermaid\ngraph TD\n  A --> B\n```\n$$\nx+y\n$$\n~~strike~~ ==mark== `code` <u>text</u>\ninline $x+y$ first<br>second &amp; :rocket: ^super^ ~sub~ [^note]\n[^note]: Footnote\n";
+        let rendered = super::parse_decorations_for_file_kind(source, &FileKind::Markdown);
+        let decorations =
+            super::source_markdown_presentation(Vec::new(), &rendered, None, 0..rendered.len());
+        let buffer = crate::buffer::Buffer::from_text(source);
+        assert_eq!(decorations.len(), buffer.line_count());
+        for (line, decoration) in decorations.iter().enumerate() {
+            if matches!(
+                rendered[line].block_type,
+                BlockType::Heading(_)
+                    | BlockType::UnorderedList
+                    | BlockType::OrderedList
+                    | BlockType::TaskList(_)
+            ) {
+                assert_eq!(decoration.block_type, rendered[line].block_type);
+                assert_eq!(decoration.inline_spans, rendered[line].inline_spans);
+                assert_eq!(decoration.syntax_ranges, rendered[line].syntax_ranges);
+            }
+            if matches!(
+                rendered[line].block_type,
+                BlockType::CodeBlock | BlockType::CodeBlockFence | BlockType::Table
+            ) || rendered[line].block_preview.is_some()
+            {
+                assert_eq!(decoration.block_type, BlockType::Normal);
+            }
+            assert!(decoration.table_info.is_none());
+            assert!(decoration.front_matter.is_none());
+            assert!(decoration.block_preview.is_none());
+            assert!(decoration.image_path.is_none());
+            let text = buffer.line_content(line);
+            let mut active_ranges = vec![1..1];
+            super::helpers::expand_source_syntax(true, text.len(), &mut active_ranges);
+            let (display, d2b, b2d, collapsed) = super::helpers::build_display_text(
+                text,
+                decoration,
+                &active_ranges,
+                false,
+                None,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1.0,
+                1.0,
+                1.0,
+            );
+            assert_eq!(display, text, "line {line}");
+            assert_eq!(d2b, (0..text.len()).collect::<Vec<_>>());
+            assert_eq!(b2d, (0..=text.len()).collect::<Vec<_>>());
+            assert!(!collapsed);
+            for offset in (0..=text.len()).filter(|offset| text.is_char_boundary(*offset)) {
+                assert_eq!(
+                    super::helpers::buffer_to_display_offset(&b2d, offset),
+                    offset
+                );
+                if offset < text.len() {
+                    assert_eq!(d2b[offset], offset);
+                }
+            }
+        }
+
+        assert!(
+            rendered
+                .iter()
+                .any(|decoration| decoration.table_info.is_some())
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|decoration| decoration.block_preview.is_some())
+        );
+        assert_eq!(buffer.text(), source);
+        assert!(
+            decorations
+                .iter()
+                .any(|row| row.block_type == BlockType::Heading(1))
+        );
+        assert!(decorations.iter().any(|row| !row.inline_spans.is_empty()));
+    }
+
+    #[test]
+    fn source_markdown_incremental_projection_keeps_unaffected_styles_and_parser_context() {
+        let before =
+            "# Heading **bold**\n\ntext here\n\n```rust\n\n# not a heading\n\n```\n\n- [x] task\n";
+        let after = before.replacen("text here", "text *here*\nnext", 1);
+        let old = parse_decorations(before);
+        let previous = super::source_markdown_presentation(Vec::new(), &old, None, 0..old.len());
+        let heading_spans = previous[0].inline_spans.as_ptr();
+        let old_buffer = Buffer::from_text(before);
+        let start = before.find("text here").unwrap();
+        let range = start..start + "text here".len();
+        let inserted = "text *here*\nnext";
+        let (start_line, old_end_line_exclusive, new_end_line_exclusive) =
+            line_display_transfer_line_bounds(&old_buffer, &range, inserted);
+        let buffer = Buffer::from_text(&after);
+        let (canonical, parsed) = compute_incremental_markdown_decorations(
+            old,
+            &buffer,
+            new_end_line_exclusive,
+            old_end_line_exclusive,
+            start_line,
+            new_end_line_exclusive,
+            after.len() as isize - before.len() as isize,
+        )
+        .expect("local edit uses incremental Markdown parsing");
+        let transfer = super::PendingLineDisplayTransfer {
+            cached_lines: Vec::new(),
+            start_line,
+            old_end_line_exclusive,
+            new_end_line_exclusive,
+            dirty_start_line: parsed.start,
+            dirty_end_line_exclusive: parsed.end,
+            markdown_plain_decoration_transfer: false,
+            force_full_markdown_reparse: false,
+            byte_delta: after.len() as isize - before.len() as isize,
+        };
+        let presentation =
+            super::source_markdown_presentation(previous, &canonical, Some(&transfer), parsed);
+        let full = parse_decorations(&after);
+        assert_eq!(canonical, full);
+        assert_eq!(
+            presentation,
+            super::source_markdown_presentation(Vec::new(), &full, None, 0..full.len())
+        );
+        assert_eq!(presentation[0].inline_spans.as_ptr(), heading_spans);
+        let code_line = (0..buffer.line_count())
+            .find(|&line| buffer.line_content(line) == "# not a heading")
+            .unwrap();
+        assert_eq!(canonical[code_line].block_type, BlockType::CodeBlock);
+        assert_eq!(presentation[code_line].block_type, BlockType::Normal);
+        // The canonical cache must still reject a partial parse inside a fence,
+        // even though the presentation rows have no code-block role.
+        assert!(
+            compute_incremental_markdown_decorations(
+                canonical,
+                &buffer,
+                code_line + 1,
+                code_line + 1,
+                code_line,
+                code_line + 1,
+                0,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn source_markdown_lazy_projection_updates_only_parsed_rows() {
+        let source = format!(
+            "# Leading **heading**\n\n{}\n```mermaid\n{}\n```\n\n# Trailing *heading*\n",
+            "plain\n\n".repeat(400),
+            "# raw code\n\n".repeat(200)
+        );
+        let buffer = Buffer::from_text(&source);
+        let (mut canonical, mut lazy) = new_lazy_markdown_decorations(buffer.line_count());
+        let initial = parse_lazy_markdown_range(&buffer, &mut canonical, &mut lazy, 0..1).unwrap();
+        let previous = super::source_markdown_presentation(Vec::new(), &canonical, None, initial);
+        let spans = previous[0].inline_spans.as_ptr();
+        let code_line = (0..buffer.line_count())
+            .find(|&line| buffer.line_content(line) == "# raw code")
+            .unwrap()
+            + 150;
+        let parsed =
+            parse_lazy_markdown_range(&buffer, &mut canonical, &mut lazy, code_line..code_line + 1)
+                .unwrap();
+        assert!(parsed.start > 0);
+        let presentation = super::source_markdown_presentation(previous, &canonical, None, parsed);
+        assert_eq!(presentation[0].inline_spans.as_ptr(), spans);
+        assert_eq!(canonical[code_line].block_type, BlockType::CodeBlock);
+        assert_eq!(presentation[code_line].block_type, BlockType::Normal);
+        assert!(presentation[code_line].block_preview.is_none());
+        assert!(
+            parse_lazy_markdown_range(&buffer, &mut canonical, &mut lazy, code_line..code_line + 1)
+                .is_none()
+        );
+        assert_eq!(
+            presentation,
+            super::source_markdown_presentation(Vec::new(), &canonical, None, 0..canonical.len())
+        );
+    }
+
+    #[test]
     fn reading_mode_is_read_only_and_keeps_markdown_syntax_folded() {
         assert!(editor_is_read_only(false, true, false));
         assert!(!markdown_syntax_expansion_allowed(false, true));
@@ -13948,7 +14352,7 @@ mod tests {
         );
 
         match incremental {
-            Ok(result) => {
+            Ok((result, _)) => {
                 let full = parse_decorations(new_text);
                 assert_eq!(
                     format!("{result:#?}"),
@@ -14224,6 +14628,7 @@ mod tests {
                 buffer.line_count(),
                 edited.len() as isize - source.len() as isize,
             )
+            .map(|(decorations, _)| decorations)
             .unwrap_or_else(|_| parse_decorations(buffer.text()));
             assert_eq!(format!("{result:#?}"), format!("{full:#?}"));
         }
