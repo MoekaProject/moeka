@@ -33,6 +33,13 @@ Use a disposable workspace for manual testing: the app's normal editing, auto-sa
 
 ## Editor interaction invariants
 
+### Theme colors and cached text
+
+- Keep the 16 light and 16 dark themes distinct in canvas/chrome temperature as well as Markdown and code palettes. Retain genuine `#FFFFFF` canvases for Paper White and Studio Daylight alongside tinted alternatives; keep identifiable red, orange, yellow, green, cyan, blue and purple representatives across canvas/accent/Colorful heading, not just code tokens. Prefer coordinated, readable ink over uniformly pastel syntax or indiscriminate saturation. Theme names and stored preferences stay compatible; preserve monochrome Markdown and the optional dark sidebar independently. See [theme color guidance](themes.md).
+- Colorful Markdown uses its semantic tokens (including `italic`); font/style/weight and nested inline-code precedence remain independent. Monochrome keeps opaque, readable muted ink and preserves colored links/code. Inline-code backgrounds and code-block borders use their dedicated theme tokens without another mode-specific alpha layer.
+- Palette constants are authored offline in perceptual color space and stored as sRGB; do not generate or contrast-correct palettes per text run/frame. Test small Markdown text, code tokens on both code and Source canvases, and actual inline-code backgrounds at 4.5:1; composite alpha before measuring contrast. Keep code frames quiet and test perceptual palette distance, not just unequal RGB integers. Light-theme code also needs its own keyword/operator/string/function chromatic-distance and multi-role checks across all pairs; surface/Markdown variation must not conceal repeated code palettes.
+- Global theme/font/scale invalidation must drop cached shaped text in **all** pane slots and inactive tabs, including state parked during `with_pane`. Stored panes reset geometry lazily once on restoration; never clear a million-entry cache by refilling every row on each swap. Syntax caches must include the full palette in their key. Pure tests do not replace native split-pane/theme-switch checks.
+
 ### Document modes
 
 - The document-mode control cycles **Edit → Reading → Source → Edit**. Its localized tooltip describes both the current mode and the next click action via `i18n::document_mode_tooltip` using `edit`, `reading` or `source`; unknown keys fall back to Edit.

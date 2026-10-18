@@ -12112,14 +12112,19 @@ impl EditorView {
         self.invalidate_line_geometry_cache();
     }
 
-    /// Invalidate the cached per-line layout for the active editor AND every
-    /// inactive tab. Use this when a global rendering parameter (UI scale,
-    /// fonts, theme, line height, letter spacing) changes, because those affect
-    /// the layout of all tabs, not just the one currently shown. Inactive tabs
-    /// recompute lazily on activation, so this stays cheap.
+    /// Invalidate per-line layout in every pane and inactive tab when a global
+    /// rendering parameter (UI scale, fonts, theme, line height, letter spacing)
+    /// changes. Layout is rebuilt lazily when each document is rendered.
     pub(crate) fn clear_all_tab_layout_caches(&mut self) {
         self.clear_line_display_info();
         self.tab_layout_cache.clear();
+        self.layout_dirty = true;
+        // During a pane swap a slot can hold the focused pane's live state.
+        // Invalidate every slot, including the detached placeholder, without
+        // nesting with_pane or assuming that a slot's id identifies its state.
+        for pane in &mut self.panes {
+            pane.state.invalidate_layout_cache();
+        }
     }
 
     pub(crate) fn clear_active_tab_layout_cache(&mut self) {
@@ -13350,6 +13355,53 @@ mod tests {
             horizontal_clip_right_x: None,
             selection_padding_left_px: 0.0,
         }
+    }
+
+    #[test]
+    fn global_layout_invalidation_drops_stored_pane_caches_and_preserves_documents() {
+        let mut panes = [super::pane::Pane::new(0), super::pane::Pane::new(1)];
+        for (index, pane) in panes.iter_mut().enumerate() {
+            pane.state.buffer = crate::buffer::Buffer::from_text("first\nsecond");
+            pane.state.cursor.offset = index + 1;
+            pane.state.scroll_offset = 24.0 * index as f32;
+            pane.state.source_mode = index == 1;
+            pane.state.line_display_info = vec![
+                Some(Box::new(test_line_display_info(&[24.0], 0.0))),
+                Some(Box::new(test_line_display_info(&[48.0], 0.0))),
+            ];
+            pane.state.invalidate_layout_cache();
+        }
+
+        for (index, pane) in panes.iter_mut().enumerate() {
+            assert!(pane.state.line_display_info.is_empty());
+            assert_eq!(pane.state.line_display_info.capacity(), 0);
+            assert!(pane.state.layout_dirty);
+            assert_eq!(pane.state.buffer.text(), "first\nsecond");
+            assert_eq!(pane.state.cursor.offset, index + 1);
+            assert_eq!(pane.state.scroll_offset, 24.0 * index as f32);
+            assert_eq!(pane.state.source_mode, index == 1);
+            // Restoration consumes the full geometry reset once; ordinary pane
+            // swaps must then retain the newly shaped line cache.
+            assert!(pane.state.take_layout_cache_invalidation());
+            assert!(!pane.state.take_layout_cache_invalidation());
+        }
+    }
+
+    #[test]
+    fn global_layout_invalidation_releases_large_sparse_cache_without_refilling_it() {
+        let mut state = super::PaneState::detached();
+        state.line_display_info.resize(1_000_000, None);
+        state.line_display_info[999_999] = Some(Box::new(test_line_display_info(&[24.0], 0.0)));
+        state.invalidate_layout_cache();
+        assert!(state.line_display_info.is_empty());
+        assert_eq!(state.line_display_info.capacity(), 0);
+        assert!(state.take_layout_cache_invalidation());
+
+        state.line_display_info = vec![Some(Box::new(test_line_display_info(&[48.0], 0.0)))];
+        state.invalidate_layout_cache();
+        assert!(state.line_display_info.is_empty());
+        assert!(state.take_layout_cache_invalidation());
+        assert!(!state.take_layout_cache_invalidation());
     }
 
     #[test]

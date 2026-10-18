@@ -300,6 +300,9 @@ macro_rules! pane_state {
     ($(($field:ident, $ty:ty, $default:expr)),* $(,)?) => {
         pub(crate) struct PaneState {
             $(pub(crate) $field: $ty,)*
+            // Slot-local, not swapped: the incoming state needs the root-only
+            // geometry/fold reset before it can be used again.
+            pending_layout_invalidation: bool,
         }
 
         impl PaneState {
@@ -308,14 +311,30 @@ macro_rules! pane_state {
             pub(crate) fn detached() -> Self {
                 Self {
                     $($field: $default,)*
+                    pending_layout_invalidation: false,
                 }
+            }
+
+            pub(super) fn invalidate_layout_cache(&mut self) {
+                self.line_display_info = LineDisplayCache::new();
+                self.layout_dirty = true;
+                self.pending_layout_invalidation = true;
+            }
+
+            pub(super) fn take_layout_cache_invalidation(&mut self) -> bool {
+                std::mem::take(&mut self.pending_layout_invalidation)
             }
         }
 
         impl EditorView {
-            /// Swaps every per-document root field with `state`.
+            /// Swaps every per-document root field with `state`, completing
+            /// any deferred layout invalidation on the incoming state only.
             pub(crate) fn swap_pane_state(&mut self, state: &mut PaneState) {
                 $(std::mem::swap(&mut self.$field, &mut state.$field);)*
+                if state.take_layout_cache_invalidation() {
+                    self.clear_line_display_info();
+                    self.layout_dirty = true;
+                }
             }
         }
     };
@@ -1100,6 +1119,112 @@ impl EditorView {
 #[cfg(test)]
 mod tests {
     use super::{Pane, PaneLayout, SplitAxis, SplitDirection};
+
+    mod layout_invalidation {
+        use crate::editor::LineDisplayCache;
+
+        // Exercise the production swap macro without constructing a GPUI view.
+        // The root-only helper is a test double that counts geometry resets.
+        struct EditorView {
+            document_id: usize,
+            line_display_info: LineDisplayCache,
+            layout_dirty: bool,
+            geometry_resets: usize,
+        }
+
+        impl EditorView {
+            fn clear_line_display_info(&mut self) {
+                self.line_display_info = LineDisplayCache::new();
+                self.geometry_resets += 1;
+            }
+        }
+
+        pane_state! {
+            (document_id, usize, usize::MAX),
+            (line_display_info, LineDisplayCache, Vec::new()),
+            (layout_dirty, bool, false),
+        }
+
+        fn root() -> EditorView {
+            EditorView {
+                document_id: 0,
+                line_display_info: vec![None; 2],
+                layout_dirty: false,
+                geometry_resets: 0,
+            }
+        }
+
+        #[test]
+        fn global_layout_invalidation_resets_only_incoming_state_once() {
+            let mut root = root();
+            let mut stored = PaneState::detached();
+            stored.document_id = 1;
+            stored.line_display_info = vec![None; 3];
+            stored.invalidate_layout_cache();
+
+            root.swap_pane_state(&mut stored);
+            assert_eq!(root.document_id, 1);
+            assert!(root.line_display_info.is_empty());
+            assert!(root.layout_dirty);
+            assert_eq!(root.geometry_resets, 1);
+            assert_eq!(stored.document_id, 0);
+            assert_eq!(stored.line_display_info.len(), 2);
+
+            root.line_display_info = vec![None; 5];
+            root.layout_dirty = false;
+            root.swap_pane_state(&mut stored);
+            assert_eq!(root.document_id, 0);
+            assert_eq!(root.line_display_info.len(), 2);
+            assert!(!root.layout_dirty);
+            assert_eq!(root.geometry_resets, 1);
+            assert_eq!(stored.line_display_info.len(), 5);
+            assert!(!stored.take_layout_cache_invalidation());
+        }
+
+        #[test]
+        fn global_layout_invalidation_covers_parked_focused_state_and_placeholder() {
+            let mut root = root();
+            let mut stored = PaneState::detached();
+            stored.document_id = 1;
+            stored.line_display_info = vec![None; 3];
+            let mut placeholder = PaneState::detached();
+            root.swap_pane_state(&mut stored);
+            assert_eq!(root.document_id, 1);
+            assert_eq!(stored.document_id, 0);
+
+            root.clear_line_display_info();
+            root.layout_dirty = true;
+            for state in [&mut placeholder, &mut stored] {
+                state.invalidate_layout_cache();
+            }
+            root.swap_pane_state(&mut stored);
+            assert_eq!(root.document_id, 0);
+            assert!(root.line_display_info.is_empty());
+            assert!(root.layout_dirty);
+            assert_eq!(root.geometry_resets, 2);
+
+            root.line_display_info = vec![None; 4];
+            root.layout_dirty = false;
+            root.swap_pane_state(&mut stored);
+            root.line_display_info = vec![None; 5];
+            root.layout_dirty = false;
+            root.swap_pane_state(&mut stored);
+            assert_eq!(root.document_id, 0);
+            assert_eq!(root.line_display_info.len(), 4);
+            assert!(!root.layout_dirty);
+            assert_eq!(stored.document_id, 1);
+            assert_eq!(stored.line_display_info.len(), 5);
+            assert_eq!(root.geometry_resets, 2);
+
+            // Parking into the invalidated placeholder resets the incoming
+            // hollow state, never the outgoing live document stored in it.
+            root.swap_pane_state(&mut placeholder);
+            assert_eq!(root.geometry_resets, 3);
+            assert_eq!(placeholder.document_id, 0);
+            assert_eq!(placeholder.line_display_info.len(), 4);
+            assert!(!placeholder.take_layout_cache_invalidation());
+        }
+    }
 
     #[test]
     fn new_panes_start_in_edit_mode_and_keep_mode_flags_independent() {

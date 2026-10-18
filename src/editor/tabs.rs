@@ -2784,7 +2784,7 @@ impl EditorView {
                     mode.icon_path(),
                     mode != DocumentMode::Edit,
                     true,
-                    None,
+                    Some(Self::cycle_document_mode_backwards),
                     mode.tooltip(self.ui_language),
                     None,
                     cx,
@@ -2807,7 +2807,15 @@ impl EditorView {
             .when(
                 self.app_settings.simple_mode && self.active_tab_uses_markdown_editor(),
                 |this| {
-                    this.child(self.render_tab_bar_action_button(
+                    this.child(
+                        div()
+                            .w(px(self.scaled(1.0)))
+                            .h(px(self.scaled(14.0)))
+                            .mx(px(self.scaled(5.0)))
+                            .flex_none()
+                            .bg(ts.tab_bar_border_color),
+                    )
+                    .child(self.render_tab_bar_action_button(
                         "tab-bar-outline-toggle",
                         OUTLINE_TOGGLE_MINI_SVG_PATH,
                         self.is_utility_panel_active(RightUtilityPanel::Outline),

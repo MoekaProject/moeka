@@ -3691,7 +3691,7 @@ mod tests {
     use crate::editor::MermaidTheme;
     use crate::front_matter::FrontMatterValue;
     use crate::markdown::{self, LineDecoration};
-    use crate::theme::Theme;
+    use crate::theme::{EditorThemeMode, Theme, ThemeKind, apply_editor_theme_mode};
 
     use super::{
         AnchoredPopupVertical, GeneratedPreviewFontFamilies, anchored_popup_placement,
@@ -7193,6 +7193,377 @@ mod tests {
     }
 
     #[test]
+    fn code_text_runs_follow_palette_across_theme_cache_switches() {
+        let line = "let moeka_theme_cache_probe = \"中🙂\"; // palette probe";
+        let decoration = LineDecoration::default();
+        let display_to_buffer = (0..line.len()).collect::<Vec<_>>();
+        assert!(super::find_syntax_for_language("rust").is_some());
+        let runs_for = |theme: &Theme| {
+            super::build_text_runs_for_display_with_language(
+                line,
+                line,
+                &display_to_buffer,
+                &decoration,
+                &[],
+                false,
+                false,
+                &font("Test Body"),
+                &font("Test CJK"),
+                &font("Test Mono"),
+                &font("Test Heading"),
+                &font("Test Heading CJK"),
+                &font("Test Italic"),
+                &font("Test Italic CJK"),
+                0,
+                16.0,
+                theme,
+                theme.diff_added_bg,
+                theme.diff_removed_bg,
+                theme.link,
+                FontWeight::NORMAL,
+                theme.list_marker,
+                FontWeight::BOLD,
+                theme.syntax_marker,
+                None,
+                true,
+                Some("rust"),
+            )
+        };
+        let a = ThemeKind::OneDark.build();
+        let b = ThemeKind::PorcelainMist.build();
+        assert_ne!(a.code_palette.keyword, b.code_palette.keyword);
+        let first_a = runs_for(&a);
+        let middle_b = runs_for(&b);
+        let cached_a = runs_for(&a);
+
+        for (theme, runs) in [(&a, &first_a), (&b, &middle_b), (&a, &cached_a)] {
+            assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), line.len());
+            for (token, color) in [
+                ("let", theme.code_palette.keyword),
+                ("\"中🙂\"", theme.code_palette.string),
+                (";", theme.code_palette.foreground),
+                ("// palette probe", theme.code_palette.comment),
+            ] {
+                let start = line.find(token).unwrap();
+                for offset in start..start + token.len() {
+                    let run = run_at_byte(runs, offset);
+                    assert_eq!(run.color, gpui::rgb(color).into(), "{token}, byte {offset}");
+                    assert_eq!(run.font.family.as_ref(), "Test Mono");
+                }
+            }
+            assert_eq!(
+                run_at_byte(runs, line.find("//").unwrap()).font.style,
+                FontStyle::Italic
+            );
+        }
+        assert_ne!(
+            run_at_byte(&first_a, 0).color,
+            run_at_byte(&middle_b, 0).color
+        );
+        assert_eq!(first_a, cached_a);
+    }
+
+    mod code_text_run_regression_tests {
+        use super::super::build_text_runs_for_display_with_language;
+        use super::*;
+        use crate::theme::CodeSyntaxPalette;
+
+        struct Fixture {
+            language: &'static str,
+            source: &'static str,
+            tokens: &'static [(usize, &'static str, &'static str)],
+        }
+
+        // Ordinary call names use variable.function.* in the bundled grammars.
+        const FIXTURES: &[Fixture] = &[
+            Fixture {
+                language: "rust",
+                source: "fn palette_probe() {\n    let title = \"中🙂\";\n    let count = value + 1;\n    render_title(title);\n    // 注释🙂 palette probe\n}",
+                tokens: &[
+                    (0, "fn", "keyword"),
+                    (0, "palette_probe", "function"),
+                    (1, "let", "keyword"),
+                    (1, "\"中🙂\"", "string"),
+                    (1, ";", "foreground"),
+                    (2, "+", "operator"),
+                    (3, "render_title", "function"),
+                    (4, "// 注释🙂 palette probe", "comment"),
+                ],
+            },
+            Fixture {
+                language: "javascript",
+                source: "function palette_probe() {\n    const title = \"中🙂\";\n    const count = value + 1;\n    render_title(title);\n    // 注释🙂 palette probe\n}",
+                tokens: &[
+                    (0, "function", "keyword"),
+                    (0, "palette_probe", "function"),
+                    (1, "const", "keyword"),
+                    (1, "\"中🙂\"", "string"),
+                    (1, ";", "foreground"),
+                    (2, "+", "operator"),
+                    (3, "render_title", "function"),
+                    (4, "// 注释🙂 palette probe", "comment"),
+                ],
+            },
+            Fixture {
+                language: "python",
+                source: "def palette_probe():\n    title = \"中🙂\"\n    count = value + 1\n    render_title(title)\n    return title  # 注释🙂 palette probe",
+                tokens: &[
+                    (0, "def", "keyword"),
+                    (0, "palette_probe", "function"),
+                    (0, ":", "foreground"),
+                    (1, "\"中🙂\"", "string"),
+                    (2, "+", "operator"),
+                    (3, "render_title", "function"),
+                    (4, "return", "keyword"),
+                    (4, "# 注释🙂 palette probe", "comment"),
+                ],
+            },
+        ];
+
+        #[derive(Clone, Copy, Debug)]
+        enum Entry {
+            Fenced,
+            RawFile,
+        }
+
+        const ENTRIES: [Entry; 2] = [Entry::Fenced, Entry::RawFile];
+
+        fn palette_roles(palette: CodeSyntaxPalette) -> [(&'static str, u32); 9] {
+            [
+                ("keyword", palette.keyword),
+                ("operator", palette.operator),
+                ("string", palette.string),
+                ("function", palette.function),
+                ("type", palette.type_name),
+                ("number", palette.number),
+                ("variable", palette.variable),
+                ("comment", palette.comment),
+                ("foreground", palette.foreground),
+            ]
+        }
+
+        fn role_color(palette: CodeSyntaxPalette, role: &str) -> gpui::Hsla {
+            let (_, packed) = palette_roles(palette)
+                .into_iter()
+                .find(|(name, _)| *name == role)
+                .expect("known code palette role");
+            gpui::rgb(packed).into()
+        }
+
+        fn sentinel_theme() -> Theme {
+            let mut theme = ThemeKind::PorcelainMist.build();
+            theme.code_palette = CodeSyntaxPalette {
+                keyword: 0xD12345,
+                operator: 0x2A917C,
+                string: 0x7A46B3,
+                function: 0x3D71C2,
+                type_name: 0xAF7526,
+                number: 0x7B8E31,
+                variable: 0xAB4578,
+                comment: 0x69788F,
+                foreground: 0x263A4D,
+            };
+            let colors = palette_roles(theme.code_palette)
+                .map(|(_, color)| color)
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(colors.len(), 9);
+            theme
+        }
+
+        fn fixture_runs(fixture: &Fixture, entry: Entry, theme: &Theme) -> Vec<Vec<TextRun>> {
+            let fenced_source = format!("```{}\n{}\n```", fixture.language, fixture.source);
+            let decorations = markdown::parse_decorations(&fenced_source);
+            let raw_decoration = LineDecoration::default();
+            assert!(super::super::find_syntax_for_language(fixture.language).is_some());
+            fixture
+                .source
+                .lines()
+                .enumerate()
+                .map(|(row, line)| {
+                    let (decoration, document_language, force_monospace) = match entry {
+                        Entry::Fenced => {
+                            let decoration = &decorations[row + 1];
+                            assert_eq!(decoration.block_type, markdown::BlockType::CodeBlock);
+                            assert_eq!(decoration.code_language.as_deref(), Some(fixture.language));
+                            (decoration, None, false)
+                        }
+                        Entry::RawFile => (&raw_decoration, Some(fixture.language), true),
+                    };
+                    let (display, d2b, b2d, collapsed) = build_display_text(
+                        line,
+                        decoration,
+                        &[],
+                        false,
+                        None,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        1.0,
+                        1.0,
+                        1.0,
+                    );
+                    assert_eq!(display, line);
+                    assert_eq!(d2b, (0..line.len()).collect::<Vec<_>>());
+                    assert_eq!(b2d, (0..=line.len()).collect::<Vec<_>>());
+                    build_text_runs_for_display_with_language(
+                        &display,
+                        line,
+                        &d2b,
+                        decoration,
+                        &[],
+                        false,
+                        collapsed,
+                        &font("Test Body"),
+                        &font("Test CJK"),
+                        &font("Test Mono"),
+                        &font("Test Heading"),
+                        &font("Test Heading CJK"),
+                        &font("Test Italic"),
+                        &font("Test Italic CJK"),
+                        0,
+                        16.0,
+                        theme,
+                        theme.diff_added_bg,
+                        theme.diff_removed_bg,
+                        theme.link,
+                        FontWeight::NORMAL,
+                        theme.list_marker,
+                        FontWeight::BOLD,
+                        theme.syntax_marker,
+                        None,
+                        force_monospace,
+                        document_language,
+                    )
+                })
+                .collect()
+        }
+
+        fn assert_fixture_runs(
+            fixture: &Fixture,
+            theme: &Theme,
+            runs: &[Vec<TextRun>],
+            context: &str,
+        ) {
+            let lines = fixture.source.lines().collect::<Vec<_>>();
+            assert_eq!(runs.len(), lines.len(), "{context}: fixture row count");
+            for (line, line_runs) in lines.iter().zip(runs) {
+                assert_eq!(
+                    line_runs.iter().map(|run| run.len).sum::<usize>(),
+                    line.len(),
+                    "{context}: {line:?}"
+                );
+                let mut end = 0;
+                for run in line_runs {
+                    assert!(run.len > 0, "{context}");
+                    end += run.len;
+                    assert!(line.is_char_boundary(end), "{context}: byte {end}");
+                    assert_eq!(run.font.family.as_ref(), "Test Mono", "{context}");
+                    assert_eq!(run.font.weight, FontWeight::NORMAL, "{context}");
+                    assert!(run.background_color.is_none(), "{context}");
+                }
+            }
+            for &(row, token, role) in fixture.tokens {
+                let line = lines[row];
+                assert_eq!(line.match_indices(token).count(), 1, "{context}: {token}");
+                let start = line.find(token).unwrap();
+                for byte in start..start + token.len() {
+                    let run = run_at_byte(&runs[row], byte);
+                    assert_eq!(
+                        run.color,
+                        role_color(theme.code_palette, role),
+                        "{context}: {role} {token:?}, byte {byte}"
+                    );
+                    assert_eq!(
+                        run.font.style,
+                        if role == "comment" {
+                            FontStyle::Italic
+                        } else {
+                            FontStyle::Normal
+                        },
+                        "{context}: {token:?}, byte {byte}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn all_light_palettes_map_real_tokens_in_fenced_and_raw_files() {
+            assert_eq!(ThemeKind::light_themes().len(), 16);
+            let sentinel = sentinel_theme();
+            for fixture in FIXTURES {
+                for entry in ENTRIES {
+                    let reference = fixture_runs(fixture, entry, &sentinel);
+                    let context = format!("sentinel/{} {entry:?}", fixture.language);
+                    assert_fixture_runs(fixture, &sentinel, &reference, &context);
+                    for &kind in ThemeKind::light_themes() {
+                        let theme = kind.build();
+                        let actual = fixture_runs(fixture, entry, &theme);
+                        let context = format!("{kind:?}/{} {entry:?}", fixture.language);
+                        assert_fixture_runs(fixture, &theme, &actual, &context);
+                        // Learn identifier roles from the real lexer, not from their spelling.
+                        for (row, line) in fixture.source.lines().enumerate() {
+                            for byte in 0..line.len() {
+                                let expected = run_at_byte(&reference[row], byte);
+                                let (role, _) = palette_roles(sentinel.code_palette)
+                                    .into_iter()
+                                    .find(|(_, packed)| {
+                                        expected.color == gpui::Hsla::from(gpui::rgb(*packed))
+                                    })
+                                    .unwrap_or_else(|| {
+                                        panic!("{context}: unrecognized sentinel at {row}:{byte}")
+                                    });
+                                let run = run_at_byte(&actual[row], byte);
+                                assert_eq!(
+                                    run.color,
+                                    role_color(theme.code_palette, role),
+                                    "{context}: {role} at {row}:{byte}"
+                                );
+                                assert_eq!(run.font, expected.font, "{context}: {row}:{byte}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn similar_light_pairs_restore_fenced_and_raw_runs_after_cache_switches() {
+            let pairs = [
+                (ThemeKind::VanillaLatte, ThemeKind::PearlMorning),
+                (ThemeKind::VanillaLatte, ThemeKind::LavenderHaze),
+                (ThemeKind::PearlMorning, ThemeKind::LavenderHaze),
+                (ThemeKind::NordicSnow, ThemeKind::CoastalFog),
+                (ThemeKind::LinenPaper, ThemeKind::SunlitCanvas),
+                (ThemeKind::LinenPaper, ThemeKind::ApricotBloom),
+                (ThemeKind::SunlitCanvas, ThemeKind::ApricotBloom),
+            ];
+            for fixture in FIXTURES {
+                for entry in ENTRIES {
+                    for (left, right) in pairs {
+                        let a = left.build();
+                        let b = right.build();
+                        let first_a = fixture_runs(fixture, entry, &a);
+                        let middle_b = fixture_runs(fixture, entry, &b);
+                        let restored_a = fixture_runs(fixture, entry, &a);
+                        let context = format!(
+                            "{left:?} → {right:?} → {left:?}/{} {entry:?}",
+                            fixture.language
+                        );
+                        for (theme, runs) in [(&a, &first_a), (&b, &middle_b), (&a, &restored_a)] {
+                            assert_fixture_runs(fixture, theme, runs, &context);
+                        }
+                        assert_ne!(first_a, middle_b, "{context}: palette switch had no effect");
+                        assert_eq!(first_a, restored_a, "{context}: stale cached text runs");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn source_math_syntax_and_delimiters_have_colors_with_identity_maps() {
         for theme in [Theme::one_dark(), Theme::one_light()] {
             for source in [
@@ -7503,64 +7874,49 @@ mod tests {
     }
 
     #[test]
-    fn folded_italic_uses_italic_font_style_and_italic_font_role() {
-        let line = "plain *italic* text";
-        let decoration = markdown::parse_decorations(line)
-            .into_iter()
-            .next()
-            .unwrap_or_default();
-        let active_ranges: [Range<usize>; 0] = [];
-        let (display_text, display_to_buffer, _, prefix_collapsed) = build_display_text(
-            line,
-            &decoration,
-            &active_ranges,
-            false,
-            None,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1.0,
-            1.0,
-            1.0,
-        );
-        let theme = Theme::one_dark();
-        let runs = build_text_runs_for_display(
-            &display_text,
-            line,
-            &display_to_buffer,
-            &decoration,
-            &active_ranges,
-            false,
-            prefix_collapsed,
-            &font(".SystemUIFont"),
-            &font(".SystemUIFont"),
-            &font(".SystemUIFont"),
-            &font(".SystemUIFont"),
-            &font(".SystemUIFont"),
-            &font("Menlo"),
-            &font("Kaiti SC"),
-            0,
-            16.0,
-            &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
-            theme.link,
-            FontWeight::NORMAL,
-            theme.list_marker,
-            FontWeight::BOLD,
-            theme.syntax_marker,
-            None,
-            false,
-        );
+    fn folded_italic_uses_semantic_palette_and_italic_font_role() {
+        for kind in [ThemeKind::PorcelainMist, ThemeKind::OneDark] {
+            for &mode in EditorThemeMode::all() {
+                let theme = apply_editor_theme_mode(&kind.build(), mode, kind.is_dark());
+                let (display_text, runs) = folded_display_and_runs("plain *italic* text", &theme);
 
-        assert_eq!(display_text, "plain italic text");
-        assert!(runs.iter().any(|run| {
-            run.font.family.as_ref() == "Menlo"
-                && run.font.style == FontStyle::Italic
-                && run.color == theme.text_primary
-        }));
+                assert_eq!(display_text, "plain italic text");
+                let italic = run_at_byte(&runs, display_text.find("italic").unwrap());
+                assert_eq!(italic.color, theme.italic, "{} {mode:?}", kind.label());
+                assert_eq!(italic.font.family.as_ref(), "Menlo");
+                assert_eq!(italic.font.style, FontStyle::Italic);
+                assert_eq!(italic.font.weight, FontWeight::NORMAL);
+                assert_eq!(run_at_byte(&runs, 0).color, theme.text_primary);
+            }
+        }
+    }
+
+    #[test]
+    fn nested_italic_preserves_emphasis_and_inline_code_priority() {
+        for kind in [ThemeKind::PorcelainMist, ThemeKind::OneDark] {
+            for &mode in EditorThemeMode::all() {
+                let theme = apply_editor_theme_mode(&kind.build(), mode, kind.is_dark());
+                for (source, token, color) in [
+                    ("**bold *italic***", "italic", theme.italic),
+                    ("*italic **bold***", "bold", theme.bold),
+                ] {
+                    let (display_text, runs) = folded_display_and_runs(source, &theme);
+                    let nested = run_at_byte(&runs, display_text.find(token).unwrap());
+                    assert_eq!(nested.color, color, "{} {mode:?}: {source}", kind.label());
+                    assert_eq!(nested.font.family.as_ref(), "Menlo");
+                    assert_eq!(nested.font.style, FontStyle::Italic);
+                    assert_eq!(nested.font.weight, FontWeight::EXTRA_BOLD);
+                }
+
+                let (display_text, runs) = folded_display_and_runs("*`code`*", &theme);
+                assert_eq!(display_text, "code");
+                let code = run_at_byte(&runs, 0);
+                assert_eq!(code.color, theme.inline_code);
+                assert_eq!(code.background_color, Some(theme.inline_code_bg));
+                assert_eq!(code.font.family.as_ref(), "Test Mono");
+                assert_eq!(code.font.style, FontStyle::Italic);
+            }
+        }
     }
 
     #[test]
@@ -7620,7 +7976,7 @@ mod tests {
         assert!(runs.iter().any(|run| {
             run.font.family.as_ref() == "PingFang SC"
                 && run.font.style == FontStyle::Oblique
-                && run.color == theme.text_primary
+                && run.color == theme.italic
         }));
     }
 
@@ -12421,7 +12777,7 @@ pub(crate) fn build_text_runs_for_display_with_language(
                     buf_weights[i] = FontWeight::EXTRA_BOLD;
                 }
                 InlineKind::Italic => {
-                    buf_colors[i] = theme.text_primary;
+                    buf_colors[i] = theme.italic;
                     buf_font_styles[i] = FontStyle::Italic;
                 }
                 InlineKind::Strikethrough => {

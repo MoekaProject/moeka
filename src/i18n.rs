@@ -434,64 +434,64 @@ pub(crate) fn translate(language: UiLanguage, key: TextKey) -> &'static str {
 pub(crate) fn document_mode_tooltip(language: UiLanguage, mode: &str) -> &'static str {
     match language {
         UiLanguage::English => match mode {
-            "reading" => "Reading mode · Click for source mode",
-            "source" => "Source mode · Click for editing mode",
-            _ => "Editing mode · Click for reading mode",
+            "reading" => "Reading mode (Left / right click to switch)",
+            "source" => "Source mode (Left / right click to switch)",
+            _ => "Editing mode (Left / right click to switch)",
         },
         UiLanguage::ChineseSimplified => match mode {
-            "reading" => "阅读模式 · 点击切换为源码模式",
-            "source" => "源码模式 · 点击切换为编辑模式",
-            _ => "编辑模式 · 点击切换为阅读模式",
+            "reading" => "阅读模式（左键 / 右键切换）",
+            "source" => "源码模式（左键 / 右键切换）",
+            _ => "编辑模式（左键 / 右键切换）",
         },
         UiLanguage::ChineseTraditional => match mode {
-            "reading" => "閱讀模式 · 點擊切換為原始碼模式",
-            "source" => "原始碼模式 · 點擊切換為編輯模式",
-            _ => "編輯模式 · 點擊切換為閱讀模式",
+            "reading" => "閱讀模式（左鍵 / 右鍵切換）",
+            "source" => "原始碼模式（左鍵 / 右鍵切換）",
+            _ => "編輯模式（左鍵 / 右鍵切換）",
         },
         UiLanguage::Japanese => match mode {
-            "reading" => "閲覧モード · クリックでソースモードへ",
-            "source" => "ソースモード · クリックで編集モードへ",
-            _ => "編集モード · クリックで閲覧モードへ",
+            "reading" => "閲覧モード（左クリック / 右クリックで切替）",
+            "source" => "ソースモード（左クリック / 右クリックで切替）",
+            _ => "編集モード（左クリック / 右クリックで切替）",
         },
         UiLanguage::Korean => match mode {
-            "reading" => "읽기 모드 · 클릭하여 소스 모드로 전환",
-            "source" => "소스 모드 · 클릭하여 편집 모드로 전환",
-            _ => "편집 모드 · 클릭하여 읽기 모드로 전환",
+            "reading" => "읽기 모드 (왼쪽 / 오른쪽 클릭으로 전환)",
+            "source" => "소스 모드 (왼쪽 / 오른쪽 클릭으로 전환)",
+            _ => "편집 모드 (왼쪽 / 오른쪽 클릭으로 전환)",
         },
         UiLanguage::French => match mode {
-            "reading" => "Mode lecture · Cliquer pour le mode source",
-            "source" => "Mode source · Cliquer pour le mode édition",
-            _ => "Mode édition · Cliquer pour le mode lecture",
+            "reading" => "Mode lecture (Clic gauche / droit pour changer)",
+            "source" => "Mode source (Clic gauche / droit pour changer)",
+            _ => "Mode édition (Clic gauche / droit pour changer)",
         },
         UiLanguage::German => match mode {
-            "reading" => "Lesemodus · Klicken für Quelltextmodus",
-            "source" => "Quelltextmodus · Klicken für Bearbeitungsmodus",
-            _ => "Bearbeitungsmodus · Klicken für Lesemodus",
+            "reading" => "Lesemodus (Links- / Rechtsklick zum Wechseln)",
+            "source" => "Quelltextmodus (Links- / Rechtsklick zum Wechseln)",
+            _ => "Bearbeitungsmodus (Links- / Rechtsklick zum Wechseln)",
         },
         UiLanguage::Spanish => match mode {
-            "reading" => "Modo lectura · Clic para modo fuente",
-            "source" => "Modo fuente · Clic para modo edición",
-            _ => "Modo edición · Clic para modo lectura",
+            "reading" => "Modo lectura (Clic izquierdo / derecho para cambiar)",
+            "source" => "Modo fuente (Clic izquierdo / derecho para cambiar)",
+            _ => "Modo edición (Clic izquierdo / derecho para cambiar)",
         },
         UiLanguage::Portuguese => match mode {
-            "reading" => "Modo de leitura · Clique para o modo fonte",
-            "source" => "Modo fonte · Clique para o modo de edição",
-            _ => "Modo de edição · Clique para o modo de leitura",
+            "reading" => "Modo de leitura (Clique esquerdo / direito para alternar)",
+            "source" => "Modo fonte (Clique esquerdo / direito para alternar)",
+            _ => "Modo de edição (Clique esquerdo / direito para alternar)",
         },
         UiLanguage::Russian => match mode {
-            "reading" => "Режим чтения · Нажмите для режима исходника",
-            "source" => "Режим исходника · Нажмите для режима редактирования",
-            _ => "Режим редактирования · Нажмите для режима чтения",
+            "reading" => "Режим чтения (Переключение левой / правой кнопкой)",
+            "source" => "Режим исходника (Переключение левой / правой кнопкой)",
+            _ => "Режим редактирования (Переключение левой / правой кнопкой)",
         },
         UiLanguage::Arabic => match mode {
-            "reading" => "وضع القراءة · انقر لوضع المصدر",
-            "source" => "وضع المصدر · انقر لوضع التحرير",
-            _ => "وضع التحرير · انقر لوضع القراءة",
+            "reading" => "وضع القراءة (التبديل بالنقر الأيسر / الأيمن)",
+            "source" => "وضع المصدر (التبديل بالنقر الأيسر / الأيمن)",
+            _ => "وضع التحرير (التبديل بالنقر الأيسر / الأيمن)",
         },
         UiLanguage::Hindi => match mode {
-            "reading" => "पठन मोड · स्रोत मोड के लिए क्लिक करें",
-            "source" => "स्रोत मोड · संपादन मोड के लिए क्लिक करें",
-            _ => "संपादन मोड · पठन मोड के लिए क्लिक करें",
+            "reading" => "पठन मोड (बाएँ / दाएँ क्लिक से बदलें)",
+            "source" => "स्रोत मोड (बाएँ / दाएँ क्लिक से बदलें)",
+            _ => "संपादन मोड (बाएँ / दाएँ क्लिक से बदलें)",
         },
     }
 }
@@ -501,13 +501,24 @@ pub(crate) fn document_mode_tooltip(language: UiLanguage, mode: &str) -> &'stati
 fn document_mode_tooltips_are_nonempty_and_distinct_for_every_language_and_mode() {
     let mut tooltips = std::collections::HashSet::new();
     for &language in UiLanguage::supported() {
+        let mut switch_hint = None;
         for mode in ["edit", "reading", "source"] {
             let tooltip = document_mode_tooltip(language, mode);
             let (current, action) = tooltip
-                .split_once(" · ")
-                .expect("mode tooltip must include current mode and next action");
+                .split_once(['(', '（'])
+                .expect("mode tooltip must include current mode and mouse controls");
             assert!(!current.trim().is_empty(), "{language:?}: {mode}");
-            assert!(!action.trim().is_empty(), "{language:?}: {mode}");
+            assert!(tooltip.ends_with([')', '）']), "{language:?}: {mode}");
+            let (left, right) = action
+                .trim_end_matches([')', '）'])
+                .split_once(" / ")
+                .expect("mode tooltip must describe both mouse buttons");
+            assert!(!left.trim().is_empty(), "{language:?}: {mode}");
+            assert!(!right.trim().is_empty(), "{language:?}: {mode}");
+            if let Some(expected) = switch_hint {
+                assert_eq!(action, expected, "{language:?}: {mode}");
+            }
+            switch_hint = Some(action);
             assert!(tooltips.insert(tooltip), "duplicate: {language:?}: {mode}");
         }
     }
@@ -515,22 +526,22 @@ fn document_mode_tooltips_are_nonempty_and_distinct_for_every_language_and_mode(
 
 #[cfg(test)]
 #[test]
-fn document_mode_tooltips_describe_the_edit_reading_source_cycle() {
+fn document_mode_tooltips_describe_the_current_mode_and_both_mouse_buttons() {
     for (language, expected) in [
         (
             UiLanguage::English,
             [
-                "Editing mode · Click for reading mode",
-                "Reading mode · Click for source mode",
-                "Source mode · Click for editing mode",
+                "Editing mode (Left / right click to switch)",
+                "Reading mode (Left / right click to switch)",
+                "Source mode (Left / right click to switch)",
             ],
         ),
         (
             UiLanguage::ChineseSimplified,
             [
-                "编辑模式 · 点击切换为阅读模式",
-                "阅读模式 · 点击切换为源码模式",
-                "源码模式 · 点击切换为编辑模式",
+                "编辑模式（左键 / 右键切换）",
+                "阅读模式（左键 / 右键切换）",
+                "源码模式（左键 / 右键切换）",
             ],
         ),
     ] {

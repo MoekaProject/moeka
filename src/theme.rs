@@ -383,7 +383,7 @@ pub struct CodeSyntaxPalette {
 
 #[allow(dead_code)]
 impl CodeSyntaxPalette {
-    /// One Dark Pro — also used by Milky Dark (legacy behavior).
+    /// One Dark accents, with comments lifted for both code and Source surfaces.
     pub const ONE_DARK: Self = Self {
         keyword: 0xC678DD,
         operator: 0x56B6C2,
@@ -392,21 +392,21 @@ impl CodeSyntaxPalette {
         type_name: 0xE5C07B,
         number: 0xD19A66,
         variable: 0xE06C75,
-        comment: 0x7F848E,
+        comment: 0x838993,
         foreground: 0xABB2BF,
     };
 
-    /// One Light — also used by Milky Light.
+    /// Pearl Morning: mulberry keywords, indigo strings and emerald calls.
     pub const ONE_LIGHT: Self = Self {
-        keyword: 0xA626A4,
-        operator: 0x0184BC,
-        string: 0x50A14F,
-        function: 0x4078F2,
-        type_name: 0xC18401,
-        number: 0x986801,
-        variable: 0xE45649,
-        comment: 0xA0A1A7,
-        foreground: 0x383A42,
+        keyword: 0xA02276,
+        operator: 0x4F48A0,
+        string: 0x4E3AB0,
+        function: 0x0B7258,
+        type_name: 0x2357B0,
+        number: 0xA24B14,
+        variable: 0x69508E,
+        comment: 0x77578C,
+        foreground: 0x443553,
     };
 
     pub const DRACULA: Self = Self {
@@ -417,7 +417,7 @@ impl CodeSyntaxPalette {
         type_name: 0x8BE9FD,
         number: 0xBD93F9,
         variable: 0xFFB86C,
-        comment: 0x6272A4,
+        comment: 0x7C8DC0,
         foreground: 0xF8F8F2,
     };
 
@@ -427,9 +427,9 @@ impl CodeSyntaxPalette {
         string: 0xA3BE8C,
         function: 0x88C0D0,
         type_name: 0x8FBCBB,
-        number: 0xB48EAD,
+        number: 0xB892B1,
         variable: 0xD8DEE9,
-        comment: 0x616E88,
+        comment: 0x909EB9,
         foreground: 0xD8DEE9,
     };
 
@@ -441,7 +441,7 @@ impl CodeSyntaxPalette {
         type_name: 0x2AC3DE,
         number: 0xFF9E64,
         variable: 0x73DACA,
-        comment: 0x565F89,
+        comment: 0x7781AE,
         foreground: 0xA9B1D6,
     };
 
@@ -453,7 +453,7 @@ impl CodeSyntaxPalette {
         type_name: 0xF9E2AF,
         number: 0xFAB387,
         variable: 0xB4BEFE,
-        comment: 0x6C7086,
+        comment: 0x858AA0,
         foreground: 0xCDD6F4,
     };
 
@@ -470,38 +470,38 @@ impl CodeSyntaxPalette {
     };
 
     pub const SOLARIZED_DARK: Self = Self {
-        keyword: 0x859900,
-        operator: 0x859900,
-        string: 0x2AA198,
-        function: 0x268BD2,
-        type_name: 0xB58900,
-        number: 0xD33682,
-        variable: 0x268BD2,
-        comment: 0x586E75,
-        foreground: 0x839496,
+        keyword: 0xB0BC66,
+        operator: 0xA5B97C,
+        string: 0x79B5A1,
+        function: 0x68ADD3,
+        type_name: 0xD2B66F,
+        number: 0xD58EAB,
+        variable: 0x8EB8BB,
+        comment: 0x8AA09B,
+        foreground: 0xB1C0BC,
     };
 
     pub const GRUVBOX_DARK: Self = Self {
-        keyword: 0xFB4934,
+        keyword: 0xFF4D37,
         operator: 0xFE8019,
         string: 0xB8BB26,
         function: 0xFABD2F,
         type_name: 0x8EC07C,
         number: 0xD3869B,
         variable: 0x83A598,
-        comment: 0x928374,
+        comment: 0x9A8B7B,
         foreground: 0xEBDBB2,
     };
 
     pub const ROSE_PINE: Self = Self {
-        keyword: 0x31748F,
+        keyword: 0x5193AF,
         operator: 0x908CAA,
         string: 0xF6C177,
         function: 0xEBBCBA,
         type_name: 0x9CCFD8,
         number: 0xC4A7E7,
         variable: 0xE0DEF4,
-        comment: 0x6E6A86,
+        comment: 0x8B87A4,
         foreground: 0xE0DEF4,
     };
 
@@ -513,7 +513,7 @@ impl CodeSyntaxPalette {
         type_name: 0xDBBC7F,
         number: 0xD699B6,
         variable: 0x83C092,
-        comment: 0x859289,
+        comment: 0x909E94,
         foreground: 0xD3C6AA,
     };
 
@@ -525,143 +525,150 @@ impl CodeSyntaxPalette {
         type_name: 0x78DCE8,
         number: 0xAB9DF2,
         variable: 0xFCFCFA,
-        comment: 0x727072,
+        comment: 0x908E90,
         foreground: 0xFCFCFA,
     };
 
-    /// Tokyo Night Light (enkia light variant).
+    /// Paper White: graphite keywords, mahogany strings and navy calls.
     pub const TOKYO_NIGHT_LIGHT: Self = Self {
-        keyword: 0x5A4A78,
-        operator: 0x0F4B6E,
-        string: 0x485E30,
-        function: 0x34548A,
-        type_name: 0x8F5E15,
-        number: 0x965027,
-        variable: 0x33635C,
-        comment: 0x9699A3,
-        foreground: 0x343B58,
+        keyword: 0x303631,
+        operator: 0x5A5E53,
+        string: 0x8C4930,
+        function: 0x284D82,
+        type_name: 0x526749,
+        number: 0x7B3A52,
+        variable: 0x444A3D,
+        comment: 0x6A6B5D,
+        foreground: 0x343630,
     };
 
-    /// Nord palette accents darkened for readable contrast on Snow Storm.
+    /// Nordic Snow: navy keywords, cyan strings and heather calls.
     pub const NORD_LIGHT: Self = Self {
-        keyword: 0x5E81AC,
-        operator: 0x5E81AC,
-        string: 0x6C8A55,
-        function: 0x3E7B91,
-        type_name: 0x497D7B,
-        number: 0x9A6590,
-        variable: 0x2E3440,
-        comment: 0x8892A5,
-        foreground: 0x2E3440,
+        keyword: 0x254B81,
+        operator: 0x2F6D85,
+        string: 0x006B76,
+        function: 0x79469C,
+        type_name: 0xA04440,
+        number: 0x4D59A1,
+        variable: 0x365777,
+        comment: 0x4B688C,
+        foreground: 0x293A57,
     };
 
+    /// Sunlit Canvas: saffron keywords, petrol strings and vermilion calls.
     pub const AYU_LIGHT: Self = Self {
-        keyword: 0xFA8D3E,
-        operator: 0xED9366,
-        string: 0x86B300,
-        function: 0xF2AE49,
-        type_name: 0x399EE6,
-        number: 0xA37ACC,
-        variable: 0x55B4D4,
-        comment: 0x787B80,
-        foreground: 0x5C6166,
+        keyword: 0x876002,
+        operator: 0x81518E,
+        string: 0x005D74,
+        function: 0xA32E26,
+        type_name: 0x174FB0,
+        number: 0x7832A5,
+        variable: 0x615526,
+        comment: 0x786529,
+        foreground: 0x51421D,
     };
 
-    /// Xcode "Default (Light)" source colors.
+    /// Studio Daylight: cobalt keywords, brick strings and magenta calls.
     pub const XCODE_LIGHT: Self = Self {
-        keyword: 0x9B2393,
-        operator: 0x643820,
-        string: 0xC41A16,
-        function: 0x326D74,
-        type_name: 0x3900A0,
-        number: 0x1C00CF,
-        variable: 0x947100,
-        comment: 0x5D6C79,
-        foreground: 0x262626,
+        keyword: 0x164BB3,
+        operator: 0x006C69,
+        string: 0xB42E36,
+        function: 0xA12687,
+        type_name: 0x1B6751,
+        number: 0x7740AE,
+        variable: 0x334A72,
+        comment: 0x5D6890,
+        foreground: 0x26344B,
     };
 
+    /// Porcelain Mist: crimson keywords, navy strings and orchid calls.
     pub const GITHUB_LIGHT: Self = Self {
-        keyword: 0xCF222E,
-        operator: 0xCF222E,
-        string: 0x0A3069,
-        function: 0x8250DF,
-        type_name: 0x953800,
-        number: 0x0550AE,
-        variable: 0x953800,
-        comment: 0x6E7781,
-        foreground: 0x1F2328,
+        keyword: 0xBE203B,
+        operator: 0x5B567D,
+        string: 0x173E78,
+        function: 0x8034AC,
+        type_name: 0x995022,
+        number: 0x175E9E,
+        variable: 0x4E4054,
+        comment: 0x527077,
+        foreground: 0x253B42,
     };
 
+    /// Solarized Light: olive keywords, jade strings and azure calls.
     pub const SOLARIZED_LIGHT: Self = Self {
-        keyword: 0x859900,
-        operator: 0x859900,
-        string: 0x2AA198,
-        function: 0x268BD2,
-        type_name: 0xB58900,
-        number: 0xD33682,
-        variable: 0x268BD2,
-        comment: 0x93A1A1,
-        foreground: 0x657B83,
+        keyword: 0x5B6509,
+        operator: 0x705F03,
+        string: 0x0A6C64,
+        function: 0x0D649E,
+        type_name: 0x7E5909,
+        number: 0xB02570,
+        variable: 0x365F67,
+        comment: 0x5C6341,
+        foreground: 0x3A4C4B,
     };
 
+    /// Vanilla Latte: caramel keywords, amethyst strings and raspberry calls.
     pub const CATPPUCCIN_LATTE: Self = Self {
-        keyword: 0x8839EF,
-        operator: 0x04A5E5,
-        string: 0x40A02B,
-        function: 0x1E66F5,
-        type_name: 0xDF8E1D,
-        number: 0xFE640B,
-        variable: 0x7287FD,
-        comment: 0x8C8FA1,
-        foreground: 0x4C4F69,
+        keyword: 0x96520C,
+        operator: 0x72502E,
+        string: 0x7231A2,
+        function: 0xB32644,
+        type_name: 0x206252,
+        number: 0x2958A0,
+        variable: 0x66462A,
+        comment: 0x836029,
+        foreground: 0x513A2A,
     };
 
+    /// Rose Dawn: crimson keywords, lapis strings and aubergine calls.
     pub const ROSE_PINE_DAWN: Self = Self {
-        keyword: 0x286983,
-        operator: 0x797593,
-        string: 0xEA9D34,
-        function: 0xD7827E,
-        type_name: 0x56949F,
-        number: 0x907AA9,
-        variable: 0x575279,
-        comment: 0x9893A5,
-        foreground: 0x575279,
+        keyword: 0xB32439,
+        operator: 0x8F4564,
+        string: 0x264BA8,
+        function: 0x742C67,
+        type_name: 0x935611,
+        number: 0x08706A,
+        variable: 0x6A425D,
+        comment: 0x805572,
+        foreground: 0x523247,
     };
 
+    /// Linen Paper: coffee keywords, wine strings and olive calls.
     pub const GRUVBOX_LIGHT: Self = Self {
-        keyword: 0x9D0006,
-        operator: 0xAF3A03,
-        string: 0x79740E,
-        function: 0xB57614,
-        type_name: 0x427B58,
-        number: 0x8F3F71,
-        variable: 0x076678,
-        comment: 0x7C6F64,
-        foreground: 0x3C3836,
+        keyword: 0x694023,
+        operator: 0x865A23,
+        string: 0x922F4E,
+        function: 0x4F672A,
+        type_name: 0x28655C,
+        number: 0xA1492E,
+        variable: 0x49382A,
+        comment: 0x726045,
+        foreground: 0x49382A,
     };
 
+    /// Sage Garden: forest keywords, rust strings and plum calls.
     pub const EVERFOREST_LIGHT: Self = Self {
-        keyword: 0xF85552,
-        operator: 0xF57D26,
-        string: 0x8DA101,
-        function: 0x3A94C5,
-        type_name: 0xDFA000,
-        number: 0xDF69BA,
-        variable: 0x35A77C,
-        comment: 0x939F91,
-        foreground: 0x5C6A72,
+        keyword: 0x165F38,
+        operator: 0x386841,
+        string: 0xA34124,
+        function: 0x70408E,
+        type_name: 0x596E22,
+        number: 0x9C5216,
+        variable: 0x36543D,
+        comment: 0x546D4F,
+        foreground: 0x2B4433,
     };
 
     pub const MILKY_NIGHT: Self = Self {
-        keyword: 0xC792D4,
-        operator: 0x89DDFF,
-        string: 0xA7C080,
-        function: 0x82AAFF,
-        type_name: 0xEBCB8B,
-        number: 0xF0A47A,
-        variable: 0xE58D91,
-        comment: 0x7E838D,
-        foreground: 0xD8D6D1,
+        keyword: 0xCDA0C9,
+        operator: 0xBDB3A2,
+        string: 0xBEC789,
+        function: 0xE7C89E,
+        type_name: 0x8ABDB7,
+        number: 0xE3A287,
+        variable: 0xD8C7B0,
+        comment: 0xA09B90,
+        foreground: 0xDDD8CE,
     };
 
     pub const AYU_MIRAGE: Self = Self {
@@ -672,104 +679,109 @@ impl CodeSyntaxPalette {
         type_name: 0x59C2FF,
         number: 0xD2A6FF,
         variable: 0x95E6CB,
-        comment: 0x6C7A89,
+        comment: 0x7F8E9D,
         foreground: 0xCCCAC2,
     };
 
     pub const MOONLIGHT_HARBOR: Self = Self {
-        keyword: 0xC099FF,
-        operator: 0x7FDBCA,
-        string: 0xA9DC76,
-        function: 0x82B1FF,
-        type_name: 0x66D9EF,
-        number: 0xF5A97F,
-        variable: 0xE6B0D8,
-        comment: 0x65708A,
-        foreground: 0xD7DEEA,
+        keyword: 0xE3B590,
+        operator: 0x8BC5BC,
+        string: 0xCAD695,
+        function: 0x80CCD0,
+        type_name: 0xD7BD85,
+        number: 0xD8ACC1,
+        variable: 0xA8D6C6,
+        comment: 0x84A4A5,
+        foreground: 0xD0E3DD,
     };
 
     pub const COBALT_VELVET: Self = Self {
-        keyword: 0xFF78B4,
-        operator: 0x67D4E8,
-        string: 0xB5E88C,
-        function: 0x7FA7FF,
-        type_name: 0xE9C46A,
-        number: 0xD6A2E8,
-        variable: 0xF29B8F,
-        comment: 0x7180A6,
+        keyword: 0xF0C779,
+        operator: 0x93BFF5,
+        string: 0x8ED5CC,
+        function: 0xDBA3E0,
+        type_name: 0xBDCAFF,
+        number: 0xEF9CA4,
+        variable: 0xDCE4FF,
+        comment: 0x92A0C9,
         foreground: 0xDCE4FF,
     };
 
     pub const OBSIDIAN_EMBER: Self = Self {
-        keyword: 0xF0785A,
-        operator: 0xE6A15C,
-        string: 0xB4C96B,
-        function: 0xE8C170,
-        type_name: 0x74B6A0,
-        number: 0xD98AA7,
-        variable: 0xE89A72,
-        comment: 0x81756D,
-        foreground: 0xDDD3C8,
+        keyword: 0xE6A077,
+        operator: 0xD6AE7B,
+        string: 0xA8BD83,
+        function: 0xE7C19A,
+        type_name: 0x8BBC9E,
+        number: 0xD4A0AB,
+        variable: 0xE5B18B,
+        comment: 0xA28C7C,
+        foreground: 0xE3D2C2,
     };
 
+    /// Willow Mist: moss keywords, amethyst strings and claret calls.
     pub const WILLOW_LIGHT: Self = Self {
-        keyword: 0x556B2F,
-        operator: 0x52766C,
-        string: 0x6B7F38,
-        function: 0x376E72,
-        type_name: 0x8A632A,
-        number: 0x985F45,
-        variable: 0x744F75,
-        comment: 0x879284,
-        foreground: 0x34413A,
+        keyword: 0x4D6920,
+        operator: 0x37643A,
+        string: 0x703594,
+        function: 0x952A49,
+        type_name: 0x8D5B16,
+        number: 0x2F54A2,
+        variable: 0x525D31,
+        comment: 0x656A3C,
+        foreground: 0x434B29,
     };
 
+    /// Coastal Fog: teal keywords, cobalt strings and copper calls.
     pub const COASTAL_LIGHT: Self = Self {
-        keyword: 0x2D5F8B,
-        operator: 0x287D83,
-        string: 0x4E7A64,
-        function: 0x356FA8,
-        type_name: 0x74639A,
-        number: 0x9A6543,
-        variable: 0x8C5267,
-        comment: 0x7C8993,
-        foreground: 0x334550,
+        keyword: 0x006970,
+        operator: 0x9A4440,
+        string: 0x234DB3,
+        function: 0xA1511D,
+        type_name: 0x773690,
+        number: 0x9A2F66,
+        variable: 0x2D6471,
+        comment: 0x3A706D,
+        foreground: 0x23474A,
     };
 
+    /// Lavender Haze: violet keywords, emerald strings and berry calls.
     pub const LAVENDER_LIGHT: Self = Self {
-        keyword: 0x7252A3,
-        operator: 0x526AA3,
-        string: 0x56805B,
-        function: 0x4169A1,
-        type_name: 0x9A623B,
-        number: 0x9A5278,
-        variable: 0xA04B58,
-        comment: 0x898494,
-        foreground: 0x433E50,
+        keyword: 0x6D26B1,
+        operator: 0x3652A1,
+        string: 0x0E7042,
+        function: 0xAB296A,
+        type_name: 0x0B6990,
+        number: 0x835A0F,
+        variable: 0x564277,
+        comment: 0x6A5A87,
+        foreground: 0x403159,
     };
 
+    /// Apricot Bloom: burnt-orange keywords, olive strings and cobalt calls.
     pub const APRICOT_LIGHT: Self = Self {
-        keyword: 0xB04C38,
-        operator: 0x9B642C,
-        string: 0x627A36,
-        function: 0x9A5B33,
-        type_name: 0x397A78,
-        number: 0x8E5590,
-        variable: 0xA64D5C,
-        comment: 0x8C8178,
-        foreground: 0x4A3B34,
+        keyword: 0xA14A08,
+        operator: 0x775399,
+        string: 0x526A18,
+        function: 0x1C56B1,
+        type_name: 0x8D2F78,
+        number: 0x8A5906,
+        variable: 0x65432E,
+        comment: 0x845A3A,
+        foreground: 0x583727,
     };
 
+    /// Silver Morning: steel keywords, ruby strings and graphite calls.
     pub const SILVER_LIGHT: Self = Self {
-        keyword: 0x4C5E88,
-        operator: 0x39747B,
-        string: 0x587447,
-        function: 0x3C6F9C,
-        type_name: 0x7D5F87,
-        number: 0x8B6046,
-        variable: 0x865263,
-        comment: 0x7F8791,
-        foreground: 0x343A43,
+        keyword: 0x3D6188,
+        operator: 0x4D6577,
+        string: 0xA22E52,
+        function: 0x303E48,
+        type_name: 0x644285,
+        number: 0x146C67,
+        variable: 0x3B535D,
+        comment: 0x4B697C,
+        foreground: 0x303D45,
     };
 }
 
@@ -804,94 +816,97 @@ const fn markdown_syntax(
     }
 }
 
+// Markdown has its own editorial hierarchy, not the code grammar's role order.
+// Palette values are authored in perceptual space, then baked to sRGB; no color
+// correction or palette generation runs in the rendering/highlighting hot path.
 fn markdown_syntax_for(code: CodeSyntaxPalette) -> MarkdownSyntaxPalette {
     if code == CodeSyntaxPalette::GITHUB_LIGHT {
         markdown_syntax(
-            0xCF222E, 0x953800, 0x8250DF, 0x6E7781, 0x0A3069, 0x0969DA, 0xCF222E,
+            0x234F65, 0x9B2C47, 0x74428C, 0x526870, 0x8034AC, 0x126780, 0x386B70,
         )
     } else if code == CodeSyntaxPalette::GRUVBOX_LIGHT {
         markdown_syntax(
-            0xAF3A03, 0xB57614, 0x8F3F71, 0x928374, 0x79740E, 0x076678, 0x9D0006,
+            0x674628, 0x8D314C, 0x586332, 0x6C5B45, 0x922F4E, 0x3B632E, 0x886126,
         )
     } else if code == CodeSyntaxPalette::XCODE_LIGHT {
         markdown_syntax(
-            0x9B2393, 0x643820, 0x3900A0, 0x5D6C79, 0xC41A16, 0x326D74, 0x947100,
+            0x214CAE, 0x9D267E, 0x226553, 0x52637E, 0xB42E36, 0x195C9E, 0x4D4596,
         )
     } else if code == CodeSyntaxPalette::ROSE_PINE_DAWN {
         markdown_syntax(
-            0xB4637A, 0x9D640E, 0x907AA9, 0x9893A5, 0x286983, 0x56949F, 0xB4637A,
+            0xAE2C39, 0x794629, 0x57408E, 0x795367, 0x264BA8, 0x086879, 0x922E5A,
         )
     } else if code == CodeSyntaxPalette::CATPPUCCIN_LATTE {
         markdown_syntax(
-            0x8839EF, 0xB94700, 0xA83A91, 0x8C8FA1, 0x367F28, 0x1E66F5, 0xA86A00,
+            0x94520F, 0x9D2A45, 0x6F3295, 0x755B45, 0x7231A2, 0x24614E, 0x8B5B1C,
         )
     } else if code == CodeSyntaxPalette::EVERFOREST_LIGHT {
         markdown_syntax(
-            0xC84C49, 0xA66B00, 0xB44B91, 0x939F91, 0x708600, 0x287FA9, 0xD06422,
+            0x205D3C, 0x9C4229, 0x70408E, 0x506A56, 0x70408E, 0x175B67, 0x516A26,
         )
     } else if code == CodeSyntaxPalette::NORD_LIGHT {
         markdown_syntax(
-            0x5E81AC, 0x965C44, 0x9A6590, 0x8892A5, 0x6C8A55, 0x3E7B91, 0x497D7B,
+            0x254B81, 0x91423C, 0x79469C, 0x4C6282, 0x086873, 0x225F8C, 0x49649A,
         )
     } else if code == CodeSyntaxPalette::SOLARIZED_LIGHT {
         markdown_syntax(
-            0xCB4B16, 0xB58900, 0x6C71C4, 0x7B8D8D, 0x1B756F, 0x268BD2, 0x697A00,
+            0x8B5909, 0x666D06, 0xA22A69, 0x5E6B58, 0x03625B, 0x17669A, 0x626E13,
         )
     } else if code == CodeSyntaxPalette::AYU_LIGHT {
         markdown_syntax(
-            0xC35F00, 0x8B5FB3, 0x287E9A, 0x787B80, 0x668A00, 0x247BB5, 0xC66C48,
+            0x92610A, 0x9B3029, 0x175D74, 0x746033, 0x005D74, 0x174FB0, 0x75438E,
         )
     } else if code == CodeSyntaxPalette::TOKYO_NIGHT_LIGHT {
         markdown_syntax(
-            0x34548A, 0x965027, 0x5A4A78, 0x9699A3, 0x485E30, 0x0F4B6E, 0x33635C,
+            0x343E36, 0x7D412C, 0x52614A, 0x606153, 0x284D82, 0x284D82, 0x59614E,
         )
     } else if code == CodeSyntaxPalette::ONE_LIGHT {
         markdown_syntax(
-            0xA626A4, 0x986801, 0x4078F2, 0x7C7D83, 0x50A14F, 0x2F6EDB, 0x0184BC,
+            0x9B2D79, 0x775013, 0x0C7359, 0x6D597D, 0x4E3AB0, 0x166957, 0x7E388C,
         )
     } else if code == CodeSyntaxPalette::WILLOW_LIGHT {
         markdown_syntax(
-            0x556B2F, 0x8A632A, 0x744F75, 0x879284, 0x6B7F38, 0x376E72, 0x52766C,
+            0x566C22, 0x8B2947, 0x752E76, 0x626D43, 0x703594, 0x30547E, 0x7C5B24,
         )
     } else if code == CodeSyntaxPalette::COASTAL_LIGHT {
         markdown_syntax(
-            0x2D5F8B, 0x9A6543, 0x74639A, 0x7C8993, 0x4E7A64, 0x356FA8, 0x287D83,
+            0x006C70, 0xA25127, 0x773690, 0x4A706F, 0x234DB3, 0x235A9A, 0x9A4440,
         )
     } else if code == CodeSyntaxPalette::LAVENDER_LIGHT {
         markdown_syntax(
-            0x7252A3, 0x9A623B, 0xA04B58, 0x898494, 0x56805B, 0x4169A1, 0x526AA3,
+            0x6931AB, 0x9D2B65, 0x267047, 0x655183, 0x0A6339, 0x00668E, 0x73518F,
         )
     } else if code == CodeSyntaxPalette::APRICOT_LIGHT {
         markdown_syntax(
-            0xB04C38, 0x9B642C, 0x8E5590, 0x8C8178, 0x627A36, 0x397A78, 0xA64D5C,
+            0xA34D12, 0x576A1D, 0x8D2F78, 0x7D5740, 0x1651AB, 0x235EA6, 0x8E5907,
         )
     } else if code == CodeSyntaxPalette::SILVER_LIGHT {
         markdown_syntax(
-            0x4C5E88, 0x8B6046, 0x7D5F87, 0x7F8791, 0x587447, 0x3C6F9C, 0x39747B,
+            0x3E5D79, 0x8C2B4C, 0x4E6258, 0x576B77, 0xA22E52, 0x1C6174, 0x5A5378,
         )
     } else if code == CodeSyntaxPalette::ONE_DARK {
         markdown_syntax(
-            0xE06C75, 0xD19A66, 0xC678DD, 0x636D83, 0x98C379, 0x61AFEF, 0xE06C75,
+            0xE06C75, 0xD19A66, 0xC678DD, 0x7E899F, 0x98C379, 0x61AFEF, 0xE06C75,
         )
     } else if code == CodeSyntaxPalette::MILKY_NIGHT {
         markdown_syntax(
-            0xE58D91, 0xEBCB8B, 0xC792D4, 0x7E838D, 0xA7C080, 0x82AAFF, 0x89DDFF,
+            0xE7C89E, 0xE3A287, 0xCDA0C9, 0xA09B90, 0xBEC789, 0x8ABDB7, 0xBDB3A2,
         )
     } else if code == CodeSyntaxPalette::DRACULA {
         markdown_syntax(
-            0xFF79C6, 0xFFB86C, 0xBD93F9, 0x6272A4, 0x50FA7B, 0x8BE9FD, 0xFF79C6,
+            0xFF79C6, 0xFFB86C, 0xBD93F9, 0x7C8DC0, 0x50FA7B, 0x8BE9FD, 0xFF79C6,
         )
     } else if code == CodeSyntaxPalette::NORD {
         markdown_syntax(
-            0x88C0D0, 0xEBCB8B, 0xB48EAD, 0x616E88, 0xA3BE8C, 0x81A1C1, 0x8FBCBB,
+            0x88C0D0, 0xEBCB8B, 0xB892B1, 0x909EB9, 0xA3BE8C, 0x81A1C1, 0x8FBCBB,
         )
     } else if code == CodeSyntaxPalette::TOKYO_NIGHT {
         markdown_syntax(
-            0x7AA2F7, 0xFF9E64, 0xBB9AF7, 0x565F89, 0x73DACA, 0x7DCFFF, 0x2AC3DE,
+            0x7AA2F7, 0xFF9E64, 0xBB9AF7, 0x7781AE, 0x73DACA, 0x7DCFFF, 0x2AC3DE,
         )
     } else if code == CodeSyntaxPalette::CATPPUCCIN_MOCHA {
         markdown_syntax(
-            0xCBA6F7, 0xFAB387, 0xF5C2E7, 0x6C7086, 0xA6E3A1, 0x89B4FA, 0xF9E2AF,
+            0xCBA6F7, 0xFAB387, 0xF5C2E7, 0x858AA0, 0xA6E3A1, 0x89B4FA, 0xF9E2AF,
         )
     } else if code == CodeSyntaxPalette::GITHUB_DARK {
         markdown_syntax(
@@ -899,39 +914,39 @@ fn markdown_syntax_for(code: CodeSyntaxPalette) -> MarkdownSyntaxPalette {
         )
     } else if code == CodeSyntaxPalette::SOLARIZED_DARK {
         markdown_syntax(
-            0xCB4B16, 0xB58900, 0x6C71C4, 0x586E75, 0x2AA198, 0x268BD2, 0x859900,
+            0xE2AB81, 0xD2B66F, 0xC2A4CF, 0x8AA09B, 0x79B5A1, 0x68ADD3, 0xB0BC66,
         )
     } else if code == CodeSyntaxPalette::GRUVBOX_DARK {
         markdown_syntax(
-            0xFE8019, 0xFABD2F, 0xD3869B, 0x928374, 0xB8BB26, 0x83A598, 0xFB4934,
+            0xFE8019, 0xFABD2F, 0xD3869B, 0x9A8B7B, 0xB8BB26, 0x83A598, 0xFF4D37,
         )
     } else if code == CodeSyntaxPalette::ROSE_PINE {
         markdown_syntax(
-            0xEB6F92, 0xF6C177, 0xC4A7E7, 0x6E6A86, 0x9CCFD8, 0xC4A7E7, 0xEBBCBA,
+            0xEB6F92, 0xF6C177, 0xC4A7E7, 0x8B87A4, 0x9CCFD8, 0xC4A7E7, 0xEBBCBA,
         )
     } else if code == CodeSyntaxPalette::EVERFOREST_DARK {
         markdown_syntax(
-            0xE67E80, 0xDBBC7F, 0xD699B6, 0x859289, 0xA7C080, 0x7FBBB3, 0xE69875,
+            0xE67E80, 0xDBBC7F, 0xD699B6, 0x909E94, 0xA7C080, 0x7FBBB3, 0xE69875,
         )
     } else if code == CodeSyntaxPalette::MONOKAI_PRO {
         markdown_syntax(
-            0xFF6188, 0xFC9867, 0xAB9DF2, 0x727072, 0xA9DC76, 0x78DCE8, 0xFFD866,
+            0xFF6188, 0xFC9867, 0xAB9DF2, 0x908E90, 0xA9DC76, 0x78DCE8, 0xFFD866,
         )
     } else if code == CodeSyntaxPalette::AYU_MIRAGE {
         markdown_syntax(
-            0xFF8F40, 0xFFB454, 0xD2A6FF, 0x6C7A89, 0xAAD94C, 0x59C2FF, 0xF29E74,
+            0xFF8F40, 0xFFB454, 0xD2A6FF, 0x7F8E9D, 0xAAD94C, 0x59C2FF, 0xF29E74,
         )
     } else if code == CodeSyntaxPalette::MOONLIGHT_HARBOR {
         markdown_syntax(
-            0xC099FF, 0xF5A97F, 0xE6B0D8, 0x65708A, 0xA9DC76, 0x82B1FF, 0x7FDBCA,
+            0x80CCD0, 0xE3B590, 0xD8ACC1, 0x84A4A5, 0xCAD695, 0xA8D6C6, 0x8BC5BC,
         )
     } else if code == CodeSyntaxPalette::COBALT_VELVET {
         markdown_syntax(
-            0xFF78B4, 0xE9C46A, 0xD6A2E8, 0x7180A6, 0xB5E88C, 0x7FA7FF, 0x67D4E8,
+            0xB9C9FF, 0xF0C779, 0xDBA3E0, 0x92A0C9, 0x8ED5CC, 0x9FBEFF, 0xEF9CA4,
         )
     } else if code == CodeSyntaxPalette::OBSIDIAN_EMBER {
         markdown_syntax(
-            0xF0785A, 0xE8C170, 0xD98AA7, 0x81756D, 0xB4C96B, 0x74B6A0, 0xE6A15C,
+            0xE6A077, 0xE7C19A, 0xD4A0AB, 0xA28C7C, 0xA8BD83, 0x8BBC9E, 0xD6AE7B,
         )
     } else {
         markdown_syntax(
@@ -979,337 +994,337 @@ struct CuratedThemeSpec {
 
 const PORCELAIN_MIST: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#FCFCFD",
-    surface: "#F5F6F8",
-    elevated: "#FFFFFF",
-    hover: "#ECEFF3",
-    selected: "#E4ECF7",
-    border: "#D9DEE7",
-    text: "#24272D",
-    muted: "#68707C",
-    bright: "#111318",
-    accent: "#2468B2",
-    secondary: "#7A4DA3",
-    danger: "#C43D4B",
-    warning: "#A56800",
-    success: "#2B7A52",
-    code_background: "#F4F6F8",
-    inline_background: "#EDEFF2",
+    background: "#F5FAFB",
+    surface: "#E4EEF0",
+    elevated: "#FBFEFE",
+    hover: "#D7E5E8",
+    selected: "#CCDDE4",
+    border: "#A5BFC5",
+    text: "#253B42",
+    muted: "#4C6169",
+    bright: "#122B34",
+    accent: "#205E78",
+    secondary: "#9C3048",
+    danger: "#BE3746",
+    warning: "#935C01",
+    success: "#27764E",
+    code_background: "#E9F2F4",
+    inline_background: "#DCE9ED",
     code_palette: CodeSyntaxPalette::GITHUB_LIGHT,
 };
 
 const LINEN_PAPER: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#FFFCF4",
-    surface: "#F4F0E5",
-    elevated: "#FFFDF8",
-    hover: "#EAE4D5",
-    selected: "#E7E1D3",
-    border: "#D8D1C1",
-    text: "#2D2B27",
-    muted: "#756F65",
-    bright: "#171613",
-    accent: "#1F6F67",
-    secondary: "#9A5A38",
-    danger: "#B43D35",
-    warning: "#9B6B12",
-    success: "#557A3E",
-    code_background: "#F5F1E7",
-    inline_background: "#ECE7DB",
+    background: "#F7EBD9",
+    surface: "#EAD7B9",
+    elevated: "#FFF7E9",
+    hover: "#E0CAA6",
+    selected: "#DBD7B8",
+    border: "#B19A73",
+    text: "#49382A",
+    muted: "#63523D",
+    bright: "#2D2016",
+    accent: "#715334",
+    secondary: "#65703D",
+    danger: "#A9332C",
+    warning: "#7E5506",
+    success: "#43662C",
+    code_background: "#F0E1CB",
+    inline_background: "#E5D0AE",
     code_palette: CodeSyntaxPalette::GRUVBOX_LIGHT,
 };
 
 const STUDIO_DAYLIGHT: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#F8FAFC",
-    surface: "#EEF2F6",
+    background: "#FFFFFF",
+    surface: "#EDF1F8",
     elevated: "#FFFFFF",
-    hover: "#E4EAF1",
-    selected: "#DCE8F8",
-    border: "#D2D9E3",
-    text: "#20242B",
-    muted: "#626B78",
-    bright: "#0D1117",
-    accent: "#1769AA",
-    secondary: "#6D4BA3",
-    danger: "#C2303F",
-    warning: "#986500",
-    success: "#287849",
-    code_background: "#F1F4F7",
-    inline_background: "#E8EDF3",
+    hover: "#DEE5F1",
+    selected: "#CEDCF1",
+    border: "#A5B6D4",
+    text: "#26344B",
+    muted: "#4D5D78",
+    bright: "#12233D",
+    accent: "#2457A6",
+    secondary: "#9D267E",
+    danger: "#C02D3D",
+    warning: "#8C5D08",
+    success: "#247446",
+    code_background: "#F3F5FB",
+    inline_background: "#E6ECF7",
     code_palette: CodeSyntaxPalette::XCODE_LIGHT,
 };
 
 const ROSE_DAWN: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#FFF9F2",
-    surface: "#F6EFE8",
-    elevated: "#FFFCF8",
-    hover: "#EDE4DF",
-    selected: "#E9DFDA",
-    border: "#D9CEC9",
-    text: "#575279",
-    muted: "#797593",
-    bright: "#3C3858",
-    accent: "#B4637A",
-    secondary: "#286983",
-    danger: "#B84B5D",
-    warning: "#A86F16",
-    success: "#39725E",
-    code_background: "#FAF4ED",
-    inline_background: "#F0E8E3",
+    background: "#FFF0F0",
+    surface: "#F6DCDC",
+    elevated: "#FFF9F9",
+    hover: "#EDCDCD",
+    selected: "#EBCED1",
+    border: "#CDA4A5",
+    text: "#522F35",
+    muted: "#794C53",
+    bright: "#35191F",
+    accent: "#AE2C39",
+    secondary: "#3056A0",
+    danger: "#A53A4E",
+    warning: "#855501",
+    success: "#306957",
+    code_background: "#F9E4E4",
+    inline_background: "#EFD0D2",
     code_palette: CodeSyntaxPalette::ROSE_PINE_DAWN,
 };
 
 const VANILLA_LATTE: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#F7F7FB",
-    surface: "#ECEEF5",
-    elevated: "#FCFCFF",
-    hover: "#E1E4EE",
-    selected: "#DCE3F3",
-    border: "#CDD1DE",
-    text: "#4C4F69",
-    muted: "#6C6F85",
-    bright: "#303247",
-    accent: "#1E66F5",
-    secondary: "#8839EF",
-    danger: "#D20F39",
-    warning: "#9A5C00",
-    success: "#2F7D26",
-    code_background: "#EFF1F5",
-    inline_background: "#E6E9F0",
+    background: "#FFF4E8",
+    surface: "#F1E0CB",
+    elevated: "#FFFAF2",
+    hover: "#E7D2B8",
+    selected: "#E8D2C4",
+    border: "#BCA184",
+    text: "#513A2A",
+    muted: "#6F5540",
+    bright: "#332010",
+    accent: "#94520F",
+    secondary: "#6F3295",
+    danger: "#C50A34",
+    warning: "#8E560A",
+    success: "#24721A",
+    code_background: "#F6E6D4",
+    inline_background: "#E9CFAB",
     code_palette: CodeSyntaxPalette::CATPPUCCIN_LATTE,
 };
 
 const SAGE_GARDEN: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#F7F8F2",
-    surface: "#ECEFE5",
-    elevated: "#FBFCF8",
-    hover: "#E1E6D9",
-    selected: "#DCE6D3",
-    border: "#CDD4C4",
-    text: "#46514A",
-    muted: "#6C796F",
-    bright: "#26312A",
-    accent: "#3B7662",
-    secondary: "#8A5D3B",
-    danger: "#B24743",
-    warning: "#916915",
-    success: "#557A3C",
-    code_background: "#EEF1E8",
-    inline_background: "#E3E8DE",
+    background: "#E7F2EA",
+    surface: "#D4E5D8",
+    elevated: "#F3FBF5",
+    hover: "#C7DBCD",
+    selected: "#BCD7C5",
+    border: "#93B29D",
+    text: "#2B4433",
+    muted: "#445D4A",
+    bright: "#15311F",
+    accent: "#205D3C",
+    secondary: "#9C4229",
+    danger: "#A83E3C",
+    warning: "#805B03",
+    success: "#486B2E",
+    code_background: "#DDECE1",
+    inline_background: "#C9E0D0",
     code_palette: CodeSyntaxPalette::EVERFOREST_LIGHT,
 };
 
 const NORDIC_SNOW: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#F8FAFD",
-    surface: "#EDF1F7",
-    elevated: "#FFFFFF",
-    hover: "#E1E7EF",
-    selected: "#D7E3F1",
-    border: "#CCD5E1",
-    text: "#2E3440",
-    muted: "#667286",
-    bright: "#18202B",
-    accent: "#4A6F9B",
-    secondary: "#8A5F8D",
-    danger: "#B34855",
-    warning: "#8D6818",
-    success: "#55754B",
-    code_background: "#EEF2F7",
-    inline_background: "#E4E9F0",
+    background: "#EBF1FC",
+    surface: "#D8E3F4",
+    elevated: "#F7FAFF",
+    hover: "#CCD9EE",
+    selected: "#BED1EB",
+    border: "#96ACCD",
+    text: "#293A57",
+    muted: "#425877",
+    bright: "#16294A",
+    accent: "#254B81",
+    secondary: "#78508E",
+    danger: "#A93E4C",
+    warning: "#815C03",
+    success: "#4B6A42",
+    code_background: "#E0E9F8",
+    inline_background: "#CEDDF1",
     code_palette: CodeSyntaxPalette::NORD_LIGHT,
 };
 
 const SOLARIZED_LIGHT_THEME: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#FDF8E7",
-    surface: "#F0EAD7",
-    elevated: "#FFFBEE",
-    hover: "#E5DECA",
-    selected: "#E2DCCB",
-    border: "#D2CBB7",
-    text: "#3D5358",
-    muted: "#687C7F",
-    bright: "#20383D",
-    accent: "#16739A",
-    secondary: "#9A5D23",
-    danger: "#C0443E",
-    warning: "#956B00",
-    success: "#647A12",
-    code_background: "#F3EDDA",
-    inline_background: "#E9E2CE",
+    background: "#F4EACD",
+    surface: "#E7D9B2",
+    elevated: "#FDF6DE",
+    hover: "#DACC9E",
+    selected: "#D4D8AE",
+    border: "#AD9C70",
+    text: "#3A4C4B",
+    muted: "#4C5846",
+    bright: "#223B3B",
+    accent: "#25687C",
+    secondary: "#7A6B17",
+    danger: "#AC302D",
+    warning: "#7A5706",
+    success: "#52640A",
+    code_background: "#EBDDB9",
+    inline_background: "#E0CEA1",
     code_palette: CodeSyntaxPalette::SOLARIZED_LIGHT,
 };
 
 const SUNLIT_CANVAS: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#FBFCFD",
-    surface: "#F1F3F5",
-    elevated: "#FFFFFF",
-    hover: "#E7EAED",
-    selected: "#DEEAF4",
-    border: "#D5DADF",
-    text: "#44494F",
-    muted: "#717981",
-    bright: "#262A2E",
-    accent: "#2778AF",
-    secondary: "#A45B24",
-    danger: "#C34249",
-    warning: "#996700",
-    success: "#4E7A32",
-    code_background: "#F2F4F6",
-    inline_background: "#E8EBEE",
+    background: "#FFF6CB",
+    surface: "#F2E1A5",
+    elevated: "#FFFBE5",
+    hover: "#E9D28E",
+    selected: "#E9D8AA",
+    border: "#BBA05F",
+    text: "#51421D",
+    muted: "#6B572A",
+    bright: "#35280D",
+    accent: "#92610A",
+    secondary: "#176477",
+    danger: "#B3333D",
+    warning: "#845A07",
+    success: "#436D25",
+    code_background: "#F7E9BA",
+    inline_background: "#E9D393",
     code_palette: CodeSyntaxPalette::AYU_LIGHT,
 };
 
 const PAPER_WHITE: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#FAFAF7",
-    surface: "#F1F0EA",
-    elevated: "#FEFEFC",
-    hover: "#E7E6DF",
-    selected: "#DCE9E2",
-    border: "#D4D3CB",
-    text: "#393A34",
-    muted: "#6D7068",
-    bright: "#20211D",
-    accent: "#1C6B48",
-    secondary: "#8B5E31",
-    danger: "#AB4C4C",
-    warning: "#8B6C14",
+    background: "#FFFFFF",
+    surface: "#F3F4F5",
+    elevated: "#FFFFFF",
+    hover: "#E7EAED",
+    selected: "#DAE1E8",
+    border: "#ABB2BA",
+    text: "#303236",
+    muted: "#5C6168",
+    bright: "#1D2025",
+    accent: "#3D4D59",
+    secondary: "#854538",
+    danger: "#A84A4B",
+    warning: "#826303",
     success: "#397353",
-    code_background: "#F1F0E9",
-    inline_background: "#E7E5DB",
+    code_background: "#F5F6F7",
+    inline_background: "#E8EBEF",
     code_palette: CodeSyntaxPalette::TOKYO_NIGHT_LIGHT,
 };
 
 const PEARL_MORNING: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#FBFCFF",
-    surface: "#F0F3F9",
-    elevated: "#FFFFFF",
-    hover: "#E5EAF3",
-    selected: "#DCE5F4",
-    border: "#CFD7E5",
-    text: "#383A42",
-    muted: "#6F7582",
-    bright: "#1E2027",
-    accent: "#4B6FB5",
-    secondary: "#8A5A96",
-    danger: "#C44755",
-    warning: "#946813",
-    success: "#39754F",
-    code_background: "#F2F5FA",
-    inline_background: "#E7EBF3",
+    background: "#F4F0FC",
+    surface: "#E5DDF3",
+    elevated: "#FCF9FF",
+    hover: "#D8CDEC",
+    selected: "#D3C8EB",
+    border: "#B3A0CD",
+    text: "#443553",
+    muted: "#614E71",
+    bright: "#2D1C3D",
+    accent: "#9B2D79",
+    secondary: "#187459",
+    danger: "#B03445",
+    warning: "#835A01",
+    success: "#316D49",
+    code_background: "#EAE1F6",
+    inline_background: "#DBCDEA",
     code_palette: CodeSyntaxPalette::ONE_LIGHT,
 };
 
 const WILLOW_MIST: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#F8FAF5",
-    surface: "#EDF1E8",
-    elevated: "#FCFDFB",
-    hover: "#E2E8DC",
-    selected: "#D9E6D8",
-    border: "#CAD4C7",
-    text: "#34413A",
-    muted: "#6B786F",
-    bright: "#1E2922",
-    accent: "#52766C",
-    secondary: "#88684A",
-    danger: "#B44B49",
-    warning: "#8D6A1B",
-    success: "#5C7B43",
-    code_background: "#EEF2EA",
-    inline_background: "#E3E9DF",
+    background: "#EFF2D6",
+    surface: "#E0E5BD",
+    elevated: "#FAFCE8",
+    hover: "#D1D9A5",
+    selected: "#CDD6A3",
+    border: "#A2AF72",
+    text: "#434B29",
+    muted: "#525C33",
+    bright: "#2C3415",
+    accent: "#566C22",
+    secondary: "#752E76",
+    danger: "#A83F3F",
+    warning: "#7E5D03",
+    success: "#4D6A33",
+    code_background: "#E7ECCB",
+    inline_background: "#D8DFAF",
     code_palette: CodeSyntaxPalette::WILLOW_LIGHT,
 };
 
 const COASTAL_FOG: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#F6FAFB",
-    surface: "#EAF1F3",
-    elevated: "#FCFEFE",
-    hover: "#DFE9EC",
-    selected: "#D5E5EA",
-    border: "#C7D5D9",
-    text: "#334550",
-    muted: "#687982",
-    bright: "#1B303A",
-    accent: "#287D83",
-    secondary: "#76639A",
-    danger: "#B84A55",
-    warning: "#916716",
-    success: "#4E7A64",
-    code_background: "#EAF1F3",
-    inline_background: "#DDE7EA",
+    background: "#E5F5F3",
+    surface: "#CCE8E4",
+    elevated: "#F3FCFA",
+    hover: "#BDDBD8",
+    selected: "#B1D7D5",
+    border: "#88ADA9",
+    text: "#23474A",
+    muted: "#385D5D",
+    bright: "#103438",
+    accent: "#006C70",
+    secondary: "#A25127",
+    danger: "#AA3D4B",
+    warning: "#835B0A",
+    success: "#406B56",
+    code_background: "#D7EEEB",
+    inline_background: "#BFE0DC",
     code_palette: CodeSyntaxPalette::COASTAL_LIGHT,
 };
 
 const LAVENDER_HAZE: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#FAF8FC",
-    surface: "#F0EDF5",
-    elevated: "#FEFCFF",
-    hover: "#E7E2ED",
-    selected: "#E1DDF0",
-    border: "#D4CDDC",
-    text: "#433E50",
-    muted: "#756F80",
-    bright: "#292432",
-    accent: "#7252A3",
-    secondary: "#A05F72",
-    danger: "#BD4657",
-    warning: "#956713",
-    success: "#56805B",
-    code_background: "#F1EDF5",
-    inline_background: "#E7E1EC",
+    background: "#EEECFB",
+    surface: "#DDD9F3",
+    elevated: "#F8F7FF",
+    hover: "#D0C9E9",
+    selected: "#C9C3EC",
+    border: "#A89BCB",
+    text: "#403159",
+    muted: "#5C487A",
+    bright: "#271741",
+    accent: "#6931AB",
+    secondary: "#267047",
+    danger: "#A93347",
+    warning: "#805708",
+    success: "#406846",
+    code_background: "#E3DEF5",
+    inline_background: "#D3C9EC",
     code_palette: CodeSyntaxPalette::LAVENDER_LIGHT,
 };
 
 const APRICOT_BLOOM: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#FFF9F5",
-    surface: "#F7EEE8",
-    elevated: "#FFFCFA",
-    hover: "#EDE2DB",
-    selected: "#F0DDD4",
-    border: "#DECEC4",
-    text: "#4A3B34",
-    muted: "#7C6D65",
-    bright: "#2C211C",
-    accent: "#B75C42",
-    secondary: "#397A78",
-    danger: "#C8444B",
-    warning: "#986512",
-    success: "#627A36",
-    code_background: "#F8EFE9",
-    inline_background: "#EEDFD7",
+    background: "#FFEEE2",
+    surface: "#F3D9C5",
+    elevated: "#FFF7F0",
+    hover: "#E9C8AD",
+    selected: "#EBD1BD",
+    border: "#BE9472",
+    text: "#583727",
+    muted: "#734D37",
+    bright: "#381D10",
+    accent: "#A34D12",
+    secondary: "#235EA6",
+    danger: "#B12D39",
+    warning: "#835607",
+    success: "#516723",
+    code_background: "#F7DFCA",
+    inline_background: "#EAC5A7",
     code_palette: CodeSyntaxPalette::APRICOT_LIGHT,
 };
 
 const SILVER_MORNING: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
-    background: "#F7F9FB",
-    surface: "#ECEFF3",
-    elevated: "#FDFEFF",
-    hover: "#E1E5EA",
-    selected: "#D9E2EC",
-    border: "#CBD2DA",
-    text: "#343A43",
-    muted: "#69727D",
-    bright: "#1C222A",
-    accent: "#4C6F96",
-    secondary: "#7D5F87",
-    danger: "#B94753",
-    warning: "#8C6717",
-    success: "#587447",
-    code_background: "#EDF1F5",
-    inline_background: "#E2E7EC",
+    background: "#ECEFF1",
+    surface: "#D9DFE3",
+    elevated: "#F7F9FA",
+    hover: "#CBD4DA",
+    selected: "#C4D2DC",
+    border: "#9AAAB5",
+    text: "#303D45",
+    muted: "#475A66",
+    bright: "#192C37",
+    accent: "#3E5D79",
+    secondary: "#A32C51",
+    danger: "#A83947",
+    warning: "#7D5A09",
+    success: "#4D673C",
+    code_background: "#E0E7EB",
+    inline_background: "#CCD9E1",
     code_palette: CodeSyntaxPalette::SILVER_LIGHT,
 };
 
@@ -1322,7 +1337,7 @@ const ONE_DARK_THEME: CuratedThemeSpec = CuratedThemeSpec {
     selected: "#39414D",
     border: "#3D434D",
     text: "#D7DAE0",
-    muted: "#8D949F",
+    muted: "#A6AEB9",
     bright: "#F2F4F7",
     accent: "#6EA8E6",
     secondary: "#C18AD6",
@@ -1343,7 +1358,7 @@ const TOKYO_NIGHT_THEME: CuratedThemeSpec = CuratedThemeSpec {
     selected: "#333B54",
     border: "#343B50",
     text: "#C4C9E0",
-    muted: "#7F879F",
+    muted: "#9EA7C0",
     bright: "#EEF0FA",
     accent: "#7AA2F7",
     secondary: "#BB9AF7",
@@ -1357,148 +1372,148 @@ const TOKYO_NIGHT_THEME: CuratedThemeSpec = CuratedThemeSpec {
 
 const CATPPUCCIN_MOCHA_THEME: CuratedThemeSpec = CuratedThemeSpec {
     dark: true,
-    background: "#1E1E2E",
-    surface: "#252536",
-    elevated: "#2D2D40",
-    hover: "#36364A",
-    selected: "#3D3D55",
-    border: "#45475A",
+    background: "#24212D",
+    surface: "#2D2838",
+    elevated: "#373042",
+    hover: "#42394E",
+    selected: "#4D425B",
+    border: "#594D68",
     text: "#CDD6F4",
-    muted: "#9399B2",
+    muted: "#AFB5CF",
     bright: "#F0F2FA",
-    accent: "#89B4FA",
-    secondary: "#CBA6F7",
+    accent: "#CBA6F7",
+    secondary: "#F5C2E7",
     danger: "#F38BA8",
     warning: "#E5C890",
     success: "#A6E3A1",
-    code_background: "#181825",
-    inline_background: "#313244",
+    code_background: "#1C1925",
+    inline_background: "#393145",
     code_palette: CodeSyntaxPalette::CATPPUCCIN_MOCHA,
 };
 
 const EVERFOREST_DARK_THEME: CuratedThemeSpec = CuratedThemeSpec {
     dark: true,
-    background: "#202622",
-    surface: "#272E29",
-    elevated: "#2E3731",
-    hover: "#374139",
-    selected: "#3D493F",
-    border: "#465148",
-    text: "#D3CDBB",
-    muted: "#8F978B",
+    background: "#28342D",
+    surface: "#313F35",
+    elevated: "#3B4A3F",
+    hover: "#455649",
+    selected: "#506254",
+    border: "#5E7260",
+    text: "#DFD9C6",
+    muted: "#D3DBCF",
     bright: "#F0E9D8",
     accent: "#83C092",
     secondary: "#7FBBB3",
-    danger: "#E67E80",
+    danger: "#F2898A",
     warning: "#DBBC7F",
     success: "#A7C080",
-    code_background: "#1A1F1C",
-    inline_background: "#303831",
+    code_background: "#222C26",
+    inline_background: "#37473B",
     code_palette: CodeSyntaxPalette::EVERFOREST_DARK,
 };
 
 const ROSE_PINE_THEME: CuratedThemeSpec = CuratedThemeSpec {
     dark: true,
-    background: "#1F1D2E",
-    surface: "#262338",
-    elevated: "#2E2A42",
-    hover: "#38334D",
-    selected: "#403A58",
-    border: "#49445E",
+    background: "#261F32",
+    surface: "#30273E",
+    elevated: "#3A2F4A",
+    hover: "#453857",
+    selected: "#514166",
+    border: "#5E4D75",
     text: "#E0DEF4",
-    muted: "#908CAA",
+    muted: "#B9B5D4",
     bright: "#F4F1FF",
     accent: "#EBBCBA",
     secondary: "#9CCFD8",
     danger: "#EB6F92",
     warning: "#F6C177",
     success: "#75B8A3",
-    code_background: "#191724",
-    inline_background: "#312E45",
+    code_background: "#1E1829",
+    inline_background: "#3A2D49",
     code_palette: CodeSyntaxPalette::ROSE_PINE,
 };
 
 const GRUVBOX_DARK_THEME: CuratedThemeSpec = CuratedThemeSpec {
     dark: true,
-    background: "#272320",
-    surface: "#302A26",
-    elevated: "#39312C",
-    hover: "#443A33",
-    selected: "#4B4037",
-    border: "#55483E",
+    background: "#29251D",
+    surface: "#343025",
+    elevated: "#3E392C",
+    hover: "#4B4434",
+    selected: "#554D3B",
+    border: "#655B44",
     text: "#E8DDC9",
-    muted: "#A09586",
+    muted: "#CABFAF",
     bright: "#FFF6E8",
-    accent: "#E88B52",
+    accent: "#D9AF56",
     secondary: "#D3869B",
-    danger: "#E66B62",
+    danger: "#F0746A",
     warning: "#D8AE55",
     success: "#A4B86A",
-    code_background: "#211E1B",
-    inline_background: "#3A322C",
+    code_background: "#221F18",
+    inline_background: "#3C3528",
     code_palette: CodeSyntaxPalette::GRUVBOX_DARK,
 };
 
 const MILKY_NIGHT: CuratedThemeSpec = CuratedThemeSpec {
     dark: true,
-    background: "#202124",
-    surface: "#282A2E",
-    elevated: "#303238",
-    hover: "#383B42",
-    selected: "#404751",
-    border: "#484C55",
-    text: "#D8D6D1",
-    muted: "#92918D",
-    bright: "#F6F4EF",
-    accent: "#82AAFF",
-    secondary: "#C792D4",
+    background: "#282725",
+    surface: "#31302C",
+    elevated: "#3A3832",
+    hover: "#444139",
+    selected: "#504C41",
+    border: "#605A4D",
+    text: "#DDD8CE",
+    muted: "#C3BEB2",
+    bright: "#F6F0E3",
+    accent: "#D6BA8C",
+    secondary: "#9BBDB4",
     danger: "#E58D91",
     warning: "#EBCB8B",
     success: "#A7C080",
-    code_background: "#1A1B1E",
-    inline_background: "#303238",
+    code_background: "#211F1D",
+    inline_background: "#3B3831",
     code_palette: CodeSyntaxPalette::MILKY_NIGHT,
 };
 
 const DRACULA_NIGHT: CuratedThemeSpec = CuratedThemeSpec {
     dark: true,
-    background: "#20212B",
-    surface: "#282A36",
-    elevated: "#303241",
-    hover: "#393C4D",
-    selected: "#414559",
-    border: "#484C60",
+    background: "#282436",
+    surface: "#312C42",
+    elevated: "#3A334D",
+    hover: "#443C59",
+    selected: "#504564",
+    border: "#5F5273",
     text: "#E6E6E1",
-    muted: "#9093A6",
+    muted: "#B7BBCE",
     bright: "#F8F8F2",
     accent: "#BD93F9",
     secondary: "#8BE9FD",
     danger: "#FF6E87",
     warning: "#F1CA76",
     success: "#50C878",
-    code_background: "#191A22",
-    inline_background: "#303241",
+    code_background: "#211D2D",
+    inline_background: "#3B334E",
     code_palette: CodeSyntaxPalette::DRACULA,
 };
 
 const NORDIC_NIGHT: CuratedThemeSpec = CuratedThemeSpec {
     dark: true,
-    background: "#252A34",
-    surface: "#2E3440",
-    elevated: "#353C4A",
-    hover: "#3B4453",
-    selected: "#434E60",
-    border: "#4C566A",
+    background: "#2E3440",
+    surface: "#363E4C",
+    elevated: "#3F495A",
+    hover: "#485467",
+    selected: "#526077",
+    border: "#606E85",
     text: "#D8DEE9",
-    muted: "#8D98AA",
+    muted: "#D0DCF0",
     bright: "#ECEFF4",
     accent: "#88C0D0",
     secondary: "#B48EAD",
-    danger: "#BF616A",
+    danger: "#F18D95",
     warning: "#D5B36A",
     success: "#A3BE8C",
-    code_background: "#20242D",
-    inline_background: "#343B48",
+    code_background: "#272D38",
+    inline_background: "#3C4657",
     code_palette: CodeSyntaxPalette::NORD,
 };
 
@@ -1511,7 +1526,7 @@ const GITHUB_DARK_THEME: CuratedThemeSpec = CuratedThemeSpec {
     selected: "#2D3744",
     border: "#30363D",
     text: "#C9D1D9",
-    muted: "#8B949E",
+    muted: "#98A1AB",
     bright: "#F0F6FC",
     accent: "#58A6FF",
     secondary: "#D2A8FF",
@@ -1531,14 +1546,14 @@ const SOLARIZED_DARK_THEME: CuratedThemeSpec = CuratedThemeSpec {
     hover: "#124B57",
     selected: "#175563",
     border: "#23616C",
-    text: "#93A1A1",
-    muted: "#718486",
-    bright: "#EEE8D5",
+    text: "#B4C4C0",
+    muted: "#AFC6C0",
+    bright: "#F3ECD8",
     accent: "#268BD2",
     secondary: "#B58900",
-    danger: "#DC5A5F",
+    danger: "#F57073",
     warning: "#D3A52E",
-    success: "#859900",
+    success: "#8FA41C",
     code_background: "#00232C",
     inline_background: "#0B3B46",
     code_palette: CodeSyntaxPalette::SOLARIZED_DARK,
@@ -1546,22 +1561,22 @@ const SOLARIZED_DARK_THEME: CuratedThemeSpec = CuratedThemeSpec {
 
 const MONOKAI_PRO_THEME: CuratedThemeSpec = CuratedThemeSpec {
     dark: true,
-    background: "#221F22",
-    surface: "#2D2A2E",
-    elevated: "#353237",
-    hover: "#403C42",
-    selected: "#49434C",
-    border: "#514B54",
+    background: "#29252A",
+    surface: "#332E34",
+    elevated: "#3E3740",
+    hover: "#493F4B",
+    selected: "#55495A",
+    border: "#65556A",
     text: "#E8E6E3",
-    muted: "#939094",
+    muted: "#C2BEC3",
     bright: "#FCFCFA",
     accent: "#78DCE8",
     secondary: "#AB9DF2",
     danger: "#FF6188",
     warning: "#FFD866",
     success: "#A9DC76",
-    code_background: "#191719",
-    inline_background: "#363237",
+    code_background: "#211E22",
+    inline_background: "#3B333E",
     code_palette: CodeSyntaxPalette::MONOKAI_PRO,
 };
 
@@ -1574,7 +1589,7 @@ const AYU_MIRAGE: CuratedThemeSpec = CuratedThemeSpec {
     selected: "#3B4658",
     border: "#424D5E",
     text: "#CCCAC2",
-    muted: "#7E8796",
+    muted: "#ABB5C4",
     bright: "#F2F0E8",
     accent: "#FFB454",
     secondary: "#59C2FF",
@@ -1588,64 +1603,64 @@ const AYU_MIRAGE: CuratedThemeSpec = CuratedThemeSpec {
 
 const MOONLIGHT_HARBOR: CuratedThemeSpec = CuratedThemeSpec {
     dark: true,
-    background: "#18202C",
-    surface: "#202A38",
-    elevated: "#283342",
-    hover: "#313E50",
-    selected: "#39495E",
-    border: "#425267",
-    text: "#D7DEEA",
-    muted: "#8490A3",
-    bright: "#F3F7FC",
-    accent: "#82B1FF",
-    secondary: "#7FDBCA",
+    background: "#102D32",
+    surface: "#19393D",
+    elevated: "#23474A",
+    hover: "#2D5557",
+    selected: "#356165",
+    border: "#427275",
+    text: "#D0E3DD",
+    muted: "#B8DADB",
+    bright: "#ECF6ED",
+    accent: "#80CCD0",
+    secondary: "#E3B590",
     danger: "#EF7C8E",
     warning: "#E8B66D",
     success: "#A9DC76",
-    code_background: "#121923",
-    inline_background: "#293645",
+    code_background: "#0B2429",
+    inline_background: "#244448",
     code_palette: CodeSyntaxPalette::MOONLIGHT_HARBOR,
 };
 
 const COBALT_VELVET: CuratedThemeSpec = CuratedThemeSpec {
     dark: true,
-    background: "#171C32",
-    surface: "#1E2540",
-    elevated: "#262E4D",
-    hover: "#303A5B",
-    selected: "#394569",
-    border: "#445071",
+    background: "#151D42",
+    surface: "#202A54",
+    elevated: "#2A3565",
+    hover: "#354173",
+    selected: "#404E86",
+    border: "#4F6099",
     text: "#DCE4FF",
-    muted: "#8792B3",
-    bright: "#F5F7FF",
-    accent: "#7FA7FF",
-    secondary: "#D29AE8",
+    muted: "#B6C5EF",
+    bright: "#F3F5FF",
+    accent: "#B9C9FF",
+    secondary: "#F0C779",
     danger: "#F07891",
     warning: "#E9C46A",
     success: "#9BCB7B",
-    code_background: "#111629",
-    inline_background: "#28304F",
+    code_background: "#111735",
+    inline_background: "#2D3965",
     code_palette: CodeSyntaxPalette::COBALT_VELVET,
 };
 
 const OBSIDIAN_EMBER: CuratedThemeSpec = CuratedThemeSpec {
     dark: true,
-    background: "#1D1A19",
-    surface: "#272321",
-    elevated: "#302A27",
-    hover: "#3A322E",
-    selected: "#463B35",
-    border: "#51443D",
-    text: "#DDD3C8",
-    muted: "#948980",
-    bright: "#FFF8F0",
-    accent: "#E88961",
-    secondary: "#74B6A0",
-    danger: "#E06F61",
+    background: "#2B201C",
+    surface: "#342720",
+    elevated: "#403027",
+    hover: "#4D392E",
+    selected: "#5A4336",
+    border: "#6C5141",
+    text: "#E3D2C2",
+    muted: "#CBB4A3",
+    bright: "#FBF0E1",
+    accent: "#E6A077",
+    secondary: "#8BBC9E",
+    danger: "#E27062",
     warning: "#E8C170",
     success: "#A9BD6A",
-    code_background: "#161312",
-    inline_background: "#312A26",
+    code_background: "#221916",
+    inline_background: "#443126",
     code_palette: CodeSyntaxPalette::OBSIDIAN_EMBER,
 };
 
@@ -1768,7 +1783,8 @@ impl Theme {
             border_secondary: border,
             border_tertiary: with_alpha(muted, if spec.dark { 0.62 } else { 0.52 }),
             border_decorative: with_alpha(muted, 0.42),
-            border_code_block: with_alpha(border, 0.9),
+            // Separate code from prose without giving the block a heavy frame.
+            border_code_block: with_alpha(border, if spec.dark { 0.38 } else { 0.55 }),
             window_border: if spec.dark {
                 border
             } else {
@@ -1906,7 +1922,9 @@ pub fn apply_editor_theme_mode(theme: &Theme, mode: EditorThemeMode, is_dark: bo
         } else {
             themed.text_primary
         };
-        let subtle = with_alpha(themed.text_secondary, if is_dark { 0.92 } else { 0.82 });
+        // Muted text is already contrast-checked. Another alpha reduction here
+        // makes small italic/list text fail on the lighter paper palettes.
+        let subtle = themed.text_secondary;
         themed.heading = if is_dark {
             with_alpha(emphasis, 0.88)
         } else {
@@ -3656,8 +3674,7 @@ mod tests {
     };
 
     fn contrast_ratio(foreground: gpui::Hsla, background: gpui::Hsla) -> f32 {
-        fn luminance(color: gpui::Hsla) -> f32 {
-            let (red, green, blue) = hsla_to_rgb(color.h, color.s, color.l);
+        fn luminance(red: f32, green: f32, blue: f32) -> f32 {
             let linear = |channel: f32| {
                 if channel <= 0.04045 {
                     channel / 12.92
@@ -3668,8 +3685,15 @@ mod tests {
             0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
         }
 
-        let foreground = luminance(foreground);
-        let background = luminance(background);
+        let (r, g, b) = hsla_to_rgb(foreground.h, foreground.s, foreground.l);
+        let (br, bg, bb) = hsla_to_rgb(background.h, background.s, background.l);
+        let a = foreground.a;
+        let foreground = luminance(
+            r * a + br * (1.0 - a),
+            g * a + bg * (1.0 - a),
+            b * a + bb * (1.0 - a),
+        );
+        let background = luminance(br, bg, bb);
         (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
     }
 
@@ -3801,24 +3825,334 @@ mod tests {
             .iter()
             .chain(ThemeKind::light_themes())
         {
-            let theme = kind.build();
-            for (name, color) in [
-                ("heading", theme.heading),
-                ("bold", theme.bold),
-                ("italic", theme.italic),
-                ("inline_code", theme.inline_code),
-                ("link", theme.link),
-                ("list_marker", theme.list_marker),
-            ] {
-                if contrast_ratio(color, theme.bg_primary) < 3.0 {
-                    failures.push(format!("{} {name}", kind.label()));
+            let base = kind.build();
+            for &mode in EditorThemeMode::all() {
+                let theme = apply_editor_theme_mode(&base, mode, kind.is_dark());
+                for (name, color) in [
+                    ("heading", theme.heading),
+                    ("bold", theme.bold),
+                    ("italic", theme.italic),
+                    ("link", theme.link),
+                    ("list_marker", theme.list_marker),
+                    ("strikethrough", theme.strikethrough),
+                    ("syntax_marker", theme.syntax_marker),
+                ] {
+                    let ratio = contrast_ratio(color, theme.bg_primary);
+                    if ratio < 4.5 {
+                        failures.push(format!("{} {mode:?}/{name}: {ratio:.2}", kind.label()));
+                    }
                 }
-            }
-            if contrast_ratio(theme.strikethrough, theme.bg_primary) < 2.5 {
-                failures.push(format!("{} strikethrough", kind.label()));
+                for background in [theme.inline_code_bg, theme.bg_primary] {
+                    let ratio = contrast_ratio(theme.inline_code, background);
+                    if ratio < 4.5 {
+                        failures.push(format!("{} {mode:?}/inline_code: {ratio:.2}", kind.label()));
+                    }
+                }
+                assert!(theme.code_palette == base.code_palette);
             }
         }
         assert!(failures.is_empty(), "{}", failures.join(", "));
+    }
+
+    #[test]
+    fn code_tokens_are_readable_on_code_blocks_and_raw_source_canvases() {
+        let mut failures = Vec::new();
+        for kind in ThemeKind::dark_themes()
+            .iter()
+            .chain(ThemeKind::light_themes())
+        {
+            let theme = kind.build();
+            let p = theme.code_palette;
+            for (role, packed) in [
+                ("keyword", p.keyword),
+                ("operator", p.operator),
+                ("string", p.string),
+                ("function", p.function),
+                ("type", p.type_name),
+                ("number", p.number),
+                ("variable", p.variable),
+                ("comment", p.comment),
+                ("foreground", p.foreground),
+            ] {
+                let color = super::packed_rgb_to_hsla(packed);
+                for (surface, background) in [("code", theme.bg_code), ("source", theme.bg_primary)]
+                {
+                    let ratio = contrast_ratio(color, background);
+                    if ratio < 4.5 {
+                        failures.push(format!("{} {role}/{surface}: {ratio:.2}", kind.label()));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join(", "));
+    }
+
+    #[test]
+    fn themed_text_retains_contrast_across_interface_surfaces() {
+        let mut failures = Vec::new();
+        for kind in ThemeKind::dark_themes()
+            .iter()
+            .chain(ThemeKind::light_themes())
+        {
+            let theme = kind.build().with_light_surface_contrast();
+            for (role, foreground) in [
+                ("primary", theme.text_primary),
+                ("secondary", theme.text_secondary),
+            ] {
+                for (surface, background) in [
+                    ("canvas", theme.bg_primary),
+                    ("sidebar", theme.bg_secondary),
+                    ("elevated", theme.bg_elevated),
+                    ("hover", theme.bg_hover),
+                    ("selected", theme.bg_selected),
+                ] {
+                    let ratio = contrast_ratio(foreground, background);
+                    if ratio < 4.5 {
+                        failures.push(format!("{} {role}/{surface}: {ratio:.2}", kind.label()));
+                    }
+                }
+            }
+            for (role, foreground) in [
+                ("danger", theme.text_danger),
+                ("warning", theme.text_warning),
+                ("added", theme.git_status_added),
+                ("modified", theme.git_status_modified),
+            ] {
+                for background in [theme.bg_primary, theme.bg_secondary] {
+                    let ratio = contrast_ratio(foreground, background);
+                    if ratio < 4.5 {
+                        failures.push(format!("{} {role}: {ratio:.2}", kind.label()));
+                    }
+                }
+            }
+            let ratio = contrast_ratio(theme.text_on_accent, theme.text_accent);
+            if ratio < 4.5 {
+                failures.push(format!("{} on accent: {ratio:.2}", kind.label()));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join(", "));
+    }
+
+    #[test]
+    fn light_themes_use_opaque_surfaces_with_clear_chrome_and_inline_code() {
+        let mut borders = std::collections::HashSet::new();
+        for kind in ThemeKind::light_themes() {
+            let theme = kind.build().with_light_surface_contrast();
+            for surface in [
+                theme.bg_primary,
+                theme.bg_secondary,
+                theme.bg_elevated,
+                theme.bg_code,
+                theme.inline_code_bg,
+            ] {
+                assert_eq!(surface.a, 1.0, "{}", kind.label());
+                if surface == crate::hex_hsla!("#FFFFFF") {
+                    assert!(
+                        matches!(kind, ThemeKind::PaperWhite | ThemeKind::StudioDaylight),
+                        "{}",
+                        kind.label()
+                    );
+                } else {
+                    assert!(surface.s > 0.01 && surface.l < 1.0, "{}", kind.label());
+                }
+            }
+            borders.insert(super::hsla_to_hex_rgba(theme.border_primary));
+            assert!(
+                contrast_ratio(theme.bg_secondary, theme.bg_primary) >= 1.08,
+                "{}",
+                kind.label()
+            );
+            assert!(
+                contrast_ratio(theme.inline_code_bg, theme.bg_primary) >= 1.10,
+                "{}",
+                kind.label()
+            );
+        }
+        assert_eq!(borders.len(), ThemeKind::light_themes().len());
+    }
+
+    #[test]
+    fn pure_white_themes_keep_white_canvases_in_both_markdown_color_modes() {
+        let white = crate::hex_hsla!("#FFFFFF");
+        let white_themes = [ThemeKind::StudioDaylight, ThemeKind::PaperWhite];
+        let actual: Vec<_> = ThemeKind::light_themes()
+            .iter()
+            .copied()
+            .filter(|kind| kind.build().bg_primary == white)
+            .collect();
+        assert_eq!(actual, white_themes);
+
+        for kind in white_themes {
+            let base = kind.build().with_light_surface_contrast();
+            for &mode in EditorThemeMode::all() {
+                let theme = apply_editor_theme_mode(&base, mode, false);
+                for surface in [theme.bg_primary, theme.bg_elevated, theme.bg_tab_active] {
+                    assert_eq!(surface, white, "{} {mode:?}", kind.label());
+                }
+                assert_ne!(theme.bg_secondary, white, "{}", kind.label());
+                assert_ne!(theme.bg_code, white, "{}", kind.label());
+                assert!(theme.code_palette == base.code_palette);
+            }
+        }
+    }
+
+    #[test]
+    fn light_themes_cover_seven_hue_families_in_canvas_accent_and_headings() {
+        // OKLCH hue ranges describe whole theme identities, not incidental code
+        // tokens. Yellow uses pale yellow paper and readable deep-gold ink.
+        for (kind, min_hue, max_hue) in [
+            (ThemeKind::RoseDawn, 0.0, 35.0),
+            (ThemeKind::ApricotBloom, 40.0, 70.0),
+            (ThemeKind::SunlitCanvas, 70.0, 110.0),
+            (ThemeKind::SageGarden, 130.0, 170.0),
+            (ThemeKind::CoastalFog, 175.0, 215.0),
+            (ThemeKind::NordicSnow, 240.0, 280.0),
+            (ThemeKind::LavenderHaze, 285.0, 320.0),
+        ] {
+            assert!(ThemeKind::light_themes().contains(&kind));
+            let theme = kind.build().with_light_surface_contrast();
+            for (role, color, min_chroma) in [
+                ("canvas", theme.bg_primary, 0.012),
+                ("accent", theme.text_accent, 0.075),
+                ("heading", theme.heading, 0.075),
+            ] {
+                let [_, a, b] = oklab(color);
+                let chroma = a.hypot(b);
+                let hue = b.atan2(a).to_degrees().rem_euclid(360.0);
+                assert!(
+                    chroma >= min_chroma && (min_hue..=max_hue).contains(&hue),
+                    "{} {role}: chroma {chroma:.4}, hue {hue:.1}",
+                    kind.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn code_block_frames_remain_quiet_in_every_theme() {
+        for kind in ThemeKind::dark_themes()
+            .iter()
+            .chain(ThemeKind::light_themes())
+        {
+            let theme = kind.build();
+            let ratio = contrast_ratio(theme.border_code_block, theme.bg_code);
+            assert!(
+                (1.08..=1.8).contains(&ratio),
+                "{} code frame: {ratio:.2}",
+                kind.label()
+            );
+        }
+    }
+
+    fn oklab(color: gpui::Hsla) -> [f32; 3] {
+        let (r, g, b) = hsla_to_rgb(color.h, color.s, color.l);
+        let linear = |v: f32| {
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let (r, g, b) = (linear(r), linear(g), linear(b));
+        let l = (0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
+        let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+        let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+        [
+            0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+            1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+            0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+        ]
+    }
+
+    #[test]
+    fn curated_themes_differ_perceptually_not_just_by_a_few_rgb_bits() {
+        let signature = |kind: ThemeKind| {
+            let t = kind.build();
+            let p = t.code_palette;
+            [
+                t.bg_primary,
+                t.bg_secondary,
+                t.text_accent,
+                t.heading,
+                t.bold,
+                t.italic,
+                t.inline_code,
+                t.link,
+                super::packed_rgb_to_hsla(p.keyword),
+                super::packed_rgb_to_hsla(p.string),
+                super::packed_rgb_to_hsla(p.function),
+                super::packed_rgb_to_hsla(p.type_name),
+                super::packed_rgb_to_hsla(p.number),
+            ]
+            .map(oklab)
+        };
+        for group in [ThemeKind::light_themes(), ThemeKind::dark_themes()] {
+            let signatures: Vec<_> = group.iter().copied().map(signature).collect();
+            for (i, left) in signatures.iter().enumerate() {
+                for (j, right) in signatures.iter().enumerate().skip(i + 1) {
+                    let squared: f32 = left
+                        .iter()
+                        .zip(right)
+                        .flat_map(|(a, b)| a.iter().zip(b))
+                        .map(|(a, b)| (a - b).powi(2))
+                        .sum();
+                    let rms = (squared / left.len() as f32).sqrt();
+                    assert!(
+                        rms >= 0.04,
+                        "{} / {} palettes too similar: {rms:.4}",
+                        group[i].label(),
+                        group[j].label()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn light_code_palettes_differ_in_common_roles_not_just_surface_or_rare_tokens() {
+        // Keep the code-only gate separate from the catalog/Markdown signature.
+        // These four roles recur in ordinary Rust, JavaScript and Python code;
+        // surfaces, comments, types and numeric literals cannot mask similarity.
+        let signatures: Vec<_> = ThemeKind::light_themes()
+            .iter()
+            .map(|kind| {
+                let p = kind.build().code_palette;
+                [p.keyword, p.operator, p.string, p.function]
+                    .map(|color| oklab(super::packed_rgb_to_hsla(color)))
+            })
+            .collect();
+        for (i, left) in signatures.iter().enumerate() {
+            for (j, right) in signatures.iter().enumerate().skip(i + 1) {
+                let mut squared = 0.0;
+                let mut chromatic_squared = 0.0;
+                let mut distinct_roles = 0;
+                for (a, b) in left.iter().zip(right) {
+                    let chromatic = (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2);
+                    let distance = (a[0] - b[0]).powi(2) + chromatic;
+                    squared += distance;
+                    chromatic_squared += chromatic;
+                    if distance >= 0.05_f32.powi(2) {
+                        distinct_roles += 1;
+                    }
+                }
+                let rms = (squared / left.len() as f32).sqrt();
+                let chromatic_rms = (chromatic_squared / left.len() as f32).sqrt();
+                let left_name = ThemeKind::light_themes()[i].label();
+                let right_name = ThemeKind::light_themes()[j].label();
+                assert!(
+                    rms >= 0.08,
+                    "{left_name} / {right_name} common code roles: {rms:.4}"
+                );
+                assert!(
+                    chromatic_rms >= 0.065,
+                    "{left_name} / {right_name} only differ in lightness: {chromatic_rms:.4}"
+                );
+                assert!(
+                    distinct_roles >= 3,
+                    "{left_name} / {right_name}: only {distinct_roles} distinct common roles"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3829,8 +4163,8 @@ mod tests {
         assert_eq!(themed.heading, base.text_primary);
         assert_eq!(themed.inline_code, base.text_primary);
         assert_eq!(themed.link, base.link);
-        assert_eq!(themed.list_marker, with_alpha(base.text_secondary, 0.82));
-        assert_eq!(themed.syntax_marker, with_alpha(base.text_secondary, 0.82));
+        assert_eq!(themed.list_marker, base.text_secondary);
+        assert_eq!(themed.syntax_marker, base.text_secondary);
     }
 }
 

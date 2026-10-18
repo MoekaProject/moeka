@@ -1480,11 +1480,7 @@ impl Styles {
                 editor_indent_guide_gap_length_px: 0.0,
                 editor_whitespace_dot_size_px: 2.0,
                 editor_whitespace_dot_color: with_alpha(theme.text_secondary, 0.35),
-                editor_inline_code_bg: if is_light {
-                    with_alpha(theme.inline_code_bg, 0.42)
-                } else {
-                    theme.inline_code_bg
-                },
+                editor_inline_code_bg: theme.inline_code_bg,
                 editor_inline_code_bg_x_padding_px: 4.0,
                 editor_inline_code_bg_radius_px: 4.0,
                 editor_inline_code_bg_y_inset_px: 2.0,
@@ -1958,11 +1954,7 @@ impl Styles {
             code_block: CodeBlockStyles {
                 code_block_bg: theme.bg_code,
                 code_block_border_width_px: 1.0,
-                code_block_border_color: if is_light {
-                    with_alpha(theme.border_primary, 0.58)
-                } else {
-                    with_alpha(theme.text_secondary, 0.10)
-                },
+                code_block_border_color: theme.border_code_block,
                 code_block_split_border_color: if is_light {
                     with_alpha(theme.text_secondary, 0.5)
                 } else {
@@ -2553,7 +2545,55 @@ impl Styles {
 #[cfg(test)]
 mod tests {
     use super::Styles;
-    use crate::theme::Theme;
+    use crate::theme::{EditorThemeMode, Theme, ThemeKind, apply_editor_theme_mode, with_alpha};
+
+    #[test]
+    fn inline_code_background_preserves_opaque_theme_token() {
+        for kind in ThemeKind::dark_themes()
+            .iter()
+            .chain(ThemeKind::light_themes())
+        {
+            let base = kind.build();
+            for &mode in EditorThemeMode::all() {
+                let theme = apply_editor_theme_mode(&base, mode, kind.is_dark());
+                for sidebar_always_dark in [false, true] {
+                    let styles =
+                        Styles::from_theme_with_options(&theme, &base, sidebar_always_dark);
+                    assert_eq!(
+                        styles.editor.editor_inline_code_bg,
+                        theme.inline_code_bg,
+                        "{} {mode:?}, dark sidebar: {sidebar_always_dark}",
+                        kind.label()
+                    );
+                    assert_eq!(styles.editor.editor_inline_code_bg.a, 1.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn code_block_border_preserves_theme_token_and_alpha() {
+        for kind in ThemeKind::dark_themes()
+            .iter()
+            .chain(ThemeKind::light_themes())
+        {
+            let base = kind.build();
+            for alpha in [base.border_code_block.a, 0.23] {
+                let mut theme = base.clone();
+                theme.border_code_block = with_alpha(base.border_code_block, alpha);
+                for sidebar_always_dark in [false, true] {
+                    let styles =
+                        Styles::from_theme_with_options(&theme, &base, sidebar_always_dark);
+                    assert_eq!(
+                        styles.code_block.code_block_border_color,
+                        theme.border_code_block,
+                        "{} alpha: {alpha}, dark sidebar: {sidebar_always_dark}",
+                        kind.label()
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn file_tree_and_file_list_share_the_same_background() {

@@ -33,11 +33,19 @@ impl DocumentMode {
         }
     }
 
+    fn previous(self) -> Self {
+        match self {
+            Self::Edit => Self::Source,
+            Self::Reading => Self::Edit,
+            Self::Source => Self::Reading,
+        }
+    }
+
     pub(crate) fn icon_path(self) -> &'static str {
         match self {
-            Self::Edit => FMT_PARAGRAPH_SVG,
+            Self::Edit => EDIT_MODE_SVG_PATH,
             Self::Reading => DOC_SVG_PATH,
-            Self::Source => FMT_CODE_SVG,
+            Self::Source => SOURCE_MODE_SVG_PATH,
         }
     }
 
@@ -1924,6 +1932,10 @@ impl EditorView {
         self.set_document_mode(self.document_mode().next(), cx);
     }
 
+    pub(crate) fn cycle_document_mode_backwards(&mut self, cx: &mut Context<Self>) {
+        self.set_document_mode(self.document_mode().previous(), cx);
+    }
+
     pub(crate) fn set_document_mode(&mut self, mode: DocumentMode, cx: &mut Context<Self>) {
         if self.document_mode() == mode || !self.active_tab_supports_text_buffer() {
             return;
@@ -2422,6 +2434,40 @@ mod tests {
                 );
             }
             assert_eq!(mode.left_aligned(preference), preference);
+        }
+    }
+
+    #[test]
+    fn document_modes_cycle_backwards_and_reverse_the_forward_cycle() {
+        use super::DocumentMode;
+        for (mode, previous) in [
+            (DocumentMode::Edit, DocumentMode::Source),
+            (DocumentMode::Source, DocumentMode::Reading),
+            (DocumentMode::Reading, DocumentMode::Edit),
+        ] {
+            assert_eq!(mode.previous(), previous);
+            assert_eq!(mode.previous().next(), mode);
+            assert_eq!(mode.next().previous(), mode);
+            assert_eq!(mode.previous().previous().previous(), mode);
+        }
+    }
+
+    #[test]
+    fn document_modes_use_the_requested_icons_and_keep_them_embedded() {
+        use super::DocumentMode;
+        for (mode, path) in [
+            (DocumentMode::Edit, "assets/icons/editor/textbox_fill.svg"),
+            (DocumentMode::Reading, "assets/icons/workspace/doc.svg"),
+            (
+                DocumentMode::Source,
+                "assets/icons/editor/pencil_ruler_fill.svg",
+            ),
+        ] {
+            assert_eq!(mode.icon_path(), path);
+            assert!(
+                crate::embedded_asset(path).is_some(),
+                "missing icon: {path}"
+            );
         }
     }
 
