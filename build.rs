@@ -155,6 +155,9 @@ mod windows_resources {
 
         let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("moeka.res");
         std::fs::write(&out, &res).expect("write moeka.res");
+        if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            println!("cargo:rustc-link-arg-bins=/MANIFEST:NO");
+        }
         println!("cargo:rustc-link-arg-bins={}", out.display());
     }
 
