@@ -37,6 +37,7 @@ mod language_picker;
 mod line_drag;
 mod list_viewport;
 mod menus;
+mod mermaid_worker;
 mod navigation_io;
 mod notifications;
 mod outline;
@@ -87,7 +88,7 @@ mod whiteboard_input;
 mod whiteboard_panel;
 mod workspace_search;
 
-pub(crate) use app_settings::{AppSettings, MermaidTheme, theme_kind_to_string};
+pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
 pub(crate) use assets::*;
 pub(crate) use attachments::AttachmentPolicy;
 pub(crate) use branch_picker::BranchPickerItem;
@@ -502,8 +503,7 @@ pub(crate) enum TableDragState {
 pub(crate) struct EditorScrollbarDragState {
     pub start_position_y: f32,
     pub start_thumb_top: f32,
-    pub track_travel: f32,
-    pub max_scroll: f32,
+    pub position_y: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2382,6 +2382,7 @@ pub struct EditorView {
     pub(crate) image_cache: HashMap<String, Option<Arc<RenderImage>>>,
     pub(crate) retired_images: Vec<Arc<RenderImage>>,
     pub(crate) generated_preview_svg_cache: HashMap<String, Arc<str>>,
+    pub(crate) mermaid_preview_worker: mermaid_worker::MermaidPreviewWorker,
     pub(crate) generated_preview_overlay_cache: HashMap<String, (u16, Arc<RenderImage>)>,
     pub(crate) generated_preview_views: HashMap<String, ImageViewState>,
     pub(crate) generated_preview_drag_state: Option<GeneratedPreviewDragState>,
@@ -2807,6 +2808,17 @@ pub struct EditorView {
     pub(crate) workspace_search_case_sensitive: bool,
     pub(crate) workspace_search_whole_word: bool,
     pub(crate) workspace_search_use_regex: bool,
+    /// Path regexes narrowing which files the content search visits.
+    pub(crate) workspace_search_filters_visible: bool,
+    pub(crate) workspace_search_include: String,
+    pub(crate) workspace_search_exclude: String,
+    pub(crate) workspace_search_include_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) workspace_search_exclude_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+    pub(crate) workspace_search_filter_error: bool,
+    /// Result files fold their match rows when `collapse_all` differs from
+    /// their membership in `collapse_toggled`.
+    pub(crate) workspace_search_collapse_all: bool,
+    pub(crate) workspace_search_collapse_toggled: HashSet<PathBuf>,
     pub(crate) workspace_search_results: Vec<WorkspaceSearchResult>,
     pub(crate) workspace_search_staging_results: Vec<WorkspaceSearchResult>,
     pub(crate) workspace_search_selected_match: Option<usize>,
@@ -3186,6 +3198,7 @@ impl EditorView {
             image_cache: HashMap::new(),
             retired_images: Vec::new(),
             generated_preview_svg_cache: HashMap::new(),
+            mermaid_preview_worker: Default::default(),
             generated_preview_overlay_cache: HashMap::new(),
             generated_preview_views: HashMap::new(),
             generated_preview_drag_state: None,
@@ -3549,6 +3562,14 @@ impl EditorView {
             workspace_search_case_sensitive: false,
             workspace_search_whole_word: false,
             workspace_search_use_regex: false,
+            workspace_search_filters_visible: false,
+            workspace_search_include: String::new(),
+            workspace_search_exclude: String::new(),
+            workspace_search_include_editor: None,
+            workspace_search_exclude_editor: None,
+            workspace_search_filter_error: false,
+            workspace_search_collapse_all: false,
+            workspace_search_collapse_toggled: HashSet::new(),
             workspace_search_results: Vec::new(),
             workspace_search_staging_results: Vec::new(),
             workspace_search_selected_match: None,
@@ -4143,11 +4164,10 @@ impl EditorView {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let Some((thumb_top, thumb_height)) = self.editor_scrollbar_thumb_geometry() else {
+        let Some((thumb_top, _)) = self.editor_scrollbar_thumb_geometry() else {
             return;
         };
         let track_top = self.editor_scrollbar_track_top();
-        let track_travel = (self.editor_scrollbar_track_height() - thumb_height).max(0.0);
         let max_scroll = self.editor_scrollbar_max_scroll();
         if max_scroll <= 0.0 {
             return;
@@ -4157,16 +4177,17 @@ impl EditorView {
         self.document_mode_scroll_anchor = None;
         self.pending_preview_reveal = None;
         self.pending_click_anchor = None;
+        self.pending_typing_scroll_guard = None;
         self.pending_scroll_to_cursor = false;
         self.pending_center_cursor_in_view = false;
+        self.pending_center_cursor_in_view_immediately = false;
         self.center_cursor_confirm_frames = 0;
         self.editor_scrollbar_revealed = true;
         self.cancel_editor_scrollbar_idle_fade();
         self.editor_scrollbar_drag = Some(EditorScrollbarDragState {
             start_position_y: f32::from(position.y),
             start_thumb_top: (thumb_top - track_top).max(0.0),
-            track_travel,
-            max_scroll,
+            position_y: f32::from(position.y),
         });
         self.editor_scrollbar_hovered = true;
         self.sync_editor_scrollbar_opacity(cx);
@@ -4226,20 +4247,12 @@ impl EditorView {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let Some(drag) = self.editor_scrollbar_drag else {
+        let Some(drag) = self.editor_scrollbar_drag.as_mut() else {
             return;
         };
-
+        drag.position_y = f32::from(position.y);
         self.hide_line_format_toolbar_for_scroll(cx);
-
-        let delta_y = f32::from(position.y) - drag.start_position_y;
-        let thumb_top = (drag.start_thumb_top + delta_y).clamp(0.0, drag.track_travel);
-        self.scroll_offset = if drag.track_travel <= 0.0 {
-            0.0
-        } else {
-            thumb_top / drag.track_travel * drag.max_scroll
-        }
-        .clamp(0.0, drag.max_scroll);
+        self.refresh_editor_scrollbar_drag_after_layout();
         self.update_toolbar_visibility_for_scroll(cx);
         cx.notify();
     }
@@ -5208,6 +5221,16 @@ impl EditorView {
         }
         if let Some(editor) = &self.workspace_search_editor {
             let styles = self.workspace_search_text_input_styles();
+            editor.update(cx, |input, cx| input.set_styles(styles, cx));
+        }
+        for editor in [
+            &self.workspace_search_include_editor,
+            &self.workspace_search_exclude_editor,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let styles = self.workspace_search_filter_text_input_styles();
             editor.update(cx, |input, cx| input.set_styles(styles, cx));
         }
         if let Some(editor) = &self.quick_open_editor {
@@ -7835,8 +7858,8 @@ impl EditorView {
         cx.notify();
     }
 
-    fn refresh_generated_block_previews(&mut self) {
-        self.refresh_generated_block_previews_with_mode(false);
+    fn refresh_generated_block_previews(&mut self) -> bool {
+        self.refresh_generated_block_previews_with_mode(false)
     }
 
     pub(crate) fn rerender_generated_block_previews(&mut self) {
@@ -7845,6 +7868,11 @@ impl EditorView {
     }
 
     fn preserve_scroll_for_preview_refresh(&mut self) {
+        // The pointer, not an offset captured before the new preview sizes,
+        // owns the viewport while the scrollbar is being dragged.
+        if self.editor_scrollbar_drag.is_some() {
+            return;
+        }
         // A heading navigation already remeasures its target on each frame.
         // Freezing the current offset here would cancel it when a chart becomes visible.
         if outline::outline_navigation_in_progress(
@@ -7868,6 +7896,7 @@ impl EditorView {
     }
 
     pub(crate) fn invalidate_generated_block_preview_render_caches(&mut self) {
+        self.invalidate_mermaid_preview_jobs();
         for cache_key in self.generated_preview_keys.clone() {
             if let Some((_, image)) = self.generated_preview_overlay_cache.remove(&cache_key) {
                 self.retired_images.push(image);
@@ -7898,6 +7927,19 @@ impl EditorView {
             }
             self.generated_preview_svg_cache.remove(&cache_key);
         }
+    }
+
+    fn other_pane_generated_preview_keys(
+        panes: &[Pane],
+        focused_pane_id: PaneId,
+    ) -> HashSet<String> {
+        // The focused slot is always a placeholder. During with_pane, the
+        // swapped pane's slot holds the focused pane's live state, not its own.
+        panes
+            .iter()
+            .filter(|pane| pane.id != focused_pane_id)
+            .flat_map(|pane| pane.state.generated_preview_keys.iter().cloned())
+            .collect()
     }
 
     pub(crate) fn retire_image_cache_entry(&mut self, cache_key: &str) {
@@ -7931,10 +7973,12 @@ impl EditorView {
             .enumerate()
             .any(|(relative_line, decoration)| {
                 let block_missing = decoration.block_preview.as_ref().is_some_and(|preview| {
-                    !self.image_cache.contains_key(&preview.cache_key)
+                    (!self.image_cache.contains_key(&preview.cache_key)
                         || !self
                             .generated_preview_svg_cache
                             .contains_key(&preview.cache_key)
+                        || self.mermaid_preview_needs_refresh(&preview.cache_key))
+                        && !self.mermaid_preview_is_pending(&preview.cache_key)
                 });
                 let line = visible_start + relative_line;
                 let line_content = self.buffer.line_content(line);
@@ -7954,9 +7998,11 @@ impl EditorView {
             // Scrolling into an uncached preview must not queue a restoration of
             // this frame's offset: a later wheel event may already have moved on.
             // Prepaint compensates any newly measured height above the viewport.
-            self.refresh_generated_block_previews();
-            cx.notify();
+            if self.refresh_generated_block_previews() {
+                cx.notify();
+            }
         }
+        self.start_mermaid_preview_worker(cx);
     }
 
     /// Debounced live rebuild of the chart/formula being edited in code view: the
@@ -7980,10 +8026,10 @@ impl EditorView {
         }));
     }
 
-    fn refresh_generated_block_previews_with_mode(&mut self, force: bool) {
+    fn refresh_generated_block_previews_with_mode(&mut self, force: bool) -> bool {
         if self.active_tab_is_diff() {
             self.prune_generated_preview_caches(HashSet::new());
-            return;
+            return false;
         }
 
         let mut preview_entries = Vec::new();
@@ -8082,7 +8128,16 @@ impl EditorView {
                 && self
                     .generated_preview_svg_cache
                     .contains_key(&preview.cache_key)
+                && !self.mermaid_preview_needs_refresh(&preview.cache_key)
             {
+                continue;
+            }
+
+            if preview.kind == markdown::BlockPreviewKind::Mermaid {
+                if force {
+                    self.mark_mermaid_preview_dirty(&preview.cache_key);
+                }
+                self.queue_mermaid_preview(&preview.cache_key, &preview.source_text);
                 continue;
             }
 
@@ -8105,7 +8160,6 @@ impl EditorView {
                         helpers::GeneratedPreviewFontFamilies {
                             monospace: self.styles.editor.editor_monospace_font_family,
                             body_cjk: self.styles.editor.editor_body_cjk_font_family,
-                            mermaid_theme: self.app_settings.mermaid_theme(),
                         },
                     ))
                 });
@@ -8168,7 +8222,6 @@ impl EditorView {
                         helpers::GeneratedPreviewFontFamilies {
                             monospace: self.styles.editor.editor_monospace_font_family,
                             body_cjk: self.styles.editor.editor_body_cjk_font_family,
-                            mermaid_theme: self.app_settings.mermaid_theme(),
                         },
                     ))
                 });
@@ -8213,6 +8266,7 @@ impl EditorView {
         }
 
         self.prune_generated_preview_caches(next_generated_keys);
+        rendered_count > 0
     }
 
     fn generated_preview_priority_line_range(&self) -> (usize, usize) {
@@ -8240,17 +8294,21 @@ impl EditorView {
     }
 
     fn prune_generated_preview_caches(&mut self, next_generated_keys: HashSet<String>) {
+        let shared_keys =
+            Self::other_pane_generated_preview_keys(&self.panes, self.focused_pane_id);
         let previous_generated_keys =
             std::mem::replace(&mut self.generated_preview_keys, next_generated_keys);
         for stale_key in previous_generated_keys {
-            if self.generated_preview_keys.contains(&stale_key) {
+            if self.generated_preview_keys.contains(&stale_key) || shared_keys.contains(&stale_key)
+            {
                 continue;
             }
             self.retire_generated_preview_cache_entry(&stale_key);
             self.generated_preview_svg_cache.remove(&stale_key);
         }
-        self.generated_preview_views
-            .retain(|cache_key, _| self.generated_preview_keys.contains(cache_key));
+        self.generated_preview_views.retain(|cache_key, _| {
+            self.generated_preview_keys.contains(cache_key) || shared_keys.contains(cache_key)
+        });
         self.trim_generated_preview_render_caches();
     }
 
@@ -8273,6 +8331,8 @@ impl EditorView {
     }
 
     fn trim_generated_preview_render_caches(&mut self) {
+        let shared_keys =
+            Self::other_pane_generated_preview_keys(&self.panes, self.focused_pane_id);
         let raster_entry_count = self
             .generated_preview_keys
             .iter()
@@ -8379,7 +8439,9 @@ impl EditorView {
             let stale_keys = self
                 .generated_preview_keys
                 .iter()
-                .filter(|cache_key| !keep_raster_keys.contains(*cache_key))
+                .filter(|cache_key| {
+                    !keep_raster_keys.contains(*cache_key) && !shared_keys.contains(*cache_key)
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             for cache_key in stale_keys {
@@ -8426,7 +8488,9 @@ impl EditorView {
             keep_svg_keys.insert(cache_key);
         }
         self.generated_preview_svg_cache.retain(|cache_key, _| {
-            !self.generated_preview_keys.contains(cache_key) || keep_svg_keys.contains(cache_key)
+            !self.generated_preview_keys.contains(cache_key)
+                || shared_keys.contains(cache_key)
+                || keep_svg_keys.contains(cache_key)
         });
     }
 
@@ -13327,7 +13391,10 @@ fn table_task_checkbox_edit_at(cell: &str, offset: usize) -> Option<(usize, &'st
 mod tests {
     use crate::markdown;
 
-    fn test_line_display_info(row_heights: &[f32], extra_height: f32) -> super::LineDisplayInfo {
+    pub(super) fn test_line_display_info(
+        row_heights: &[f32],
+        extra_height: f32,
+    ) -> super::LineDisplayInfo {
         let mut wrapped_line = gpui::WrappedLine::default();
         let layout: &mut std::sync::Arc<gpui::WrappedLineLayout> = &mut wrapped_line;
         std::sync::Arc::make_mut(layout).wrap_boundaries = (1..row_heights.len())

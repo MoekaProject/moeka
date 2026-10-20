@@ -22,6 +22,30 @@ enum TabDropTarget<'a> {
     End,
 }
 
+fn take_generated_preview_resource<T: Clone>(
+    resources: &mut HashMap<String, T>,
+    key: &str,
+    shared: bool,
+) -> Option<T> {
+    if shared {
+        resources.get(key).cloned()
+    } else {
+        resources.remove(key)
+    }
+}
+
+fn restore_generated_preview_resources<T>(
+    resources: &mut HashMap<String, T>,
+    saved: HashMap<String, T>,
+    prefer_live_keys: &HashSet<String>,
+) {
+    resources.extend(
+        saved
+            .into_iter()
+            .filter(|(key, _)| !prefer_live_keys.contains(key)),
+    );
+}
+
 impl EditorView {
     pub(super) fn stash_active_tab_generated_preview_cache(&mut self) {
         let Some(active_tab_id) = self.active_tab_id.clone() else {
@@ -31,6 +55,8 @@ impl EditorView {
         // A delayed rebuild belongs to the tab that scheduled it. Dropping the
         // task prevents it from rebuilding whichever tab becomes active next.
         self.generated_preview_rerender_task = None;
+        let shared_keys =
+            Self::other_pane_generated_preview_keys(&self.panes, self.focused_pane_id);
         let keys = std::mem::take(&mut self.generated_preview_keys);
         let mut cache = GeneratedPreviewTabCache {
             code_mode_preview_key: self.code_mode_preview_key.take(),
@@ -38,16 +64,26 @@ impl EditorView {
             ..GeneratedPreviewTabCache::default()
         };
         for key in &keys {
-            if let Some(image) = self.image_cache.remove(key) {
+            let shared = shared_keys.contains(key);
+            if let Some(image) = take_generated_preview_resource(&mut self.image_cache, key, shared)
+            {
                 cache.images.insert(key.clone(), image);
             }
-            if let Some(svg) = self.generated_preview_svg_cache.remove(key) {
+            if let Some(svg) =
+                take_generated_preview_resource(&mut self.generated_preview_svg_cache, key, shared)
+            {
                 cache.svgs.insert(key.clone(), svg);
             }
-            if let Some(overlay) = self.generated_preview_overlay_cache.remove(key) {
+            if let Some(overlay) = take_generated_preview_resource(
+                &mut self.generated_preview_overlay_cache,
+                key,
+                shared,
+            ) {
                 cache.overlays.insert(key.clone(), overlay);
             }
-            if let Some(view) = self.generated_preview_views.remove(key) {
+            if let Some(view) =
+                take_generated_preview_resource(&mut self.generated_preview_views, key, shared)
+            {
                 cache.views.insert(key.clone(), view);
             }
         }
@@ -74,11 +110,34 @@ impl EditorView {
             return;
         };
 
+        let shared_keys =
+            Self::other_pane_generated_preview_keys(&self.panes, self.focused_pane_id);
+        let mut prefer_live_keys = shared_keys.clone();
+        prefer_live_keys.retain(|key| {
+            self.image_cache.contains_key(key)
+                || self.generated_preview_svg_cache.contains_key(key)
+                || self.generated_preview_overlay_cache.contains_key(key)
+        });
+        // Choose a whole render bundle: a missing live overlay may have been
+        // invalidated by a newer SVG and must not be filled from the old tab.
+        // Views can still restore their last state if no live view exists.
+        let mut views = cache.views;
+        views.retain(|key, _| {
+            !shared_keys.contains(key) || !self.generated_preview_views.contains_key(key)
+        });
         self.generated_preview_keys = cache.keys;
-        self.image_cache.extend(cache.images);
-        self.generated_preview_svg_cache.extend(cache.svgs);
-        self.generated_preview_overlay_cache.extend(cache.overlays);
-        self.generated_preview_views.extend(cache.views);
+        restore_generated_preview_resources(&mut self.image_cache, cache.images, &prefer_live_keys);
+        restore_generated_preview_resources(
+            &mut self.generated_preview_svg_cache,
+            cache.svgs,
+            &prefer_live_keys,
+        );
+        restore_generated_preview_resources(
+            &mut self.generated_preview_overlay_cache,
+            cache.overlays,
+            &prefer_live_keys,
+        );
+        self.generated_preview_views.extend(views);
         self.code_mode_preview_key = cache.code_mode_preview_key;
         self.generated_preview_rerender_pending = cache.rerender_pending;
     }
@@ -115,10 +174,27 @@ impl EditorView {
         let Some(cache) = self.tab_generated_preview_cache.remove(tab_id) else {
             return;
         };
-        self.retired_images
-            .extend(cache.images.into_values().flatten());
-        self.retired_images
-            .extend(cache.overlays.into_values().map(|(_, image)| image));
+        for (key, image) in cache.images {
+            if let Some(image) = image {
+                let still_shared = self
+                    .image_cache
+                    .get(&key)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|live| Arc::ptr_eq(live, &image));
+                if !still_shared {
+                    self.retired_images.push(image);
+                }
+            }
+        }
+        for (key, (_, image)) in cache.overlays {
+            let still_shared = self
+                .generated_preview_overlay_cache
+                .get(&key)
+                .is_some_and(|(_, live)| Arc::ptr_eq(live, &image));
+            if !still_shared {
+                self.retired_images.push(image);
+            }
+        }
     }
 
     fn release_document_image_cache(&mut self) {
@@ -3392,6 +3468,126 @@ fn first_markdown_content_line_end(text: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_preview_consumers_follow_parked_state_not_slot_owner() {
+        let mut root = PaneState::detached();
+        root.generated_preview_keys = HashSet::from(["focused".into(), "shared".into()]);
+        let mut panes = [Pane::new(0), Pane::new(1), Pane::new(2)];
+        panes[1].state.generated_preview_keys = HashSet::from(["other".into(), "shared".into()]);
+        let mut inactive = GeneratedPreviewTabCache::default();
+        inactive.keys.insert("inactive".into());
+        panes[2]
+            .state
+            .tab_generated_preview_cache
+            .insert("inactive-tab".into(), inactive);
+
+        let consumers = EditorView::other_pane_generated_preview_keys(&panes, 0);
+        assert_eq!(consumers, panes[1].state.generated_preview_keys);
+        assert!(!consumers.contains("focused"));
+        assert!(!consumers.contains("inactive"));
+
+        // Mirror with_pane(1): slot 1 now parks the focused pane, while slot 0
+        // remains the placeholder. Excluding the current pane ID would be wrong.
+        std::mem::swap(&mut root, &mut panes[1].state);
+        let consumers = EditorView::other_pane_generated_preview_keys(&panes, 0);
+        assert_eq!(
+            consumers,
+            HashSet::from(["focused".into(), "shared".into()])
+        );
+        assert!(!consumers.contains("other"));
+        assert!(panes[0].state.generated_preview_keys.is_empty());
+    }
+
+    #[test]
+    fn generated_preview_stash_clones_shared_and_moves_exclusive_resources() {
+        for shared in [false, true] {
+            let key = "preview".to_string();
+            let image = Arc::new(RenderImage::new([image::Frame::new(
+                image::RgbaImage::new(8, 4),
+            )]));
+            let svg: Arc<str> = Arc::from("last svg");
+            let mut live = GeneratedPreviewTabCache::default();
+            live.images.insert(key.clone(), Some(image.clone()));
+            live.svgs.insert(key.clone(), svg.clone());
+            live.overlays.insert(key.clone(), (100, image.clone()));
+            live.views.insert(key.clone(), ImageViewState::default());
+            let mut saved = GeneratedPreviewTabCache::default();
+
+            saved.images.insert(
+                key.clone(),
+                take_generated_preview_resource(&mut live.images, &key, shared).unwrap(),
+            );
+            saved.svgs.insert(
+                key.clone(),
+                take_generated_preview_resource(&mut live.svgs, &key, shared).unwrap(),
+            );
+            saved.overlays.insert(
+                key.clone(),
+                take_generated_preview_resource(&mut live.overlays, &key, shared).unwrap(),
+            );
+            saved.views.insert(
+                key.clone(),
+                take_generated_preview_resource(&mut live.views, &key, shared).unwrap(),
+            );
+
+            assert_eq!(live.images.contains_key(&key), shared);
+            assert_eq!(live.svgs.contains_key(&key), shared);
+            assert_eq!(live.overlays.contains_key(&key), shared);
+            assert_eq!(live.views.contains_key(&key), shared);
+            assert!(Arc::ptr_eq(saved.images[&key].as_ref().unwrap(), &image));
+            assert!(Arc::ptr_eq(&saved.overlays[&key].1, &image));
+            assert!(Arc::ptr_eq(&saved.svgs[&key], &svg));
+            live.svgs.insert(key.clone(), Arc::from("newer svg"));
+            assert_eq!(saved.svgs[&key].as_ref(), "last svg");
+        }
+    }
+
+    #[test]
+    fn generated_preview_restore_prefers_live_shared_bundle_not_old_overlay() {
+        let shared = "shared".to_string();
+        let exclusive = "exclusive".to_string();
+        let image = Arc::new(RenderImage::new([image::Frame::new(
+            image::RgbaImage::new(8, 4),
+        )]));
+        let mut live = GeneratedPreviewTabCache::default();
+        let mut saved = GeneratedPreviewTabCache::default();
+        // Even a cached failure is newer than the saved success. Replacement
+        // invalidates the old overlay; absence must not resurrect that overlay.
+        live.images.insert(shared.clone(), None);
+        live.svgs.insert(shared.clone(), Arc::from("newer svg"));
+        live.svgs
+            .insert(exclusive.clone(), Arc::from("unowned svg"));
+        for key in [&shared, &exclusive] {
+            saved.images.insert(key.clone(), Some(image.clone()));
+            saved.svgs.insert(key.clone(), Arc::from("last tab svg"));
+            saved.overlays.insert(key.clone(), (100, image.clone()));
+        }
+        let prefer_live_keys = HashSet::from([shared.clone()]);
+        restore_generated_preview_resources(&mut live.images, saved.images, &prefer_live_keys);
+        restore_generated_preview_resources(&mut live.svgs, saved.svgs, &prefer_live_keys);
+        restore_generated_preview_resources(&mut live.overlays, saved.overlays, &prefer_live_keys);
+
+        assert!(live.images[&shared].is_none());
+        assert_eq!(live.svgs[&shared].as_ref(), "newer svg");
+        assert!(!live.overlays.contains_key(&shared));
+        assert!(Arc::ptr_eq(
+            live.images[&exclusive].as_ref().unwrap(),
+            &image
+        ));
+        assert_eq!(live.svgs[&exclusive].as_ref(), "last tab svg");
+        assert!(live.overlays.contains_key(&exclusive));
+    }
+
+    #[test]
+    fn generated_preview_restore_uses_last_tab_resources_without_live_bundle() {
+        let key = "preview".to_string();
+        let mut live = GeneratedPreviewTabCache::default();
+        let mut saved = GeneratedPreviewTabCache::default();
+        saved.svgs.insert(key.clone(), Arc::from("last tab svg"));
+        restore_generated_preview_resources(&mut live.svgs, saved.svgs, &HashSet::new());
+        assert_eq!(live.svgs[&key].as_ref(), "last tab svg");
+    }
 
     fn closed_editor_tab(text: &str, path: Option<PathBuf>) -> OpenTab {
         OpenTab {

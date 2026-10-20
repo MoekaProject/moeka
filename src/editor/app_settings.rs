@@ -7,140 +7,6 @@ use super::{
     ChatAgentCli, FileListDisplayMode, SidebarSortMode, TerminalCursorShape, config_store,
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum MermaidTheme {
-    #[default]
-    Auto,
-    EditorLight,
-    EditorDark,
-    OneDark,
-    GruvboxLight,
-    GruvboxDark,
-    AyuLight,
-    AyuDark,
-    MermaidDefault,
-    MermaidBase,
-    MermaidDark,
-    MermaidForest,
-    MermaidNeutral,
-    MermaidNeo,
-    MermaidNeoDark,
-    MermaidRedux,
-    MermaidReduxDark,
-    MermaidReduxColor,
-    MermaidReduxDarkColor,
-}
-
-impl MermaidTheme {
-    pub(crate) const ALL: [Self; 19] = [
-        Self::Auto,
-        Self::EditorLight,
-        Self::EditorDark,
-        Self::OneDark,
-        Self::GruvboxLight,
-        Self::GruvboxDark,
-        Self::AyuLight,
-        Self::AyuDark,
-        Self::MermaidDefault,
-        Self::MermaidBase,
-        Self::MermaidDark,
-        Self::MermaidForest,
-        Self::MermaidNeutral,
-        Self::MermaidNeo,
-        Self::MermaidNeoDark,
-        Self::MermaidRedux,
-        Self::MermaidReduxDark,
-        Self::MermaidReduxColor,
-        Self::MermaidReduxDarkColor,
-    ];
-
-    pub(crate) const fn settings_value(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::EditorLight => "editor-light",
-            Self::EditorDark => "editor-dark",
-            Self::OneDark => "one-dark",
-            Self::GruvboxLight => "gruvbox-light",
-            Self::GruvboxDark => "gruvbox-dark",
-            Self::AyuLight => "ayu-light",
-            Self::AyuDark => "ayu-dark",
-            Self::MermaidDefault => "mermaid-default",
-            Self::MermaidBase => "mermaid-base",
-            Self::MermaidDark => "mermaid-dark",
-            Self::MermaidForest => "mermaid-forest",
-            Self::MermaidNeutral => "mermaid-neutral",
-            Self::MermaidNeo => "mermaid-neo",
-            Self::MermaidNeoDark => "mermaid-neo-dark",
-            Self::MermaidRedux => "mermaid-redux",
-            Self::MermaidReduxDark => "mermaid-redux-dark",
-            Self::MermaidReduxColor => "mermaid-redux-color",
-            Self::MermaidReduxDarkColor => "mermaid-redux-dark-color",
-        }
-    }
-
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Auto => "Auto (Editor Light / Dark)",
-            Self::EditorLight => "Editor Light",
-            Self::EditorDark => "Editor Dark",
-            Self::OneDark => "One Dark",
-            Self::GruvboxLight => "Gruvbox Light",
-            Self::GruvboxDark => "Gruvbox Dark",
-            Self::AyuLight => "Ayu Light",
-            Self::AyuDark => "Ayu Dark",
-            Self::MermaidDefault => "Mermaid Default",
-            Self::MermaidBase => "Mermaid Base",
-            Self::MermaidDark => "Mermaid Dark",
-            Self::MermaidForest => "Mermaid Forest",
-            Self::MermaidNeutral => "Mermaid Neutral",
-            Self::MermaidNeo => "Mermaid Neo",
-            Self::MermaidNeoDark => "Mermaid Neo Dark",
-            Self::MermaidRedux => "Mermaid Redux",
-            Self::MermaidReduxDark => "Mermaid Redux Dark",
-            Self::MermaidReduxColor => "Mermaid Redux Color",
-            Self::MermaidReduxDarkColor => "Mermaid Redux Dark Color",
-        }
-    }
-
-    pub(crate) fn from_settings(value: &str) -> Self {
-        Self::ALL
-            .into_iter()
-            .find(|theme| theme.settings_value() == value)
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn host_preset(self, is_dark: bool) -> Option<merman::render::HostThemePreset> {
-        Some(match self {
-            Self::Auto if is_dark => merman::render::HostThemePreset::EditorDark,
-            Self::Auto | Self::EditorLight => merman::render::HostThemePreset::EditorLight,
-            Self::EditorDark => merman::render::HostThemePreset::EditorDark,
-            Self::OneDark => merman::render::HostThemePreset::OneDark,
-            Self::GruvboxLight => merman::render::HostThemePreset::GruvboxLight,
-            Self::GruvboxDark => merman::render::HostThemePreset::GruvboxDark,
-            Self::AyuLight => merman::render::HostThemePreset::AyuLight,
-            Self::AyuDark => merman::render::HostThemePreset::AyuDark,
-            _ => return None,
-        })
-    }
-
-    pub(crate) const fn mermaid_theme_name(self) -> Option<&'static str> {
-        Some(match self {
-            Self::MermaidDefault => "default",
-            Self::MermaidBase => "base",
-            Self::MermaidDark => "dark",
-            Self::MermaidForest => "forest",
-            Self::MermaidNeutral => "neutral",
-            Self::MermaidNeo => "neo",
-            Self::MermaidNeoDark => "neo-dark",
-            Self::MermaidRedux => "redux",
-            Self::MermaidReduxDark => "redux-dark",
-            Self::MermaidReduxColor => "redux-color",
-            Self::MermaidReduxDarkColor => "redux-dark-color",
-            _ => return None,
-        })
-    }
-}
-
 /// How the light/dark appearance is chosen. `Manual` keeps whatever theme the
 /// user last picked; `Auto` mirrors the OS appearance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,8 +61,6 @@ pub(crate) struct AppSettings {
     pub body_cjk_font: String,
     #[serde(default = "default_code_font")]
     pub code_font: String,
-    #[serde(default = "default_mermaid_theme")]
-    pub mermaid_theme: String,
     #[serde(default = "default_font_size")]
     pub font_size: f32,
     #[serde(default = "default_line_height")]
@@ -318,10 +182,6 @@ fn default_code_font() -> String {
     crate::platform::fonts::MONOSPACE.to_string()
 }
 
-fn default_mermaid_theme() -> String {
-    MermaidTheme::default().settings_value().to_string()
-}
-
 fn default_font_size() -> f32 {
     15.0
 }
@@ -430,7 +290,6 @@ impl Default for AppSettings {
             body_latin_font: default_body_latin_font(),
             body_cjk_font: default_body_cjk_font(),
             code_font: default_code_font(),
-            mermaid_theme: default_mermaid_theme(),
             font_size: default_font_size(),
             line_height: default_line_height(),
             letter_spacing: default_letter_spacing(),
@@ -467,10 +326,6 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
-    pub(crate) fn mermaid_theme(&self) -> MermaidTheme {
-        MermaidTheme::from_settings(&self.mermaid_theme)
-    }
-
     pub(crate) fn effective_editor_font_size(&self) -> f32 {
         (self.font_size - 1.0).clamp(9.0, 29.0)
     }
@@ -727,7 +582,7 @@ pub(crate) fn theme_kind_to_string(kind: ThemeKind) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppSettings, MermaidTheme, theme_kind_to_string};
+    use super::{AppSettings, theme_kind_to_string};
     use crate::editor::attachments::{AttachmentLinkSyntax, AttachmentPathStyle};
     use crate::editor::{ChatAgentCli, TerminalCursorShape};
     use crate::theme::{EditorThemeMode, ThemeKind};
@@ -821,16 +676,13 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_theme_options_cover_all_merman_themes_and_round_trip() {
-        let native_themes = MermaidTheme::ALL
-            .into_iter()
-            .filter_map(MermaidTheme::mermaid_theme_name)
-            .collect::<Vec<_>>();
-
-        assert_eq!(native_themes, merman::supported_themes());
-        for theme in MermaidTheme::ALL {
-            assert_eq!(MermaidTheme::from_settings(theme.settings_value()), theme);
-        }
+    fn removed_mermaid_settings_are_ignored_and_not_saved() {
+        let settings: AppSettings =
+            serde_yaml::from_str("mermaid_style: editorial\nmermaid_theme: mermaid-dark\n")
+                .unwrap();
+        let yaml = serde_yaml::to_string(&settings).unwrap();
+        assert!(!yaml.contains("mermaid_style"));
+        assert!(!yaml.contains("mermaid_theme"));
     }
 
     #[test]

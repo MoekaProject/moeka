@@ -58,6 +58,10 @@ Small yellow and orange text must use deeper gold/orange ink for contrast, not b
 
 Color names describe the relationships, not fixed textbook swatches. Small tokens use deep, contrast-checked ink. Variables, types, operators, numbers and comments complete each palette without forcing all sixteen themes into green strings and blue calls. Low-chroma Paper White and Silver remain deliberate quieter choices, but use different string/call relationships.
 
+## Mermaid geometry and theme colors
+
+Mermaid diagrams are compiled to SVG by Ondine. Their background and foreground colors are derived from the current editor theme, so light and dark appearances update automatically; the SVG canvas remains transparent.
+
 ## Token ownership
 
 - `Theme::curated` connects surface specs, `MarkdownSyntaxPalette` and `CodeSyntaxPalette`.

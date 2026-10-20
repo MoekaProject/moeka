@@ -262,13 +262,27 @@ fn table_border_track_path(
     path.build().ok()
 }
 
+fn generated_preview_heights_changed(
+    decorations: &[crate::markdown::LineDecoration],
+    updates: &[(usize, Option<LineDisplayInfo>)],
+    previous_height: impl Fn(usize) -> f32,
+) -> bool {
+    updates.iter().any(|(line, info)| {
+        decorations.get(*line).is_some_and(|decoration| {
+            decoration.block_preview.is_some() || !decoration.inline_math_spans.is_empty()
+        }) && info
+            .as_ref()
+            .is_some_and(|info| (info.total_height() - previous_height(*line)).abs() > 0.01)
+    })
+}
+
 fn preview_height_anchor_delta(
     previous_height: f32,
     measured_height: f32,
-    previous_bottom: f32,
-    viewport_top: f32,
+    previous_bottom: f64,
+    viewport_top: f64,
 ) -> f32 {
-    if previous_bottom < viewport_top {
+    if previous_bottom <= viewport_top {
         measured_height - previous_height
     } else {
         0.0
@@ -285,6 +299,42 @@ fn preview_height_changes_above_viewport_keep_the_next_line_fixed() {
     assert_eq!(preview_height_anchor_delta(100.0, 300.0, 12.0, 0.0), 0.0);
     // An uncached line still has an estimated height in the geometry index.
     assert_eq!(preview_height_anchor_delta(24.0, 300.0, -12.0, 0.0), 276.0);
+}
+
+#[cfg(test)]
+#[test]
+fn preview_height_change_at_viewport_boundary_anchors_the_following_line() {
+    assert_eq!(
+        preview_height_anchor_delta(100.0, 300.0, 500.0, 500.0),
+        200.0
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn preview_reflow_classifies_each_change_against_previous_document_geometry() {
+    fn measure(previous: &[f32], measured: &[f32], scroll: f64) -> (f32, f32) {
+        let mut previous_bottom = 0.0;
+        let mut painted_bottom = -(scroll as f32);
+        let mut compensation = 0.0;
+        for (&old, &new) in previous.iter().zip(measured) {
+            previous_bottom += old as f64;
+            compensation += preview_height_anchor_delta(old, new, previous_bottom, scroll);
+            painted_bottom += new;
+        }
+        (compensation, painted_bottom - compensation)
+    }
+    // A tall VISIBLE preview shrinks. The next preview was below the viewport,
+    // even though its new top is above it. Running painted-y classification
+    // incorrectly compensates its growth and fights the viewport's own reflow.
+    assert_eq!(measure(&[400.0, 20.0], &[20.0, 40.0], 250.0).0, 0.0);
+    // Several changes above the viewport, including collapsed source rows,
+    // compensate exactly once, preserving the next line's screen position.
+    let previous = [100.0, 0.0, 200.0, 0.0];
+    let measured = [200.0, 0.0, 50.0, 0.0];
+    assert_eq!(measure(&previous, &measured, 350.0), (-50.0, -50.0));
+    // Once committed, identical measurements cannot accumulate more movement.
+    assert_eq!(measure(&measured, &measured, 300.0), (0.0, -50.0));
 }
 
 fn line_format_trigger_left(
@@ -3139,13 +3189,16 @@ fn non_markdown_cached_line_can_reuse(
     }
 }
 
-// Retain shaping measurements across attempts, but never paint or publish the
-// intermediate frame. Three passes bound reflow work even for large documents.
+// Retain shaping measurements across mode/scrollbar reconciliation attempts,
+// but never publish intermediate geometry. Ordinary scrolling stays single-pass;
+// three passes bound reflow work even for large documents.
 struct EditorPrepaintFrame {
-    preserve_mode_scroll: bool,
+    reconcile_scroll: bool,
     pass: usize,
     previews_prepared: bool,
     offscreen_wrap_reflows: usize,
+    generated_preview_height_changed: bool,
+    explicit_caret_reveal_requested: bool,
 }
 
 impl EditorPrepaintFrame {
@@ -3153,7 +3206,11 @@ impl EditorPrepaintFrame {
     const OFFSCREEN_WRAP_REFLOW_BUDGET: usize = 48;
 
     fn can_retry(&self) -> bool {
-        self.preserve_mode_scroll && self.pass + 1 < Self::MAX_PASSES
+        self.reconcile_scroll && self.pass + 1 < Self::MAX_PASSES
+    }
+
+    fn allows_fallback_caret_preservation(&self) -> bool {
+        !self.generated_preview_height_changed || self.explicit_caret_reveal_requested
     }
 
     fn should_retry(
@@ -3167,14 +3224,16 @@ impl EditorPrepaintFrame {
 }
 
 fn reconciled_editor_prepaint<T>(
-    preserve_mode_scroll: bool,
+    reconcile_scroll: bool,
     mut prepaint: impl FnMut(&mut EditorPrepaintFrame) -> Result<T, ()>,
 ) -> T {
     let mut frame = EditorPrepaintFrame {
-        preserve_mode_scroll,
+        reconcile_scroll,
         pass: 0,
         previews_prepared: false,
         offscreen_wrap_reflows: EditorPrepaintFrame::OFFSCREEN_WRAP_REFLOW_BUDGET,
+        generated_preview_height_changed: false,
+        explicit_caret_reveal_requested: false,
     };
     loop {
         match prepaint(&mut frame) {
@@ -3184,6 +3243,195 @@ fn reconciled_editor_prepaint<T>(
                 frame.pass += 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod passive_preview_reflow_tests {
+    use super::*;
+    use crate::editor::tests::test_line_display_info;
+    use crate::markdown::parse_decorations;
+
+    fn anchor_line(decorations: &[crate::markdown::LineDecoration]) -> usize {
+        decorations
+            .iter()
+            .position(|decoration| {
+                decoration
+                    .block_preview
+                    .as_ref()
+                    .is_some_and(|p| p.is_anchor)
+                    || !decoration.inline_math_spans.is_empty()
+            })
+            .expect("generated preview or inline math")
+    }
+
+    #[test]
+    fn wheel_offset_survives_passive_mermaid_and_math_growth() {
+        for source in [
+            "```mermaid\ngraph TD\nA-->B\n```\n",
+            "$$\nx + y\n$$\n",
+            "text $x + y$\n",
+        ] {
+            let decorations = parse_decorations(source);
+            let line = anchor_line(&decorations);
+            let updates = [(line, Some(test_line_display_info(&[600.0], 0.0)))];
+            let scroll_before_wheel = 1_000.0;
+            let mut scroll = scroll_before_wheel - 100.0;
+            let viewport_height = 600.0;
+            let previous_caret_bottom = 1_474.0;
+            assert!(previous_caret_bottom <= scroll + viewport_height);
+            let measured_caret_bottom = previous_caret_bottom + 300.0;
+            let fallback_correction = measured_caret_bottom - (scroll + viewport_height);
+            assert_eq!(fallback_correction, 274.0);
+            assert_eq!(
+                preview_height_anchor_delta(300.0, 600.0, 1_200.0, scroll as f64),
+                0.0
+            );
+            reconciled_editor_prepaint(false, |frame| {
+                frame.generated_preview_height_changed =
+                    generated_preview_heights_changed(&decorations, &updates, |_| 300.0);
+                assert!(frame.generated_preview_height_changed);
+                // This is the final fallback's actual gate, not the explicit
+                // scroll-to-cursor/navigation path. It must never run here.
+                if frame.allows_fallback_caret_preservation() {
+                    scroll += fallback_correction;
+                }
+                Ok(())
+            });
+            assert_eq!(scroll, 900.0);
+            assert!(scroll < scroll_before_wheel);
+        }
+    }
+
+    #[test]
+    fn collapsed_mermaid_and_math_source_rows_count_even_without_anchor_changes() {
+        for source in ["```mermaid\ngraph TD\nA-->B\n```\n", "$$\nx + y\n$$\n"] {
+            let decorations = parse_decorations(source);
+            let line = decorations
+                .iter()
+                .position(|decoration| {
+                    decoration
+                        .block_preview
+                        .as_ref()
+                        .is_some_and(|p| !p.is_anchor)
+                })
+                .expect("collapsed source row");
+            // Only a non-anchor early-return row changes. Anchor-only detection
+            // or detection inside the normal line-height branch would miss it.
+            let updates = [(line, Some(test_line_display_info(&[], 0.0)))];
+            assert!(generated_preview_heights_changed(
+                &decorations,
+                &updates,
+                |_| 24.0
+            ));
+            assert!(!generated_preview_heights_changed(
+                &decorations,
+                &updates,
+                |_| 0.0
+            ));
+            let expanded = [(line, Some(test_line_display_info(&[24.0], 0.0)))];
+            assert!(generated_preview_heights_changed(
+                &decorations,
+                &expanded,
+                |_| 0.0
+            ));
+        }
+    }
+
+    #[test]
+    fn unchanged_previews_and_ordinary_text_reflow_keep_existing_caret_fallback() {
+        let decorations = parse_decorations("text $x$\n");
+        let line = anchor_line(&decorations);
+        let updates = [(line, Some(test_line_display_info(&[24.0], 0.0)))];
+        assert!(!generated_preview_heights_changed(
+            &decorations,
+            &updates,
+            |_| 24.0
+        ));
+        assert!(!generated_preview_heights_changed(
+            &decorations,
+            &updates,
+            |_| 24.001
+        ));
+        assert!(generated_preview_heights_changed(
+            &decorations,
+            &updates,
+            |_| 24.125
+        ));
+        assert!(!generated_preview_heights_changed(
+            &decorations,
+            &[(line, None)],
+            |_| 24.0
+        ));
+        let plain = parse_decorations("ordinary text\n");
+        assert!(!generated_preview_heights_changed(&plain, &updates, |_| {
+            600.0
+        }));
+        reconciled_editor_prepaint(false, |frame| {
+            assert!(frame.allows_fallback_caret_preservation());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn passive_preview_reflow_does_not_suppress_above_viewport_compensation() {
+        let mut scroll = 900.0;
+        let previous_caret_top = 1_450.0;
+        let previous_screen_y = previous_caret_top - scroll;
+        reconciled_editor_prepaint(false, |frame| {
+            frame.generated_preview_height_changed = true;
+            assert!(!frame.allows_fallback_caret_preservation());
+            // The anchor path remains independent of fallback caret policy.
+            scroll += preview_height_anchor_delta(300.0, 600.0, 850.0, scroll as f64);
+            assert_eq!(scroll, 1_200.0);
+            assert_eq!(previous_caret_top + 300.0 - scroll, previous_screen_y);
+            assert_eq!(
+                preview_height_anchor_delta(600.0, 600.0, 1_150.0, scroll as f64),
+                0.0
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn explicit_typing_and_caret_reveal_keep_fallback_after_guards_are_consumed() {
+        let mut attempts = 0;
+        reconciled_editor_prepaint(true, |frame| {
+            attempts += 1;
+            if frame.pass == 0 {
+                frame.explicit_caret_reveal_requested = true;
+                frame.generated_preview_height_changed = true;
+                return Err(());
+            }
+            // Even if a typing/reveal guard was consumed on the first attempt,
+            // its user intent must survive the transaction's final paint pass.
+            assert!(frame.allows_fallback_caret_preservation());
+            Ok(())
+        });
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn passive_preview_flag_survives_retries_but_not_subsequent_frames() {
+        let mut attempts = 0;
+        reconciled_editor_prepaint(true, |frame| {
+            attempts += 1;
+            if frame.pass == 0 {
+                frame.generated_preview_height_changed = true;
+                return Err(());
+            }
+            // The next attempt may emit identical heights; that must not
+            // re-enable the fallback within this same accepted frame.
+            assert!(!frame.allows_fallback_caret_preservation());
+            Ok(())
+        });
+        assert_eq!(attempts, 2);
+        reconciled_editor_prepaint(false, |frame| {
+            assert!(!frame.generated_preview_height_changed);
+            assert!(!frame.explicit_caret_reveal_requested);
+            assert!(frame.allows_fallback_caret_preservation());
+            Ok(())
+        });
     }
 }
 
@@ -3306,6 +3554,25 @@ mod mode_prepaint_tests {
     }
 
     #[test]
+    fn scrollbar_reflow_reconciles_paint_and_hit_geometry_without_unbounded_work() {
+        let mut scroll = 500.0;
+        let mut attempts = 0;
+        // A stationary drag's new range maps the pointer to a different offset.
+        let (paint_scroll, hit_scroll) = reconciled_editor_prepaint(true, |frame| {
+            attempts += 1;
+            let painted = scroll;
+            scroll = 1_200.0;
+            if frame.should_retry(painted, scroll, false) {
+                return Err(());
+            }
+            Ok((painted, painted))
+        });
+        assert_eq!(attempts, 2);
+        assert_eq!((paint_scroll, hit_scroll), (scroll, scroll));
+        assert!(attempts <= EditorPrepaintFrame::MAX_PASSES);
+    }
+
+    #[test]
     fn document_mode_prepaint_ignores_subpixel_corrections() {
         reconciled_editor_prepaint(true, |frame| {
             assert!(!frame.should_retry(900.0, 900.5, false));
@@ -3325,6 +3592,16 @@ impl EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<EditorPrepaintState, ()> {
+        // Capture intent before the reveal/typing guards are consumed. Retain it
+        // across transactional retries, but never across separate frames.
+        frame.explicit_caret_reveal_requested |= {
+            let editor = self.editor.read(cx);
+            editor.pending_typing_scroll_guard.is_some()
+                || editor.pending_click_anchor.is_some()
+                || editor.pending_scroll_to_cursor
+                || editor.pending_center_cursor_in_view
+                || editor.center_cursor_confirm_frames > 0
+        };
         // Resolve a deferred scroll-to-cursor before reading layout state, when
         // the per-line geometry cache is already valid (the common case after an
         // edit like pasting long text). Otherwise the layout loop below positions
@@ -3400,7 +3677,7 @@ impl EditorElement {
 
         // Preview creation may synchronously replace placeholder geometry. Do it
         // before shaping, once per frame rather than once per retry.
-        if frame.preserve_mode_scroll && !frame.previews_prepared {
+        if frame.reconcile_scroll && !frame.previews_prepared {
             self.editor.update(cx, |editor, cx| {
                 editor.last_viewport_height = bounds.size.height.into();
                 editor.last_viewport_width = bounds.size.width.into();
@@ -3607,7 +3884,8 @@ impl EditorElement {
         let mut y = origin_y + (render_start_y - scroll_offset as f64) as f32;
         let mut _last_line_height = 0.0_f32;
         let mut scroll_anchor_delta = 0.0_f32;
-        let suppress_scroll_anchor_compensation = editor.pending_preview_reveal.is_some()
+        let suppress_scroll_anchor_compensation = editor.editor_scrollbar_drag.is_some()
+            || editor.pending_preview_reveal.is_some()
             || editor.document_mode_scroll_anchor_is_current()
             || editor.pending_click_anchor.is_some()
             || editor.pending_center_cursor_in_view
@@ -4022,7 +4300,9 @@ impl EditorElement {
             if line_has_block_preview {
                 let previous_height = editor.visual_height_for_line(line_idx);
                 cached_height_before_reflow = Some(previous_height);
-                cached_line_above_viewport = y - scroll_anchor_delta + previous_height < origin_y;
+                cached_line_above_viewport = editor.line_y_offset_precise(line_idx)
+                    + previous_height as f64
+                    <= scroll_offset as f64;
             }
             let can_reuse_non_markdown_cached_line = editor.active_tab_is_non_markdown_text()
                 && !is_cursor_line_early
@@ -5835,8 +6115,11 @@ impl EditorElement {
                     scroll_anchor_delta += preview_height_anchor_delta(
                         previous_height,
                         total_line_height,
-                        y - scroll_anchor_delta + previous_height,
-                        origin_y,
+                        // Classify against the OLD geometry, not the running
+                        // painted y: an earlier visible preview may have shrunk
+                        // and moved this row above the viewport during reflow.
+                        editor.line_y_offset_precise(line_idx) + previous_height as f64,
+                        scroll_offset as f64,
                     );
                 } else if editor.active_tab_is_non_markdown_text()
                     && editor.editor_wraps_to_available_width()
@@ -11264,6 +11547,15 @@ impl EditorElement {
                 cx.notify();
             }
             editor.sync_code_block_horizontal_scrollbar(cx);
+            // Compare before committing measurements. Inspect all preview rows,
+            // not just anchors: collapsed source rows commit zero height via an
+            // early return, and inline math can change text-row height too.
+            frame.generated_preview_height_changed = frame.generated_preview_height_changed
+                || generated_preview_heights_changed(
+                    &editor.decorations,
+                    &display_info_updates,
+                    |line| editor.visual_height_for_line(line),
+                );
             editor.apply_line_display_info_updates(line_count, display_info_updates);
             if editor.front_matter_group_geometry_dirty
                 && editor
@@ -11366,6 +11658,9 @@ impl EditorElement {
             }
             editor.last_text_width = text_width;
             editor.last_window_scale_factor = window_scale_factor;
+            if editor.refresh_editor_scrollbar_drag_after_layout() {
+                cx.notify();
+            }
             let center_requested =
                 editor.pending_center_cursor_in_view || editor.center_cursor_confirm_frames > 0;
             // The animation epoch is shared, unlike the guards swapped into
@@ -11397,6 +11692,7 @@ impl EditorElement {
                 && !explicit_navigation
                 && !editor.document_mode_scroll_anchor_is_current()
                 && editor.pending_preview_reveal.is_none()
+                && editor.editor_scrollbar_drag.is_none()
                 && !editor.pending_center_cursor_in_view
                 && !editor.pending_scroll_to_cursor
             {
@@ -11409,10 +11705,10 @@ impl EditorElement {
             if deferred_offscreen_wrap_lines {
                 cx.notify();
             }
-            if !frame.preserve_mode_scroll {
+            if !frame.reconcile_scroll {
                 editor.ensure_visible_generated_block_previews(cx);
             }
-            if (!frame.preserve_mode_scroll || frame.can_retry())
+            if (!frame.reconcile_scroll || frame.can_retry())
                 && editor.restore_document_mode_scroll_anchor(true)
             {
                 cx.notify();
@@ -11475,6 +11771,10 @@ impl EditorElement {
             if !explicit_navigation
                 && !editor.document_mode_scroll_anchor_is_current()
                 && caret_was_visible
+                && editor.editor_scrollbar_drag.is_none()
+                // Passive preview reflow must not invent a new caret reveal
+                // after wheel input already cancelled the explicit guards.
+                && frame.allows_fallback_caret_preservation()
                 && editor.keep_previously_visible_cursor_in_view()
             {
                 cx.notify();
@@ -11516,7 +11816,7 @@ impl EditorElement {
             return Err(());
         }
         self.editor.update(cx, |editor, cx| {
-            if frame.preserve_mode_scroll {
+            if frame.reconcile_scroll {
                 // On budget exhaustion defer any further correction, rather
                 // than exposing an offset different from the geometry painted.
                 editor.scroll_offset = scroll_offset;
@@ -11752,7 +12052,7 @@ impl Element for EditorElement {
         let pane_swapped = self
             .editor
             .update(cx, |editor, _| editor.begin_pane_swap(self.pane_id));
-        let (caret_was_visible, preserve_mode_scroll) = self.editor.update(cx, |editor, cx| {
+        let (caret_was_visible, reconcile_scroll) = self.editor.update(cx, |editor, cx| {
             let caret_was_visible = editor.focused_pane_id == self.pane_id
                 && (editor.cursor_visible_in_viewport()
                     || editor.pending_typing_scroll_guard.is_some());
@@ -11763,11 +12063,12 @@ impl Element for EditorElement {
             editor.refresh_front_matter_input_geometry(window, bounds);
             (
                 caret_was_visible,
-                editor.document_mode_scroll_anchor_is_current(),
+                editor.document_mode_scroll_anchor_is_current()
+                    || editor.editor_scrollbar_drag.is_some(),
             )
         });
-        let state = reconciled_editor_prepaint(preserve_mode_scroll, |frame| {
-            if frame.preserve_mode_scroll {
+        let state = reconciled_editor_prepaint(reconcile_scroll, |frame| {
+            if frame.reconcile_scroll {
                 window.transact(|window| {
                     self.prepaint_document(bounds, frame, caret_was_visible, window, cx)
                 })

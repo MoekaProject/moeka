@@ -4,6 +4,7 @@
 name = "moeka"
 version = "0.1.26"
 edition = "2024"
+rust-version = "1.97"
 description = "A local-first Markdown editor with live rendering, workspaces, and native desktop tools"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/MoekaProject/moeka"
@@ -21,6 +22,7 @@ mas = []
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "9d9640d" }
 gpui = "0.2.2"
 printpdf = "0.7"
@@ -53,7 +55,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 emojis = "0.6"
 portable-pty = "0.9.0"
 mathjax-svg-rs = "0.4"
-merman = { version = "0.8.0-alpha.3", features = ["render"] }
+ondine = { git = "https://github.com/wevm/ondine", rev = "6a1586e5af980e67c104239593ae931837157b8b", package = "compiler" }
 resvg = { version = "0.45", default-features = false, features = [
   "text",
   "system-fonts",
@@ -87,7 +89,6 @@ gpui = { path = "vendor/gpui" }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
 block = "0.1"
-base64 = "0.22"
 core-graphics = "0.24"
 raw-window-handle = "0.6"
 

@@ -243,16 +243,27 @@ fn export_preview_font_families() -> helpers::GeneratedPreviewFontFamilies<'stat
     helpers::GeneratedPreviewFontFamilies {
         monospace: "SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace",
         body_cjk: "PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, sans-serif",
-        mermaid_theme: super::MermaidTheme::Auto,
     }
 }
 
 fn render_export_preview_svg(kind: crate::markdown::BlockPreviewKind, source: &str) -> String {
-    let theme = crate::theme::ThemeKind::PorcelainMist.build();
-    helpers::build_generated_block_preview_svg(kind, source, &theme, export_preview_font_families())
+    render_export_preview_svg_with_font_families(kind, source, export_preview_font_families())
 }
 
-fn export_code_block_preview_html(kind: &CodeBlockKind<'_>, source: &str) -> Option<String> {
+fn render_export_preview_svg_with_font_families(
+    kind: crate::markdown::BlockPreviewKind,
+    source: &str,
+    font_families: helpers::GeneratedPreviewFontFamilies<'_>,
+) -> String {
+    let theme = crate::theme::ThemeKind::PaperWhite.build();
+    helpers::build_generated_block_preview_svg(kind, source, &theme, font_families)
+}
+
+fn export_code_block_preview_html(
+    kind: &CodeBlockKind<'_>,
+    source: &str,
+    font_families: helpers::GeneratedPreviewFontFamilies<'_>,
+) -> Option<String> {
     let language = match kind {
         CodeBlockKind::Fenced(info) => info
             .split_whitespace()
@@ -269,7 +280,7 @@ fn export_code_block_preview_html(kind: &CodeBlockKind<'_>, source: &str) -> Opt
         _ => return None,
     };
 
-    let svg = render_export_preview_svg(preview_kind, source);
+    let svg = render_export_preview_svg_with_font_families(preview_kind, source, font_families);
     Some(format!(
         "<figure class=\"export-preview export-preview-{}\">{}</figure>",
         match preview_kind {
@@ -636,7 +647,12 @@ fn callout_assets(kind: BlockQuoteKind) -> (&'static str, &'static str, &'static
 
 /// Renders a callout blockquote with the given kind, optional title and body
 /// events. An empty `title` falls back to the kind's label.
-fn build_callout_html(kind: BlockQuoteKind, title: &str, body_events: Vec<Event<'_>>) -> String {
+fn build_callout_html(
+    kind: BlockQuoteKind,
+    title: &str,
+    body_events: Vec<Event<'_>>,
+    font_families: helpers::GeneratedPreviewFontFamilies<'_>,
+) -> String {
     let (kind_class, kind_label, icon) = callout_assets(kind);
     let icon = icon.replacen(
         "<svg ",
@@ -647,7 +663,7 @@ fn build_callout_html(kind: BlockQuoteKind, title: &str, body_events: Vec<Event<
     let mut body_html = String::new();
     push_html(
         &mut body_html,
-        transform_export_events(body_events.into_iter()).into_iter(),
+        transform_export_events(body_events.into_iter(), font_families).into_iter(),
     );
 
     let mut title_html = String::new();
@@ -668,7 +684,10 @@ fn build_callout_html(kind: BlockQuoteKind, title: &str, body_events: Vec<Event<
 /// which pulldown leaves as a plain blockquote because the title shares the
 /// marker line. `inner` is the event stream between the blockquote tags
 /// (exclusive). Returns `None` when it is not such a callout.
-fn try_render_callout(inner: &[Event<'_>]) -> Option<String> {
+fn try_render_callout(
+    inner: &[Event<'_>],
+    font_families: helpers::GeneratedPreviewFontFamilies<'_>,
+) -> Option<String> {
     if !matches!(inner.first(), Some(Event::Start(Tag::Paragraph))) {
         return None;
     }
@@ -723,7 +742,7 @@ fn try_render_callout(inner: &[Event<'_>]) -> Option<String> {
     }
     body_events.extend(inner[para_end + 1..].iter().cloned());
 
-    Some(build_callout_html(kind, title, body_events))
+    Some(build_callout_html(kind, title, body_events, font_families))
 }
 
 /// Walks pulldown's event stream and rewrites the constructs the export needs to
@@ -731,7 +750,10 @@ fn try_render_callout(inner: &[Event<'_>]) -> Option<String> {
 /// custom inline syntaxes, and `[!KIND]` callouts. Blockquotes are buffered so a
 /// callout can be detected from their first line; the function recurses for
 /// blockquote bodies so nested constructs are handled too.
-fn transform_export_events<'a>(parser: impl Iterator<Item = Event<'a>>) -> Vec<Event<'a>> {
+fn transform_export_events<'a>(
+    parser: impl Iterator<Item = Event<'a>>,
+    font_families: helpers::GeneratedPreviewFontFamilies<'_>,
+) -> Vec<Event<'a>> {
     let mut events: Vec<Event<'a>> = Vec::new();
     let mut pending_code_block: Option<(CodeBlockKind<'a>, Vec<Event<'a>>, String)> = None;
     let mut pending_blockquote: Option<(usize, Option<BlockQuoteKind>, Vec<Event<'a>>)> = None;
@@ -745,17 +767,18 @@ fn transform_export_events<'a>(parser: impl Iterator<Item = Event<'a>>) -> Vec<E
                     pending_blockquote = Some((depth + 1, kind, buffer));
                 }
                 Event::End(TagEnd::BlockQuote(_)) if depth == 1 => {
-                    if let Some(callout_html) = try_render_callout(&buffer) {
+                    if let Some(callout_html) = try_render_callout(&buffer, font_families) {
                         events.push(Event::Html(CowStr::Boxed(callout_html.into_boxed_str())));
                     } else if let Some(alert_kind) = kind {
                         // A GitHub-style alert (`> [!KIND]` on its own line):
                         // pulldown already parsed the kind and stripped the
                         // marker, so render the buffered body as a callout.
-                        let callout_html = build_callout_html(alert_kind, "", buffer);
+                        let callout_html =
+                            build_callout_html(alert_kind, "", buffer, font_families);
                         events.push(Event::Html(CowStr::Boxed(callout_html.into_boxed_str())));
                     } else {
                         events.push(Event::Start(Tag::BlockQuote(kind)));
-                        events.extend(transform_export_events(buffer.into_iter()));
+                        events.extend(transform_export_events(buffer.into_iter(), font_families));
                         events.push(Event::End(TagEnd::BlockQuote(kind)));
                     }
                 }
@@ -778,7 +801,9 @@ fn transform_export_events<'a>(parser: impl Iterator<Item = Event<'a>>) -> Vec<E
             let is_end = matches!(event, Event::End(TagEnd::CodeBlock));
             buffered.push(event);
             if is_end {
-                if let Some(preview_html) = export_code_block_preview_html(&kind, &source) {
+                if let Some(preview_html) =
+                    export_code_block_preview_html(&kind, &source, font_families)
+                {
                     events.push(Event::Html(CowStr::Boxed(preview_html.into_boxed_str())));
                 } else if let Some(highlighted) = highlight_code_block_html(&kind, &source) {
                     events.push(Event::Html(CowStr::Boxed(highlighted.into_boxed_str())));
@@ -864,14 +889,22 @@ fn transform_export_events<'a>(parser: impl Iterator<Item = Event<'a>>) -> Vec<E
     }
     if let Some((_depth, kind, buffer)) = pending_blockquote.take() {
         events.push(Event::Start(Tag::BlockQuote(kind)));
-        events.extend(transform_export_events(buffer.into_iter()));
+        events.extend(transform_export_events(buffer.into_iter(), font_families));
         events.push(Event::End(TagEnd::BlockQuote(kind)));
     }
 
     events
 }
 
+#[cfg(test)]
 fn render_markdown_for_export(markdown: &str) -> String {
+    render_markdown_for_export_with_font_families(markdown, export_preview_font_families())
+}
+
+fn render_markdown_for_export_with_font_families(
+    markdown: &str,
+    font_families: helpers::GeneratedPreviewFontFamilies<'_>,
+) -> String {
     // Disable pulldown's inline extensions that overlap the editor's custom
     // delimiters. Subscript/strikethrough both use `~` and, with both enabled,
     // pulldown fragments `~x~` into separate text events without forming a
@@ -897,7 +930,10 @@ fn render_markdown_for_export(markdown: &str) -> String {
     .into_offset_iter()
     .map(|(event, range)| inline_source.restore_event(event, range));
     let mut html = String::new();
-    push_html(&mut html, transform_export_events(parser).into_iter());
+    push_html(
+        &mut html,
+        transform_export_events(parser, font_families).into_iter(),
+    );
     html
 }
 
@@ -1001,13 +1037,30 @@ fn markdown_with_explicit_table_boundaries(markdown: &str) -> std::borrow::Cow<'
     }
 }
 
+#[cfg(test)]
 fn build_html_document(
     title: &str,
     markdown: &str,
     source_file_path: Option<&Path>,
     layout: ExportLayout,
 ) -> String {
-    let html = render_markdown_for_export(markdown);
+    build_html_document_with_font_families(
+        title,
+        markdown,
+        source_file_path,
+        layout,
+        export_preview_font_families(),
+    )
+}
+
+fn build_html_document_with_font_families(
+    title: &str,
+    markdown: &str,
+    source_file_path: Option<&Path>,
+    layout: ExportLayout,
+    font_families: helpers::GeneratedPreviewFontFamilies<'_>,
+) -> String {
+    let html = render_markdown_for_export_with_font_families(markdown, font_families);
 
     let escaped_title = html_escape(title);
     let base_href = html_base_href(source_file_path)
@@ -3871,11 +3924,21 @@ impl EditorView {
         #[cfg(not(target_os = "macos"))]
         let ui_language = self.ui_language;
         let layout = ExportLayout::from_settings(&self.app_settings);
+        let preview_font_families = helpers::GeneratedPreviewFontFamilies {
+            monospace: self.styles.editor.editor_monospace_font_family,
+            body_cjk: self.styles.editor.editor_body_cjk_font_family,
+        };
         let immediate_bytes = match format {
             ExportFormat::Markdown => Some(text.as_bytes().to_vec()),
             ExportFormat::Html => Some(
-                build_html_document(&title, &text, source_file_path.as_deref(), layout)
-                    .into_bytes(),
+                build_html_document_with_font_families(
+                    &title,
+                    &text,
+                    source_file_path.as_deref(),
+                    layout,
+                    preview_font_families,
+                )
+                .into_bytes(),
             ),
             ExportFormat::Pdf | ExportFormat::Png => None,
         };
@@ -3915,8 +3978,13 @@ impl EditorView {
             } else {
                 #[cfg(target_os = "macos")]
                 let export_result = {
-                    let html =
-                        build_html_document(&title, &text, source_file_path.as_deref(), layout);
+                    let html = build_html_document_with_font_families(
+                        &title,
+                        &text,
+                        source_file_path.as_deref(),
+                        layout,
+                        preview_font_families,
+                    );
                     match format {
                         ExportFormat::Png => {
                             build_png_document_from_html_macos(
@@ -4641,6 +4709,72 @@ mod tests {
         for scale in [1.0, 1.5, 2.0] {
             assert_eq!(layout.png_snapshot_width_pt(scale) * scale, 1604.0);
         }
+    }
+
+    #[test]
+    fn export_mermaid_uses_ondine_in_svg_html_and_nested_callouts() {
+        let source = "flowchart LR\n A[Start] --> B[Finish]";
+        let svg =
+            super::render_export_preview_svg(crate::markdown::BlockPreviewKind::Mermaid, source);
+        let preview = crate::editor::helpers::build_generated_block_preview_svg(
+            crate::markdown::BlockPreviewKind::Mermaid,
+            source,
+            &crate::theme::ThemeKind::PaperWhite.build(),
+            super::export_preview_font_families(),
+        );
+        assert_eq!(svg, preview, "export must use the same renderer as preview");
+        assert!(svg.contains("class=\"ondine ondine-flowchart\""));
+        assert!(svg.contains("--ondine-bg:"));
+        assert!(svg.contains("--ondine-fg:"));
+        crate::editor::helpers::load_generated_preview_image_from_svg(
+            &svg,
+            crate::markdown::BlockPreviewKind::Mermaid,
+        )
+        .expect("Ondine SVG should rasterize");
+
+        let fenced = format!("```mermaid\n{source}\n```\n");
+        for (prefix, quote) in [
+            ("", ""),
+            ("", "> "),
+            ("> [!NOTE]\n", "> "),
+            ("> [!TIP] Custom title\n", "> "),
+            ("> > [!NOTE]\n", "> > "),
+        ] {
+            let markdown = format!(
+                "{prefix}{}",
+                fenced
+                    .lines()
+                    .map(|line| format!("{quote}{line}\n"))
+                    .collect::<String>()
+            );
+            let html = super::build_html_document(
+                "Diagram",
+                &markdown,
+                None,
+                super::ExportLayout::from_settings(&super::AppSettings::default()),
+            );
+            assert!(
+                html.contains(&svg),
+                "Ondine SVG not propagated through {markdown:?}"
+            );
+            assert_eq!(
+                html.matches("class=\"export-preview export-preview-mermaid\"")
+                    .count(),
+                1
+            );
+        }
+
+        let html = super::build_html_document_with_font_families(
+            "Diagram",
+            &fenced,
+            None,
+            super::ExportLayout::from_settings(&super::AppSettings::default()),
+            crate::editor::helpers::GeneratedPreviewFontFamilies {
+                monospace: "Moeka Test Code",
+                body_cjk: "Moeka Test CJK",
+            },
+        );
+        assert!(html.contains("text,tspan{font-family:'Moeka Test Code'"));
     }
 
     #[test]

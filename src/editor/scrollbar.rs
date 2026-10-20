@@ -5,7 +5,36 @@ use gpui::{
 
 use crate::style::{EditorStyles, Styles};
 
-use super::EditorView;
+use super::{EditorScrollbarDragState, EditorView};
+
+impl EditorScrollbarDragState {
+    fn scroll_offset(&self, track_travel: f32, max_scroll: f32) -> f32 {
+        if track_travel <= 0.0 || max_scroll <= 0.0 {
+            return 0.0;
+        }
+        // Retain the pointer's original grab point in track coordinates, but
+        // map it through the CURRENT range. Async previews can change both the
+        // thumb size and the range even while the pointer is stationary.
+        let thumb_top = self.start_thumb_top + self.position_y - self.start_position_y;
+        (thumb_top / track_travel).clamp(0.0, 1.0) * max_scroll
+    }
+}
+
+impl EditorView {
+    pub(super) fn refresh_editor_scrollbar_drag_after_layout(&mut self) -> bool {
+        let Some(drag) = self.editor_scrollbar_drag else {
+            return false;
+        };
+        let track_travel = self
+            .editor_scrollbar_thumb_geometry()
+            .map(|(_, height)| (self.editor_scrollbar_track_height() - height).max(0.0))
+            .unwrap_or(0.0);
+        let target = drag.scroll_offset(track_travel, self.editor_scrollbar_max_scroll());
+        let changed = (target - self.scroll_offset).abs() > 0.5;
+        self.scroll_offset = target;
+        changed
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum PanelScrollbarKind {
@@ -812,6 +841,37 @@ mod tests {
         PanelScrollbarDragState, PanelScrollbarKind, PanelScrollbarState, VerticalScrollbarMetrics,
         panel_scrollbar_thumb_color,
     };
+
+    #[test]
+    fn editor_scrollbar_drag_tracks_current_range_during_async_preview_reflow() {
+        let drag = super::EditorScrollbarDragState {
+            start_position_y: 320.0,
+            start_thumb_top: 200.0,
+            position_y: 320.0,
+        };
+        // Neither the pointer nor the desired thumb top moves while previews
+        // complete. The same drag must use each new range, not mouse-down's.
+        for (travel, max_scroll) in [(400.0, 1_000.0), (450.0, 4_000.0), (300.0, 600.0)] {
+            let offset = drag.scroll_offset(travel, max_scroll);
+            assert!((offset / max_scroll * travel - 200.0).abs() < 0.001);
+            assert_eq!(drag.scroll_offset(travel, max_scroll), offset);
+        }
+    }
+
+    #[test]
+    fn editor_scrollbar_drag_reaches_new_bottom_and_clamps_after_content_shrinks() {
+        let mut drag = super::EditorScrollbarDragState {
+            start_position_y: 320.0,
+            start_thumb_top: 200.0,
+            position_y: 570.0,
+        };
+        assert_eq!(drag.scroll_offset(450.0, 4_000.0), 4_000.0);
+        assert_eq!(drag.scroll_offset(300.0, 600.0), 600.0);
+        assert_eq!(drag.scroll_offset(0.0, 600.0), 0.0);
+        assert_eq!(drag.scroll_offset(450.0, 0.0), 0.0);
+        drag.position_y = 0.0;
+        assert_eq!(drag.scroll_offset(450.0, 4_000.0), 0.0);
+    }
 
     fn drag_state() -> PanelScrollbarDragState {
         PanelScrollbarDragState {

@@ -6,7 +6,8 @@ use gpui::{
 };
 
 use super::search::{
-    SEARCH_CASE_ICON_SVG_PATH, SEARCH_CLOSE_ICON_SVG_PATH, SEARCH_ICON_SVG_PATH,
+    SEARCH_CASE_ICON_SVG_PATH, SEARCH_CLOSE_ICON_SVG_PATH, SEARCH_COLLAPSE_ALL_ICON_SVG_PATH,
+    SEARCH_EXPAND_ALL_ICON_SVG_PATH, SEARCH_FILTER_ICON_SVG_PATH, SEARCH_ICON_SVG_PATH,
     SEARCH_REGEX_ICON_SVG_PATH, SEARCH_WHOLE_WORD_ICON_SVG_PATH, find_search_matches,
 };
 use super::*;
@@ -66,6 +67,65 @@ fn sort_search_results(results: &mut [WorkspaceSearchResult], mode: SidebarSortM
         };
         order.then_with(|| compare_workspace_search_paths(mode, &left.path, &right.path))
     });
+}
+
+/// Include/exclude regexes matched against `/`-separated paths relative to
+/// the workspace root. Exclusion prunes whole directories; inclusion only
+/// decides which files are read.
+#[derive(Clone, Default)]
+pub(crate) struct SearchPathFilter {
+    include: Option<regex::Regex>,
+    exclude: Option<regex::Regex>,
+}
+
+impl SearchPathFilter {
+    pub(crate) fn new(include: &str, exclude: &str) -> Result<Self, regex::Error> {
+        let compile = |pattern: &str| {
+            let pattern = pattern.trim();
+            (!pattern.is_empty())
+                .then(|| regex::Regex::new(pattern))
+                .transpose()
+        };
+        Ok(Self {
+            include: compile(include)?,
+            exclude: compile(exclude)?,
+        })
+    }
+
+    fn relative_path(root: &std::path::Path, path: &std::path::Path) -> Option<String> {
+        let relative = path.strip_prefix(root).ok()?;
+        let parts = relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>();
+        (!parts.is_empty()).then(|| parts.join("/"))
+    }
+
+    fn excludes_dir(&self, root: &std::path::Path, dir: &std::path::Path) -> bool {
+        let Some(exclude) = &self.exclude else {
+            return false;
+        };
+        Self::relative_path(root, dir).is_some_and(|relative| exclude.is_match(&relative))
+    }
+
+    /// Index candidates arrive as bare file paths, so every ancestor is
+    /// checked here too to honour directory exclusions a walk would prune.
+    fn allows_file(&self, root: &std::path::Path, file: &std::path::Path) -> bool {
+        let Some(relative) = Self::relative_path(root, file) else {
+            return true;
+        };
+        if let Some(exclude) = &self.exclude {
+            let ancestor_excluded = relative
+                .match_indices('/')
+                .any(|(index, _)| exclude.is_match(&relative[..index]));
+            if ancestor_excluded || exclude.is_match(&relative) {
+                return false;
+            }
+        }
+        self.include
+            .as_ref()
+            .is_none_or(|include| include.is_match(&relative))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,10 +311,54 @@ impl EditorView {
         self.workspace_search_highlight_current_index = None;
     }
 
+    pub(crate) fn workspace_search_file_collapsed(&self, path: &std::path::Path) -> bool {
+        self.workspace_search_collapse_all != self.workspace_search_collapse_toggled.contains(path)
+    }
+
+    /// Match rows a result contributes to the list, which keyboard
+    /// navigation and the row budget both follow.
+    fn workspace_search_visible_matches<'a>(
+        &self,
+        result: &'a WorkspaceSearchResult,
+    ) -> &'a [WorkspaceSearchMatch] {
+        if self.workspace_search_file_collapsed(&result.path) {
+            &[]
+        } else {
+            &result.matches[..result.matches.len().min(50)]
+        }
+    }
+
+    fn workspace_search_resume_visible(&self, result: &WorkspaceSearchResult) -> bool {
+        result.resume.is_some() && !self.workspace_search_file_collapsed(&result.path)
+    }
+
+    fn workspace_search_any_expanded(&self) -> bool {
+        self.workspace_search_results
+            .iter()
+            .any(|result| !self.workspace_search_file_collapsed(&result.path))
+    }
+
+    fn toggle_workspace_search_file_collapsed(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !self.workspace_search_collapse_toggled.remove(&path) {
+            self.workspace_search_collapse_toggled.insert(path);
+        }
+        // Match indices shift once rows fold, so a stale selection would
+        // point at a different line.
+        self.workspace_search_selected_match = None;
+        cx.notify();
+    }
+
+    fn set_workspace_search_all_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        self.workspace_search_collapse_all = collapsed;
+        self.workspace_search_collapse_toggled.clear();
+        self.workspace_search_selected_match = None;
+        cx.notify();
+    }
+
     fn workspace_search_total_match_count(&self) -> usize {
         self.workspace_search_results
             .iter()
-            .map(|result| result.matches.iter().take(50).count())
+            .map(|result| self.workspace_search_visible_matches(result).len())
             .sum()
     }
 
@@ -264,7 +368,7 @@ impl EditorView {
     ) -> Option<(PathBuf, WorkspaceSearchMatch)> {
         let mut current_index = 0usize;
         for result in &self.workspace_search_results {
-            for search_match in result.matches.iter().take(50) {
+            for search_match in self.workspace_search_visible_matches(result) {
                 if current_index == target_index {
                     return Some((result.path.clone(), search_match.clone()));
                 }
@@ -279,14 +383,14 @@ impl EditorView {
         let mut child_index = 2usize;
         for result in &self.workspace_search_results {
             child_index += 1;
-            for _ in result.matches.iter().take(50) {
+            for _ in self.workspace_search_visible_matches(result) {
                 if current_index == target_index {
                     return Some(child_index);
                 }
                 current_index += 1;
                 child_index += 1;
             }
-            child_index += usize::from(result.resume.is_some());
+            child_index += usize::from(self.workspace_search_resume_visible(result));
         }
         None
     }
@@ -467,7 +571,10 @@ impl EditorView {
     fn workspace_search_total_row_count(&self) -> usize {
         self.workspace_search_results
             .iter()
-            .map(|result| 1 + result.matches.len().min(50) + usize::from(result.resume.is_some()))
+            .map(|result| {
+                1 + self.workspace_search_visible_matches(result).len()
+                    + usize::from(self.workspace_search_resume_visible(result))
+            })
             .sum()
     }
 
@@ -509,10 +616,19 @@ impl EditorView {
         }
     }
 
+    pub(crate) fn workspace_search_path_filter(&self) -> Result<SearchPathFilter, regex::Error> {
+        SearchPathFilter::new(
+            &self.workspace_search_include,
+            &self.workspace_search_exclude,
+        )
+    }
+
     pub(crate) fn run_workspace_search(&mut self, cx: &mut Context<Self>) {
         let query = self.workspace_search_query.trim().to_string();
         self.clear_workspace_search_preview_state();
-        if query.is_empty() {
+        self.workspace_search_collapse_toggled.clear();
+        self.workspace_search_filter_error = self.workspace_search_path_filter().is_err();
+        if query.is_empty() || self.workspace_search_filter_error {
             self.workspace_search_results.clear();
             self.workspace_search_staging_results.clear();
             self.workspace_search_task = None;
@@ -727,6 +843,7 @@ impl EditorView {
         let case_sensitive = self.workspace_search_case_sensitive;
         let whole_word = self.workspace_search_whole_word;
         let use_regex = self.workspace_search_use_regex;
+        let path_filter = self.workspace_search_path_filter().unwrap_or_default();
         let root = self.sidebar_root.clone();
         if file_watch::operation_suppressed("Search workspace", &root) {
             self.workspace_search_has_more = false;
@@ -747,6 +864,7 @@ impl EditorView {
                         case_sensitive,
                         whole_word,
                         use_regex,
+                        &path_filter,
                         super::list_viewport::SEARCH_LIST_POLICY.batch_size,
                     )
                 })
@@ -797,6 +915,89 @@ impl EditorView {
             .ok();
         });
         self.workspace_search_task = Some(task);
+    }
+
+    fn new_workspace_search_filter_input(
+        &mut self,
+        include: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Entity<crate::text_input::TextInput> {
+        let styles = self.workspace_search_filter_text_input_styles();
+        let placeholder = crate::i18n::search_option_label(
+            self.ui_language,
+            if include {
+                "include_placeholder"
+            } else {
+                "exclude_placeholder"
+            },
+        );
+        let initial = if include {
+            self.workspace_search_include.clone()
+        } else {
+            self.workspace_search_exclude.clone()
+        };
+        let editor = cx.new(move |cx| {
+            let mut input = crate::text_input::TextInput::new(styles, placeholder, cx);
+            input.set_text(&initial, cx);
+            input
+        });
+        cx.subscribe(
+            &editor,
+            move |this, editor, event: &crate::text_input::TextInputEvent, cx| match event {
+                crate::text_input::TextInputEvent::Changed => {
+                    let text = editor.read(cx).text().to_string();
+                    if include {
+                        this.workspace_search_include = text;
+                    } else {
+                        this.workspace_search_exclude = text;
+                    }
+                    this.run_workspace_search(cx);
+                }
+                crate::text_input::TextInputEvent::Submit
+                | crate::text_input::TextInputEvent::SubmitBackward => {
+                    this.commit_workspace_search_selected_match(cx);
+                }
+                crate::text_input::TextInputEvent::Escape => {}
+                crate::text_input::TextInputEvent::MoveUp => {
+                    this.move_workspace_search_selection(-1, cx);
+                }
+                crate::text_input::TextInputEvent::MoveDown => {
+                    this.move_workspace_search_selection(1, cx);
+                }
+            },
+        )
+        .detach();
+        editor
+    }
+
+    fn toggle_workspace_search_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace_search_filters_visible = !self.workspace_search_filters_visible;
+        if self.workspace_search_filters_visible {
+            if self.workspace_search_include_editor.is_none() {
+                self.workspace_search_include_editor =
+                    Some(self.new_workspace_search_filter_input(true, cx));
+            }
+            if self.workspace_search_exclude_editor.is_none() {
+                self.workspace_search_exclude_editor =
+                    Some(self.new_workspace_search_filter_input(false, cx));
+            }
+            if let Some(editor) = &self.workspace_search_include_editor {
+                editor.focus_handle(cx).focus(window);
+            }
+        } else if let Some(editor) = &self.workspace_search_editor {
+            editor.focus_handle(cx).focus(window);
+        }
+        cx.notify();
+    }
+
+    /// Include/exclude fields carry no leading search icon.
+    pub(crate) fn workspace_search_filter_text_input_styles(
+        &self,
+    ) -> crate::style::TextInputStyles {
+        let mut styles = self.workspace_search_text_input_styles();
+        styles.text_input_padding_left_px =
+            self.scaled(self.styles.text_input.text_input_padding_right_px);
+        styles
     }
 
     pub(crate) fn workspace_search_text_input_styles(&self) -> crate::style::TextInputStyles {
@@ -853,7 +1054,7 @@ impl EditorView {
         let input_height = self.scaled(workspace_styles.ws_search_input_height_px);
         let button_size = self.scaled(workspace_styles.ws_search_btn_size_px);
         let button_icon_size = self.scaled(workspace_styles.ws_search_btn_icon_size_px);
-        let button_gap = self.scaled(workspace_styles.ws_search_input_icon_gap_px);
+        let button_gap = self.scaled(1.0);
         let input_gap = self.scaled(workspace_styles.ws_search_input_gap_px);
         let icon_size = self.scaled(workspace_styles.ws_search_input_icon_size_px);
         let chrome_padding_x = ((input_height - button_size).max(0.0) / 2.0).round();
@@ -879,6 +1080,33 @@ impl EditorView {
             workspace_styles.ws_search_input_hover_bg
         };
         let result_selected_bg = self.styles.sidebar.sidebar_item_selected_bg;
+        let filters_active = self.workspace_search_filters_visible
+            || !self.workspace_search_include.trim().is_empty()
+            || !self.workspace_search_exclude.trim().is_empty();
+
+        let filter_field = |editor: Option<gpui::Entity<crate::text_input::TextInput>>| {
+            div()
+                .w_full()
+                .h(px(input_height))
+                .bg(workspace_styles.ws_search_input_bg)
+                .hover(move |style| style.bg(workspace_styles.ws_search_input_hover_bg))
+                .border(px(search_border_width))
+                .border_color(search_border_color)
+                .rounded(px(self.scaled(workspace_styles.ws_search_input_radius_px)))
+                .when_some(editor, |this, editor| this.child(editor))
+        };
+        let filters = self.workspace_search_filters_visible.then(|| {
+            div()
+                .w_full()
+                .px(px(self.scaled(workspace_styles.ws_search_padding_px)))
+                .pt(px(self.scaled(2.0)))
+                .pb(px(self.scaled(2.0)))
+                .flex()
+                .flex_col()
+                .gap(px(self.scaled(4.0)))
+                .child(filter_field(self.workspace_search_include_editor.clone()))
+                .child(filter_field(self.workspace_search_exclude_editor.clone()))
+        });
 
         let input = div()
             .w_full()
@@ -1059,6 +1287,43 @@ impl EditorView {
                             .child(
                                 self.with_search_tooltip(
                                     div()
+                                        .id("workspace-search-filters-btn")
+                                        .w(px(button_size))
+                                        .h(px(button_size))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(button_radius))
+                                        .cursor(CursorStyle::Arrow)
+                                        .when(filters_active, |this: gpui::Stateful<gpui::Div>| {
+                                            this.bg(button_active_bg)
+                                        })
+                                        .hover(move |style| style.bg(button_hover_bg))
+                                        .child(
+                                            svg()
+                                                .path(SEARCH_FILTER_ICON_SVG_PATH)
+                                                .size(px(button_icon_size))
+                                                .text_color(if filters_active {
+                                                    button_active_icon_color
+                                                } else {
+                                                    button_icon_color
+                                                }),
+                                        )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.toggle_workspace_search_filters(window, cx);
+                                            }),
+                                        ),
+                                    "filters",
+                                    None,
+                                    cx,
+                                ),
+                            )
+                            .child(
+                                self.with_search_tooltip(
+                                    div()
                                         .id("workspace-search-close-btn")
                                         .w(px(button_size))
                                         .h(px(button_size))
@@ -1097,20 +1362,29 @@ impl EditorView {
             .sum();
         let file_count = self.workspace_search_results.len();
         let show_sort = !trimmed_query.is_empty() && file_count > 0;
-        let status_text = match workspace_search_status(
-            trimmed_query.is_empty(),
-            self.workspace_search_task.is_some(),
-            file_count,
-        ) {
-            WorkspaceSearchStatus::Empty => String::new(),
-            WorkspaceSearchStatus::Searching => self.t(crate::i18n::TextKey::Searching).to_string(),
-            WorkspaceSearchStatus::NoResults => {
-                self.t(crate::i18n::TextKey::SearchNoResults).to_string()
-            }
-            WorkspaceSearchStatus::Summary => {
-                crate::i18n::workspace_search_summary(self.ui_language, total_matches, file_count)
+        let status_text = if self.workspace_search_filter_error {
+            crate::i18n::search_option_label(self.ui_language, "invalid_regex").to_string()
+        } else {
+            match workspace_search_status(
+                trimmed_query.is_empty(),
+                self.workspace_search_task.is_some(),
+                file_count,
+            ) {
+                WorkspaceSearchStatus::Empty => String::new(),
+                WorkspaceSearchStatus::Searching => {
+                    self.t(crate::i18n::TextKey::Searching).to_string()
+                }
+                WorkspaceSearchStatus::NoResults => {
+                    self.t(crate::i18n::TextKey::SearchNoResults).to_string()
+                }
+                WorkspaceSearchStatus::Summary => crate::i18n::workspace_search_summary(
+                    self.ui_language,
+                    total_matches,
+                    file_count,
+                ),
             }
         };
+        let any_expanded = self.workspace_search_any_expanded();
         let status = div()
             .w_full()
             .h(px(self.scaled(workspace_styles.ws_search_summary_height_px)))
@@ -1135,6 +1409,28 @@ impl EditorView {
             )
             .when(show_sort, |this| {
                 this.child(self.render_sidebar_header_action_button(
+                    "workspace-search-collapse-all",
+                    if any_expanded {
+                        SEARCH_COLLAPSE_ALL_ICON_SVG_PATH
+                    } else {
+                        SEARCH_EXPAND_ALL_ICON_SVG_PATH
+                    },
+                    crate::i18n::search_option_label(
+                        self.ui_language,
+                        if any_expanded {
+                            "collapse_all"
+                        } else {
+                            "expand_all"
+                        },
+                    ),
+                    None,
+                    cx,
+                    |this, _event, _window, cx| {
+                        let collapse = this.workspace_search_any_expanded();
+                        this.set_workspace_search_all_collapsed(collapse, cx);
+                    },
+                ))
+                .child(self.render_sidebar_header_action_button(
                     "workspace-search-sort",
                     FILETREE_SORT_SVG_PATH,
                     crate::i18n::sidebar_action_label(self.ui_language, "sort"),
@@ -1151,7 +1447,7 @@ impl EditorView {
         if !trimmed_query.is_empty() && !self.workspace_search_results.is_empty() {
             let mut remaining_rows = self.workspace_search_render_limit;
             let mut match_index = 0usize;
-            'files: for result in &self.workspace_search_results {
+            'files: for (result_index, result) in self.workspace_search_results.iter().enumerate() {
                 if remaining_rows == 0 {
                     break;
                 }
@@ -1175,6 +1471,14 @@ impl EditorView {
                     .map(|parent| parent.to_string_lossy().into_owned())
                     .filter(|parent| !parent.is_empty() && parent != ".");
                 let match_count = result.matches.len();
+                let is_collapsed = self.workspace_search_file_collapsed(&result.path);
+                let is_last_result = result_index + 1 == self.workspace_search_results.len();
+                let show_bottom_border = !is_collapsed || is_last_result;
+                let header_path = result.path.clone();
+                let file_header_hover_bg = workspace_styles.ws_search_match_hover_bg;
+                let file_header_border_width =
+                    px(workspace_styles.ws_search_file_header_border_width_px);
+                let file_header_border_color = workspace_styles.ws_search_file_header_border_color;
 
                 result_children.push(
                     div()
@@ -1187,9 +1491,36 @@ impl EditorView {
                         .items_center()
                         .gap(px(self.scaled(4.0)))
                         .bg(workspace_styles.ws_search_file_header_bg)
-                        .border_t(px(workspace_styles.ws_search_file_header_border_width_px))
-                        .border_b(px(workspace_styles.ws_search_file_header_border_width_px))
-                        .border_color(workspace_styles.ws_search_file_header_border_color)
+                        .relative()
+                        .border_t(file_header_border_width)
+                        .border_b(file_header_border_width)
+                        .border_color(gpui::transparent_black())
+                        .cursor(CursorStyle::Arrow)
+                        .hover(move |style| style.bg(file_header_hover_bg))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_workspace_search_file_collapsed(
+                                    header_path.clone(),
+                                    cx,
+                                );
+                            }),
+                        )
+                        .child(
+                            svg()
+                                .path(FILETREE_FOLD_SVG_PATH)
+                                .flex_none()
+                                .size(px(
+                                    self.scaled(self.styles.sidebar.sidebar_item_fold_icon_size_px)
+                                ))
+                                .text_color(self.styles.sidebar.sidebar_item_fold_icon_color)
+                                .when(!is_collapsed, |icon| {
+                                    icon.with_transformation(gpui::Transformation::rotate(
+                                        gpui::radians(std::f32::consts::FRAC_PI_2),
+                                    ))
+                                }),
+                        )
                         .child(
                             div()
                                 .flex_1()
@@ -1235,6 +1566,26 @@ impl EditorView {
                                 .opacity(0.4)
                                 .child(format!("{match_count}")),
                         )
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(file_header_border_width)
+                                .bg(file_header_border_color),
+                        )
+                        .when(show_bottom_border, |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .bottom_0()
+                                    .left_0()
+                                    .right_0()
+                                    .h(file_header_border_width)
+                                    .bg(file_header_border_color),
+                            )
+                        })
                         .into_any_element(),
                 );
                 remaining_rows = remaining_rows.saturating_sub(1);
@@ -1245,7 +1596,7 @@ impl EditorView {
                 let hover_bg = workspace_styles.ws_search_match_hover_bg;
                 let hl_bg = workspace_styles.ws_search_match_highlight_bg;
                 let hl_color = workspace_styles.ws_search_match_highlight_text_color;
-                for search_match in result.matches.iter().take(50) {
+                for search_match in self.workspace_search_visible_matches(result) {
                     if remaining_rows == 0 {
                         break 'files;
                     }
@@ -1351,7 +1702,7 @@ impl EditorView {
                     remaining_rows = remaining_rows.saturating_sub(1);
                 }
 
-                if let Some(resume) = result.resume {
+                if let Some(resume) = result.resume.filter(|_| !is_collapsed) {
                     if remaining_rows == 0 {
                         break 'files;
                     }
@@ -1406,6 +1757,7 @@ impl EditorView {
             .flex()
             .flex_col()
             .child(input)
+            .children(filters)
             .child(status)
             .child(
                 div()
@@ -1693,6 +2045,7 @@ fn search_directory_batch(
     case_sensitive: bool,
     whole_word: bool,
     use_regex: bool,
+    path_filter: &SearchPathFilter,
     row_budget: usize,
 ) -> std::io::Result<WorkspaceSearchBatch> {
     let mut results = Vec::new();
@@ -1728,7 +2081,14 @@ fn search_directory_batch(
             continue;
         }
         let is_dir = metadata.is_dir();
-        if path != workspace_root && should_skip_path(&path, is_dir) {
+        if path != workspace_root
+            && (should_skip_path(&path, is_dir)
+                || if is_dir {
+                    path_filter.excludes_dir(workspace_root, &path)
+                } else {
+                    !path_filter.allows_file(workspace_root, &path)
+                })
+        {
             continue;
         }
         if is_dir {
@@ -1799,7 +2159,7 @@ fn search_directory_batch(
 mod tests {
     use std::{fs, time::SystemTime};
 
-    use super::search_directory_batch;
+    use super::{SearchPathFilter, search_directory_batch};
     use super::{WORKSPACE_SEARCH_FILE_LINE_LIMIT, search_file_window};
 
     #[test]
@@ -1847,6 +2207,7 @@ mod tests {
             true,
             false,
             false,
+            &SearchPathFilter::default(),
             100,
         )
         .unwrap();
@@ -1867,6 +2228,7 @@ mod tests {
             true,
             false,
             false,
+            &SearchPathFilter::default(),
             100,
         )
         .unwrap();
@@ -1879,8 +2241,17 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("unavailable");
         assert!(
-            search_directory_batch(&root, vec![root.clone()], "needle", true, false, false, 100)
-                .is_err()
+            search_directory_batch(
+                &root,
+                vec![root.clone()],
+                "needle",
+                true,
+                false,
+                false,
+                &SearchPathFilter::default(),
+                100
+            )
+            .is_err()
         );
     }
 
@@ -1903,6 +2274,7 @@ mod tests {
                 true,
                 false,
                 false,
+                &SearchPathFilter::default(),
                 100,
             )
             .unwrap();
@@ -1928,6 +2300,7 @@ mod tests {
             true,
             false,
             false,
+            &SearchPathFilter::default(),
             100,
         )
         .unwrap();
@@ -1949,9 +2322,17 @@ mod tests {
         fs::write(root.join("a.md"), "needle").unwrap();
         fs::write(root.join("b.md"), "needle").unwrap();
 
-        let first =
-            search_directory_batch(&root, vec![root.clone()], "needle", true, false, false, 1)
-                .unwrap();
+        let first = search_directory_batch(
+            &root,
+            vec![root.clone()],
+            "needle",
+            true,
+            false,
+            false,
+            &SearchPathFilter::default(),
+            1,
+        )
+        .unwrap();
         assert_eq!(first.results.len(), 1);
         assert!(!first.pending_paths.is_empty());
 
@@ -1962,11 +2343,69 @@ mod tests {
             true,
             false,
             false,
+            &SearchPathFilter::default(),
             100,
         )
         .unwrap();
         assert_eq!(second.results.len(), 1);
         assert!(second.pending_paths.is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn path_filters_prune_excluded_directories_and_require_included_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        for path in ["docs/a.md", "docs/drafts/b.md", "notes/c.md", "notes/d.txt"] {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "needle").unwrap();
+        }
+        let filter = SearchPathFilter::new(r"\.md$", "^docs/drafts$").unwrap();
+        let batch = search_directory_batch(
+            root,
+            vec![root.to_path_buf()],
+            "needle",
+            true,
+            false,
+            false,
+            &filter,
+            100,
+        )
+        .unwrap();
+        let mut found = batch
+            .results
+            .iter()
+            .map(|result| result.path.strip_prefix(root).unwrap().to_path_buf())
+            .collect::<Vec<_>>();
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                std::path::PathBuf::from("docs/a.md"),
+                std::path::PathBuf::from("notes/c.md")
+            ]
+        );
+
+        // Index candidates skip the walk, so ancestors must be checked too.
+        let candidate = search_directory_batch(
+            root,
+            vec![root.join("docs/drafts/b.md")],
+            "needle",
+            true,
+            false,
+            false,
+            &filter,
+            100,
+        )
+        .unwrap();
+        assert!(candidate.results.is_empty());
+    }
+
+    #[test]
+    fn invalid_path_filter_regex_is_reported() {
+        assert!(SearchPathFilter::new("(", "").is_err());
+        assert!(SearchPathFilter::new("", "[").is_err());
+        assert!(SearchPathFilter::new("  ", "").is_ok());
     }
 }

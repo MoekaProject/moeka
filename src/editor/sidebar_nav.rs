@@ -62,9 +62,8 @@ impl EditorView {
             Some(path) => path,
             None => return,
         };
-        if self.sidebar_cached_path_is_dir(&path) == Some(true)
-            && self.expanded_dirs.contains(&path)
-        {
+        let is_expanded = self.expanded_dirs.contains(&path);
+        if self.sidebar_cached_path_is_dir(&path) == Some(true) && is_expanded {
             self.expanded_dirs.remove(&path);
             self.invalidate_sidebar_flattened_items();
             cx.notify();
@@ -89,7 +88,8 @@ impl EditorView {
             None => return,
         };
         if self.sidebar_cached_path_is_dir(&path) == Some(true) {
-            if !self.expanded_dirs.contains(&path) {
+            let is_expanded = self.expanded_dirs.contains(&path);
+            if !is_expanded {
                 self.expanded_dirs.insert(path.clone());
                 if self.sidebar_error.is_some() {
                     self.schedule_sidebar_directory_refresh(path, cx);

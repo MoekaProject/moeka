@@ -272,7 +272,6 @@ mod tests {
             body_latin_font: "IBM Plex Sans".to_string(),
             body_cjk_font: crate::platform::fonts::CJK.to_string(),
             code_font: "JetBrains Mono".to_string(),
-            mermaid_theme: "auto".to_string(),
             font_size: 17.0,
             line_height: 1.7,
             letter_spacing: 0.5,
@@ -332,6 +331,24 @@ mod tests {
         assert_eq!(loaded, config);
         assert_eq!(loaded.settings.link_syntax, "wikilink");
         assert_eq!(loaded.settings.link_path_style, "shortest");
+    }
+
+    #[test]
+    fn removed_mermaid_settings_are_ignored_and_not_saved() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.yaml");
+        fs::write(
+            &path,
+            "settings:\n  mermaid_style: editorial\n  mermaid_theme: mermaid-dark\n  code_font: Menlo\n",
+        )
+        .unwrap();
+        let config = load_yaml_file::<SettingsFile>(&path).unwrap();
+        assert_eq!(config.settings.code_font, "Menlo");
+        save_yaml_file(&path, &config).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("mermaid_style"));
+        assert!(!saved.contains("mermaid_theme"));
+        assert_eq!(load_yaml_file::<SettingsFile>(&path).unwrap(), config);
     }
 
     #[test]

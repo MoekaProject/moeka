@@ -2620,7 +2620,7 @@ mod tests {
                 },
             ),
             (
-                5..1,
+                std::ops::Range { start: 5, end: 1 },
                 Cursor {
                     anchor: 11,
                     offset: 4,
@@ -2648,7 +2648,7 @@ mod tests {
 
     #[test]
     fn source_ime_resolves_primary_override_and_each_mark_before_normalizing() {
-        for override_range in [1..5, 5..1] {
+        for override_range in [1..5, std::ops::Range { start: 5, end: 1 }] {
             let mut buffer = Buffer::from_text("abcdefgh");
             let mut initial = ime_state(0..0, &[7..7]);
             initial.marked_range = Some(2..3);
@@ -2774,7 +2774,10 @@ mod tests {
     #[test]
     fn source_ime_duplicate_and_boundary_carets_preserve_primary_identity() {
         let mut buffer = Buffer::from_text("abcdef");
-        let initial = ime_state(4..1, &[4..4, 1..1, 5..5, 5..5]);
+        let initial = ime_state(
+            std::ops::Range { start: 4, end: 1 },
+            &[4..4, 1..1, 5..5, 5..5],
+        );
         let preedit = ime_replace(&mut buffer, &initial, None, "X", None, true);
         assert_eq!(buffer.text(), "aXeXf");
         assert_eq!(

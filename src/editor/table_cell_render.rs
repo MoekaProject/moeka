@@ -1809,7 +1809,7 @@ mod tests {
                 (info.cells[0].clone(), info.cell_ranges[0].clone())
             );
         }
-        for range in [3..4, 99..100, 5..2] {
+        for range in [3..4, 99..100, std::ops::Range { start: 5, end: 2 }] {
             let mut invalid = info.clone();
             invalid.cell_ranges[0] = range.clone();
             assert_eq!(

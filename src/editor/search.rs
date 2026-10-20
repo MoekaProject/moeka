@@ -8,6 +8,9 @@ pub(crate) const SEARCH_ICON_SVG_PATH: &str = "assets/icons/filetree/search.svg"
 pub(crate) const SEARCH_CASE_ICON_SVG_PATH: &str = "assets/icons/search/case_sensitive.svg";
 pub(crate) const SEARCH_WHOLE_WORD_ICON_SVG_PATH: &str = "assets/icons/search/whole_word.svg";
 pub(crate) const SEARCH_REGEX_ICON_SVG_PATH: &str = "assets/icons/search/regex.svg";
+pub(crate) const SEARCH_FILTER_ICON_SVG_PATH: &str = "assets/icons/search/filter.svg";
+pub(crate) const SEARCH_COLLAPSE_ALL_ICON_SVG_PATH: &str = "assets/icons/search/collapse-all.svg";
+pub(crate) const SEARCH_EXPAND_ALL_ICON_SVG_PATH: &str = "assets/icons/search/expand-all.svg";
 pub(crate) const SEARCH_CLOSE_ICON_SVG_PATH: &str = "assets/icons/filetree/close.svg";
 
 /// Buffers at or below this size are scanned in one go; the streaming path only

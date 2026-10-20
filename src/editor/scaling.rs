@@ -1463,7 +1463,9 @@ impl EditorView {
     }
 
     fn cursor_center_previews_pending(&self) -> bool {
-        if self.generated_preview_rerender_pending || self.generated_preview_rerender_task.is_some()
+        if self.generated_preview_rerender_pending
+            || self.generated_preview_rerender_task.is_some()
+            || self.mermaid_previews_in_flight()
         {
             return true;
         }
@@ -1477,6 +1479,7 @@ impl EditorView {
                             || !self
                                 .generated_preview_svg_cache
                                 .contains_key(&preview.cache_key)
+                            || self.mermaid_preview_needs_refresh(&preview.cache_key)
                     }) || decoration.inline_math_spans.iter().any(|range| {
                         self.buffer
                             .line_content(start + index)
@@ -2209,10 +2212,11 @@ impl EditorView {
         let previews_need_rendering = self.visible_generated_previews_need_rendering();
         let previews_in_flight = self.generated_preview_rerender_pending
             || self.generated_preview_rerender_task.is_some()
-            || self.document_mode_images_pending();
-        // Missing generated previews are synchronous work for the next frame,
-        // not async work whose completion can wake us. Keep that work bounded,
-        // and never count a capped/unfinished layout as settled.
+            || self.document_mode_images_pending()
+            || self.mermaid_previews_in_flight();
+        // Missing, unqueued previews need a bounded follow-up frame. Queued
+        // Mermaid work instead wakes layout on completion, without polling or
+        // spending the anchor's frame budget while the CPU job runs.
         if !anchor.confirm_painted_layout(
             target,
             self.scroll_offset,

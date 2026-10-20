@@ -34,6 +34,13 @@ Three concentrations matter when planning a change:
 
 At a high level, input changes the source buffer and cursor, editor orchestration updates or invalidates parse/layout caches, and render/prepaint/paint produce visible content and hit geometry. Later pointer and IME operations use that geometry to map back to source positions. Not every edit triggers a full parse or layout, so a change must account for both cached and rebuilt paths.
 
+## Mermaid preview pipeline
+
+- [helpers.rs](../src/editor/helpers.rs) delegates Mermaid source rendering to the Ondine compiler and applies the current editor theme to its SVG through Ondine's CSS custom properties. The SVG canvas remains transparent; the same generated SVG is used for editor previews and exports.
+- [mermaid_worker.rs](../src/editor/mermaid_worker.rs) owns the editor's async Mermaid build/raster queue: **one active job and at most eight queued jobs per window**, shared across panes. Its state stays on the root `EditorView`, never in the mirrored `PaneState`. Jobs snapshot source/rendering inputs and validate epoch, pane/tab, workspace/path and configuration before installation. Invalidating a running job drops its result, not its physical CPU slot; new work waits for its completion. Existing image/SVG/overlay caches and scroll compensation still belong to editor orchestration.
+
+See [Mermaid development invariants](development.md#mermaid-preview-pipeline) for renderer and worker verification details.
+
 ## Split panes: state-swap invariants
 
 Read [src/editor/pane.rs](../src/editor/pane.rs) before changing document state.

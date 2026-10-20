@@ -171,16 +171,26 @@ fn launch_paths_from_args() -> Vec<PathBuf> {
 /// Opens launch paths: directories are added as workspaces (the last one
 /// becomes active), files open in permanent tabs.
 fn open_launch_paths(editor: &Entity<EditorView>, paths: Vec<PathBuf>, cx: &mut App) {
-    open_launch_paths_with_policy(editor, paths, false, cx);
+    open_launch_paths_with_policy(editor, paths, false, true, cx);
 }
 
 fn open_launch_paths_with_policy(
     editor: &Entity<EditorView>,
     paths: Vec<PathBuf>,
     markdown_only: bool,
+    fresh_window: bool,
     cx: &mut App,
 ) {
-    editor.update(cx, |_, cx| {
+    editor.update(cx, |editor, cx| {
+        // A window launched just to open outside files should not greet the
+        // user with an unrelated workspace. This is decided before any I/O so
+        // the sidebar never flashes; opened directories re-show it anyway.
+        if fresh_window && !launch_paths_touch_workspace(&editor.sidebar_root, &paths) {
+            editor.sidebar_visible = false;
+            editor.sidebar_resizing = false;
+            editor.set_sidebar_width_immediately(0.0);
+            cx.notify();
+        }
         cx.spawn(async move |this, cx| {
             let mut dirs = Vec::new();
             let mut files = Vec::new();
@@ -224,6 +234,13 @@ fn open_launch_paths_with_policy(
         })
         .detach();
     });
+}
+
+fn launch_paths_touch_workspace(root: &std::path::Path, paths: &[PathBuf]) -> bool {
+    !root.as_os_str().is_empty()
+        && paths
+            .iter()
+            .any(|path| std::path::absolute(path).is_ok_and(|path| path.starts_with(root)))
 }
 
 #[cfg(target_os = "macos")]
@@ -481,8 +498,9 @@ fn main() {
             if let (Some(editor), Some(async_app)) = (editor, async_app) {
                 async_app
                     .spawn(async move |cx| {
-                        let _ =
-                            cx.update(|cx| open_launch_paths_with_policy(&editor, paths, true, cx));
+                        let _ = cx.update(|cx| {
+                            open_launch_paths_with_policy(&editor, paths, true, false, cx)
+                        });
                     })
                     .detach();
             } else {
@@ -928,7 +946,7 @@ fn main() {
             *editor_for_window.borrow_mut() = Some(view.clone());
             let pending_paths = std::mem::take(&mut *pending_paths_for_window.borrow_mut());
             if !pending_paths.is_empty() {
-                open_launch_paths_with_policy(&view, pending_paths, true, cx);
+                open_launch_paths_with_policy(&view, pending_paths, true, true, cx);
             }
         }
     });

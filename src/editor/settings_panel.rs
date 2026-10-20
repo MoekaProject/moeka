@@ -20,9 +20,9 @@ use super::app_settings::ThemeMode;
 use super::helpers;
 use super::{
     APP_VERSION, ChatAgentCli, DOC_SVG_PATH, EditorView, FILE_INFO_SECTION_INFO_SVG_PATH,
-    FLOWER_SVG_PATH, GIT_SYNC_SVG_PATH, MOUNTAIN_SVG_PATH, MermaidTheme, SITE_SVG_PATH,
-    SearchMenuConfig, SearchMenuRow, THEME_AUTO_MINI_SVG_PATH, THEME_DARK_MINI_SVG_PATH,
-    THEME_LIGHT_MINI_SVG_PATH, TerminalCursorShape, attachments, tooltip,
+    FLOWER_SVG_PATH, GIT_SYNC_SVG_PATH, MOUNTAIN_SVG_PATH, SITE_SVG_PATH, SearchMenuConfig,
+    SearchMenuRow, THEME_AUTO_MINI_SVG_PATH, THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH,
+    TerminalCursorShape, attachments, tooltip,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -39,7 +39,6 @@ pub(crate) enum FontRole {
     UiFont,
     BodyFont,
     CodeFont,
-    MermaidTheme,
     InterfaceLanguage,
     DateTimeFormat,
     AttachmentLocation,
@@ -57,46 +56,8 @@ pub(crate) struct PickerOption {
     pub value: String,
     pub label: String,
     pub search_text: String,
-    pub group: Option<PickerOptionGroup>,
     pub preview_font: Option<String>,
     pub icon_path: Option<&'static str>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PickerOptionGroup {
-    MermaidEditor,
-    MermaidNative,
-}
-
-impl PickerOptionGroup {
-    fn label(self, language: UiLanguage) -> &'static str {
-        match (self, language) {
-            (Self::MermaidEditor, UiLanguage::ChineseSimplified) => "编辑器风格",
-            (Self::MermaidNative, UiLanguage::ChineseSimplified) => "Mermaid 原生",
-            (Self::MermaidEditor, UiLanguage::ChineseTraditional) => "編輯器風格",
-            (Self::MermaidNative, UiLanguage::ChineseTraditional) => "Mermaid 原生",
-            (Self::MermaidEditor, UiLanguage::Japanese) => "エディタースタイル",
-            (Self::MermaidNative, UiLanguage::Japanese) => "Mermaid 標準",
-            (Self::MermaidEditor, UiLanguage::Korean) => "에디터 스타일",
-            (Self::MermaidNative, UiLanguage::Korean) => "Mermaid 기본",
-            (Self::MermaidEditor, UiLanguage::French) => "Styles de l'éditeur",
-            (Self::MermaidNative, UiLanguage::French) => "Styles Mermaid natifs",
-            (Self::MermaidEditor, UiLanguage::German) => "Editor-Stile",
-            (Self::MermaidNative, UiLanguage::German) => "Native Mermaid-Stile",
-            (Self::MermaidEditor, UiLanguage::Spanish) => "Estilos del editor",
-            (Self::MermaidNative, UiLanguage::Spanish) => "Estilos nativos de Mermaid",
-            (Self::MermaidEditor, UiLanguage::Portuguese) => "Estilos do editor",
-            (Self::MermaidNative, UiLanguage::Portuguese) => "Estilos nativos do Mermaid",
-            (Self::MermaidEditor, UiLanguage::Russian) => "Стили редактора",
-            (Self::MermaidNative, UiLanguage::Russian) => "Встроенные стили Mermaid",
-            (Self::MermaidEditor, UiLanguage::Arabic) => "أنماط المحرر",
-            (Self::MermaidNative, UiLanguage::Arabic) => "أنماط Mermaid الأصلية",
-            (Self::MermaidEditor, UiLanguage::Hindi) => "संपादक शैलियां",
-            (Self::MermaidNative, UiLanguage::Hindi) => "मूल Mermaid शैलियां",
-            (Self::MermaidEditor, UiLanguage::English) => "Editor Styles",
-            (Self::MermaidNative, UiLanguage::English) => "Native Mermaid Styles",
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -1064,7 +1025,6 @@ impl EditorView {
                     value: (*format).to_string(),
                     label: preview.clone(),
                     search_text: format!("{preview} {format}").to_lowercase(),
-                    group: None,
                     preview_font: None,
                     icon_path: None,
                 }
@@ -1712,13 +1672,6 @@ impl EditorView {
             ))
             // Editor font size
             .child(self.render_editor_font_size_row(cx))
-            .child(self.render_picker_row(
-                self.t(TextKey::MermaidTheme),
-                self.app_settings.mermaid_theme().label(),
-                FontRole::MermaidTheme,
-                0,
-                cx,
-            ))
             // Line height
             .child(self.render_line_height_row(cx))
             // Letter spacing
@@ -2608,33 +2561,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let (all_options, placeholder) = match role {
-            FontRole::MermaidTheme => (
-                MermaidTheme::ALL
-                    .into_iter()
-                    .map(|theme| {
-                        let group = if theme.mermaid_theme_name().is_some() {
-                            PickerOptionGroup::MermaidNative
-                        } else {
-                            PickerOptionGroup::MermaidEditor
-                        };
-                        PickerOption {
-                            value: theme.settings_value().to_string(),
-                            label: theme.label().to_string(),
-                            search_text: format!(
-                                "{} {} {}",
-                                theme.label(),
-                                theme.settings_value(),
-                                group.label(self.ui_language)
-                            )
-                            .to_lowercase(),
-                            group: Some(group),
-                            preview_font: None,
-                            icon_path: None,
-                        }
-                    })
-                    .collect(),
-                self.t(TextKey::SearchMermaidThemes).to_string(),
-            ),
             FontRole::DateTimeFormat => (
                 self.date_time_format_options(),
                 self.t(TextKey::SearchDateTimeFormats).to_string(),
@@ -2649,7 +2575,6 @@ impl EditorView {
                             value: value.to_string(),
                             search_text: format!("{label} {value}").to_lowercase(),
                             label,
-                            group: None,
                             preview_font: None,
                             icon_path: None,
                         }
@@ -2670,7 +2595,6 @@ impl EditorView {
                             agent_cli.settings_value()
                         )
                         .to_lowercase(),
-                        group: None,
                         preview_font: None,
                         icon_path: Some(agent_cli.icon_path()),
                     })
@@ -2692,7 +2616,6 @@ impl EditorView {
                         value: value.to_string(),
                         search_text: label.to_lowercase(),
                         label,
-                        group: None,
                         preview_font: None,
                         icon_path: None,
                     }
@@ -2716,7 +2639,6 @@ impl EditorView {
                                 value: (*value).to_string(),
                                 search_text: label.to_lowercase(),
                                 label,
-                                group: None,
                                 preview_font: None,
                                 icon_path: None,
                             }
@@ -2732,7 +2654,6 @@ impl EditorView {
                         value: option.language.code().to_string(),
                         label: option.label,
                         search_text: option.search_text,
-                        group: None,
                         preview_font: None,
                         icon_path: None,
                     })
@@ -2756,7 +2677,6 @@ impl EditorView {
                             value: name.clone(),
                             label: name.clone(),
                             search_text: name.to_lowercase(),
-                            group: None,
                             preview_font: Some(name),
                             icon_path: None,
                         })
@@ -2778,7 +2698,6 @@ impl EditorView {
                     self.app_settings.terminal_font.clone()
                 }
             }
-            (FontRole::MermaidTheme, _) => self.app_settings.mermaid_theme.clone(),
             (FontRole::InterfaceLanguage, _) => self.ui_language.code().to_string(),
             (FontRole::DateTimeFormat, _) => self.app_settings.date_time_format().to_string(),
             (FontRole::AttachmentLocation, _) => self.app_settings.attachment_location.clone(),
@@ -2945,55 +2864,25 @@ impl EditorView {
             row_count: picker.filtered.len(),
         };
 
-        let mut previous_group = None;
         let rows = picker
             .filtered
             .iter()
             .take(picker.render_limit)
             .enumerate()
             .map(|(idx, option)| {
-                let show_group = option.group.is_some() && option.group != previous_group;
-                previous_group = option.group;
                 let value = option.value.clone();
                 let row = SearchMenuRow::new(option.label.clone())
                     .selected(idx == picker.selected_index)
                     .icon(option.icon_path)
                     .preview_font(option.preview_font.clone());
-                let option_row = self.render_search_menu_row(
+                self.render_search_menu_row(
                     SharedString::from(format!("fp-item-{idx}")),
                     row,
                     move |this, _, cx| {
                         this.apply_font_selection(value.clone(), cx);
                     },
                     cx,
-                );
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .when(show_group, |this| {
-                        let group = option.group.expect("visible group header");
-                        this.child(
-                            div()
-                                .h(px(self.scaled(22.0)))
-                                .px(px(self.scaled(
-                                    self.styles.quick_open.quick_open_result_padding_x_px,
-                                )))
-                                .flex()
-                                .items_center()
-                                .text_size(px(self.scaled(
-                                    self.styles.quick_open.quick_open_result_path_font_size_px,
-                                )))
-                                .text_color(
-                                    self.styles
-                                        .quick_open
-                                        .quick_open_result_secondary_text_color,
-                                )
-                                .child(group.label(self.ui_language)),
-                        )
-                    })
-                    .child(option_row)
-                    .into_any_element()
+                )
             })
             .collect();
 
@@ -3024,7 +2913,6 @@ impl EditorView {
 
     fn apply_font_selection(&mut self, font_name: String, cx: &mut Context<Self>) {
         if let Some(picker) = self.settings_font_picker.take() {
-            let rerender_generated_previews = picker.role == FontRole::MermaidTheme;
             self.settings_font_picker_editor = None;
             self.font_picker_trigger_position = None;
             match (picker.role, picker.option_index) {
@@ -3051,11 +2939,6 @@ impl EditorView {
                 }
                 (FontRole::TerminalFont, _) => {
                     self.app_settings.terminal_font = font_name;
-                }
-                (FontRole::MermaidTheme, _) => {
-                    self.app_settings.mermaid_theme = MermaidTheme::from_settings(&font_name)
-                        .settings_value()
-                        .to_string();
                 }
                 (FontRole::InterfaceLanguage, _) => {
                     if let Some(language) = UiLanguage::from_code(&font_name) {
@@ -3099,7 +2982,9 @@ impl EditorView {
             }
             self.app_settings.save();
             self.clear_all_tab_layout_caches();
-            if rerender_generated_previews {
+            if matches!(picker.role, FontRole::CodeFont)
+                || matches!((picker.role, picker.option_index), (FontRole::BodyFont, 1))
+            {
                 self.invalidate_generated_block_preview_render_caches();
                 self.rerender_generated_block_previews();
             }

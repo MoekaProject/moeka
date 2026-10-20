@@ -8,12 +8,12 @@ use super::*;
 
 #[derive(Clone)]
 pub(crate) struct SidebarDirectoryChild {
-    name: String,
-    path: PathBuf,
-    is_dir: bool,
+    pub(super) name: String,
+    pub(super) path: PathBuf,
+    pub(super) is_dir: bool,
 }
 
-fn load_sidebar_directory(
+pub(super) fn load_sidebar_directory(
     path: &Path,
     sort_mode: SidebarSortMode,
 ) -> std::io::Result<Vec<SidebarDirectoryChild>> {

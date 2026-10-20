@@ -1514,13 +1514,9 @@ impl EditorView {
         }
 
         if has_root || !starred_files.is_empty() {
-            let header_index = 0;
-            tree_items.insert(
-                header_index,
-                self.render_starred_sidebar_section(&starred_files, cx),
-            );
+            tree_items.insert(0, self.render_starred_sidebar_section(&starred_files, cx));
             if has_root {
-                tree_items.insert(header_index + 1, header);
+                tree_items.insert(1, header);
             }
         }
 
