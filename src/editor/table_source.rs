@@ -15,11 +15,7 @@ pub(crate) struct TableSource {
     format_pending: bool,
 }
 
-fn alignment_edits(
-    text: &str,
-    base: usize,
-    protected_offsets: &[usize],
-) -> Vec<(Range<usize>, String)> {
+fn alignment_edits(text: &str, base: usize) -> Vec<(Range<usize>, String)> {
     let mut groups: Vec<Vec<(usize, &str, Vec<usize>)>> = vec![Vec::new()];
     let mut offset = base;
     for line in text.split('\n') {
@@ -53,12 +49,6 @@ fn alignment_edits(
             for (column, pair) in pipes.windows(2).enumerate() {
                 let start = pair[0] + 1;
                 let end = pair[1];
-                if protected_offsets
-                    .iter()
-                    .any(|offset| base + start <= *offset && *offset <= base + end)
-                {
-                    continue;
-                }
                 let cell = &line[start..end];
                 let content = cell.trim_matches(|ch| ch == ' ' || ch == '\t');
                 let width = crate::table_ops::cell_display_width(content);
@@ -197,6 +187,17 @@ impl TableSource {
 }
 
 impl EditorView {
+    pub(super) fn markdown_table_source_range_at_cursor(&self) -> Option<Range<usize>> {
+        if !self.active_tab_uses_markdown_editor() {
+            return None;
+        }
+        let (start, end, _) = self.table_lines_for_block(self.cursor_line())?;
+        if self.block_is_front_matter(start) {
+            return None;
+        }
+        Some(self.buffer.line_start(start)..self.buffer.line_end(end.saturating_sub(1)))
+    }
+
     pub(super) fn restore_table_source_snapshot(&mut self, text: &str) -> bool {
         if self.table_source.is_none() {
             return false;
@@ -224,25 +225,44 @@ impl EditorView {
         {
             return;
         }
-        let Some(source) = self.table_source.as_mut() else {
-            return;
+        let range = if let Some(source) = self.table_source.as_mut() {
+            if !source.format_pending {
+                return;
+            }
+            source.format_pending = false;
+            source.range.clone()
+        } else {
+            if record_history && self.pending_history_transaction.is_none() {
+                return;
+            }
+            if !self.active_tab_uses_markdown_editor() {
+                return;
+            }
+            let Some((start, end, _)) = self.table_lines_for_block(self.cursor_line()) else {
+                return;
+            };
+            if self.block_is_front_matter(start) {
+                return;
+            }
+            self.buffer.line_start(start)..self.buffer.line_end(end.saturating_sub(1))
         };
-        if !source.format_pending {
-            return;
+        if self.align_table_source_range(range, record_history) {
+            self.reparse();
+            if let Some(source) = self.table_source.as_mut() {
+                source.format_pending = false;
+            }
         }
-        source.format_pending = false;
-        let range = source.range.clone();
+    }
+
+    pub(super) fn align_table_source_range(
+        &mut self,
+        range: Range<usize>,
+        record_history: bool,
+    ) -> bool {
         let original = self.buffer.text_for_range(range.clone()).to_string();
-        let protected_offsets: Vec<_> = std::iter::once(&self.cursor)
-            .chain(self.extra_cursors.iter())
-            .map(|cursor| cursor.offset)
-            .collect();
-        let edits = alignment_edits(&original, range.start, &protected_offsets);
-        if let Some(source) = self.table_source.as_mut() {
-            source.format_pending = !protected_offsets.is_empty();
-        }
+        let edits = alignment_edits(&original, range.start);
         if edits.is_empty() {
-            return;
+            return false;
         }
         if record_history && self.pending_history_transaction.is_none() {
             self.checkpoint();
@@ -251,16 +271,21 @@ impl EditorView {
             cursor.offset = offset_after_alignment(cursor.offset, &edits, &original, range.start);
             cursor.anchor = offset_after_alignment(cursor.anchor, &edits, &original, range.start);
         }
+        if let Some(offset) = &mut self.last_typing_checkpoint_offset {
+            *offset = offset_after_alignment(*offset, &edits, &original, range.start);
+        }
+        if self.source_mode {
+            self.source_syntax_context
+                .get_mut()
+                .invalidate_from(self.buffer.offset_to_line_col(range.start).0);
+        }
         for (range, replacement) in edits.iter().rev() {
             self.buffer.replace(range.clone(), replacement);
         }
         self.pending_line_display_transfer = None;
         self.clear_active_tab_layout_cache();
-        self.reparse();
-        if let Some(source) = self.table_source.as_mut() {
-            source.format_pending = !protected_offsets.is_empty();
-        }
         self.reset_cursor_visual_targeting();
+        true
     }
 
     pub(super) fn finish_table_source_history(&mut self) {
@@ -337,7 +362,7 @@ mod tests {
 
     fn align_buffer(buffer: &mut Buffer, range: Range<usize>, positions: &mut [usize]) {
         let original = buffer.text_for_range(range.clone()).to_string();
-        let edits = alignment_edits(&original, range.start, &[]);
+        let edits = alignment_edits(&original, range.start);
         for position in positions {
             *position = offset_after_alignment(*position, &edits, &original, range.start);
         }
@@ -410,7 +435,7 @@ mod tests {
             last_relative
         );
         assert_eq!(positions[2], 0);
-        assert!(alignment_edits(buffer.text(), 0, &[]).is_empty());
+        assert!(alignment_edits(buffer.text(), 0).is_empty());
     }
 
     #[test]
@@ -426,24 +451,25 @@ mod tests {
         assert!(buffer.text().contains("`x|y`"));
         assert!(buffer.text().contains("\u{4e2d}\u{6587}\\|z"));
         assert!(buffer.text().ends_with("\n\nincomplete text"));
-        assert_eq!(alignment_edits("", 0, &[]), Vec::new());
+        assert_eq!(alignment_edits("", 0), Vec::new());
     }
 
     #[test]
-    fn source_alignment_defers_the_active_cell_until_the_cursor_leaves() {
+    fn live_source_alignment_formats_the_active_cell_and_preserves_the_caret() {
         let text = "| a   | b |\n| --- | --- |\n| longer | c |";
         let active_cell = text.find("a   ").unwrap() + 2;
-        let deferred = alignment_edits(text, 0, &[active_cell]);
-        assert!(
-            deferred
-                .iter()
-                .all(|(range, _)| !range.contains(&active_cell))
-        );
-        assert!(
-            alignment_edits(text, 0, &[])
-                .iter()
-                .any(|(range, _)| range.contains(&active_cell))
-        );
+        let mut buffer = Buffer::from_text(text);
+        let mut positions = [active_cell];
+        let len = buffer.len();
+        align_buffer(&mut buffer, 0..len, &mut positions);
+
+        let rows: Vec<_> = buffer.text().split('\n').collect();
+        let pipes: Vec<_> = rows
+            .iter()
+            .map(|row| markdown::table_pipe_offsets(row))
+            .collect();
+        assert!(pipes.iter().all(|row| row == &pipes[0]));
+        assert_eq!(&buffer.text()[positions[0] - 1..positions[0]], "a");
     }
 
     #[test]

@@ -776,6 +776,7 @@ impl EditorView {
                     if focus_editor && editor.focused_pane_id == pane_id {
                         editor.request_editor_focus(cx);
                     }
+                    editor.apply_pending_workspace_search_match(epoch, cx);
                     session_store::persist_session(editor);
                 });
             })
@@ -856,6 +857,9 @@ impl EditorView {
                     }
                     if latest && focus_editor {
                         editor.request_editor_focus(cx);
+                    }
+                    if latest {
+                        editor.apply_pending_workspace_search_match(epoch, cx);
                     }
                     session_store::persist_session(editor);
                 });

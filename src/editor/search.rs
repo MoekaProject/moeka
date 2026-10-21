@@ -670,11 +670,7 @@ impl EditorView {
         self.pending_typing_scroll_guard = None;
         self.pending_preview_reveal = None;
         self.invalidate_search_presentation();
-        if self.embedded_editor && self.embedded_read_only {
-            self.center_cursor_in_view_immediately(cx);
-        } else {
-            self.center_cursor_in_view(cx);
-        }
+        self.center_cursor_in_view_once(cx);
     }
 
     /// Longest distance a match can reach past the slice it starts in.

@@ -5303,6 +5303,16 @@ impl EditorElement {
                             }
                             _ => cursor_pos,
                         };
+                        let cursor_x = super::caret::caret_x_between_grapheme_centers(
+                            &cached.display_text,
+                            disp_cursor_col,
+                            cursor_pos,
+                            |index| {
+                                cached
+                                    .wrapped_line
+                                    .position_for_index(index, px(line_height))
+                            },
+                        );
                         let row_height = f32::from(cached.wrapped_line.row_height(
                             cached.wrapped_line.row_for_y(cursor_pos.y, px(line_height)),
                             px(line_height),
@@ -5312,10 +5322,15 @@ impl EditorElement {
                         let cursor_top = text_line_top
                             + f32::from(cursor_pos.y)
                             + (row_height - cursor_height) / 2.0;
+                        let cursor_width = px(editor.styles.cursor.cursor_width_px);
                         cursor_paints.push(super::caret::CaretPaint {
                             bounds: Bounds::new(
-                                point(px(content_x) + cursor_pos.x, px(cursor_top)),
-                                size(px(editor.styles.cursor.cursor_width_px), px(cursor_height)),
+                                point(
+                                    px(content_x)
+                                        + super::caret::centered_caret_left(cursor_x, cursor_width),
+                                    px(cursor_top),
+                                ),
+                                size(cursor_width, px(cursor_height)),
                             ),
                             color: theme.cursor,
                             force_visible: editor.is_selecting,
@@ -7919,6 +7934,19 @@ impl EditorElement {
                                                                         &shaped, hard_display_text, disp_col, line_height,
                                                                         editor.wrap_boundary_affinity_for_offset(cur_off),
                                                                     );
+                                                                    let caret_x =
+                                                                        super::caret::caret_x_between_grapheme_centers(
+                                                                            hard_display_text,
+                                                                            disp_col,
+                                                                            pos,
+                                                                            |index| Some(hanging.position(
+                                                                                &shaped,
+                                                                                hard_display_text,
+                                                                                index,
+                                                                                line_height,
+                                                                                None,
+                                                                            )),
+                                                                        );
                                                                     let row_height = f32::from(
                                                                         shaped.row_height(
                                                                             shaped.row_for_y(
@@ -7943,7 +7971,14 @@ impl EditorElement {
                                                                         == editor.cursor.offset
                                                                     {
                                                                         table_cursor_paint_bounds = Some((cur_off, Bounds::new(
-                                                                            point(px(cell_x) + pos.x, px(cursor_top)),
+                                                                            point(
+                                                                                px(cell_x)
+                                                                                    + super::caret::centered_caret_left(
+                                                                                        caret_x,
+                                                                                        px(editor.styles.cursor.cursor_width_px),
+                                                                                    ),
+                                                                                px(cursor_top),
+                                                                            ),
                                                                             size(px(editor.styles.cursor.cursor_width_px), px(cursor_height)),
                                                                         )));
                                                                     }
@@ -7951,7 +7986,11 @@ impl EditorElement {
                                                                         super::caret::CaretPaint {
                                                                             bounds: Bounds::new(
                                                                                 point(
-                                                                            px(cell_x) + pos.x,
+                                                                            px(cell_x)
+                                                                                + super::caret::centered_caret_left(
+                                                                                        caret_x,
+                                                                                    px(editor.styles.cursor.cursor_width_px),
+                                                                                ),
                                                                             px(cursor_top),
                                                                         ),
                                                                                 size(
@@ -9393,18 +9432,31 @@ impl EditorElement {
                                     let caret_pos = wrapped
                                         .position_for_index(display_head, px(r_line_height))
                                         .unwrap_or_default();
+                                    let caret_x = super::caret::caret_x_between_grapheme_centers(
+                                        &display_text,
+                                        display_head,
+                                        caret_pos,
+                                        |index| {
+                                            wrapped.position_for_index(index, px(r_line_height))
+                                        },
+                                    );
                                     let caret_height = r_line_height
                                         * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
                                     let caret_top = row_top
                                         + f32::from(caret_pos.y)
                                         + (r_line_height - caret_height) / 2.0;
+                                    let caret_width = px(editor.styles.cursor.cursor_width_px);
                                     cursor_paints.push(super::caret::CaretPaint {
                                         bounds: Bounds::new(
-                                            point(px(row_content_x) + caret_pos.x, px(caret_top)),
-                                            size(
-                                                px(editor.styles.cursor.cursor_width_px),
-                                                px(caret_height),
+                                            point(
+                                                px(row_content_x)
+                                                    + super::caret::centered_caret_left(
+                                                        caret_x,
+                                                        caret_width,
+                                                    ),
+                                                px(caret_top),
                                             ),
+                                            size(caret_width, px(caret_height)),
                                         ),
                                         color: theme.cursor,
                                         force_visible: editor.phantom_selecting,
@@ -9813,7 +9865,7 @@ impl EditorElement {
                             disp_start,
                             disp_end,
                             content_x,
-                            line_top,
+                            text_line_top,
                             line_height,
                             font_size,
                             indent_px,
@@ -9924,6 +9976,12 @@ impl EditorElement {
                         .unwrap_or(cursor_pos),
                         _ => cursor_pos,
                     };
+                    let cursor_x = super::caret::caret_x_between_grapheme_centers(
+                        &display_text,
+                        disp_cursor_col,
+                        cursor_pos,
+                        |index| wrapped.position_for_index(index, px(line_height)),
+                    );
 
                     let cursor_indent = helpers::indent_for_y(indent_px, cursor_pos.y, line_height);
                     let row_height = f32::from(wrapped.row_height(
@@ -9935,9 +9993,14 @@ impl EditorElement {
                     let cursor_top = text_line_top
                         + f32::from(cursor_pos.y)
                         + (row_height - cursor_height) / 2.0;
+                    let cursor_width = px(editor.styles.cursor.cursor_width_px);
                     let cursor_bounds = Bounds::new(
-                        point(px(content_x + cursor_indent) + cursor_pos.x, px(cursor_top)),
-                        size(px(editor.styles.cursor.cursor_width_px), px(cursor_height)),
+                        point(
+                            px(content_x + cursor_indent)
+                                + super::caret::centered_caret_left(cursor_x, cursor_width),
+                            px(cursor_top),
+                        ),
+                        size(cursor_width, px(cursor_height)),
                     );
                     let cursor_left = f32::from(cursor_bounds.origin.x);
                     let cursor_right = cursor_left + f32::from(cursor_bounds.size.width);
@@ -11683,7 +11746,8 @@ impl EditorElement {
                 editor.outline_navigation_epoch = None;
                 navigation_in_progress = false;
             }
-            let explicit_navigation = center_requested || navigation_in_progress;
+            let explicit_navigation =
+                center_requested || navigation_in_progress || frame.explicit_caret_reveal_requested;
             if explicit_navigation {
                 editor.pending_preview_reveal = None;
             }
@@ -12064,7 +12128,8 @@ impl Element for EditorElement {
             (
                 caret_was_visible,
                 editor.document_mode_scroll_anchor_is_current()
-                    || editor.editor_scrollbar_drag.is_some(),
+                    || editor.editor_scrollbar_drag.is_some()
+                    || editor.center_cursor_confirm_frames > 0,
             )
         });
         let state = reconciled_editor_prepaint(reconcile_scroll, |frame| {

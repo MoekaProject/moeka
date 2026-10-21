@@ -210,6 +210,12 @@ impl EditorView {
     }
 
     pub(super) fn apply_source_action(&mut self, action: SourceAction<'_>) -> bool {
+        // Keep the parsed table range anchored through the edit so formatting
+        // can be included before this action's single reparse.
+        let alignment_range = self.markdown_table_source_range_at_cursor();
+        if let Some(range) = &alignment_range {
+            self.buffer.track_range(Some(range.clone()));
+        }
         let cursors = self.cursor_states_with_primary_flag();
         let plans = plans(
             &self.buffer,
@@ -219,7 +225,16 @@ impl EditorView {
         );
         let changed = self.apply_source_plans(plans);
         if changed {
+            if alignment_range.is_some() {
+                let range = self.buffer.tracked_range_update().map(|(range, _)| range);
+                self.buffer.track_range(None);
+                if let Some(range) = range {
+                    self.align_table_source_range(range, true);
+                }
+            }
             self.reparse_with_source_context(true);
+        } else if alignment_range.is_some() {
+            self.buffer.track_range(None);
         }
         changed
     }

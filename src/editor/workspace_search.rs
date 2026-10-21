@@ -33,6 +33,20 @@ fn remember_search_date(path: &std::path::Path, metadata: &std::fs::Metadata) {
     dates.insert(path.to_path_buf(), date);
 }
 
+fn take_pending_workspace_search_navigation(
+    pending: &mut Option<(usize, PathBuf, WorkspaceSearchMatch)>,
+    open_epoch: usize,
+    active_path: Option<&std::path::Path>,
+) -> Option<(PathBuf, WorkspaceSearchMatch)> {
+    let is_current_target = pending.as_ref().is_some_and(|(epoch, path, _)| {
+        *epoch == open_epoch && active_path == Some(path.as_path())
+    });
+    is_current_target
+        .then(|| pending.take())
+        .flatten()
+        .map(|(_, path, search_match)| (path, search_match))
+}
+
 fn sort_search_results(results: &mut [WorkspaceSearchResult], mode: SidebarSortMode) {
     // Snapshot observations once: sorting never performs filesystem I/O or
     // observes changing timestamps while another worker loads dates.
@@ -306,6 +320,7 @@ impl EditorView {
 
     pub(crate) fn clear_workspace_search_preview_state(&mut self) {
         self.workspace_search_selected_match = None;
+        self.workspace_search_pending_navigation = None;
         self.workspace_search_highlight_path = None;
         self.workspace_search_highlight_ranges.clear();
         self.workspace_search_highlight_current_index = None;
@@ -409,7 +424,12 @@ impl EditorView {
             self.open_path_in_preview_tab(path.clone(), focus_editor, cx);
         }
 
-        self.reveal_workspace_search_match(path, search_match, cx);
+        if self.current_file_path.as_deref() == Some(path.as_path()) {
+            self.reveal_workspace_search_match(path, search_match, cx);
+        } else {
+            self.workspace_search_pending_navigation =
+                Some((self.preview_open_epoch, path, search_match));
+        }
     }
 
     fn reveal_workspace_search_match(
@@ -418,13 +438,29 @@ impl EditorView {
         search_match: WorkspaceSearchMatch,
         cx: &mut Context<Self>,
     ) {
+        self.workspace_search_pending_navigation = None;
         self.workspace_search_highlight_path = Some(path);
         self.workspace_search_highlight_ranges =
             vec![search_match.byte_offset..search_match.byte_end];
         self.workspace_search_highlight_current_index = Some(0);
         self.cursor.offset = search_match.byte_offset.min(self.buffer.len());
         self.cursor.anchor = self.cursor.offset;
-        self.center_cursor_in_view_immediately(cx);
+        self.center_cursor_in_view_once(cx);
+    }
+
+    pub(super) fn apply_pending_workspace_search_match(
+        &mut self,
+        open_epoch: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((path, search_match)) = take_pending_workspace_search_navigation(
+            &mut self.workspace_search_pending_navigation,
+            open_epoch,
+            self.current_file_path.as_deref(),
+        ) else {
+            return;
+        };
+        self.reveal_workspace_search_match(path, search_match, cx);
     }
 
     fn preview_workspace_search_match_at(
@@ -995,6 +1031,7 @@ impl EditorView {
         &self,
     ) -> crate::style::TextInputStyles {
         let mut styles = self.workspace_search_text_input_styles();
+        styles.text_input_focus_bg = self.styles.workspace_search.ws_search_input_focus_bg;
         styles.text_input_padding_left_px =
             self.scaled(self.styles.text_input.text_input_padding_right_px);
         styles
@@ -1069,12 +1106,13 @@ impl EditorView {
         let input_icon_color = workspace_styles.ws_search_input_icon_color;
         let search_border_width = self.scaled(workspace_styles.ws_search_input_border_width_px);
         let search_border_color = workspace_styles.ws_search_input_border_color;
-        let search_bg = if self.workspace_search_input_focused {
+        let search_is_active = self.workspace_search_input_focused || !trimmed_query.is_empty();
+        let search_bg = if search_is_active {
             workspace_styles.ws_search_input_focus_bg
         } else {
             workspace_styles.ws_search_input_bg
         };
-        let search_hover_bg = if self.workspace_search_input_focused {
+        let search_hover_bg = if search_is_active {
             workspace_styles.ws_search_input_focus_bg
         } else {
             workspace_styles.ws_search_input_hover_bg
@@ -1084,15 +1122,29 @@ impl EditorView {
             || !self.workspace_search_include.trim().is_empty()
             || !self.workspace_search_exclude.trim().is_empty();
 
-        let filter_field = |editor: Option<gpui::Entity<crate::text_input::TextInput>>| {
+        let filter_field = |editor: Option<gpui::Entity<crate::text_input::TextInput>>,
+                            has_text: bool| {
+            let background = if has_text {
+                workspace_styles.ws_search_input_focus_bg
+            } else {
+                workspace_styles.ws_search_input_bg
+            };
+            let hover_background = if has_text {
+                workspace_styles.ws_search_input_focus_bg
+            } else {
+                workspace_styles.ws_search_input_hover_bg
+            };
             div()
-                .w_full()
+                .flex_1()
+                .min_w(px(0.0))
                 .h(px(input_height))
-                .bg(workspace_styles.ws_search_input_bg)
-                .hover(move |style| style.bg(workspace_styles.ws_search_input_hover_bg))
+                .bg(background)
+                .hover(move |style| style.bg(hover_background))
                 .border(px(search_border_width))
                 .border_color(search_border_color)
                 .rounded(px(self.scaled(workspace_styles.ws_search_input_radius_px)))
+                .flex()
+                .items_center()
                 .when_some(editor, |this, editor| this.child(editor))
         };
         let filters = self.workspace_search_filters_visible.then(|| {
@@ -1102,10 +1154,15 @@ impl EditorView {
                 .pt(px(self.scaled(2.0)))
                 .pb(px(self.scaled(2.0)))
                 .flex()
-                .flex_col()
                 .gap(px(self.scaled(4.0)))
-                .child(filter_field(self.workspace_search_include_editor.clone()))
-                .child(filter_field(self.workspace_search_exclude_editor.clone()))
+                .child(filter_field(
+                    self.workspace_search_include_editor.clone(),
+                    !self.workspace_search_include.trim().is_empty(),
+                ))
+                .child(filter_field(
+                    self.workspace_search_exclude_editor.clone(),
+                    !self.workspace_search_exclude.trim().is_empty(),
+                ))
         });
 
         let input = div()
@@ -2159,7 +2216,9 @@ fn search_directory_batch(
 mod tests {
     use std::{fs, time::SystemTime};
 
-    use super::{SearchPathFilter, search_directory_batch};
+    use super::{
+        SearchPathFilter, search_directory_batch, take_pending_workspace_search_navigation,
+    };
     use super::{WORKSPACE_SEARCH_FILE_LINE_LIMIT, search_file_window};
 
     #[test]
@@ -2192,6 +2251,37 @@ mod tests {
         assert_eq!(rest.len(), 1);
         assert_eq!(rest[0].line_number, WORKSPACE_SEARCH_FILE_LINE_LIMIT + 3);
         assert!(done.is_none());
+    }
+
+    #[test]
+    fn workspace_search_navigation_waits_for_its_target_tab() {
+        let path = std::path::PathBuf::from("target.md");
+        let search_match = super::WorkspaceSearchMatch {
+            line_number: 3,
+            line_text: "needle".to_string(),
+            match_start: 0,
+            match_end: 6,
+            byte_offset: 12,
+            byte_end: 18,
+        };
+        let mut pending = Some((7, path.clone(), search_match));
+
+        assert!(take_pending_workspace_search_navigation(&mut pending, 6, Some(&path)).is_none());
+        assert!(
+            take_pending_workspace_search_navigation(
+                &mut pending,
+                7,
+                Some(std::path::Path::new("other.md")),
+            )
+            .is_none()
+        );
+        assert!(pending.is_some());
+
+        let (opened_path, opened_match) =
+            take_pending_workspace_search_navigation(&mut pending, 7, Some(&path)).unwrap();
+        assert_eq!(opened_path, path);
+        assert_eq!(opened_match.byte_offset, 12);
+        assert!(pending.is_none());
     }
 
     #[test]

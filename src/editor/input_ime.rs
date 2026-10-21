@@ -2395,9 +2395,7 @@ impl EditorView {
             return;
         };
 
-        if !self.source_mode {
-            self.format_table_source_before_ime_commit();
-        }
+        self.format_table_source_before_ime_commit();
         let changed = snapshot.text != self.buffer.text()
             || snapshot.cursor_offset != self.cursor.offset
             || snapshot.cursor_anchor != self.cursor.anchor

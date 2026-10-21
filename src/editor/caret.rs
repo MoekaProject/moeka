@@ -3,8 +3,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    Context, Entity, Hsla, PaintQuad, Render, Subscription, Window, canvas, fill, prelude::*,
+    Context, Entity, Hsla, PaintQuad, Pixels, Render, Subscription, Window, canvas, fill,
+    prelude::*,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::{EditorView, PaneId, TableBoundaryCaret, element};
 
@@ -13,6 +15,47 @@ pub(crate) struct CaretPaint {
     pub(crate) bounds: gpui::Bounds<gpui::Pixels>,
     pub(crate) color: Hsla,
     pub(crate) force_visible: bool,
+}
+
+pub(crate) fn centered_caret_left(boundary_x: Pixels, width: Pixels) -> Pixels {
+    boundary_x - width / 2.0
+}
+
+pub(crate) fn caret_x_between_grapheme_centers(
+    text: &str,
+    offset: usize,
+    boundary: gpui::Point<Pixels>,
+    mut position_for_index: impl FnMut(usize) -> Option<gpui::Point<Pixels>>,
+) -> Pixels {
+    let mut previous_start = None;
+    let mut next_end = None;
+    for (start, grapheme) in text.grapheme_indices(true) {
+        let end = start + grapheme.len();
+        if end == offset {
+            previous_start = Some(start);
+        }
+        if start == offset {
+            next_end = Some(end);
+            break;
+        }
+    }
+
+    let (Some(previous_start), Some(next_end)) = (previous_start, next_end) else {
+        return boundary.x;
+    };
+    let (Some(previous), Some(next)) = (
+        position_for_index(previous_start),
+        position_for_index(next_end),
+    ) else {
+        return boundary.x;
+    };
+    if previous.y != boundary.y || next.y != boundary.y {
+        return boundary.x;
+    }
+
+    // Center between the neighboring grapheme advance-cell centers, not just
+    // at the next glyph's origin.
+    (previous.x + boundary.x * 2.0 + next.x) / 4.0
 }
 
 #[derive(Clone, Default)]
@@ -211,7 +254,12 @@ impl CaretOverlayView {
 
 #[cfg(test)]
 mod tests {
-    use super::{CARET_FADE_FRAMES, CaretGeometrySnapshot, caret_fade_opacity};
+    use gpui::px;
+
+    use super::{
+        CARET_FADE_FRAMES, CaretGeometrySnapshot, caret_fade_opacity,
+        caret_x_between_grapheme_centers, centered_caret_left,
+    };
     use crate::editor::{TableBoundaryCaret, TableBoundarySide};
 
     #[test]
@@ -226,6 +274,53 @@ mod tests {
         assert_eq!(
             caret_fade_opacity(0.0, 1.0, CARET_FADE_FRAMES, CARET_FADE_FRAMES),
             1.0
+        );
+    }
+
+    #[test]
+    fn text_caret_stroke_is_centered_on_the_character_boundary() {
+        let boundary = px(12.5);
+        let width = px(2.0);
+        assert_eq!(centered_caret_left(boundary, width) + width / 2.0, boundary);
+    }
+
+    #[test]
+    fn text_caret_is_centered_between_adjacent_grapheme_centers() {
+        let text = "iW";
+        let x =
+            caret_x_between_grapheme_centers(text, 1, gpui::point(px(16.0), px(0.0)), |index| {
+                match index {
+                    0 => Some(gpui::point(px(0.0), px(0.0))),
+                    2 => Some(gpui::point(px(20.0), px(0.0))),
+                    _ => None,
+                }
+            });
+        assert_eq!(x, px(13.0));
+    }
+
+    #[test]
+    fn text_caret_keeps_grapheme_and_wrap_boundaries_intact() {
+        let text = "e\u{301}界";
+        let boundary = gpui::point(px(10.0), px(24.0));
+        assert_eq!(
+            caret_x_between_grapheme_centers(text, 3, boundary, |index| match index {
+                0 => Some(gpui::point(px(0.0), px(24.0))),
+                6 => Some(gpui::point(px(18.0), px(24.0))),
+                _ => None,
+            }),
+            px(9.5)
+        );
+        assert_eq!(
+            caret_x_between_grapheme_centers(text, 1, boundary, |_| None),
+            boundary.x
+        );
+        assert_eq!(
+            caret_x_between_grapheme_centers(text, 3, boundary, |index| match index {
+                0 => Some(gpui::point(px(0.0), px(0.0))),
+                6 => Some(gpui::point(px(18.0), px(48.0))),
+                _ => None,
+            }),
+            boundary.x
         );
     }
 

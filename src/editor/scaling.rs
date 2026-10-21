@@ -224,6 +224,18 @@ impl CursorCenterConfirmation {
     }
 }
 
+fn settled_cursor_center_target(
+    confirmation: &mut CursorCenterConfirmation,
+    measured_target: Option<f32>,
+    previews_pending: bool,
+) -> Option<f32> {
+    if confirmation.observe(measured_target, previews_pending) {
+        measured_target
+    } else {
+        None
+    }
+}
+
 fn typing_scroll_should_restore(
     same_logical_line: bool,
     _pending_fence_on_same_visual_row: bool,
@@ -1351,6 +1363,7 @@ impl EditorView {
     ) {
         let start_scroll = self.scroll_offset;
         let animate = animate && (target_scroll - start_scroll).abs() >= 1.0;
+        let animation_target = target_scroll;
         if !animate {
             self.scroll_offset = target_scroll;
             self.clamp_scroll();
@@ -1376,35 +1389,53 @@ impl EditorView {
                         if this.scroll_anim_epoch != epoch {
                             return false;
                         }
+                        let mut scroll_changed = false;
                         let keep = this.with_pane_if_alive(pane_id, |editor| {
                             if editor.active_tab_id != tab_id
                                 || editor.cursor.offset != cursor_offset
                             {
                                 return false;
                             }
-                            let measured = (!editor.layout_dirty)
-                                .then(|| editor.cursor_center_scroll_target())
-                                .flatten();
-                            let target = measured
-                                .unwrap_or_else(|| editor.cursor_center_layout_scroll_target());
-                            // Do not animate to the geometry captured before the
-                            // target entered the windowed shaping/preview range.
-                            let progress = if step <= animation_steps {
+                            if step <= animation_steps {
                                 let t = step as f32 / animation_steps as f32;
-                                1.0 - (1.0 - t).powi(3)
+                                let progress = 1.0 - (1.0 - t).powi(3);
+                                let next_scroll =
+                                    start_scroll + (animation_target - start_scroll) * progress;
+                                if (editor.scroll_offset - next_scroll).abs() > 0.01 {
+                                    editor.scroll_offset = next_scroll;
+                                    editor.clamp_scroll();
+                                    editor.table_cursor_paint_bounds = None;
+                                    scroll_changed = true;
+                                }
+                                true
                             } else {
-                                1.0
-                            };
-                            editor.scroll_offset =
-                                start_scroll + (target - start_scroll) * progress;
-                            editor.clamp_scroll();
-                            editor.table_cursor_paint_bounds = None;
-                            step <= animation_steps
-                                || !confirmation
-                                    .observe(measured, editor.cursor_center_previews_pending())
+                                // Keep the bootstrapped viewport steady while
+                                // windowed layout and visible previews settle.
+                                let measured = (!editor.layout_dirty)
+                                    .then(|| editor.cursor_center_scroll_target())
+                                    .flatten();
+                                if let Some(settled_target) = settled_cursor_center_target(
+                                    &mut confirmation,
+                                    measured,
+                                    editor.cursor_center_previews_pending(),
+                                ) {
+                                    if (editor.scroll_offset - settled_target).abs() > 0.5 {
+                                        editor.scroll_offset = settled_target;
+                                        editor.clamp_scroll();
+                                        editor.table_cursor_paint_bounds = None;
+                                        scroll_changed = true;
+                                    }
+                                    false
+                                } else {
+                                    true
+                                }
+                            }
                         });
-                        cx.notify();
-                        keep.unwrap_or(false)
+                        let keep = keep.unwrap_or(false);
+                        if keep || scroll_changed {
+                            cx.notify();
+                        }
+                        keep
                     })
                     .unwrap_or(false);
                 if !keep {
@@ -1516,6 +1547,22 @@ impl EditorView {
         self.prepare_cursor_center_navigation();
         let target = self.cursor_center_layout_scroll_target();
         self.start_cursor_center_navigation(target, false, cx);
+    }
+
+    pub(crate) fn center_cursor_in_view_once(&mut self, cx: &mut Context<Self>) {
+        if self.embedded_editor && self.embedded_read_only {
+            self.embedded_stick_to_bottom = false;
+        }
+        self.prepare_cursor_center_navigation();
+        self.outline_navigation_epoch = None;
+        let target = self.cursor_center_layout_scroll_target();
+        self.scroll_offset = target;
+        self.clamp_scroll();
+        // Reconcile the measured target within the next prepaint transaction,
+        // so its estimated position is never published as an intermediate frame.
+        self.center_cursor_confirm_frames = 1;
+        self.table_cursor_paint_bounds = None;
+        cx.notify();
     }
 
     pub(crate) fn cursor_center_scroll_target(&self) -> Option<f32> {
@@ -2857,6 +2904,31 @@ mod tests {
         assert!(!confirmation.observe(Some(160.0), false));
         assert!(!confirmation.observe(Some(160.0), false));
         assert!(confirmation.observe(Some(160.0), false));
+    }
+
+    #[test]
+    fn cursor_center_scrolls_to_the_final_target_only_after_layout_settles() {
+        let mut confirmation = super::CursorCenterConfirmation::default();
+        assert_eq!(
+            super::settled_cursor_center_target(&mut confirmation, Some(100.0), false),
+            None
+        );
+        assert_eq!(
+            super::settled_cursor_center_target(&mut confirmation, Some(160.0), false),
+            None
+        );
+        assert_eq!(
+            super::settled_cursor_center_target(&mut confirmation, Some(160.0), true),
+            None
+        );
+        assert_eq!(
+            super::settled_cursor_center_target(&mut confirmation, Some(160.0), false),
+            None
+        );
+        assert_eq!(
+            super::settled_cursor_center_target(&mut confirmation, Some(160.0), false),
+            Some(160.0)
+        );
     }
 
     #[test]
