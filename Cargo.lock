@@ -3892,7 +3892,7 @@ dependencies = [
 
 [[package]]
 name = "moeka"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
