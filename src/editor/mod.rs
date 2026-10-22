@@ -1732,10 +1732,46 @@ pub(crate) struct PendingHistoryTransaction {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub(crate) struct TableCursorGeometry {
+    pub(crate) offset: usize,
+    pub(crate) paint_bounds: Bounds<Pixels>,
+    pub(crate) content_top: f32,
+    pub(crate) row_height: f32,
+    pub(crate) visual_row: usize,
+}
+
+impl TableCursorGeometry {
+    fn from_paint(
+        offset: usize,
+        paint_bounds: Bounds<Pixels>,
+        visual_row: usize,
+        row_bounds: Range<f32>,
+        viewport_top: f32,
+        painted_scroll: f32,
+    ) -> Self {
+        Self {
+            offset,
+            paint_bounds,
+            // Bind the row to this paint's origin, not a prefix-height cache
+            // that may already contain measurements from a later layout.
+            content_top: row_bounds.start - viewport_top + painted_scroll,
+            row_height: row_bounds.end - row_bounds.start,
+            visual_row,
+        }
+    }
+
+    fn vertical_bounds(self) -> (f32, f32) {
+        let top = self.content_top;
+        (top, top + self.row_height)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct PendingTypingScrollGuard {
     pub(crate) line: usize,
     pub(crate) visual_row: usize,
     pub(crate) visual_geometry_ready: bool,
+    pub(crate) cursor_top: Option<f32>,
     pub(crate) viewport_height: f32,
     pub(crate) scroll_offset: f32,
 }
@@ -2363,7 +2399,7 @@ pub struct EditorView {
     /// Top-left table controls: (bounds, table_start_line).
     /// Blank-space hit areas beside a table: (bounds, boundary caret).
     pub(crate) table_boundary_caret_areas: Vec<(gpui::Bounds<Pixels>, TableBoundaryCaret)>,
-    pub(crate) table_cursor_paint_bounds: Option<(usize, Bounds<Pixels>)>,
+    pub(crate) table_cursor_paint_bounds: Option<TableCursorGeometry>,
     pub(crate) table_cell_selection: Option<table_handles::TableCellSelection>,
     pub(crate) table_boundary_caret: Option<TableBoundaryCaret>,
     pub(crate) table_boundary_drag_origin: Option<TableBoundaryCaret>,
@@ -8673,7 +8709,7 @@ impl EditorView {
     }
 
     /// Rendered-Markdown input assistance. Keep this distinct from editor
-    /// identity so Source cannot trigger table formatting or list renumbering.
+    /// identity so Source cannot trigger rendered-cell operations or list renumbering.
     pub(crate) fn active_tab_is_markdown(&self) -> bool {
         !self.source_mode && self.active_tab_uses_markdown_editor()
     }

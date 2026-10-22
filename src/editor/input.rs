@@ -20,7 +20,7 @@ pub(super) struct TableCellDisplayInfo {
     pub(super) display_to_buffer: Vec<usize>,
     pub(super) buffer_to_display: Vec<usize>,
     pub(super) cell_range: Range<usize>,
-    pub(super) cell_content_len: usize,
+    pub(super) display_source_end: usize,
     pub(super) line_height: f32,
 }
 
@@ -86,13 +86,18 @@ fn table_cell_buffer_column_for_hit(
             .position(|&index| index == hard_line_start)
             && let Some(tail) = source.get(source_start..)
         {
-            return source_start + tail.len() - tail.trim_start_matches([' ', '\t']).len();
+            let trimmed = tail.trim_start_matches([' ', '\t']);
+            return if trimmed.is_empty() {
+                source_start
+            } else {
+                source_start + tail.len() - trimmed.len()
+            };
         }
     }
     info.display_to_buffer
         .get(display_index)
         .copied()
-        .unwrap_or(info.cell_content_len)
+        .unwrap_or(info.display_source_end)
 }
 
 fn table_cell_visual_line_count(info: &TableCellDisplayInfo) -> usize {
@@ -244,7 +249,7 @@ fn table_cell_offset_for_visual_line(
             let offset = if display_index < info.display_to_buffer.len() {
                 info.display_to_buffer[display_index]
             } else {
-                info.cell_content_len
+                info.display_source_end
             };
             return Some((
                 offset,
@@ -2911,6 +2916,7 @@ impl EditorView {
                 &cell_content,
                 &cell_decoration,
                 &b2d_raw,
+                active,
             );
             let trim_start = trimmed_range.start;
             let trimmed_len = trimmed_range.len();
@@ -2994,7 +3000,12 @@ impl EditorView {
             display_to_buffer,
             buffer_to_display,
             cell_range,
-            cell_content_len: cell_content.len(),
+            display_source_end: helpers::table_cell_visible_source_range(
+                &cell_content,
+                &cell_decoration,
+                &cell_active_ranges,
+            )
+            .end,
             line_height,
         })
     }
@@ -4211,7 +4222,7 @@ impl EditorView {
             info.display_to_buffer
                 .get(display_index)
                 .copied()
-                .unwrap_or(info.cell_content_len)
+                .unwrap_or(info.display_source_end)
         };
         Some((
             line_start + info.cell_range.start + buffer_col,
@@ -4643,7 +4654,8 @@ mod table_cell_pointer_tests {
             1.0,
             1.0,
         );
-        let range = helpers::table_cell_display_range(&raw, source, &decoration, &b2d);
+        let range =
+            helpers::table_cell_display_range(&raw, source, &decoration, &b2d, active_ranges);
         let display_text = raw[range.clone()].to_string();
         TableCellDisplayInfo {
             wrapped_lines: Vec::new(),
@@ -4656,9 +4668,125 @@ mod table_cell_pointer_tests {
                 .map(|index| index.saturating_sub(range.start).min(range.len()))
                 .collect(),
             cell_range: 0..source.len(),
-            cell_content_len: source.len(),
+            display_source_end: helpers::table_cell_visible_source_range(
+                source,
+                &decoration,
+                active_ranges,
+            )
+            .end,
             display_text,
             line_height: 24.0,
+        }
+    }
+
+    #[test]
+    fn typed_edge_spaces_are_displayed_before_another_character_is_entered() {
+        for initial in ["", "中🙂", "**é🙂**", "- [ ] "] {
+            for at_start in [false, true] {
+                let mut row = format!("| {initial}          |");
+                let mut caret = 2 + if at_start { 0 } else { initial.len() };
+                for inserted in [" ", " ", "\t"] {
+                    row.insert_str(caret, inserted);
+                    caret += inserted.len();
+                    let text = format!("| Header |\n| --- |\n{row}");
+                    let decorations = markdown::parse_decorations(&text);
+                    let table = decorations[2].table_info.as_ref().unwrap();
+                    let (content, range) =
+                        crate::editor::table_cell_render::content_with_range(table, &row, 0);
+                    assert!(range.contains(&(caret - 1)));
+                    let local = caret - range.start;
+                    let focus = helpers::TableCellSyntaxFocus {
+                        selections: vec![caret..caret],
+                        ..Default::default()
+                    };
+                    let decoration =
+                        helpers::table_cell_decoration(&decorations[2], &content, &range);
+                    let active = helpers::table_cell_active_ranges(0, &range, &focus, &decoration);
+                    let info = display_info(&content, &active);
+                    let display_caret = info.buffer_to_display[local];
+                    assert!(
+                        display_caret >= inserted.len(),
+                        "{row:?}, content={content:?}, active={active:?}, display={:?}, local={local}",
+                        info.display_text
+                    );
+                    assert_eq!(
+                        &info.display_text[display_caret - inserted.len()..display_caret],
+                        inserted,
+                        "{row:?} at {caret}",
+                    );
+                    assert_eq!(
+                        info.display_to_buffer[display_caret - inserted.len()],
+                        local - inserted.len(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn active_cell_reveals_only_padding_up_to_its_caret_or_selection() {
+        let source = "value     ";
+        for (active, expected) in [
+            (vec![], "value"),
+            (vec![7..7], "value  "),
+            (vec![5..8], "value   "),
+        ] {
+            let info = display_info(source, &active);
+            assert_eq!(info.display_text, expected);
+            assert_eq!(info.display_source_end, expected.len());
+        }
+        let source = "     ";
+        assert_eq!(display_info(source, &[2..2]).display_text, "  ");
+        assert_eq!(display_info(source, &[]).display_text, "");
+    }
+
+    #[test]
+    fn repeated_cell_end_hits_insert_before_source_alignment_padding() {
+        for (source, initial) in [
+            ("|                 |", ""),
+            ("| \t |", ""),
+            ("| 中🙂          |", "中🙂"),
+            ("| **é🙂**          |", "**é🙂**"),
+            ("| - [ ]            |", "- [ ] "),
+            ("| value          ", "value"),
+        ] {
+            let mut row = source.to_string();
+            let mut expected = initial.to_string();
+            for inserted in ["x", " y", "中🙂"] {
+                let text = format!("| Header |\n| --- |\n{row}");
+                let decorations = markdown::parse_decorations(&text);
+                let table = decorations[2].table_info.as_ref().unwrap();
+                let (content, range) =
+                    crate::editor::table_cell_render::content_with_range(table, &row, 0);
+                let info = display_info(&content, &[]);
+                let column = table_cell_buffer_column_for_hit(
+                    &info,
+                    &content,
+                    0,
+                    0,
+                    100.0,
+                    info.display_text.len(),
+                );
+                row.insert_str(range.start + column, inserted);
+                expected.push_str(inserted);
+                assert!(
+                    row.starts_with(&format!("| {expected}")),
+                    "{source:?}: {row:?}, expected {expected:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn blank_cell_hits_on_either_edge_keep_padding_after_the_caret() {
+        let source = "\t    ";
+        let info = display_info(source, &[]);
+        assert!(info.display_text.is_empty());
+        for x in [-1.0, 0.0, 100.0] {
+            assert_eq!(
+                table_cell_buffer_column_for_hit(&info, source, 0, 0, x, 0),
+                0,
+            );
         }
     }
 
@@ -4936,7 +5064,7 @@ mod tests {
             display_to_buffer: (0..display_text.len()).collect(),
             buffer_to_display: (0..display_text.len()).collect(),
             cell_range: 0..display_text.len(),
-            cell_content_len: display_text.len(),
+            display_source_end: display_text.len(),
             display_text,
             line_height: 24.0,
         }

@@ -447,7 +447,7 @@ pane_state! {
     (table_column_border_segments, Vec<(gpui::Bounds<Pixels>, usize, usize)>, Vec::new()),
     (table_row_border_segments, Vec<(gpui::Bounds<Pixels>, usize, usize)>, Vec::new()),
     (table_boundary_caret_areas, Vec<(gpui::Bounds<Pixels>, TableBoundaryCaret)>, Vec::new()),
-    (table_cursor_paint_bounds, Option<(usize, Bounds<Pixels>)>, None),
+    (table_cursor_paint_bounds, Option<TableCursorGeometry>, None),
     (table_cell_selection, Option<super::table_handles::TableCellSelection>, None),
     (table_boundary_caret, Option<TableBoundaryCaret>, None),
     (table_boundary_drag_origin, Option<TableBoundaryCaret>, None),

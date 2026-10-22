@@ -322,6 +322,7 @@ const MAX_WATCHED_DIRECTORIES: usize = 64;
 const MAX_DIR_SNAPSHOT_ENTRIES: usize = 4096;
 const MAX_FILE_LIST_STAMP_ENTRIES: usize = 512;
 const POLLS_PER_FALLBACK_SCAN: u8 = 4;
+const DOCUMENT_CONTENT_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DocStamp {
@@ -446,6 +447,7 @@ pub(super) struct FileWatch {
     documents: HashSet<PathBuf>,
     fingerprints: HashMap<PathBuf, Option<u64>>,
     doc_stamps: HashMap<PathBuf, DocStamp>,
+    content_checked_at: HashMap<PathBuf, std::time::Instant>,
     dir_snapshots: HashMap<PathBuf, HashMap<std::ffi::OsString, bool>>,
     file_list_dir: Option<PathBuf>,
     file_list_stamps: HashMap<PathBuf, (u64, Option<std::time::SystemTime>)>,
@@ -509,6 +511,7 @@ impl FileWatch {
             documents: HashSet::new(),
             fingerprints: HashMap::new(),
             doc_stamps: HashMap::new(),
+            content_checked_at: HashMap::new(),
             dir_snapshots: HashMap::new(),
             file_list_dir: None,
             file_list_stamps: HashMap::new(),
@@ -874,6 +877,23 @@ impl FileWatch {
                 .retain(|path, _| request.documents.contains(path));
             self.doc_stamps
                 .retain(|path, _| request.documents.contains(path));
+            self.content_checked_at
+                .retain(|path, _| request.documents.contains(path));
+            // Remote mounts may preserve/cache size and mtime and emit no
+            // native event. Revalidate one oldest document per scan, not the tree.
+            let content_probe = request
+                .documents
+                .iter()
+                .filter_map(|path| {
+                    if !matches!(self.doc_stamps.get(path), Some(DocStamp::File { .. })) {
+                        return None;
+                    }
+                    let checked = self.content_checked_at.get(path)?;
+                    (checked.elapsed() >= DOCUMENT_CONTENT_CHECK_INTERVAL)
+                        .then_some((path, checked))
+                })
+                .min_by_key(|(_, checked)| **checked)
+                .map(|(path, _)| path.clone());
             for path in &request.documents {
                 crate::platform::fs_task::check_deadline()?;
                 let stamp = match probe_doc_stamp(path) {
@@ -891,7 +911,8 @@ impl FileWatch {
                 }
                 let needs_content_check = prev_stamp != Some(stamp)
                     || !self.fingerprints.contains_key(path)
-                    || stamp_modified_recently(stamp);
+                    || stamp_modified_recently(stamp)
+                    || content_probe.as_ref() == Some(path);
                 if !needs_content_check {
                     continue;
                 }
@@ -960,6 +981,8 @@ impl FileWatch {
             if tracked_documents.contains(path) {
                 match observation {
                     FileObservation::File(bytes) => {
+                        self.content_checked_at
+                            .insert(path.clone(), std::time::Instant::now());
                         self.fingerprints
                             .insert(path.clone(), Some(file_fingerprint(bytes)));
                         if let Ok(stamp) = probe_doc_stamp(path) {
@@ -1193,6 +1216,59 @@ mod tests {
                 .contains(&path);
         }
         assert!(changed);
+    }
+
+    #[test]
+    fn bounded_content_probes_detect_unchanged_remote_metadata_without_events() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = (0..3)
+            .map(|index| directory.path().join(format!("{index}.md")))
+            .collect();
+        let old_time = std::time::SystemTime::now() - Duration::from_secs(120);
+        for path in &paths {
+            std::fs::write(path, "old").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(old_time)
+                .unwrap();
+        }
+        let mut watcher = FileWatch::new().unwrap();
+        let request = request(Path::new(""), &paths);
+        watcher.poll(request.clone()).unwrap();
+        // Remove native delivery, as on a mount that accepts a watch but never
+        // forwards remote mutations.
+        for path in watcher.watched.keys() {
+            watcher.watcher.unwatch(path).unwrap();
+        }
+        for path in &paths {
+            std::fs::write(path, "new").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(old_time)
+                .unwrap();
+            assert_eq!(probe_doc_stamp(path).unwrap(), watcher.doc_stamps[path]);
+            watcher
+                .content_checked_at
+                .insert(path.clone(), Instant::now() - Duration::from_secs(60));
+        }
+        while watcher.events.try_recv().is_ok() {}
+        let mut detected = HashSet::new();
+        for _ in 0..paths.len() {
+            watcher.polls_since_scan = POLLS_PER_FALLBACK_SCAN - 1;
+            let batch = watcher.poll(request.clone()).unwrap();
+            assert_eq!(batch.contents.len(), 1);
+            assert_eq!(batch.documents_to_check.len(), 1);
+            detected.extend(batch.documents_to_check);
+        }
+        assert_eq!(detected, paths.into_iter().collect());
+        watcher.polls_since_scan = POLLS_PER_FALLBACK_SCAN - 1;
+        let idle = watcher.poll(request).unwrap();
+        assert!(idle.contents.is_empty());
+        assert!(idle.documents_to_check.is_empty());
     }
 
     #[test]

@@ -2239,7 +2239,8 @@ fn build_precise_table_layout(
             subscript_scale_factor,
             superscript_scale_factor,
         );
-        let range = helpers::table_cell_display_range(&folded, content, decoration, &b2d);
+        let range =
+            helpers::table_cell_display_range(&folded, content, decoration, &b2d, active_ranges);
         let display = folded[range.clone()].to_string();
         let d2b = d2b[range.clone()].to_vec();
         let b2d = b2d
@@ -3199,6 +3200,7 @@ struct EditorPrepaintFrame {
     offscreen_wrap_reflows: usize,
     generated_preview_height_changed: bool,
     explicit_caret_reveal_requested: bool,
+    cursor_reveal_requested: bool,
 }
 
 impl EditorPrepaintFrame {
@@ -3219,7 +3221,12 @@ impl EditorPrepaintFrame {
         target_scroll: f32,
         geometry_changed: bool,
     ) -> bool {
-        self.can_retry() && (geometry_changed || (target_scroll - painted_scroll).abs() > 0.5)
+        self.can_retry()
+            && (geometry_changed || !self.scroll_is_reconciled(painted_scroll, target_scroll))
+    }
+
+    fn scroll_is_reconciled(&self, painted_scroll: f32, target_scroll: f32) -> bool {
+        !self.reconcile_scroll || (target_scroll - painted_scroll).abs() <= 0.5
     }
 }
 
@@ -3234,6 +3241,7 @@ fn reconciled_editor_prepaint<T>(
         offscreen_wrap_reflows: EditorPrepaintFrame::OFFSCREEN_WRAP_REFLOW_BUDGET,
         generated_preview_height_changed: false,
         explicit_caret_reveal_requested: false,
+        cursor_reveal_requested: false,
     };
     loop {
         match prepaint(&mut frame) {
@@ -3263,6 +3271,108 @@ mod passive_preview_reflow_tests {
                     || !decoration.inline_math_spans.is_empty()
             })
             .expect("generated preview or inline math")
+    }
+
+    #[test]
+    fn table_search_centers_the_painted_row_after_upstream_remeasurement() {
+        for initial_scroll in [0.0, 9_000.0] {
+            let mut scroll = initial_scroll;
+            let mut painted_match_top = 0.0;
+            let viewport_top = 80.0;
+            let viewport_height = 600.0;
+            let row_height = 24.0;
+            let mut attempts = 0;
+            reconciled_editor_prepaint(true, |frame| {
+                attempts += 1;
+                // The first layout measures previews above this table. Its
+                // new prefix cache is not the origin used by this paint pass.
+                let table_top = if frame.pass == 0 { 1_000.0 } else { 1_800.0 };
+                painted_match_top = viewport_top + table_top + 2_400.0 - scroll;
+                let geometry = TableCursorGeometry::from_paint(
+                    100,
+                    Bounds::new(
+                        point(px(20.0), px(painted_match_top)),
+                        size(px(2.0), px(row_height)),
+                    ),
+                    3,
+                    painted_match_top..painted_match_top + row_height,
+                    viewport_top,
+                    scroll,
+                );
+                let painted_scroll = scroll;
+                let (top, bottom) = geometry.vertical_bounds();
+                scroll = ((top + bottom - viewport_height) * 0.5).max(0.0);
+                if frame.should_retry(painted_scroll, scroll, false) {
+                    return Err(());
+                }
+                assert!(frame.scroll_is_reconciled(painted_scroll, scroll));
+                Ok(())
+            });
+            assert_eq!(attempts, 3);
+            assert_eq!(
+                painted_match_top + row_height * 0.5 - viewport_top,
+                viewport_height * 0.5,
+            );
+            assert_eq!(scroll, 3_912.0);
+        }
+    }
+
+    #[test]
+    fn scroll_requests_survive_rejected_and_exhausted_layout_attempts() {
+        let mut center_confirm_frames = 1usize;
+        let mut typing_guard = Some(PendingTypingScrollGuard {
+            line: 30,
+            visual_row: 2,
+            visual_geometry_ready: true,
+            cursor_top: Some(1_200.0),
+            viewport_height: 600.0,
+            scroll_offset: 900.0,
+        });
+        let mut scroll = 900.0;
+        let mut attempts = 0;
+        // A growing preview changes the target on every attempt and exhausts
+        // the bounded transaction. Neither request may be consumed yet.
+        reconciled_editor_prepaint(true, |frame| {
+            attempts += 1;
+            let painted = scroll;
+            let target = painted + 100.0;
+            if frame.should_retry(painted, target, false) {
+                scroll = target;
+                return Err(());
+            }
+            if frame.scroll_is_reconciled(painted, target) {
+                center_confirm_frames = center_confirm_frames.saturating_sub(1);
+                typing_guard = None;
+            }
+            Ok(())
+        });
+        assert_eq!(attempts, EditorPrepaintFrame::MAX_PASSES);
+        assert_eq!(center_confirm_frames, 1);
+        assert!(typing_guard.is_some());
+
+        attempts = 0;
+        // The next frame has settled geometry. Its correction must survive
+        // rejection, then be consumed exactly once by the painted attempt.
+        reconciled_editor_prepaint(true, |frame| {
+            attempts += 1;
+            assert_eq!(center_confirm_frames, 1);
+            assert!(typing_guard.is_some());
+            let painted = scroll;
+            let target = 1_300.0;
+            if frame.should_retry(painted, target, false) {
+                scroll = target;
+                return Err(());
+            }
+            if frame.scroll_is_reconciled(painted, target) {
+                center_confirm_frames = center_confirm_frames.saturating_sub(1);
+                typing_guard = None;
+            }
+            Ok(())
+        });
+        assert_eq!(attempts, 2);
+        assert_eq!(scroll, 1_300.0);
+        assert_eq!(center_confirm_frames, 0);
+        assert!(typing_guard.is_none());
     }
 
     #[test]
@@ -3602,6 +3712,7 @@ impl EditorElement {
                 || editor.pending_center_cursor_in_view
                 || editor.center_cursor_confirm_frames > 0
         };
+        frame.cursor_reveal_requested |= self.editor.read(cx).pending_scroll_to_cursor;
         // Resolve a deferred scroll-to-cursor before reading layout state, when
         // the per-line geometry cache is already valid (the common case after an
         // edit like pasting long text). Otherwise the layout loop below positions
@@ -3610,6 +3721,7 @@ impl EditorElement {
         // stale offset and the next frame jumps to the corrected one. Resolving it
         // up front makes this frame paint at the final offset with no jump.
         self.editor.update(cx, |editor, _| {
+            editor.pending_scroll_to_cursor |= frame.cursor_reveal_requested;
             if !editor.pending_scroll_to_cursor
                 || editor.pending_center_cursor_in_view
                 || editor.pending_preview_reveal.is_some()
@@ -3704,6 +3816,12 @@ impl EditorElement {
         let scroll_offset = editor.scroll_offset;
         let caret_cursor_offset = cursor.offset;
         let cursor_line = editor.cursor_line();
+        let cursor_table_reveal_range = frame
+            .explicit_caret_reveal_requested
+            .then(|| decorations.get(cursor_line)?.table_info.as_ref())
+            .flatten()
+            .filter(|table| !table.is_front_matter)
+            .map(|table| table.table_start_line..table.table_end_line);
 
         let viewport_height: f32 = bounds.size.height.into();
         let viewport_width: f32 = bounds.size.width.into();
@@ -3796,6 +3914,10 @@ impl EditorElement {
             }
 
             if active_tab_is_markdown {
+                if let Some(table) = &cursor_table_reveal_range {
+                    start = start.min(table.start);
+                    end = end.max(table.end);
+                }
                 let mut expanded = true;
                 while expanded {
                     expanded = false;
@@ -3889,6 +4011,8 @@ impl EditorElement {
             || editor.document_mode_scroll_anchor_is_current()
             || editor.pending_click_anchor.is_some()
             || editor.pending_center_cursor_in_view
+            || editor.center_cursor_confirm_frames > 0
+            || frame.explicit_caret_reveal_requested
             || (editor.pending_scroll_to_cursor && editor.pending_typing_scroll_guard.is_none());
 
         // Collect all cursor selection ranges (primary + extra)
@@ -4286,7 +4410,10 @@ impl EditorElement {
             let group_plan = front_matter_group_plans
                 .iter()
                 .find(|plan| plan.group.source_lines.contains(&line_idx));
-            let is_cursor_line_early = line_idx == cursor_line;
+            let is_cursor_table_anchor = cursor_table_reveal_range
+                .as_ref()
+                .is_some_and(|table| table.start == line_idx);
+            let is_cursor_line_early = line_idx == cursor_line || is_cursor_table_anchor;
             let line_has_block_preview = decorations
                 .get(line_idx)
                 .and_then(|decoration| decoration.block_preview.as_ref())
@@ -4305,7 +4432,7 @@ impl EditorElement {
                     <= scroll_offset as f64;
             }
             let can_reuse_non_markdown_cached_line = editor.active_tab_is_non_markdown_text()
-                && !is_cursor_line_early
+                && !is_cursor_table_anchor
                 && !line_has_block_preview
                 && !editor.inline_diff_is_phantom_anchor(line_idx)
                 && cached_line.is_some_and(|cached| {
@@ -4752,7 +4879,9 @@ impl EditorElement {
                     }),
                 ));
 
-                if line_bottom < origin_y || line_top > origin_y + viewport_height {
+                if (line_bottom < origin_y || line_top > origin_y + viewport_height)
+                    && !is_cursor_line_early
+                {
                     y += total_line_height;
                     _last_line_height = total_line_height;
                     continue;
@@ -5303,10 +5432,12 @@ impl EditorElement {
                             }
                             _ => cursor_pos,
                         };
-                        let cursor_x = super::caret::caret_x_between_grapheme_centers(
+                        let cursor_x = super::caret::text_caret_x(
                             &cached.display_text,
                             disp_cursor_col,
                             cursor_pos,
+                            &cached.wrapped_line.unwrapped_layout,
+                            window.text_system(),
                             |index| {
                                 cached
                                     .wrapped_line
@@ -7096,6 +7227,7 @@ impl EditorElement {
                                             &cell_content,
                                             &cell_decoration,
                                             &b2d,
+                                            active,
                                         );
                                         let display = raw[range.clone()].to_owned();
                                         let d2b = d2b[range.clone()].to_vec();
@@ -7213,6 +7345,7 @@ impl EditorElement {
                                     ) {
                                         let cell_runs = prepared.display.4;
                                         let mut hard_line_y = cell_text_y;
+                                        let mut visual_row_start = 0;
                                         for (((shaped, hard_line_range), fragment_info), hanging) in
                                             prepared
                                                 .lines
@@ -7221,6 +7354,8 @@ impl EditorElement {
                                                 .zip(&cell_decoration.table_cell_fragments)
                                                 .zip(prepared.wraps)
                                         {
+                                            let visual_row_count =
+                                                shaped.wrap_boundaries().len() + 1;
                                             let indent_px = hanging.indent;
                                             let hard_display_text = cell_layout
                                                 .display_text
@@ -7880,7 +8015,7 @@ impl EditorElement {
                                                     }
                                                 }
 
-                                                // Paint cursors within this cell
+                                                // Measure even while search owns keyboard focus.
                                                 if editor.selected_handle.is_none()
                                                     && !editor.table_boundary_caret.is_some_and(
                                                         |boundary| {
@@ -7888,9 +8023,6 @@ impl EditorElement {
                                                                 == ti.table_start_line
                                                         },
                                                     )
-                                                    && window.is_window_active()
-                                                    && editor.focus_handle.is_focused(window)
-                                                    && editor.focused_sidebar_path.is_none()
                                                 {
                                                     {
                                                         for &cur_off in &all_cursor_offsets {
@@ -7935,17 +8067,22 @@ impl EditorElement {
                                                                         editor.wrap_boundary_affinity_for_offset(cur_off),
                                                                     );
                                                                     let caret_x =
-                                                                        super::caret::caret_x_between_grapheme_centers(
+                                                                        super::caret::text_caret_x(
                                                                             hard_display_text,
                                                                             disp_col,
                                                                             pos,
-                                                                            |index| Some(hanging.position(
-                                                                                &shaped,
-                                                                                hard_display_text,
-                                                                                index,
-                                                                                line_height,
-                                                                                None,
-                                                                            )),
+                                                                            &shaped
+                                                                                .unwrapped_layout,
+                                                                            window.text_system(),
+                                                                            |index| {
+                                                                                Some(hanging.position(
+                                                                                    &shaped,
+                                                                                    hard_display_text,
+                                                                                    index,
+                                                                                    line_height,
+                                                                                    None,
+                                                                                ))
+                                                                            },
                                                                         );
                                                                     let row_height = f32::from(
                                                                         shaped.row_height(
@@ -7967,45 +8104,49 @@ impl EditorElement {
                                                                         + (row_height
                                                                             - cursor_height)
                                                                             / 2.0;
+                                                                    let cursor_width = px(editor
+                                                                        .styles
+                                                                        .cursor
+                                                                        .cursor_width_px);
+                                                                    let cursor_bounds = Bounds::new(
+                                                                        point(
+                                                                            px(cell_x) + super::caret::centered_caret_left(
+                                                                                caret_x, cursor_width,
+                                                                            ),
+                                                                            px(cursor_top),
+                                                                        ),
+                                                                        size(cursor_width, px(cursor_height)),
+                                                                    );
                                                                     if cur_off
                                                                         == editor.cursor.offset
                                                                     {
-                                                                        table_cursor_paint_bounds = Some((cur_off, Bounds::new(
-                                                                            point(
-                                                                                px(cell_x)
-                                                                                    + super::caret::centered_caret_left(
-                                                                                        caret_x,
-                                                                                        px(editor.styles.cursor.cursor_width_px),
-                                                                                    ),
-                                                                                px(cursor_top),
-                                                                            ),
-                                                                            size(px(editor.styles.cursor.cursor_width_px), px(cursor_height)),
-                                                                        )));
+                                                                        let row_top = hard_line_y
+                                                                            + f32::from(pos.y);
+                                                                        table_cursor_paint_bounds = Some(TableCursorGeometry::from_paint(
+                                                                            cur_off,
+                                                                            cursor_bounds,
+                                                                            visual_row_start + shaped.row_for_y(pos.y, px(line_height)),
+                                                                            row_top..row_top + row_height,
+                                                                            origin_y,
+                                                                            scroll_offset,
+                                                                        ));
                                                                     }
-                                                                    cursor_paints.push(
-                                                                        super::caret::CaretPaint {
-                                                                            bounds: Bounds::new(
-                                                                                point(
-                                                                            px(cell_x)
-                                                                                + super::caret::centered_caret_left(
-                                                                                        caret_x,
-                                                                                    px(editor.styles.cursor.cursor_width_px),
-                                                                                ),
-                                                                            px(cursor_top),
-                                                                        ),
-                                                                                size(
-                                                                            px(editor
-                                                                                .styles
-                                                                                .cursor
-                                                                                .cursor_width_px),
-                                                                            px(cursor_height),
-                                                                        ),
-                                                                            ),
-                                                                            color: theme.cursor,
-                                                                            force_visible: editor
-                                                                                .is_selecting,
-                                                                        },
-                                                                    );
+                                                                    if window.is_window_active()
+                                                                        && editor
+                                                                            .focus_handle
+                                                                            .is_focused(window)
+                                                                        && editor
+                                                                            .focused_sidebar_path
+                                                                            .is_none()
+                                                                    {
+                                                                        cursor_paints.push(
+                                                                            super::caret::CaretPaint {
+                                                                                bounds: cursor_bounds,
+                                                                                color: theme.cursor,
+                                                                                force_visible: editor.is_selecting,
+                                                                            },
+                                                                        );
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -8142,6 +8283,7 @@ impl EditorElement {
                                                     px(line_height),
                                                 ));
                                             }
+                                            visual_row_start += visual_row_count;
                                             hard_line_y += hard_height;
                                         }
                                     }
@@ -9432,10 +9574,12 @@ impl EditorElement {
                                     let caret_pos = wrapped
                                         .position_for_index(display_head, px(r_line_height))
                                         .unwrap_or_default();
-                                    let caret_x = super::caret::caret_x_between_grapheme_centers(
+                                    let caret_x = super::caret::text_caret_x(
                                         &display_text,
                                         display_head,
                                         caret_pos,
+                                        &wrapped.unwrapped_layout,
+                                        window.text_system(),
                                         |index| {
                                             wrapped.position_for_index(index, px(r_line_height))
                                         },
@@ -9976,10 +10120,12 @@ impl EditorElement {
                         .unwrap_or(cursor_pos),
                         _ => cursor_pos,
                     };
-                    let cursor_x = super::caret::caret_x_between_grapheme_centers(
+                    let cursor_x = super::caret::text_caret_x(
                         &display_text,
                         disp_cursor_col,
                         cursor_pos,
+                        &wrapped.unwrapped_layout,
+                        window.text_system(),
                         |index| wrapped.position_for_index(index, px(line_height)),
                     );
 
@@ -11778,7 +11924,7 @@ impl EditorElement {
                 cx.notify();
             }
             let mut did_adjust_click_anchor = false;
-            if let Some(anchor) = editor.pending_click_anchor.take() {
+            if let Some(anchor) = editor.pending_click_anchor {
                 let line = anchor.line.min(editor.buffer.line_count());
                 let rel_y_after = editor.text_y_offset_for_line(line);
                 let target = (anchor.scroll_before + (rel_y_after - anchor.rel_y_before)).max(0.0);
@@ -11812,7 +11958,6 @@ impl EditorElement {
                 editor.scroll_to_cursor();
                 cx.notify();
             } else if editor.center_cursor_confirm_frames > 0 {
-                editor.center_cursor_confirm_frames -= 1;
                 if !did_preserve_typing_scroll
                     && !did_adjust_click_anchor
                     && !did_adjust_preview_reveal
@@ -11843,9 +11988,39 @@ impl EditorElement {
             {
                 cx.notify();
             }
-            // Reset the rendered view (zoom/pan) whenever the cursor enters or
-            // leaves a preview's source. Run this after consuming existing scroll
-            // guards so a forced rerender's new guard survives until its layout.
+        });
+
+        if frame.should_retry(
+            scroll_offset,
+            self.editor.read(cx).scroll_offset,
+            mode_geometry_changed,
+        ) {
+            // Window::transact removes this attempt's hitboxes/tooltips. Keep
+            // the measured line caches and offset for the next attempt, but do
+            // not publish stale caret, drag, menu or input geometry.
+            return Err(());
+        }
+        self.editor.update(cx, |editor, cx| {
+            // Rejected attempts retain the same input/navigation intent. Consume
+            // it only once the geometry at the final scroll offset is accepted.
+            if frame.scroll_is_reconciled(scroll_offset, editor.scroll_offset) {
+                editor.pending_typing_scroll_guard = None;
+                editor.pending_click_anchor = None;
+                editor.center_cursor_confirm_frames =
+                    editor.center_cursor_confirm_frames.saturating_sub(1);
+            } else {
+                editor.pending_scroll_to_cursor |= frame.cursor_reveal_requested;
+                cx.notify();
+            }
+            if frame.reconcile_scroll {
+                // On budget exhaustion defer any further correction, rather
+                // than exposing an offset different from the geometry painted.
+                editor.scroll_offset = scroll_offset;
+            }
+            editor.sync_slash_menu_anchor_after_layout(cx);
+            editor.sync_table_input_menu_after_layout(window, cx);
+            // A preview refresh may install a new scroll guard for a later
+            // frame; do not consume it as part of this frame's transaction.
             let focused_code_mode = editor.focused_code_mode_preview_key();
             if focused_code_mode != editor.code_mode_preview_key {
                 let leaving_code_view = editor.code_mode_preview_key.is_some();
@@ -11867,26 +12042,6 @@ impl EditorElement {
                 editor.generated_preview_rerender_pending = false;
                 editor.schedule_generated_preview_rerender(cx);
             }
-        });
-
-        if frame.should_retry(
-            scroll_offset,
-            self.editor.read(cx).scroll_offset,
-            mode_geometry_changed,
-        ) {
-            // Window::transact removes this attempt's hitboxes/tooltips. Keep
-            // the measured line caches and offset for the next attempt, but do
-            // not publish stale caret, drag, menu or input geometry.
-            return Err(());
-        }
-        self.editor.update(cx, |editor, cx| {
-            if frame.reconcile_scroll {
-                // On budget exhaustion defer any further correction, rather
-                // than exposing an offset different from the geometry painted.
-                editor.scroll_offset = scroll_offset;
-            }
-            editor.sync_slash_menu_anchor_after_layout(cx);
-            editor.sync_table_input_menu_after_layout(window, cx);
         });
 
         // Trigger loading for any image paths not yet in cache
@@ -12129,7 +12284,10 @@ impl Element for EditorElement {
                 caret_was_visible,
                 editor.document_mode_scroll_anchor_is_current()
                     || editor.editor_scrollbar_drag.is_some()
-                    || editor.center_cursor_confirm_frames > 0,
+                    || editor.center_cursor_confirm_frames > 0
+                    || editor.pending_typing_scroll_guard.is_some()
+                    || editor.pending_click_anchor.is_some()
+                    || editor.pending_scroll_to_cursor,
             )
         });
         let state = reconciled_editor_prepaint(reconcile_scroll, |frame| {

@@ -337,8 +337,12 @@ fn row_edits_preserve_cells(
         })
 }
 
-/// A table target is handled even when protected: never fall through to a
-/// physical-row deletion for a separator, cross-cell selection, or nearby word.
+fn multiline_selection(buffer: &Buffer, cursor: Cursor) -> bool {
+    cursor.has_selection()
+        && buffer.offset_to_line_col(cursor.offset).0 != buffer.offset_to_line_col(cursor.anchor).0
+}
+
+/// Protect implicit structural edits, not explicit selections spanning blocks.
 fn deletion_plan(
     buffer: &Buffer,
     rows: &[LineDecoration],
@@ -384,7 +388,7 @@ fn deletion_plan(
                 &edit.range,
                 action != lists::DeleteAction::Line,
             ));
-    if table {
+    if table && (action == lists::DeleteAction::Line || !multiline_selection(buffer, cursor)) {
         edit = Edit::new(cursor.offset..cursor.offset, String::new());
     } else if action == lists::DeleteAction::Line
         && super::ordered_list_near_line(rows, buffer.offset_to_line_col(cursor.offset).0)
@@ -415,6 +419,7 @@ fn deletion_plans(
         let mut lines: Vec<_> = plans
             .iter()
             .filter(|(_, _, e)| !e.range.is_empty())
+            .filter(|(cursor, _, _)| !multiline_selection(buffer, *cursor))
             .filter_map(|(_, _, edit)| {
                 let line = buffer.offset_to_line_col(edit.range.start).0;
                 rows.get(line)
@@ -431,12 +436,14 @@ fn deletion_plans(
                 .filter(|(_, _, e)| {
                     !e.range.is_empty() && buffer.offset_to_line_col(e.range.start).0 == line
                 })
+                .filter(|(cursor, _, _)| !multiline_selection(buffer, *cursor))
                 .cloned()
                 .collect();
             if !row_deletions_preserve_cells(buffer, rows, line, &targets) {
                 for (cursor, _, edit) in &mut plans {
                     if !edit.range.is_empty()
                         && buffer.offset_to_line_col(edit.range.start).0 == line
+                        && !multiline_selection(buffer, *cursor)
                     {
                         *edit = Edit::new(cursor.offset..cursor.offset, String::new());
                     }
@@ -1345,6 +1352,48 @@ mod tests {
         )
         .0;
         assert_eq!(edit.range, 0.."before\n".len());
+    }
+
+    #[test]
+    fn explicit_block_selections_delete_one_or_more_tables_in_both_directions() {
+        let text = "before\n| A | B |\n| --- | --- |\n| one | two |\nbetween\n| C | D |\n| --- | --- |\n| three | four |\nafter";
+        for range in [
+            0..text.len(),
+            text.find("| A").unwrap()..text.find("between").unwrap(),
+            text.find("one").unwrap()..text.find("four").unwrap() + 4,
+        ] {
+            for reversed in [false, true] {
+                let cursor = Cursor {
+                    anchor: if reversed { range.end } else { range.start },
+                    offset: if reversed { range.start } else { range.end },
+                };
+                for action in deletion_actions()
+                    .into_iter()
+                    .filter(|action| *action != lists::DeleteAction::Line)
+                {
+                    let mut buffer = Buffer::from_text(text);
+                    let rows = markdown::parse_decorations(text);
+                    let plans = deletion_plans(&buffer, &rows, true, vec![(cursor, true)], action);
+                    assert_eq!(
+                        lists::deletion_ranges(&plans),
+                        vec![range.clone()],
+                        "{action:?}"
+                    );
+                    let resolved = lists::apply_deletions(&mut buffer, &plans);
+                    assert_eq!(
+                        buffer.text(),
+                        format!("{}{}", &text[..range.start], &text[range.end..])
+                    );
+                    assert_eq!(
+                        resolved[0].0,
+                        Cursor {
+                            offset: range.start,
+                            anchor: range.start
+                        }
+                    );
+                }
+            }
+        }
     }
 
     #[test]

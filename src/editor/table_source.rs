@@ -15,7 +15,29 @@ pub(crate) struct TableSource {
     format_pending: bool,
 }
 
-fn alignment_edits(text: &str, base: usize) -> Vec<(Range<usize>, String)> {
+fn alignment_content_range(cell: &str, start: usize, carets: &[usize]) -> Range<usize> {
+    let content_start = usize::from(cell.starts_with(' '));
+    let content_end = carets
+        .iter()
+        .copied()
+        .filter(|&offset| start + content_start <= offset && offset <= start + cell.len())
+        .map(|offset| offset - start)
+        .max()
+        .unwrap_or(0)
+        .max(cell.trim_end_matches([' ', '\t']).len())
+        .max(content_start);
+    content_start..content_end
+}
+
+fn alignment_content<'a>(cell: &'a str, start: usize, carets: &[usize]) -> &'a str {
+    &cell[alignment_content_range(cell, start, carets)]
+}
+
+fn alignment_edits_with_carets(
+    text: &str,
+    base: usize,
+    carets: &[usize],
+) -> Vec<(Range<usize>, String)> {
     let mut groups: Vec<Vec<(usize, &str, Vec<usize>)>> = vec![Vec::new()];
     let mut offset = base;
     for line in text.split('\n') {
@@ -38,10 +60,10 @@ fn alignment_edits(text: &str, base: usize) -> Vec<(Range<usize>, String)> {
             .max()
             .unwrap_or(0);
         let mut widths = vec![0; columns];
-        for (_, line, pipes) in &rows {
+        for (base, line, pipes) in &rows {
             for (column, pair) in pipes.windows(2).enumerate() {
                 widths[column] = widths[column].max(crate::table_ops::cell_display_width(
-                    line[pair[0] + 1..pair[1]].trim_matches(|ch| ch == ' ' || ch == '\t'),
+                    alignment_content(&line[pair[0] + 1..pair[1]], base + pair[0] + 1, carets),
                 ));
             }
         }
@@ -50,7 +72,7 @@ fn alignment_edits(text: &str, base: usize) -> Vec<(Range<usize>, String)> {
                 let start = pair[0] + 1;
                 let end = pair[1];
                 let cell = &line[start..end];
-                let content = cell.trim_matches(|ch| ch == ' ' || ch == '\t');
+                let content = alignment_content(cell, base + start, carets);
                 let width = crate::table_ops::cell_display_width(content);
                 let replacement = format!(" {content}{}", " ".repeat(widths[column] - width + 1));
                 if cell != replacement {
@@ -62,11 +84,17 @@ fn alignment_edits(text: &str, base: usize) -> Vec<(Range<usize>, String)> {
     edits
 }
 
+#[cfg(test)]
+fn alignment_edits(text: &str, base: usize) -> Vec<(Range<usize>, String)> {
+    alignment_edits_with_carets(text, base, &[])
+}
+
 fn offset_after_alignment(
     offset: usize,
     edits: &[(Range<usize>, String)],
     original: &str,
     base: usize,
+    carets: &[usize],
 ) -> usize {
     let mut shift = 0isize;
     for (range, replacement) in edits {
@@ -75,12 +103,11 @@ fn offset_after_alignment(
         }
         let old = &original[range.start - base..range.end - base];
         if offset <= range.end {
-            let content = old.trim_matches(|ch| ch == ' ' || ch == '\t');
-            let content_start = old.find(content).unwrap_or(0);
-            let relative = if offset - range.start <= content_start {
+            let content = alignment_content_range(old, range.start, carets);
+            let relative = if offset - range.start <= content.start {
                 1
             } else {
-                (offset - range.start - content_start + 1).min(content.len() + 1)
+                (offset - range.start - content.start + 1).min(content.len() + 1)
             };
             return (range.start as isize + shift) as usize + relative;
         }
@@ -191,10 +218,16 @@ impl EditorView {
         if !self.active_tab_uses_markdown_editor() {
             return None;
         }
-        let (start, end, _) = self.table_lines_for_block(self.cursor_line())?;
-        if self.block_is_front_matter(start) {
+        let context = self.source_syntax_context.borrow();
+        let rows = context
+            .markdown_decorations
+            .as_deref()
+            .unwrap_or(&self.decorations);
+        let table = rows.get(self.cursor_line())?.table_info.as_ref()?;
+        if table.is_front_matter {
             return None;
         }
+        let (start, end) = (table.table_start_line, table.table_end_line);
         Some(self.buffer.line_start(start)..self.buffer.line_end(end.saturating_sub(1)))
     }
 
@@ -232,19 +265,19 @@ impl EditorView {
             source.format_pending = false;
             source.range.clone()
         } else {
+            if !self.source_mode {
+                return;
+            }
             if record_history && self.pending_history_transaction.is_none() {
                 return;
             }
             if !self.active_tab_uses_markdown_editor() {
                 return;
             }
-            let Some((start, end, _)) = self.table_lines_for_block(self.cursor_line()) else {
+            let Some(range) = self.markdown_table_source_range_at_cursor() else {
                 return;
             };
-            if self.block_is_front_matter(start) {
-                return;
-            }
-            self.buffer.line_start(start)..self.buffer.line_end(end.saturating_sub(1))
+            range
         };
         if self.align_table_source_range(range, record_history) {
             self.reparse();
@@ -260,7 +293,11 @@ impl EditorView {
         record_history: bool,
     ) -> bool {
         let original = self.buffer.text_for_range(range.clone()).to_string();
-        let edits = alignment_edits(&original, range.start);
+        let carets: Vec<_> = std::iter::once(&self.cursor)
+            .chain(self.extra_cursors.iter())
+            .flat_map(|cursor| [cursor.offset, cursor.anchor])
+            .collect();
+        let edits = alignment_edits_with_carets(&original, range.start, &carets);
         if edits.is_empty() {
             return false;
         }
@@ -268,11 +305,13 @@ impl EditorView {
             self.checkpoint();
         }
         for cursor in std::iter::once(&mut self.cursor).chain(self.extra_cursors.iter_mut()) {
-            cursor.offset = offset_after_alignment(cursor.offset, &edits, &original, range.start);
-            cursor.anchor = offset_after_alignment(cursor.anchor, &edits, &original, range.start);
+            cursor.offset =
+                offset_after_alignment(cursor.offset, &edits, &original, range.start, &carets);
+            cursor.anchor =
+                offset_after_alignment(cursor.anchor, &edits, &original, range.start, &carets);
         }
         if let Some(offset) = &mut self.last_typing_checkpoint_offset {
-            *offset = offset_after_alignment(*offset, &edits, &original, range.start);
+            *offset = offset_after_alignment(*offset, &edits, &original, range.start, &carets);
         }
         if self.source_mode {
             self.source_syntax_context
@@ -364,10 +403,49 @@ mod tests {
         let original = buffer.text_for_range(range.clone()).to_string();
         let edits = alignment_edits(&original, range.start);
         for position in positions {
-            *position = offset_after_alignment(*position, &edits, &original, range.start);
+            *position = offset_after_alignment(*position, &edits, &original, range.start, &[]);
         }
         for (range, replacement) in edits.into_iter().rev() {
             buffer.replace(range, &replacement);
+        }
+    }
+
+    #[test]
+    fn live_alignment_keeps_typed_spaces_and_paste_at_the_same_insertion_point() {
+        for (cell, local) in [("a  ", 3), ("  a", 2), ("   ", 2), ("文  ", "文  ".len())] {
+            let text = format!("| {cell} | b |\n| --- | --- |\n| longer | c |");
+            let mut buffer = Buffer::from_text(&text);
+            let mut caret = 2 + local;
+            for input in ["", " ", "pasted"] {
+                buffer.insert(caret, input);
+                caret += input.len();
+                let original = buffer.text().to_string();
+                let edits = alignment_edits_with_carets(&original, 0, &[caret]);
+                let before = original[2..caret].to_string();
+                caret = offset_after_alignment(caret, &edits, &original, 0, &[caret]);
+                for (range, replacement) in edits.into_iter().rev() {
+                    buffer.replace(range, &replacement);
+                }
+                assert_eq!(&buffer.text()[2..caret], before, "{cell:?}, {input:?}");
+                let pipes: Vec<_> = buffer
+                    .text()
+                    .lines()
+                    .map(markdown::table_pipe_offsets)
+                    .collect();
+                let pipe_columns: Vec<_> = buffer
+                    .text()
+                    .lines()
+                    .zip(pipes)
+                    .map(|(line, pipes)| {
+                        pipes
+                            .into_iter()
+                            .map(|offset| crate::table_ops::cell_display_width(&line[..offset]))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                assert!(pipe_columns.iter().all(|row| row == &pipe_columns[0]));
+                assert!(alignment_edits_with_carets(buffer.text(), 0, &[caret]).is_empty());
+            }
         }
     }
 
@@ -480,7 +558,7 @@ mod tests {
         let len = buffer.len();
         align_buffer(&mut buffer, 0..len, &mut positions);
         assert_eq!(&buffer.text()[positions[0]..positions[0] + 1], "a");
-        assert!(buffer.text().starts_with("| a    | b"));
+        assert!(buffer.text().starts_with("|  a   | b"));
         let formatted = buffer.text().to_string();
         let len = buffer.len();
         align_buffer(&mut buffer, 0..len, &mut positions);

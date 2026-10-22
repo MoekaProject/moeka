@@ -1878,10 +1878,10 @@ impl EditorView {
 
     pub(crate) fn cursor_screen_position(&self) -> Point<Pixels> {
         if self.table_cursor_cell().is_some()
-            && let Some((offset, bounds)) = self.table_cursor_paint_bounds
-            && offset == self.cursor.offset
+            && let Some(geometry) = self.table_cursor_paint_bounds
+            && geometry.offset == self.cursor.offset
         {
-            return gpui::point(bounds.left(), bounds.bottom());
+            return gpui::point(geometry.paint_bounds.left(), geometry.paint_bounds.bottom());
         }
         self.screen_position_for_offset(self.cursor.offset)
     }
@@ -1896,7 +1896,7 @@ impl EditorView {
             || self.table_cursor_cell().is_none()
             || !self
                 .table_cursor_paint_bounds
-                .is_some_and(|(offset, _)| offset == self.cursor.offset)
+                .is_some_and(|geometry| geometry.offset == self.cursor.offset)
             || !self
                 .context_menu
                 .as_ref()
@@ -5420,10 +5420,10 @@ impl EditorView {
             self.cursor.offset
         };
         if self.table_cell_for_offset(anchor_offset).is_some()
-            && let Some((offset, bounds)) = self.table_cursor_paint_bounds
-            && offset == anchor_offset
+            && let Some(geometry) = self.table_cursor_paint_bounds
+            && geometry.offset == anchor_offset
         {
-            return f32::from(bounds.size.height)
+            return f32::from(geometry.paint_bounds.size.height)
                 / self.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
         }
         let (line, _) = self.buffer.offset_to_line_col(anchor_offset);

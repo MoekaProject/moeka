@@ -10,9 +10,9 @@ use super::{WrapBoundaryAffinityKind, helpers};
 
 use crate::markdown::TableLineInfo;
 
-/// Restore real list indentation and trailing whitespace around semantic cells.
+/// Restore editable whitespace around semantic cells.
 /// Immediately after a pipe, one optional ASCII space is formatting padding;
-/// any further spaces/tabs before a list belong to its first fragment. Never
+/// any further spaces/tabs belong to the cell. Never
 /// borrow row/container indentation or synthesize source bytes.
 pub(super) fn content_with_range(
     info: &TableLineInfo,
@@ -36,15 +36,13 @@ pub(super) fn content_with_range(
     content.push_str(&tail[..trailing_len]);
     range.end += trailing_len;
 
-    if helpers::table_cell_list_syntax_len(&content) > 0 {
-        let before = &source_line[..range.start];
-        let padding_start = before.trim_end_matches([' ', '\t']).len();
-        if before[..padding_start].ends_with('|') {
-            let formatting_space =
-                usize::from(source_line.as_bytes().get(padding_start) == Some(&b' '));
-            range.start = padding_start + formatting_space;
-            content = source_line[range.clone()].to_owned();
-        }
+    let before = &source_line[..range.start];
+    let padding_start = before.trim_end_matches([' ', '\t']).len();
+    if before[..padding_start].ends_with('|') {
+        let formatting_space =
+            usize::from(source_line.as_bytes().get(padding_start) == Some(&b' '));
+        range.start = padding_start + formatting_space;
+        content = source_line[range.clone()].to_owned();
     }
     (content, range)
 }
@@ -651,7 +649,7 @@ mod tests {
             scales[2],
         );
         let display_range =
-            helpers::table_cell_display_range(&raw_display, &content, &decoration, &raw_b2d);
+            helpers::table_cell_display_range(&raw_display, &content, &decoration, &raw_b2d, &[]);
         assert!(display_range.start <= display_range.end);
         assert!(raw_display.is_char_boundary(display_range.start));
         assert!(raw_display.is_char_boundary(display_range.end));
@@ -1327,7 +1325,8 @@ mod tests {
             let info = rows[2].table_info.as_ref().unwrap();
             assert_eq!(
                 content_with_range(info, row, 0).1.start,
-                info.cell_ranges[0].start
+                2,
+                "ordinary cells must own newly typed leading spaces too",
             );
         }
         let row = "  - item | neighbor";
@@ -1779,15 +1778,12 @@ mod tests {
     }
 
     #[test]
-    fn render_cell_empty_and_missing_cells_keep_their_anchors() {
+    fn render_cell_empty_padding_is_owned_from_the_first_editable_byte() {
         let row = "| \t | value |";
         let text = format!("| A | B |\n| --- | --- |\n{row}");
         let decorations = markdown::parse_decorations(&text);
         let info = decorations[2].table_info.as_ref().unwrap();
-        assert_eq!(
-            content_with_range(info, row, 0),
-            (String::new(), info.cell_ranges[0].clone())
-        );
+        assert_eq!(content_with_range(info, row, 0), ("\t ".to_string(), 2..4));
         assert_eq!(content_with_range(info, row, 9), (String::new(), 0..0));
     }
 

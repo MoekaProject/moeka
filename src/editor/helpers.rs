@@ -2435,8 +2435,13 @@ pub(crate) fn compute_table_layout(
                 1.0,
                 1.0,
             );
-            let trimmed_range =
-                table_cell_display_range(&folded_raw, &cell_content, &cell_decoration, &b2d_raw);
+            let trimmed_range = table_cell_display_range(
+                &folded_raw,
+                &cell_content,
+                &cell_decoration,
+                &b2d_raw,
+                &[],
+            );
             let trim_start = trimmed_range.start;
             let display_text = folded_raw[trimmed_range.clone()].to_string();
             let d2b = d2b_raw[trimmed_range].to_vec();
@@ -2744,11 +2749,10 @@ pub(crate) fn hard_line_byte_ranges(text: &str) -> Vec<Range<usize>> {
     ranges
 }
 
-pub(crate) fn table_cell_display_range(
-    display_text: &str,
+pub(crate) fn table_cell_visible_source_range(
     source: &str,
     decoration: &LineDecoration,
-    buffer_to_display: &[usize],
+    active: &[Range<usize>],
 ) -> Range<usize> {
     // Only source padding is disposable. Spaces produced by scripts, footnotes
     // and folded prefixes reserve real ink and must survive at cell edges.
@@ -2757,6 +2761,8 @@ pub(crate) fn table_cell_display_range(
         .first()
         .is_some_and(|fragment| fragment.prefix_len > 0)
     {
+        0
+    } else if source.trim_matches([' ', '\t']).is_empty() {
         0
     } else {
         source.len() - source.trim_start_matches([' ', '\t']).len()
@@ -2770,13 +2776,39 @@ pub(crate) fn table_cell_display_range(
         .len()
         .max(source_start)
         .max(prefix_end);
+    let mut range = source_start..source_end;
+    // Reveal real whitespace through the caret/selection immediately, without
+    // displaying the remaining alignment padding or changing natural widths.
+    for selection in active {
+        if selection.start <= selection.end
+            && selection.end <= source.len()
+            && source.is_char_boundary(selection.start)
+            && source.is_char_boundary(selection.end)
+        {
+            if selection.start <= source_start {
+                range.start = 0;
+            }
+            range.end = range.end.max(selection.end);
+        }
+    }
+    range
+}
+
+pub(crate) fn table_cell_display_range(
+    display_text: &str,
+    source: &str,
+    decoration: &LineDecoration,
+    buffer_to_display: &[usize],
+    active: &[Range<usize>],
+) -> Range<usize> {
+    let source_range = table_cell_visible_source_range(source, decoration, active);
     let start = buffer_to_display
-        .get(source_start)
+        .get(source_range.start)
         .copied()
         .unwrap_or(0)
         .min(display_text.len());
     let end = buffer_to_display
-        .get(source_end)
+        .get(source_range.end)
         .copied()
         .unwrap_or(display_text.len())
         .clamp(start, display_text.len());
@@ -3702,7 +3734,7 @@ mod tests {
                 source, decoration, active, false, None, 0, 3, 3, 2, 0, 0.7, 0.7, 0.7,
             );
             let range = if cell {
-                helpers::table_cell_display_range(&raw, source, decoration, &b2d)
+                helpers::table_cell_display_range(&raw, source, decoration, &b2d, active)
             } else {
                 0..raw.len()
             };
