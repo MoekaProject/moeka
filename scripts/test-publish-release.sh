@@ -286,4 +286,54 @@ invoke publish v9.8.7 || fail 'Draft resume failed'
 [[ "$original" == "$(shasum -a 256 "$FIXTURE/remote/Moeka-macos-arm64.dmg")" ]] || fail 'Original draft asset changed'
 if grep -Eq '^(make |git (push|tag )|gh release create )' "$FIXTURE/calls"; then fail 'Resume rebuilt, retagged, or recreated release'; fi
 echo 'PASS interrupted upload, changed-dist refusal, and no-overwrite draft resume'
-printf 'All offline release safety tests passed (%s isolated fixtures).\n' "$count"
+notary_fixture="$work/notary"
+mkdir -p "$notary_fixture/bin" "$notary_fixture/Moeka.app"
+cp "${helper%/*}/sign_notarize_package.sh" "$notary_fixture/sign_notarize_package.sh"
+cat >"$notary_fixture/bin/mock" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+tool=${0##*/}
+printf '%s %s\n' "$tool" "$*" >>"$NOTARY_CALLS"
+case "$tool" in
+    xcrun)
+        if [[ "$1 $2" == 'notarytool submit' ]]; then
+            [[ " $* " == *' --no-s3-acceleration '* && " $* " == *' --wait '* ]] || exit 97
+            exit "$NOTARY_RESULT"
+        fi
+        [[ "$1 $2" == 'stapler staple' || "$1 $2" == 'stapler validate' ]] || exit 98;;
+    ditto) touch "${!#}";;
+    create_dmg.sh) touch "$2";;
+    codesign|spctl) :;;
+    *) exit 99;;
+esac
+MOCK
+chmod +x "$notary_fixture/bin/mock"
+for tool in xcrun ditto codesign spctl; do
+    cp "$notary_fixture/bin/mock" "$notary_fixture/bin/$tool"
+done
+cp "$notary_fixture/bin/mock" "$notary_fixture/create_dmg.sh"
+for notary_result in 0 1 138; do
+    calls="$notary_fixture/calls-$notary_result"
+    output="$notary_fixture/output-$notary_result"
+    if NOTARY_CALLS="$calls" NOTARY_RESULT="$notary_result" PATH="$notary_fixture/bin:$PATH" \
+        bash "$notary_fixture/sign_notarize_package.sh" \
+        "$notary_fixture/Moeka.app" "$output/staging" "$output/Moeka.dmg" \
+        "$output/Moeka.zip" Moeka Moeka unused-background fake-identity fake-profile \
+        >"$notary_fixture/log-$notary_result" 2>&1; then
+        [[ "$notary_result" == 0 ]] || { echo 'FAIL: notarization failure was ignored' >&2; exit 1; }
+        [[ -f "$output/Moeka.dmg" && -f "$output/Moeka.zip" ]]
+        grep -q 'xcrun stapler staple' "$calls"
+        grep -q 'xcrun stapler validate' "$calls"
+        grep -q 'spctl --assess' "$calls"
+    else
+        notary_exit=$?
+        [[ "$notary_result" != 0 && "$notary_exit" == "$notary_result" ]] || {
+            cat "$notary_fixture/log-$notary_result" >&2; exit 1;
+        }
+        if grep -Eq 'stapler|spctl|create_dmg.sh' "$calls" || [[ -e "$output" ]]; then
+            echo 'FAIL: packaging continued after notarization failure' >&2; exit 1
+        fi
+    fi
+    printf 'PASS notarization pipeline: exit %s\n' "$notary_result"
+done
+printf 'All offline release safety tests passed (%s publishing fixtures + 3 notarization fixtures).\n' "$count"

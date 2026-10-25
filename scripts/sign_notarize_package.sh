@@ -37,7 +37,7 @@ codesign \
 codesign --verify --deep --strict --verbose=2 "$app_path"
 
 ditto -c -k --sequesterRsrc --keepParent "$app_path" "$notary_zip"
-xcrun notarytool submit "$notary_zip" --keychain-profile "$notary_profile" --wait
+xcrun notarytool submit "$notary_zip" --keychain-profile "$notary_profile" --no-s3-acceleration --wait
 xcrun stapler staple "$app_path"
 xcrun stapler validate "$app_path"
 codesign --verify --deep --strict --verbose=2 "$app_path"
