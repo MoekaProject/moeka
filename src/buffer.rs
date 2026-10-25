@@ -330,23 +330,44 @@ impl Buffer {
     }
 
     pub(crate) fn apply_edits_forward(&mut self, edits: &[BufferEdit]) -> bool {
-        for edit in edits {
-            let end = edit.start + edit.deleted_text.len();
-            if self.text.get(edit.start..end) != Some(edit.deleted_text.as_str()) {
-                return false;
-            }
-            self.replace(edit.start..end, &edit.inserted_text);
-        }
-        true
+        self.apply_edit_sequence(edits.iter().map(|edit| {
+            (
+                edit.start,
+                edit.deleted_text.as_str(),
+                edit.inserted_text.as_str(),
+            )
+        }))
     }
 
     pub(crate) fn apply_edits_inverse(&mut self, edits: &[BufferEdit]) -> bool {
-        for edit in edits.iter().rev() {
-            let end = edit.start + edit.inserted_text.len();
-            if self.text.get(edit.start..end) != Some(edit.inserted_text.as_str()) {
+        self.apply_edit_sequence(edits.iter().rev().map(|edit| {
+            (
+                edit.start,
+                edit.inserted_text.as_str(),
+                edit.deleted_text.as_str(),
+            )
+        }))
+    }
+
+    fn apply_edit_sequence<'a>(
+        &mut self,
+        edits: impl IntoIterator<Item = (usize, &'a str, &'a str)>,
+    ) -> bool {
+        let tracked_range = self.tracked_range.clone();
+        let recorded_len = self.recorded_edits.len();
+        let mut applied: Vec<(usize, &str, &str)> = Vec::new();
+        for (start, deleted, inserted) in edits {
+            let end = start.checked_add(deleted.len());
+            if end.and_then(|end| self.text.get(start..end)) != Some(deleted) {
+                for (start, deleted, inserted) in applied.into_iter().rev() {
+                    self.replace(start..start + inserted.len(), deleted);
+                }
+                self.tracked_range = tracked_range;
+                self.recorded_edits.truncate(recorded_len);
                 return false;
             }
-            self.replace(edit.start..end, &edit.deleted_text);
+            self.replace(start..end.unwrap(), inserted);
+            applied.push((start, deleted, inserted));
         }
         true
     }
@@ -834,6 +855,44 @@ mod tests {
         assert_eq!(buffer.text(), "alpha\nbeta\n");
         assert!(buffer.apply_edits_forward(&edits));
         assert_eq!(buffer.text(), "Xlpha\nB\n");
+    }
+
+    #[test]
+    fn failed_history_transactions_leave_text_indexes_tracking_and_recording_unchanged() {
+        for inverse in [false, true] {
+            let mut buffer = Buffer::from_text("alpha\nbeta");
+            buffer.track_range(Some(6..10));
+            buffer.begin_edit_recording();
+            buffer.insert(0, "!");
+            let before = buffer.text().to_string();
+            let tracking = buffer.tracked_range.clone();
+            let recorded = buffer.recorded_edits.clone();
+            let valid = BufferEdit {
+                start: 1,
+                deleted_text: if inverse { "changed\n" } else { "alpha" }.to_string(),
+                inserted_text: if inverse { "alpha" } else { "changed\n" }.to_string(),
+            };
+            let invalid = BufferEdit {
+                start: usize::MAX,
+                deleted_text: "missing".to_string(),
+                inserted_text: "missing".to_string(),
+            };
+            let edits = if inverse {
+                vec![invalid, valid]
+            } else {
+                vec![valid, invalid]
+            };
+            let success = if inverse {
+                buffer.apply_edits_inverse(&edits)
+            } else {
+                buffer.apply_edits_forward(&edits)
+            };
+            assert!(!success);
+            assert_eq!(buffer.text(), before);
+            assert_eq!(buffer.tracked_range, tracking);
+            assert_eq!(buffer.finish_edit_recording(), recorded);
+            assert_line_starts_consistent(&buffer);
+        }
     }
 
     #[test]

@@ -901,6 +901,13 @@ impl EditorView {
             false,
             cx,
             move |this, _, cx| {
+                if border_axis.is_none()
+                    && this.table_cell_selection.is_none()
+                    && this.cursor.has_selection()
+                {
+                    this.copy_selection_to_clipboard(cx);
+                    return;
+                }
                 let text = if border_axis.is_some() {
                     this.copy_table_border_selection()
                 } else {
@@ -915,9 +922,16 @@ impl EditorView {
         items.push(self.render_context_menu_item_with_icon(
             self.t(crate::i18n::TextKey::Cut),
             MENU_CLIP_SVG_PATH,
-            true,
+            false,
             cx,
             move |this, _, cx| {
+                if border_axis.is_none()
+                    && this.table_cell_selection.is_none()
+                    && this.cursor.has_selection()
+                {
+                    this.cut_selection_to_clipboard(cx);
+                    return;
+                }
                 if border_axis.is_some() {
                     this.cut_table_border_selection(cx);
                 } else {
@@ -1519,14 +1533,86 @@ impl EditorView {
         }
     }
 
+    fn save_current_markdown_image_as(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.current_markdown_image_source().map(str::to_string) else {
+            return;
+        };
+        let file = self.current_file_path.clone();
+        let root = self.sidebar_root.clone();
+        let workspaces = self.workspaces.clone();
+        let default_name = source
+            .split(['?', '#'])
+            .next()
+            .and_then(|path| Path::new(path).file_name())
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("image")
+            .to_string();
+        #[cfg(target_os = "macos")]
+        let directory = file
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .or_else(crate::platform::paths::home_dir)
+            .unwrap_or_default();
+        #[cfg(not(target_os = "macos"))]
+        let title = self.t(crate::i18n::TextKey::SaveFileDialog).to_string();
+        self.close_context_menu(cx);
+        cx.spawn(async move |this, cx| {
+            #[cfg(target_os = "macos")]
+            let destination = match this.update(cx, |_, cx| {
+                cx.prompt_for_new_path(&directory, Some(&default_name))
+            }) {
+                Ok(receiver) => receiver.await.ok().and_then(Result::ok).flatten(),
+                Err(_) => None,
+            };
+            #[cfg(not(target_os = "macos"))]
+            let destination = cx
+                .background_executor()
+                .spawn(async move { helpers::save_file_blocking(&default_name, &title) })
+                .await;
+            let Some(destination) = destination else {
+                return;
+            };
+            let path = destination.clone();
+            let result =
+                crate::platform::fs_task::run_anyhow("save image as", destination, move || {
+                    let bytes = navigation_io::read_document_image_bytes(
+                        &source,
+                        file.as_deref(),
+                        &root,
+                        &workspaces,
+                    )?;
+                    file_ops::atomic_write(&path, &bytes)?;
+                    Ok(())
+                })
+                .await;
+            if let Err(error) = result {
+                this.update(cx, |editor, cx| {
+                    editor.notify_error(
+                        format!(
+                            "{}: {error}",
+                            editor.t(crate::i18n::TextKey::FileOperationFailed)
+                        ),
+                        cx,
+                    );
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     fn pick_image_for_current_markdown_image(&mut self, cx: &mut Context<Self>) {
         let Some(target) = self.current_image_menu_target() else {
             return;
         };
         let Some(document_path) = self.current_file_path.clone() else {
-            log_error!("select image requires a saved markdown file");
+            self.pick_image_for_line(target.line, cx);
             return;
         };
+        let document = navigation_io::DocumentContext::capture(self);
+        let original = self.buffer.line_content(target.line).to_string();
 
         cx.spawn(async move |this, cx| {
             #[cfg(target_os = "macos")]
@@ -1581,9 +1667,17 @@ impl EditorView {
                     }
                 }
                 this.update(cx, |editor, cx| {
-                    if editor.current_file_path.as_ref() == Some(&document_path) {
-                        editor.replace_image_url_on_line_with_text(target.line, &relative_path, cx);
-                    }
+                    editor.with_pane_if_alive(document.pane_id(), |editor| {
+                        if document.is_current(editor)
+                            && editor.buffer.line_content(target.line) == original
+                        {
+                            editor.replace_image_url_on_line_with_text(
+                                target.line,
+                                &relative_path,
+                                cx,
+                            );
+                        }
+                    });
                 })
                 .ok();
             }
@@ -4312,28 +4406,26 @@ impl EditorView {
 
     fn render_image_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut items: Vec<AnyElement> = [
-            (None, FormatMenuAction::EditImageDescription, false),
-            (None, FormatMenuAction::EditImageUrl, false),
-            (None, FormatMenuAction::DeleteImage, true),
-            (None, FormatMenuAction::SelectImageFile, false),
+            (FormatMenuAction::EditImageDescription, false),
+            (FormatMenuAction::EditImageUrl, false),
+            (FormatMenuAction::DeleteImage, true),
+            (FormatMenuAction::SelectImageFile, false),
         ]
         .into_iter()
-        .map(|(icon, action, _is_destructive)| {
+        .map(|(action, is_destructive)| {
             let label = self.format_action_label(action);
-            self.render_format_context_menu_item(
-                &label,
-                icon,
-                None,
-                false,
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.execute_format_menu_action(action, cx);
-                },
-            )
+            self.render_context_menu_item(&label, is_destructive, cx, move |this, _, cx| {
+                this.execute_format_menu_action(action, cx);
+            })
         })
         .collect();
 
+        items.push(self.render_context_menu_item(
+            &format!("{}...", self.t(crate::i18n::TextKey::SaveAs)),
+            false,
+            cx,
+            |this, _, cx| this.save_current_markdown_image_as(cx),
+        ));
         if let Some(image_source) = self.current_markdown_image_source() {
             let image_source = image_source.to_string();
             let label = self.t(crate::i18n::TextKey::CopyToClipboard).to_string();
@@ -5101,7 +5193,6 @@ impl EditorView {
                     move |this, _, cx| this.execute_format_menu_action(action, cx),
                 ));
             }
-            items.push(self.render_context_menu_separator());
         } else {
             items.push(self.render_format_context_menu_item(
                 &self.format_action_label(FormatMenuAction::HorizontalRule),
@@ -5132,10 +5223,6 @@ impl EditorView {
                     this.execute_format_menu_action(action, cx);
                 },
             ));
-        }
-
-        if !toolbar {
-            items.push(self.render_context_menu_separator());
         }
 
         for (label, icon, shortcut, action) in [
@@ -6276,7 +6363,11 @@ impl EditorView {
             }
             ContextMenuKind::Format => (
                 self.render_format_context_menu(cx),
-                self.scaled(self.styles.context_menu.menu_format_width_px),
+                self.scaled(if self.current_image_menu_target().is_some() {
+                    188.0
+                } else {
+                    self.styles.context_menu.menu_format_width_px
+                }),
             ),
             ContextMenuKind::FrontMatterType {
                 line,

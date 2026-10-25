@@ -321,6 +321,25 @@ fn heading_syntax_is_active(decoration: &LineDecoration, active_ranges: &[Range<
     matches!(decoration.block_type, BlockType::Heading(_)) && !active_ranges.is_empty()
 }
 
+pub(super) fn preserve_heading_syntax_focus(
+    decoration: &LineDecoration,
+    source: Range<usize>,
+    cursors: impl IntoIterator<Item = crate::cursor::Cursor>,
+    active_ranges: &mut Vec<Range<usize>>,
+) {
+    if matches!(decoration.block_type, BlockType::Heading(_))
+        && cursors.into_iter().any(|cursor| {
+            let selection = cursor.selection_range();
+            (source.start <= cursor.offset && cursor.offset <= source.end)
+                || (!selection.is_empty()
+                    && selection.start < source.end
+                    && source.start < selection.end)
+        })
+    {
+        active_ranges.push(0..source.len());
+    }
+}
+
 fn scaled_inline_placeholder(text: &str, scale: f32) -> String {
     let target_columns = ((display_width(text) as f32) * scale).round() as usize;
     " ".repeat(target_columns.max(1))
@@ -2788,7 +2807,15 @@ pub(crate) fn table_cell_visible_source_range(
             if selection.start <= source_start {
                 range.start = 0;
             }
-            range.end = range.end.max(selection.end);
+            let covers_entire_cell = !selection.is_empty()
+                && selection.start <= source_start
+                && selection.end >= source.len();
+            let visible_end = if covers_entire_cell {
+                source_end
+            } else {
+                selection.end
+            };
+            range.end = range.end.max(visible_end);
         }
     }
     range
@@ -3776,6 +3803,50 @@ mod tests {
                 false,
             );
             (text, d2b, b2d, runs)
+        }
+
+        #[test]
+        fn selecting_a_padded_table_cell_does_not_wrap_its_alignment_whitespace() {
+            let row = "| 功能                         | 快捷键                        |";
+            let document = format!("| 功能 | 快捷键 |\n| --- | --- |\n{row}");
+            let buffer = Buffer::from_text(&document);
+            let decorations = markdown::parse_decorations(&document);
+            let info = decorations[2].table_info.as_ref().unwrap();
+            let (source, cell_range) =
+                crate::editor::table_cell_render::content_with_range(info, row, 0);
+            assert!(source.ends_with("                         "));
+            assert_eq!(source.trim_end(), "功能");
+            let decoration = table_cell_decoration(&decorations[2], &source, &cell_range);
+            let start = buffer.line_start(2) + cell_range.start;
+            let end = buffer.line_start(2) + cell_range.end;
+            let active = helpers::table_cell_active_ranges(
+                buffer.line_start(2),
+                &cell_range,
+                &helpers::TableCellSyntaxFocus {
+                    selections: vec![start..end],
+                    ..Default::default()
+                },
+                &decoration,
+            );
+            let mapped = display(&source, &decoration, &active, true);
+            assert_eq!(mapped.0, "功能");
+            assert_eq!(
+                helpers::hard_line_byte_ranges(&mapped.0),
+                vec![0.."功能".len()]
+            );
+
+            let caret = helpers::TableCellSyntaxFocus {
+                selections: vec![end..end],
+                ..Default::default()
+            };
+            let caret_active = helpers::table_cell_active_ranges(
+                buffer.line_start(2),
+                &cell_range,
+                &caret,
+                &decoration,
+            );
+            let caret_display = display(&source, &decoration, &caret_active, true);
+            assert!(caret_display.0.ends_with("                         "));
         }
 
         fn assert_keyword_mapping_and_highlight(
@@ -5905,6 +5976,68 @@ mod tests {
     }
 
     #[test]
+    fn heading_focus_survives_drag_suppression_for_carets_and_crossline_selections() {
+        let source = "## Selected heading";
+        let decorations = crate::markdown::parse_decorations(source);
+        let start = 50;
+        for (offset, anchor) in [
+            (start, start),
+            (start + 1, start + 1),
+            (start + 8, start + 8),
+            (start + source.len(), start + source.len()),
+            (start + 5, start + 12),
+            (start + 12, start + 5),
+            (start - 5, start + source.len() + 5),
+        ] {
+            let mut active = Vec::new();
+            super::preserve_heading_syntax_focus(
+                &decorations[0],
+                start..start + source.len(),
+                [crate::cursor::Cursor { offset, anchor }],
+                &mut active,
+            );
+            let (display, _, _, _) = build_display_text(
+                source,
+                &decorations[0],
+                &active,
+                false,
+                None,
+                0,
+                3,
+                3,
+                2,
+                0,
+                1.0,
+                1.0,
+                1.0,
+            );
+            assert_eq!(display, source, "cursor {anchor}..{offset}");
+        }
+    }
+
+    #[test]
+    fn heading_text_selection_keeps_atx_prefix_visible() {
+        let source = "## Selected heading";
+        let decorations = crate::markdown::parse_decorations(source);
+        let (display, _, _, _) = build_display_text(
+            source,
+            &decorations[0],
+            &[3..source.len()],
+            false,
+            None,
+            0,
+            3,
+            3,
+            2,
+            0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        assert_eq!(display, source);
+    }
+
+    #[test]
     fn generated_mermaid_uses_ondine_with_active_theme_colors() {
         let source = "flowchart LR\nA[Start] --> B[Finish]";
         let mut outputs = Vec::new();
@@ -5919,7 +6052,10 @@ mod tests {
                 "--ondine-bg:{};",
                 super::svg_color(theme.bg_primary)
             )));
-            assert!(svg.contains(&format!("fill=\"{}\"", super::svg_color(theme.bg_primary))));
+            assert!(svg.contains(&format!(
+                "fill=\"{}\"",
+                super::mermaid_fill_palette(&theme)[0]
+            )));
             assert!(svg.contains(&format!(
                 "--ondine-fg:{};",
                 super::svg_color(super::generated_preview_foreground_color(&theme))
@@ -5952,13 +6088,84 @@ mod tests {
             assert!(svg.contains("!important;}</style>"));
             assert!(svg.contains("Apple Color Emoji"));
             if source.starts_with("pie ") {
-                assert!(svg.contains("fill=\"#A0A1A4FF\""));
+                assert!(
+                    super::mermaid_fill_palette(&Theme::one_dark())
+                        .iter()
+                        .any(|color| svg.contains(&format!("fill=\"{color}\"")))
+                );
             }
             if source.contains("✅") {
                 assert!(svg.contains("✅"));
             }
             load_generated_preview_image_from_svg(&svg, markdown::BlockPreviewKind::Mermaid)
                 .expect("themed Ondine SVG should rasterize");
+        }
+    }
+
+    #[test]
+    fn mermaid_colors_only_existing_fills_and_preserves_authored_styles() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><rect fill="var(--_s)"/><path fill="none" stroke="var(--ondine-series-1,#000)"/><path stroke="var(--_fg)"/><circle style="fill:var(--ondine-series-2,#000);stroke:var(--_fg)"/><rect fill="#e8ddf0" style="stroke:#826394"/><text fill="var(--_bg)">Label</text></svg>"##;
+        let colored = super::color_mermaid_existing_fills(svg).unwrap();
+        assert!(colored.contains(r#"fill="var(--moeka-fill-surface)""#));
+        assert!(colored.contains(r##"fill="none" stroke="var(--ondine-series-1,#000)""##));
+        assert!(colored.contains(r#"<path stroke="var(--_fg)"/>"#));
+        assert!(colored.contains("fill:var(--moeka-fill-series-2,#000);stroke:var(--_fg)"));
+        assert!(colored.contains(r##"fill="#e8ddf0" style="stroke:#826394""##));
+        assert!(colored.contains(r#"<text fill="var(--_fg)">Label</text>"#));
+        let groups = r#"<svg xmlns="http://www.w3.org/2000/svg"><g fill="var(--_bg)"><text>Percent</text></g><g fill="var(--_bg)"><rect width="10" height="10"/></g></svg>"#;
+        let groups = super::color_mermaid_existing_fills(groups).unwrap();
+        assert!(groups.contains(r#"<g fill="var(--_fg)"><text>Percent</text></g>"#));
+        assert!(groups.contains(r#"<g fill="var(--moeka-fill-surface)"><rect"#));
+        let before = usvg::roxmltree::Document::parse(svg).unwrap();
+        let after = usvg::roxmltree::Document::parse(&colored).unwrap();
+        assert_eq!(
+            before
+                .descendants()
+                .filter(|node| node.is_element())
+                .count(),
+            after.descendants().filter(|node| node.is_element()).count()
+        );
+    }
+
+    #[test]
+    fn mermaid_background_palette_has_readable_text_in_all_themes() {
+        let luminance = |color: &str| {
+            let rgba = super::parse_svg_hex_color(color).unwrap();
+            let channel = |byte: u8| {
+                let value = byte as f32 / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(rgba[0]) + 0.7152 * channel(rgba[1]) + 0.0722 * channel(rgba[2])
+        };
+        for kind in ThemeKind::light_themes()
+            .iter()
+            .chain(ThemeKind::dark_themes())
+        {
+            let theme = kind.build();
+            let foreground = super::svg_color(super::generated_preview_foreground_color(&theme));
+            let foreground = luminance(&foreground);
+            let primary =
+                super::parse_svg_hex_color(&super::mermaid_fill_palette(&theme)[0]).unwrap();
+            let primary_chroma =
+                primary[..3].iter().max().unwrap() - primary[..3].iter().min().unwrap();
+            assert!(
+                primary_chroma >= 8,
+                "{kind:?}: primary background must be colored"
+            );
+            for background in super::mermaid_fill_palette(&theme) {
+                let background_luminance = luminance(&background);
+                let contrast = (foreground.max(background_luminance) + 0.05)
+                    / (foreground.min(background_luminance) + 0.05);
+                assert!(
+                    contrast >= 4.5,
+                    "{kind:?}: {background}, contrast={contrast}"
+                );
+                assert_ne!(background, super::svg_color(theme.bg_primary));
+            }
         }
     }
 
@@ -5984,9 +6191,13 @@ mod tests {
 
         assert_eq!(diagrams.len(), 42, "gallery example count changed");
         let mut failures = Vec::new();
-        for (title, source) in diagrams {
+        for (diagram_index, (title, source)) in diagrams.into_iter().enumerate() {
             let mut themed_svgs = Vec::new();
-            for theme in [Theme::one_light(), Theme::one_dark()] {
+            for kind in ThemeKind::light_themes()
+                .iter()
+                .chain(ThemeKind::dark_themes())
+            {
+                let theme = kind.build();
                 let svg = match super::render_mermaid_block_preview_svg(
                     &source,
                     &theme,
@@ -6040,14 +6251,54 @@ mod tests {
                         "{title}: authored canvas background was not transparent"
                     ));
                 }
-                if let Err(error) =
-                    load_generated_preview_image_from_svg(&svg, markdown::BlockPreviewKind::Mermaid)
-                {
-                    failures.push(format!("{title}: SVG rasterization failed: {error}"));
+                match load_generated_preview_image_from_svg(
+                    &svg,
+                    markdown::BlockPreviewKind::Mermaid,
+                ) {
+                    Ok(image) => {
+                        let pixels = image.as_bytes(0).unwrap();
+                        if !pixels.chunks_exact(4).any(|pixel| pixel[3] > 0) {
+                            failures.push(format!("{title} ({kind:?}): blank raster"));
+                        }
+                        if let Ok(directory) = std::env::var("MOEKA_MERMAID_AUDIT_DIR")
+                            && matches!(kind, ThemeKind::PaperWhite | ThemeKind::OneDark)
+                        {
+                            let directory = std::path::Path::new(&directory);
+                            std::fs::create_dir_all(directory).unwrap();
+                            let background =
+                                super::parse_svg_hex_color(&super::svg_color(theme.bg_primary))
+                                    .unwrap();
+                            let mut rgba = pixels.to_vec();
+                            for pixel in rgba.chunks_exact_mut(4) {
+                                pixel.swap(0, 2);
+                                let alpha = pixel[3] as f32 / 255.0;
+                                for channel in 0..3 {
+                                    pixel[channel] = (pixel[channel] as f32
+                                        + background[channel] as f32 * (1.0 - alpha))
+                                        .round()
+                                        .clamp(0.0, 255.0)
+                                        as u8;
+                                }
+                                pixel[3] = 255;
+                            }
+                            let size = image.size(0);
+                            image::save_buffer(
+                                directory.join(format!("{kind:?}-{diagram_index:02}.png")),
+                                &rgba,
+                                size.width.0 as u32,
+                                size.height.0 as u32,
+                                image::ColorType::Rgba8,
+                            )
+                            .unwrap();
+                        }
+                    }
+                    Err(error) => {
+                        failures.push(format!("{title}: SVG rasterization failed: {error}"))
+                    }
                 }
                 themed_svgs.push(svg);
             }
-            if themed_svgs.len() == 2 && themed_svgs[0] == themed_svgs[1] {
+            if themed_svgs.len() > 1 && themed_svgs.windows(2).any(|pair| pair[0] == pair[1]) {
                 failures.push(format!("{title}: light and dark SVGs are identical"));
             }
         }
@@ -6777,7 +7028,16 @@ mod tests {
             .expect("small table/diagram edits parse at canonical block boundaries");
             let transfer = PendingLineDisplayTransfer {
                 cached_lines: Vec::new(),
+                folded_anchor_offsets: Vec::new(),
+                folded_image_anchor_offsets: Vec::new(),
                 start_line,
+                replaced_start_line: !range.is_empty()
+                    && range.start <= old_buffer.line_start(start_line)
+                    && range.end >= old_buffer.line_end(start_line),
+                replaced_start_offset: range.start,
+                replaced_end_offset: range.end,
+                inserted_len: inserted.len(),
+                fold_line_swap: None,
                 old_end_line_exclusive,
                 new_end_line_exclusive,
                 dirty_start_line: parsed.start,
@@ -11657,6 +11917,100 @@ fn render_mathjax_preview_svg(
     }
 }
 
+fn mermaid_fill_palette(theme: &Theme) -> [String; 8] {
+    let primary = [
+        theme.text_accent,
+        theme.link,
+        theme.git_status_added,
+        theme.text_warning,
+    ]
+    .into_iter()
+    .find(|color| {
+        let rgb = parse_svg_hex_color(&svg_color(*color)).expect("theme colors are valid");
+        rgb[..3].iter().max().unwrap() - rgb[..3].iter().min().unwrap() >= 40
+    })
+    .unwrap_or(theme.git_status_added);
+    let accents = [
+        primary,
+        theme.git_status_added,
+        theme.text_warning,
+        theme.text_danger,
+    ];
+    let background = svg_color(theme.bg_primary);
+    std::array::from_fn(|index| {
+        let weight = if index < 4 { 20 } else { 30 };
+        parse_srgb_color_mix(&format!(
+            "in srgb,{} {weight}%,{background}",
+            svg_color(accents[index % accents.len()]),
+        ))
+        .expect("theme colors are valid sRGB hex colors")
+    })
+}
+
+fn color_mermaid_existing_fills(svg: &str) -> anyhow::Result<String> {
+    let document = usvg::roxmltree::Document::parse(svg)?;
+    let mut edits = Vec::new();
+    for node in document.descendants().filter(|node| node.is_element()) {
+        let text = matches!(node.tag_name().name(), "text" | "tspan")
+            || (node.tag_name().name() == "g"
+                && node.descendants().any(|child| child.has_tag_name("text"))
+                && node
+                    .descendants()
+                    .filter(|child| child.is_element())
+                    .all(|child| {
+                        matches!(
+                            child.tag_name().name(),
+                            "g" | "text" | "tspan" | "title" | "desc"
+                        )
+                    }));
+        for attribute in node.attributes() {
+            if !matches!(attribute.name(), "fill" | "style") {
+                continue;
+            }
+            let range = attribute.range_value();
+            let original = &svg[range.clone()];
+            let recolor = |fill: &str| {
+                if text {
+                    fill.replace("var(--_bg)", "var(--_fg)")
+                } else {
+                    fill.replace("var(--_s)", "var(--moeka-fill-surface)")
+                        .replace("var(--_a)", "var(--moeka-fill-surface-alt)")
+                        .replace("var(--_bg)", "var(--moeka-fill-surface)")
+                        .replace("var(--_c)", "var(--moeka-fill-surface)")
+                        .replace("var(--ondine-critical", "var(--moeka-fill-critical")
+                        .replace("var(--ondine-series-", "var(--moeka-fill-series-")
+                }
+            };
+            let replacement = if attribute.name() == "fill" {
+                recolor(original)
+            } else {
+                original
+                    .split(';')
+                    .map(|declaration| {
+                        if let Some((property, value)) = declaration.split_once(':')
+                            && property.trim() == "fill"
+                        {
+                            format!("{property}:{}", recolor(value))
+                        } else {
+                            declaration.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(";")
+            };
+            if replacement != original {
+                edits.push((range, replacement));
+            }
+        }
+    }
+    edits.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    let mut colored = svg.to_string();
+    for (range, replacement) in edits {
+        colored.replace_range(range, &replacement);
+    }
+    Ok(colored)
+}
+
 fn render_mermaid_block_preview_svg(
     source_text: &str,
     theme: &Theme,
@@ -11668,6 +12022,22 @@ fn render_mermaid_block_preview_svg(
     let svg = ondine::render(source_text, "", now)
         .map_err(|error| anyhow::anyhow!("Ondine: {error:?}"))?
         .svg;
+    let svg = color_mermaid_existing_fills(&svg)?;
+    let palette = mermaid_fill_palette(theme);
+    let mut fill_variables = format!(
+        "--moeka-fill-surface:{};--moeka-fill-surface-alt:{};--moeka-fill-critical:{};",
+        palette[0],
+        palette[1],
+        parse_srgb_color_mix(&format!(
+            "in srgb,{} 25%,{}",
+            svg_color(theme.text_danger),
+            svg_color(theme.bg_primary)
+        ))
+        .expect("theme colors are valid"),
+    );
+    for (index, color) in palette.iter().enumerate() {
+        fill_variables.push_str(&format!("--moeka-fill-series-{}:{color};", index + 1));
+    }
     let background = svg_color(theme.bg_primary);
     let foreground = svg_color(generated_preview_foreground_color(theme));
     let secondary = svg_color(theme.text_secondary);
@@ -11678,7 +12048,7 @@ fn render_mermaid_block_preview_svg(
     let themed_svg = append_svg_root_style(
         &svg,
         &format!(
-            "--ondine-bg:{background};--ondine-fg:{foreground};--ondine-line:{foreground};--ondine-border:{foreground};--ondine-muted:{secondary};--ondine-surface:{background};--ondine-surface-alt:{surface_alt};--ondine-accent:{accent};--ondine-critical:{critical};--ondine-font:{font_family};font-family:{font_family};background-color:transparent;text-rendering:geometricPrecision;shape-rendering:geometricPrecision;"
+            "--ondine-bg:{background};--ondine-fg:{foreground};--ondine-line:{foreground};--ondine-border:{foreground};--ondine-muted:{secondary};--ondine-surface:{background};--ondine-surface-alt:{surface_alt};--ondine-accent:{accent};--ondine-critical:{critical};--ondine-font:{font_family};{fill_variables}font-family:{font_family};background-color:transparent;text-rendering:geometricPrecision;shape-rendering:geometricPrecision;"
         ),
     );
     let themed_svg = append_svg_style_element(

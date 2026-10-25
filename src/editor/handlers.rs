@@ -11,6 +11,48 @@ fn page_down_row_fits(remaining_height: f32, step_distance: f32, first_step: boo
     first_step || step_distance <= remaining_height
 }
 
+fn adjacent_line_swap_edit(buffer: &Buffer, first: usize) -> Option<(Range<usize>, String)> {
+    if first.checked_add(1)? >= buffer.line_count() {
+        return None;
+    }
+    let upper = buffer.line_content(first);
+    let lower = buffer.line_content(first + 1);
+    let upper_text = upper.strip_suffix('\r').unwrap_or(upper);
+    let lower_text = lower.strip_suffix('\r').unwrap_or(lower);
+    let separator = if upper.ends_with('\r') { "\r\n" } else { "\n" };
+    let suffix = if lower.ends_with('\r') { "\r" } else { "" };
+    Some((
+        buffer.line_start(first)..buffer.line_end(first + 1),
+        format!("{lower_text}{separator}{upper_text}{suffix}"),
+    ))
+}
+
+#[cfg(test)]
+#[test]
+fn adjacent_line_swap_preserves_eof_newlines_unicode_and_crlf() {
+    for (source, expected) in [
+        ("a\nb", "b\na"),
+        ("a\nb\nc", "b\na\nc"),
+        ("a\nb\n", "b\na\n"),
+        ("\ntext", "text\n"),
+        ("a\r\nb", "b\r\na"),
+        ("a\r\nb\r\nc", "b\r\na\r\nc"),
+        ("\u{4e2d}\n\u{1f642}", "\u{1f642}\n\u{4e2d}"),
+    ] {
+        let mut buffer = Buffer::from_text(source);
+        let old_line_count = buffer.line_count();
+        buffer.begin_edit_recording();
+        let (range, replacement) = adjacent_line_swap_edit(&buffer, 0).unwrap();
+        buffer.replace(range, &replacement);
+        let edits = buffer.finish_edit_recording();
+        assert_eq!(buffer.text(), expected);
+        assert_eq!(buffer.line_count(), old_line_count);
+        assert_eq!(edits.len(), 1);
+        assert!(buffer.apply_edits_inverse(&edits));
+        assert_eq!(buffer.text(), source);
+    }
+}
+
 #[cfg(test)]
 #[test]
 fn page_down_budgets_actual_rows_instead_of_uniform_steps() {
@@ -104,7 +146,9 @@ impl EditorView {
                 anchor: anchor.min(self.buffer.len()),
             })
             .collect();
-        self.scroll_offset = view.scroll_offset;
+        self.scroll_offset = self
+            .pending_typing_scroll_guard
+            .map_or(view.scroll_offset, |guard| guard.scroll_offset);
     }
 
     fn apply_history_transaction(&mut self, undo: bool, cx: &mut Context<Self>) -> bool {
@@ -120,6 +164,7 @@ impl EditorView {
         let Some((edits, view)) = transaction else {
             return false;
         };
+        let folded_anchors = self.snapshot_folded_anchor_offsets();
         let applied = if undo {
             self.buffer.apply_edits_inverse(&edits)
         } else {
@@ -129,6 +174,7 @@ impl EditorView {
         if !applied {
             return false;
         }
+        self.remap_folded_anchor_offsets_after_history(folded_anchors, &edits, undo);
         self.restore_history_view(view);
         self.clear_marked_ranges();
         self.reset_cursor_visual_targeting();
@@ -136,6 +182,7 @@ impl EditorView {
         self.dedup_cursors();
         self.reparse();
         self.finish_table_source_history();
+        self.scroll_to_cursor();
         if self.search_visible {
             self.run_search(cx);
         }
@@ -150,6 +197,7 @@ impl EditorView {
             self.whiteboard_undo(cx);
             return;
         }
+        self.pending_typing_scroll_guard = None;
         if !self.begin_content_edit(cx) {
             return;
         }
@@ -290,6 +338,7 @@ impl EditorView {
             self.whiteboard_redo(cx);
             return;
         }
+        self.pending_typing_scroll_guard = None;
         if !self.begin_content_edit(cx) {
             return;
         }
@@ -433,6 +482,10 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if self.handle_folded_boundary_delete(DeleteAction::Backward) {
+            self.pause_blinking(cx);
+            return;
+        }
         if self.source_mode {
             self.capture_typing_scroll_guard();
             self.pending_code_fence = None;
@@ -477,6 +530,11 @@ impl EditorView {
             }
             self.pause_blinking(cx);
             cx.notify();
+            return;
+        }
+        if !self.has_extra_cursors() && self.backspace_blank_table_row() {
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
             return;
         }
         if self.semantic_delete_touches_table(DeleteAction::Backward) {
@@ -680,6 +738,10 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if self.handle_folded_boundary_delete(DeleteAction::Forward) {
+            self.pause_blinking(cx);
+            return;
+        }
         if self.source_mode {
             self.capture_typing_scroll_guard();
             self.pending_code_fence = None;
@@ -852,6 +914,7 @@ impl EditorView {
             .and_then(|d| d.table_info.as_ref())
             .filter(|ti| !ti.is_separator)
             .map(|ti| ti.cell_ranges.clone());
+        let previous = [self.cursor];
         self.cursor.move_left(&self.buffer);
         if let Some(cell_ranges) = cell_ranges {
             let (_, new_col) = self.buffer.offset_to_line_col(self.cursor.offset);
@@ -873,6 +936,7 @@ impl EditorView {
                     .move_to(line_start + cell_ranges[0].start, &self.buffer);
             }
         }
+        self.skip_folded_caret_navigation(&previous);
         if !had_selection
             && self.cursor.offset != prev_offset
             && self.is_wrap_boundary_offset(self.cursor.offset)
@@ -922,6 +986,7 @@ impl EditorView {
             .and_then(|d| d.table_info.as_ref())
             .filter(|ti| !ti.is_separator)
             .map(|ti| ti.cell_ranges.clone());
+        let previous = [self.cursor];
         self.cursor.move_right(&self.buffer);
         if let Some(cell_ranges) = cell_ranges {
             let (_, new_col) = self.buffer.offset_to_line_col(self.cursor.offset);
@@ -936,6 +1001,7 @@ impl EditorView {
                 }
             }
         }
+        self.skip_folded_caret_navigation(&previous);
         self.maybe_auto_select_link_url(prev_offset, false, cx);
         self.finish_horizontal_cursor_move(cx);
         if self.wiki_link_start.is_some() {
@@ -1002,6 +1068,7 @@ impl EditorView {
             cx.notify();
             return;
         }
+        let previous = [self.cursor];
         let prev_offset = self.cursor.offset;
         if self.vertical_move_goal_x.is_none() {
             self.vertical_move_goal_x = self.cursor_visual_x(self.cursor.offset);
@@ -1015,6 +1082,7 @@ impl EditorView {
         self.snap_cursor_to_content();
         self.skip_table_separator_line(false);
         self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
+        self.skip_folded_caret_navigation(&previous);
         self.maybe_auto_select_link_url(prev_offset, false, cx);
         self.navigate_scroll_to_cursor();
         self.pause_blinking(cx);
@@ -1081,6 +1149,7 @@ impl EditorView {
             cx.notify();
             return;
         }
+        let previous = [self.cursor];
         let prev_offset = self.cursor.offset;
         if self.vertical_move_goal_x.is_none() {
             self.vertical_move_goal_x = self.cursor_visual_x(self.cursor.offset);
@@ -1094,6 +1163,7 @@ impl EditorView {
         self.snap_cursor_to_content();
         self.skip_table_separator_line(true);
         self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
+        self.skip_folded_caret_navigation(&previous);
         self.maybe_auto_select_link_url(prev_offset, false, cx);
         self.navigate_scroll_to_cursor();
         self.pause_blinking(cx);
@@ -1117,7 +1187,7 @@ impl EditorView {
         } else if !in_table {
             self.cursor.select_left(&self.buffer);
         }
-        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.skip_folded_selection_navigation(&previous);
         self.dedup_cursors();
         self.finish_horizontal_cursor_move(cx);
     }
@@ -1140,7 +1210,7 @@ impl EditorView {
         } else if !in_table {
             self.cursor.select_right(&self.buffer);
         }
-        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.skip_folded_selection_navigation(&previous);
         self.dedup_cursors();
         self.finish_horizontal_cursor_move(cx);
     }
@@ -1179,7 +1249,7 @@ impl EditorView {
                 self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
             }
         }
-        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.skip_folded_selection_navigation(&previous);
         self.dedup_cursors();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -1226,7 +1296,7 @@ impl EditorView {
                 self.update_wrap_boundary_affinity_for_goal_x(self.cursor.offset, goal_x);
             }
         }
-        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.skip_folded_selection_navigation(&previous);
         self.dedup_cursors();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -1239,6 +1309,7 @@ impl EditorView {
         }
         self.table_boundary_caret = None;
         self.cursor.select_all(&self.buffer);
+        self.unfold_cursor_regions();
         self.pause_blinking(cx);
     }
 
@@ -1390,6 +1461,17 @@ impl EditorView {
         }
         if !self.begin_content_edit(cx) {
             return;
+        }
+        if !self.folded_sections.is_empty() {
+            self.checkpoint();
+            if self.skip_folded_anchor_for_line_break() {
+                self.pending_code_fence = None;
+                self.multi_cursor_insert("\n");
+                self.reparse();
+                self.scroll_to_cursor();
+                self.pause_blinking(cx);
+                return;
+            }
         }
         if self.source_mode {
             if self.sidebar_edit.is_some() {
@@ -1660,6 +1742,17 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if !self.folded_sections.is_empty() {
+            self.checkpoint();
+            if self.skip_folded_anchor_for_line_break() {
+                self.pending_code_fence = None;
+                self.multi_cursor_insert("\n");
+                self.reparse();
+                self.scroll_to_cursor();
+                self.pause_blinking(cx);
+                return;
+            }
+        }
         if self.source_mode {
             self.pending_code_fence = None;
             self.checkpoint();
@@ -1874,7 +1967,7 @@ impl EditorView {
             } else if self.table_cell_for_offset(current).is_none() {
                 self.cursor = probe;
             }
-            self.skip_front_matter_caret_navigation(&previous);
+            self.skip_folded_caret_navigation(&previous);
         }
         self.finish_horizontal_cursor_move(cx);
     }
@@ -1903,7 +1996,7 @@ impl EditorView {
             } else if self.table_cell_for_offset(current).is_none() {
                 self.cursor = probe;
             }
-            self.skip_front_matter_caret_navigation(&previous);
+            self.skip_folded_caret_navigation(&previous);
         }
         self.finish_horizontal_cursor_move(cx);
     }
@@ -1929,7 +2022,7 @@ impl EditorView {
         for cursor in &mut self.extra_cursors {
             cursor.select_word_left(&self.buffer);
         }
-        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.skip_folded_selection_navigation(&previous);
         self.dedup_cursors();
         self.finish_horizontal_cursor_move(cx);
     }
@@ -1955,7 +2048,7 @@ impl EditorView {
         for cursor in &mut self.extra_cursors {
             cursor.select_word_right(&self.buffer);
         }
-        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.skip_folded_selection_navigation(&previous);
         self.dedup_cursors();
         self.finish_horizontal_cursor_move(cx);
     }
@@ -1966,12 +2059,14 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let previous = self.all_cursors_snapshot();
         self.clear_phantom_selection();
         self.table_boundary_caret = None;
         self.cursor.move_to(0, &self.buffer);
         for cursor in &mut self.extra_cursors {
             cursor.move_to(0, &self.buffer);
         }
+        self.skip_folded_caret_navigation(&previous);
         self.dedup_cursors();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -1983,6 +2078,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let previous = self.all_cursors_snapshot();
         self.clear_phantom_selection();
         self.table_boundary_caret = None;
         let end = self.buffer.len();
@@ -1990,6 +2086,7 @@ impl EditorView {
         for cursor in &mut self.extra_cursors {
             cursor.move_to(end, &self.buffer);
         }
+        self.skip_folded_caret_navigation(&previous);
         self.dedup_cursors();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -2001,12 +2098,14 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let previous = self.all_cursors_snapshot();
         self.clear_phantom_selection();
         self.table_boundary_caret = None;
         self.cursor.select_to(0, &self.buffer);
         for cursor in &mut self.extra_cursors {
             cursor.select_to(0, &self.buffer);
         }
+        self.skip_folded_selection_navigation(&previous);
         self.dedup_cursors();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -2018,6 +2117,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let previous = self.all_cursors_snapshot();
         self.clear_phantom_selection();
         self.table_boundary_caret = None;
         let end = self.buffer.len();
@@ -2025,6 +2125,7 @@ impl EditorView {
         for cursor in &mut self.extra_cursors {
             cursor.select_to(end, &self.buffer);
         }
+        self.skip_folded_selection_navigation(&previous);
         self.dedup_cursors();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -2036,6 +2137,10 @@ impl EditorView {
 
     fn delete_to_line_boundary_impl(&mut self, to_start: bool, kill: bool, cx: &mut Context<Self>) {
         if !self.begin_content_edit(cx) {
+            return;
+        }
+        if self.handle_folded_boundary_delete(DeleteAction::LineBoundary { to_start, kill }) {
+            self.pause_blinking(cx);
             return;
         }
         if self.table_boundary_caret.is_some() {
@@ -2096,6 +2201,7 @@ impl EditorView {
         if self.active_tab_is_whiteboard() || !self.begin_content_edit(cx) {
             return;
         }
+        self.skip_folded_anchor_for_line_break();
         if self.table_boundary_caret.is_some() {
             let _ = self.insert_line_at_table_boundary(cx);
             return;
@@ -2250,6 +2356,10 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        if self.handle_folded_boundary_delete(DeleteAction::Word { backwards: true }) {
+            self.pause_blinking(cx);
+            return;
+        }
         if self.table_boundary_caret.is_some() {
             self.pause_blinking(cx);
             return;
@@ -2272,6 +2382,10 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         if !self.begin_content_edit(cx) {
+            return;
+        }
+        if self.handle_folded_boundary_delete(DeleteAction::Word { backwards: false }) {
+            self.pause_blinking(cx);
             return;
         }
         if self.table_boundary_caret.is_some() {
@@ -2772,6 +2886,7 @@ impl EditorView {
         if self.sidebar_edit.is_some() {
             return;
         }
+        self.unfold_cursor_regions();
         self.select_logical_line_at_offset(self.cursor.offset, cx);
     }
 
@@ -2803,11 +2918,14 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        let after_fold = self.skip_folded_anchor_for_line_break();
         self.checkpoint();
         let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
         let end = self.buffer.line_end(line);
-        self.buffer.insert(end, "\n");
-        self.cursor.offset = end + 1;
+        let insert_at = if after_fold { self.cursor.offset } else { end };
+        self.queue_non_markdown_line_display_transfer(&(insert_at..insert_at), "\n");
+        self.buffer.insert(insert_at, "\n");
+        self.cursor.offset = insert_at + 1;
         self.cursor.anchor = self.cursor.offset;
         self.mark_active_tab_dirty();
         self.reparse();
@@ -2830,6 +2948,7 @@ impl EditorView {
         self.checkpoint();
         let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
         let start = self.buffer.line_start(line);
+        self.queue_non_markdown_line_display_transfer(&(start..start), "\n");
         self.buffer.insert(start, "\n");
         self.cursor.offset = start;
         self.cursor.anchor = self.cursor.offset;
@@ -2851,12 +2970,15 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
+        self.skip_folded_anchor_for_line_break();
         self.checkpoint();
         let (line, _) = self.buffer.offset_to_line_col(self.cursor.offset);
         let start = self.buffer.line_start(line);
         let end = self.buffer.line_end(line);
         let line_text = self.buffer.text()[start..end].to_string();
-        self.buffer.insert(end, &format!("\n{}", line_text));
+        let insertion = format!("\n{}", line_text);
+        self.queue_non_markdown_line_display_transfer(&(end..end), &insertion);
+        self.buffer.insert(end, &insertion);
         self.cursor.offset = end + 1 + line_text.len();
         self.cursor.anchor = self.cursor.offset;
         self.mark_active_tab_dirty();
@@ -2884,11 +3006,15 @@ impl EditorView {
         let text = self.buffer.text()[start..end].to_string();
         let inserted_len = text.len() + 1;
         if upward {
-            self.buffer.insert(start, &format!("{text}\n"));
+            let insertion = format!("{text}\n");
+            self.queue_non_markdown_line_display_transfer(&(start..start), &insertion);
+            self.buffer.insert(start, &insertion);
             self.cursor.offset = self.cursor.offset.min(self.buffer.len());
             self.cursor.anchor = self.cursor.anchor.min(self.buffer.len());
         } else {
-            self.buffer.insert(end, &format!("\n{text}"));
+            let insertion = format!("\n{text}");
+            self.queue_non_markdown_line_display_transfer(&(end..end), &insertion);
+            self.buffer.insert(end, &insertion);
             self.cursor.offset = (self.cursor.offset + inserted_len).min(self.buffer.len());
             self.cursor.anchor = (self.cursor.anchor + inserted_len).min(self.buffer.len());
         }
@@ -2957,20 +3083,18 @@ impl EditorView {
         if line == 0 {
             return;
         }
-        self.checkpoint();
-        let start = self.buffer.line_start(line);
-        let end = self.buffer.line_end(line);
-        let line_text = self.buffer.text()[start..end].to_string();
-        let delete_end = if end < self.buffer.len() {
-            end + 1
-        } else {
-            end
+        let Some((range, replacement)) = adjacent_line_swap_edit(&self.buffer, line - 1) else {
+            return;
         };
-        self.buffer.delete(start..delete_end);
-        let prev_start = self.buffer.line_start(line - 1);
-        let insert_text = format!("{}\n", line_text);
-        self.buffer.insert(prev_start, &insert_text);
-        let new_offset = prev_start + col.min(line_text.len());
+        self.checkpoint();
+        self.queue_non_markdown_line_display_transfer(&range, &replacement);
+        if let Some(transfer) = self.pending_line_display_transfer.as_mut() {
+            transfer.fold_line_swap = Some(line - 1);
+        }
+        self.buffer.replace(range, &replacement);
+        let new_offset = self
+            .buffer
+            .clamp_grapheme_offset(self.buffer.line_col_to_offset(line - 1, col));
         self.cursor.offset = new_offset;
         self.cursor.anchor = self.cursor.offset;
         self.mark_active_tab_dirty();
@@ -2996,20 +3120,18 @@ impl EditorView {
         if line >= line_count.saturating_sub(1) {
             return;
         }
-        self.checkpoint();
-        let start = self.buffer.line_start(line);
-        let end = self.buffer.line_end(line);
-        let line_text = self.buffer.text()[start..end].to_string();
-        let delete_end = if end < self.buffer.len() {
-            end + 1
-        } else {
-            end
+        let Some((range, replacement)) = adjacent_line_swap_edit(&self.buffer, line) else {
+            return;
         };
-        self.buffer.delete(start..delete_end);
-        let next_end = self.buffer.line_end(line);
-        let insert_text = format!("\n{}", line_text);
-        self.buffer.insert(next_end, &insert_text);
-        let new_offset = next_end + 1 + col.min(line_text.len());
+        self.checkpoint();
+        self.queue_non_markdown_line_display_transfer(&range, &replacement);
+        if let Some(transfer) = self.pending_line_display_transfer.as_mut() {
+            transfer.fold_line_swap = Some(line);
+        }
+        self.buffer.replace(range, &replacement);
+        let new_offset = self
+            .buffer
+            .clamp_grapheme_offset(self.buffer.line_col_to_offset(line + 1, col));
         self.cursor.offset = new_offset.min(self.buffer.len());
         self.cursor.anchor = self.cursor.offset;
         self.mark_active_tab_dirty();

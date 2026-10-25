@@ -398,6 +398,142 @@ fn deletion_plan(
     (edit, table)
 }
 
+fn backspace_table_tail_target(
+    buffer: &Buffer,
+    rows: &[LineDecoration],
+    cursor: Cursor,
+) -> Option<usize> {
+    let start = if cursor.has_selection() {
+        cursor.selection_range().start
+    } else {
+        cursor.offset
+    };
+    let (line, _) = buffer.offset_to_line_col(start);
+    if line == 0 {
+        return None;
+    }
+    let line_start = buffer.line_start(line);
+    let line_end = buffer.line_end(line);
+    let current_line_blank = buffer
+        .line_content(line)
+        .trim_matches([' ', '\t', '\r'])
+        .is_empty();
+    if cursor.has_selection() {
+        let selected_line_end = line_end + usize::from(line_end < buffer.len());
+        if start != line_start || cursor.selection_range().end < selected_line_end {
+            return None;
+        }
+    } else {
+        if current_line_blank {
+            if cursor.offset < line_start || cursor.offset > line_end {
+                return None;
+            }
+        } else if cursor.offset != line_start {
+            return None;
+        }
+    }
+    let mut table_line = line;
+    while table_line > 0 {
+        table_line -= 1;
+        if current_line_blank
+            && buffer
+                .line_content(table_line)
+                .trim_matches([' ', '\t', '\r'])
+                .is_empty()
+        {
+            continue;
+        }
+        break;
+    }
+    let info = rows.get(table_line)?.table_info.as_ref()?;
+    if info.is_front_matter || info.is_separator || info.table_end_line != table_line + 1 {
+        return None;
+    }
+    let tail = buffer.line_end(table_line);
+    Some(tail - usize::from(buffer.line_content(table_line).ends_with('\r')))
+}
+
+struct BlankTableRowBackspace {
+    range: Range<usize>,
+    target_offset: usize,
+    boundary: Option<super::TableBoundaryCaret>,
+}
+
+fn blank_table_row_backspace(
+    buffer: &Buffer,
+    rows: &[LineDecoration],
+    cursor: Cursor,
+) -> Option<BlankTableRowBackspace> {
+    if cursor.has_selection() {
+        return None;
+    }
+    let (line, _) = buffer.offset_to_line_col(cursor.offset);
+    if line == 0 {
+        return None;
+    }
+    let line_start = buffer.line_start(line);
+    let content = buffer.line_content(line);
+    if !content.trim_matches([' ', '\t', '\r']).is_empty()
+        || cursor.offset < line_start
+        || cursor.offset > buffer.line_end(line)
+    {
+        return None;
+    }
+
+    let previous_separator_len = if line_start >= 2
+        && buffer.text().as_bytes().get(line_start - 2..line_start) == Some(b"\r\n")
+    {
+        2
+    } else if buffer.text().as_bytes().get(line_start - 1) == Some(&b'\n') {
+        1
+    } else {
+        return None;
+    };
+    let mut table_line = line;
+    while table_line > 0 {
+        table_line -= 1;
+        if buffer
+            .line_content(table_line)
+            .trim_matches([' ', '\t', '\r'])
+            .is_empty()
+        {
+            continue;
+        }
+        break;
+    }
+    let info = rows.get(table_line)?.table_info.as_ref()?;
+    if info.is_front_matter || info.is_separator || info.table_end_line != table_line + 1 {
+        return None;
+    }
+
+    let content_without_cr = content.strip_suffix('\r').unwrap_or(content);
+    let range = line_start - previous_separator_len..line_start + content_without_cr.len();
+    let retains_line_ending = line + 1 < buffer.line_count();
+    let retained_cr = usize::from(retains_line_ending && content.ends_with('\r'));
+    let next_line_blank = retains_line_ending
+        && buffer
+            .line_content(line + 1)
+            .trim_matches([' ', '\t', '\r'])
+            .is_empty();
+    let previous_blank_remains = table_line + 1 < line;
+    let table_is_adjacent = table_line + 1 == line;
+    let target_offset = if next_line_blank {
+        range.start + usize::from(retains_line_ending) + retained_cr
+    } else if previous_blank_remains {
+        buffer.line_start(line - 1)
+    } else {
+        range.start + retained_cr
+    };
+    Some(BlankTableRowBackspace {
+        range: range.clone(),
+        target_offset,
+        boundary: (table_is_adjacent && !next_line_blank).then_some(super::TableBoundaryCaret {
+            table_start_line: info.table_start_line,
+            side: super::TableBoundarySide::Below,
+        }),
+    })
+}
+
 fn deletion_plans(
     buffer: &Buffer,
     rows: &[LineDecoration],
@@ -452,6 +588,41 @@ fn deletion_plans(
         }
     }
     plans
+}
+
+fn deleted_table_rows_as_blank_lines(
+    buffer: &Buffer,
+    rows: &[LineDecoration],
+    deletion: &Range<usize>,
+) -> String {
+    let mut blank_lines = String::new();
+    for (line, decoration) in rows.iter().enumerate() {
+        let Some(info) = decoration.table_info.as_ref().filter(|info| {
+            info.is_header && !info.is_front_matter && info.table_start_line == line
+        }) else {
+            continue;
+        };
+        let block_start = buffer.line_start(line);
+        let end_line = info.table_end_line.min(buffer.line_count());
+        let block_end = if end_line < buffer.line_count() {
+            buffer.line_start(end_line)
+        } else {
+            buffer.len()
+        };
+        if deletion.start > block_start || deletion.end < block_end {
+            continue;
+        }
+        for table_line in line..end_line {
+            let line_end = buffer.line_end(table_line);
+            if line_end < buffer.len() {
+                let next_start = buffer.line_start(table_line + 1);
+                let newline_start =
+                    line_end - usize::from(buffer.line_content(table_line).ends_with('\r'));
+                blank_lines.push_str(buffer.text().get(newline_start..next_start).unwrap_or("\n"));
+            }
+        }
+    }
+    blank_lines
 }
 
 fn native_angle_edit(
@@ -598,6 +769,30 @@ fn open_line_plan(
 }
 
 impl EditorView {
+    pub(super) fn backspace_blank_table_row(&mut self) -> bool {
+        let rendered = self.active_tab_is_markdown()
+            && self.table_source.is_none()
+            && self.table_boundary_caret.is_none();
+        if !rendered {
+            return false;
+        }
+        let Some(edit) = blank_table_row_backspace(&self.buffer, &self.decorations, self.cursor)
+        else {
+            return false;
+        };
+        self.checkpoint();
+        self.queue_non_markdown_line_display_transfer(&edit.range, "");
+        self.buffer.delete(edit.range);
+        self.cursor.move_to(edit.target_offset, &self.buffer);
+        self.table_boundary_caret = edit.boundary;
+        self.mark_active_tab_dirty();
+        self.clear_marked_ranges();
+        self.reset_cursor_visual_targeting();
+        self.reparse();
+        self.scroll_to_cursor();
+        true
+    }
+
     pub(super) fn semantic_open_line_plan(&self) -> Option<Edit> {
         open_line_plan(
             &self.buffer,
@@ -632,17 +827,61 @@ impl EditorView {
     }
 
     pub(super) fn apply_semantic_delete(&mut self, action: lists::DeleteAction) -> bool {
+        let plans = self.semantic_delete_plans(action);
+        let caret_targets: Vec<_> = if action == lists::DeleteAction::Backward {
+            plans
+                .iter()
+                .map(|(cursor, _, edit)| {
+                    if edit.range.is_empty() {
+                        None
+                    } else {
+                        backspace_table_tail_target(&self.buffer, &self.decorations, *cursor)
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.apply_semantic_delete_plans(plans, action, &caret_targets)
+    }
+
+    pub(super) fn semantic_delete_plans(
+        &self,
+        action: lists::DeleteAction,
+    ) -> Vec<(Cursor, bool, Edit)> {
         let rendered = self.active_tab_is_markdown()
             && self.table_source.is_none()
             && self.table_boundary_caret.is_none();
-        let plans = deletion_plans(
+        deletion_plans(
             &self.buffer,
             &self.decorations,
             rendered,
             self.cursor_states_with_primary_flag(),
             action,
-        );
+        )
+    }
+
+    pub(super) fn apply_semantic_delete_plans(
+        &mut self,
+        plans: Vec<(Cursor, bool, Edit)>,
+        action: lists::DeleteAction,
+        caret_targets: &[Option<usize>],
+    ) -> bool {
         let ranges = lists::deletion_ranges(&plans);
+        let replacements: Vec<_> = ranges
+            .iter()
+            .map(|range| {
+                (
+                    range.clone(),
+                    deleted_table_rows_as_blank_lines(&self.buffer, &self.decorations, range),
+                )
+            })
+            .collect();
+        let folded_anchors = (ranges.len() > 1).then(|| self.snapshot_folded_anchor_offsets());
+        let fold_edits = replacements
+            .iter()
+            .map(|(range, text)| (range.clone(), text.len()))
+            .collect::<Vec<_>>();
         if matches!(action, lists::DeleteAction::LineBoundary { kill: true, .. })
             && !ranges.is_empty()
         {
@@ -654,12 +893,30 @@ impl EditorView {
                     .join("\n"),
             );
         }
-        if let [range] = ranges.as_slice() {
-            self.queue_non_markdown_line_display_transfer(range, "");
+        if let [(range, text)] = replacements.as_slice() {
+            self.queue_non_markdown_line_display_transfer(range, text);
         } else if !ranges.is_empty() {
             self.pending_line_display_transfer = None;
         }
-        let resolved = lists::apply_deletions(&mut self.buffer, &plans);
+        let mut resolved =
+            lists::apply_deletions_with_replacements(&mut self.buffer, &plans, &replacements);
+        for ((cursor, primary, _), target) in resolved.iter_mut().zip(caret_targets) {
+            if let Some(target) = target {
+                if let Some((next, _)) = super::fold::folded_delete_cursor_targets(
+                    &self.buffer,
+                    &[(*target, *primary)],
+                    &fold_edits,
+                )
+                .into_iter()
+                .next()
+                {
+                    *cursor = next;
+                }
+            }
+        }
+        if let Some(folded_anchors) = folded_anchors {
+            self.remap_folded_anchor_offsets(folded_anchors, &fold_edits);
+        }
         self.finish_table_aware_cursor_plans(resolved);
         !ranges.is_empty()
     }
@@ -668,9 +925,20 @@ impl EditorView {
     /// Keep normalization in this transaction, never in the native text path:
     /// paste and IME newlines are soft breaks, not Enter actions.
     pub(super) fn apply_table_aware_cursor_plans(&mut self, plans: Vec<(Edit, bool)>) {
+        let folded_anchors = self
+            .pending_line_display_transfer
+            .is_none()
+            .then(|| self.snapshot_folded_anchor_offsets());
+        let fold_edits = plans
+            .iter()
+            .map(|(edit, _)| (edit.range.clone(), edit.text.len()))
+            .collect::<Vec<_>>();
         let Some(resolved) = lists::apply(&mut self.buffer, &plans) else {
             return;
         };
+        if let Some(folded_anchors) = folded_anchors {
+            self.remap_folded_anchor_offsets(folded_anchors, &fold_edits);
+        }
         self.finish_table_aware_cursor_plans(resolved);
     }
 
@@ -911,6 +1179,259 @@ impl EditorView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backspace_deleting_a_line_below_a_table_moves_to_table_tail() {
+        use super::super::fold::folded_delete_cursor_targets;
+
+        for newline in ["\n", "\r\n"] {
+            let source =
+                ["| A | B |", "| --- | --- |", "| x | y |", "remove", "keep"].join(newline);
+            let buffer = Buffer::from_text(&source);
+            let rows = markdown::parse_decorations(&source);
+            let line = 3;
+            let start = buffer.line_start(line);
+            let end = buffer.line_end(line) + 1;
+            let cursor = Cursor {
+                anchor: start,
+                offset: end,
+            };
+            let target = backspace_table_tail_target(&buffer, &rows, cursor).unwrap();
+            let table_tail =
+                buffer.line_end(2) - usize::from(buffer.line_content(2).ends_with('\r'));
+            assert_eq!(target, table_tail);
+
+            let plans = deletion_plans(
+                &buffer,
+                &rows,
+                true,
+                vec![(cursor, true)],
+                lists::DeleteAction::Backward,
+            );
+            let ranges = lists::deletion_ranges(&plans);
+            let edits: Vec<_> = ranges.iter().cloned().map(|range| (range, 0)).collect();
+            let mut edited = Buffer::from_text(&source);
+            let mut resolved = lists::apply_deletions(&mut edited, &plans);
+            resolved[0].0 = folded_delete_cursor_targets(&edited, &[(target, true)], &edits)[0].0;
+            assert_eq!(
+                edited.text(),
+                ["| A | B |", "| --- | --- |", "| x | y |", "keep"].join(newline)
+            );
+            assert_eq!(resolved[0].0.offset, table_tail);
+        }
+    }
+
+    #[test]
+    fn backspace_table_tail_target_requires_the_whole_adjacent_line() {
+        let source = "| A | B |\n| --- | --- |\n| x | y |\nremove\nkeep";
+        let buffer = Buffer::from_text(source);
+        let rows = markdown::parse_decorations(source);
+        let start = buffer.line_start(3);
+        assert!(
+            backspace_table_tail_target(
+                &buffer,
+                &rows,
+                Cursor {
+                    anchor: start,
+                    offset: start + 2,
+                },
+            )
+            .is_none()
+        );
+        assert!(
+            backspace_table_tail_target(
+                &buffer,
+                &rows,
+                Cursor {
+                    anchor: buffer.line_start(4),
+                    offset: buffer.line_end(4),
+                },
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn backspace_at_line_start_after_table_has_a_navigation_target() {
+        let source = "| A | B |\n| --- | --- |\n| x | y |\nparagraph";
+        let buffer = Buffer::from_text(source);
+        let rows = markdown::parse_decorations(source);
+        let cursor = Cursor {
+            anchor: buffer.line_start(3),
+            offset: buffer.line_start(3),
+        };
+        assert_eq!(
+            backspace_table_tail_target(&buffer, &rows, cursor),
+            Some(buffer.line_end(2))
+        );
+    }
+
+    #[test]
+    fn backspace_deletes_blank_rows_one_at_a_time_before_reaching_table() {
+        for newline in ["\n", "\r\n"] {
+            let source =
+                ["| A | B |", "| --- | --- |", "| x | y |", " 	 ", "", "keep"].join(newline);
+            let buffer = Buffer::from_text(&source);
+            let rows = markdown::parse_decorations(&source);
+            let blank_line = 4;
+            let cursor_offset = buffer.line_start(blank_line);
+            let mut edited = Buffer::from_text(&source);
+            let first_plan = blank_table_row_backspace(
+                &edited,
+                &rows,
+                Cursor {
+                    anchor: cursor_offset,
+                    offset: cursor_offset,
+                },
+            )
+            .unwrap();
+            assert!(first_plan.boundary.is_none());
+            edited.delete(first_plan.range);
+            assert_eq!(
+                edited.text(),
+                ["| A | B |", "| --- | --- |", "| x | y |", " \t ", "keep"].join(newline)
+            );
+            assert_eq!(first_plan.target_offset, edited.line_start(3));
+            let rows = markdown::parse_decorations(edited.text());
+            let second_plan = blank_table_row_backspace(
+                &edited,
+                &rows,
+                Cursor {
+                    anchor: first_plan.target_offset,
+                    offset: first_plan.target_offset,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                second_plan.boundary.unwrap().side,
+                super::super::TableBoundarySide::Below
+            );
+            edited.delete(second_plan.range);
+            assert_eq!(
+                edited.text(),
+                ["| A | B |", "| --- | --- |", "| x | y |", "keep"].join(newline)
+            );
+            let table_tail = edited.line_end(2);
+            assert_eq!(second_plan.target_offset, table_tail);
+        }
+    }
+
+    #[test]
+    fn folded_blank_backspace_keeps_other_cursors_deleting_and_maps_heading_target() {
+        use super::super::fold::{folded_delete_cursor_targets, folded_delete_overrides};
+
+        let mut buffer = Buffer::from_text("prefix\n# A\nbody\n\n# B\nxyz");
+        let rows = crate::markdown::parse_decorations(buffer.text());
+        let blank = buffer.line_start(3);
+        let mut plans = deletion_plans(
+            &buffer,
+            &rows,
+            false,
+            vec![
+                (
+                    Cursor {
+                        anchor: blank,
+                        offset: blank,
+                    },
+                    true,
+                ),
+                (
+                    Cursor {
+                        anchor: 1,
+                        offset: 1,
+                    },
+                    false,
+                ),
+            ],
+            lists::DeleteAction::Backward,
+        );
+        let targets =
+            folded_delete_overrides(&buffer, &[2..3], &mut plans, lists::DeleteAction::Backward)
+                .unwrap();
+        let ranges = lists::deletion_ranges(&plans);
+        let edits: Vec<_> = ranges.into_iter().map(|range| (range, 0)).collect();
+        let mut resolved = lists::apply_deletions(&mut buffer, &plans);
+        for ((cursor, primary, _), target) in resolved.iter_mut().zip(targets) {
+            if let Some(target) = target {
+                *cursor = folded_delete_cursor_targets(&buffer, &[(target, *primary)], &edits)[0].0;
+            }
+        }
+        assert_eq!(buffer.text(), "refix\n# A\nbody\n# B\nxyz");
+        assert_eq!(
+            resolved[0].0,
+            Cursor {
+                anchor: buffer.line_end(1),
+                offset: buffer.line_end(1)
+            }
+        );
+        assert!(resolved[0].1);
+        assert_eq!(
+            resolved[1].0,
+            Cursor {
+                anchor: 0,
+                offset: 0
+            }
+        );
+        assert!(!resolved[1].1);
+    }
+
+    #[test]
+    fn folded_boundary_navigation_does_not_swallow_other_cursor_deletions() {
+        use super::super::fold::{folded_delete_cursor_targets, folded_delete_overrides};
+
+        for action in [
+            lists::DeleteAction::Backward,
+            lists::DeleteAction::Word { backwards: true },
+        ] {
+            let mut buffer = Buffer::from_text("# A\nbody\n# B\nother word");
+            let rows = crate::markdown::parse_decorations(buffer.text());
+            let boundary = buffer.line_start(2);
+            let last = buffer.len();
+            let mut plans = deletion_plans(
+                &buffer,
+                &rows,
+                false,
+                vec![
+                    (
+                        Cursor {
+                            anchor: boundary,
+                            offset: boundary,
+                        },
+                        true,
+                    ),
+                    (
+                        Cursor {
+                            anchor: last,
+                            offset: last,
+                        },
+                        false,
+                    ),
+                ],
+                action,
+            );
+            let ordinary = plans[1].2.range.clone();
+            let targets = folded_delete_overrides(&buffer, &[1..2], &mut plans, action).unwrap();
+            assert_eq!(plans[1].2.range, ordinary);
+            assert!(plans[0].2.range.is_empty());
+            let edits: Vec<_> = lists::deletion_ranges(&plans)
+                .into_iter()
+                .map(|range| (range, 0))
+                .collect();
+            let mut resolved = lists::apply_deletions(&mut buffer, &plans);
+            resolved[0].0 =
+                folded_delete_cursor_targets(&buffer, &[(targets[0].unwrap(), true)], &edits)[0].0;
+            assert_eq!(
+                resolved[0].0,
+                Cursor {
+                    anchor: buffer.line_end(0),
+                    offset: buffer.line_end(0)
+                }
+            );
+            assert_eq!(buffer.line_content(1), "body");
+            assert!(buffer.len() < last);
+            assert_eq!(resolved[1].0.offset, buffer.len());
+        }
+    }
+
     use super::*;
     use crate::markdown;
 
@@ -1394,6 +1915,114 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn deleting_complete_table_blocks_leaves_blank_rows_and_preserves_newlines() {
+        for newline in ["\n", "\r\n"] {
+            let text = [
+                "before",
+                "| A | B |",
+                "| --- | --- |",
+                "| one | two |",
+                "between",
+                "| C | D |",
+                "| --- | --- |",
+                "| three | four |",
+                "after",
+            ]
+            .join(newline);
+            let start = text.find("| A |").unwrap();
+            let end = text.find("between").unwrap();
+            let buffer = Buffer::from_text(&text);
+            let rows = markdown::parse_decorations(&text);
+            let plans = deletion_plans(
+                &buffer,
+                &rows,
+                true,
+                vec![(
+                    Cursor {
+                        anchor: start,
+                        offset: end,
+                    },
+                    true,
+                )],
+                lists::DeleteAction::Backward,
+            );
+            let replacements = lists::deletion_ranges(&plans)
+                .into_iter()
+                .map(|range| {
+                    let text = deleted_table_rows_as_blank_lines(&buffer, &rows, &range);
+                    (range, text)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(replacements[0].1, newline.repeat(3));
+            let mut edited = Buffer::from_text(&text);
+            let resolved =
+                lists::apply_deletions_with_replacements(&mut edited, &plans, &replacements);
+            assert_eq!(
+                edited.text(),
+                [
+                    "before",
+                    "",
+                    "",
+                    "",
+                    "between",
+                    "| C | D |",
+                    "| --- | --- |",
+                    "| three | four |",
+                    "after"
+                ]
+                .join(newline)
+            );
+            assert_eq!(resolved[0].0.offset, start);
+            assert!(
+                markdown::parse_decorations(edited.text())
+                    .iter()
+                    .all(|row| row.table_info.is_none()
+                        || row
+                            .table_info
+                            .as_ref()
+                            .is_some_and(|info| info.table_start_line == 5))
+            );
+
+            let all_range = 0..buffer.len();
+            let all_plan = deletion_plans(
+                &buffer,
+                &rows,
+                true,
+                vec![(
+                    Cursor {
+                        anchor: 0,
+                        offset: buffer.len(),
+                    },
+                    true,
+                )],
+                lists::DeleteAction::Forward,
+            );
+            let all_replacements = lists::deletion_ranges(&all_plan)
+                .into_iter()
+                .map(|range| {
+                    let text = deleted_table_rows_as_blank_lines(&buffer, &rows, &range);
+                    (range, text)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(all_replacements[0].1, newline.repeat(6));
+            let mut edited = Buffer::from_text(&text);
+            lists::apply_deletions_with_replacements(&mut edited, &all_plan, &all_replacements);
+            assert_eq!(edited.text(), newline.repeat(6));
+            let _ = all_range;
+        }
+    }
+
+    #[test]
+    fn partial_table_selection_does_not_expand_to_the_whole_block() {
+        let text = "| A | B |\n| --- | --- |\n| one | two |\nafter";
+        let buffer = Buffer::from_text(text);
+        let rows = markdown::parse_decorations(text);
+        let start = text.find("one").unwrap();
+        let range = start..start + 3;
+        assert!(deleted_table_rows_as_blank_lines(&buffer, &rows, &range).is_empty());
     }
 
     #[test]

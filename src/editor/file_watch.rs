@@ -19,8 +19,13 @@ pub(super) fn refresh_clean_snapshot(
     if is_dirty || snapshot.text == new_text {
         return false;
     }
-    snapshot.cursor_offset = snapshot.cursor_offset.min(new_text.len());
-    snapshot.cursor_anchor = snapshot.cursor_anchor.min(new_text.len());
+    let clamp = |offset: usize| new_text.floor_char_boundary(offset.min(new_text.len()));
+    snapshot.cursor_offset = clamp(snapshot.cursor_offset);
+    snapshot.cursor_anchor = clamp(snapshot.cursor_anchor);
+    for (offset, anchor) in &mut snapshot.extra_cursors {
+        *offset = clamp(*offset);
+        *anchor = clamp(*anchor);
+    }
     snapshot.text = new_text;
     true
 }
@@ -1294,6 +1299,36 @@ mod tests {
         assert_eq!(snapshot.cursor_offset, 4);
         assert_eq!(snapshot.cursor_anchor, 4);
         assert_eq!(snapshot.scroll_offset, 80.0);
+    }
+
+    #[test]
+    fn external_reload_clamps_all_cursor_offsets_to_utf8_boundaries() {
+        let mut snapshot = super::super::EditorSnapshot {
+            text: "previous ascii document".into(),
+            cursor_offset: 2,
+            cursor_anchor: 4,
+            extra_cursors: vec![(3, usize::MAX)],
+            ..Default::default()
+        };
+        assert!(refresh_clean_snapshot(
+            &mut snapshot,
+            false,
+            "a\u{1f642}b".into()
+        ));
+        assert_eq!(snapshot.cursor_offset, 1);
+        assert_eq!(snapshot.cursor_anchor, 1);
+        assert_eq!(snapshot.extra_cursors, vec![(1, snapshot.text.len())]);
+        for offset in [snapshot.cursor_offset, snapshot.cursor_anchor]
+            .into_iter()
+            .chain(
+                snapshot
+                    .extra_cursors
+                    .iter()
+                    .flat_map(|&(offset, anchor)| [offset, anchor]),
+            )
+        {
+            assert!(snapshot.text.is_char_boundary(offset));
+        }
     }
 
     #[test]

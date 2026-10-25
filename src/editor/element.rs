@@ -90,6 +90,22 @@ pub(super) fn front_matter_fold_hit_bounds(
     .intersect(&viewport)
 }
 
+fn markdown_fold_hit_bounds(
+    icon_left: f32,
+    left_padding: f32,
+    hit_padding: f32,
+    content_left: f32,
+    top: f32,
+    height: f32,
+) -> Bounds<Pixels> {
+    let left = icon_left - left_padding - hit_padding;
+    let right = content_left - hit_padding;
+    Bounds::new(
+        point(px(left), px(top)),
+        size(px((right - left).max(0.0)), px(height)),
+    )
+}
+
 pub(super) fn front_matter_type_hit_bounds(
     slot: Bounds<Pixels>,
     viewport: Bounds<Pixels>,
@@ -151,6 +167,22 @@ fn front_matter_delimiters_and_summary_use_left_edge_and_fold_hits_stay_in_gutte
         assert!(hit.contains(&point(px(95.0), px(60.0))));
         assert!(!hit.contains(&point(px(101.0), px(60.0))));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn markdown_fold_hit_bounds_stop_before_the_heading_hash() {
+    let content_left = 100.0;
+    let icon_left = 78.0;
+    let hit = markdown_fold_hit_bounds(icon_left, 0.0, 3.0, content_left, 20.0, 24.0);
+    assert_eq!(hit.left(), px(icon_left - 3.0));
+    assert_eq!(hit.right(), px(content_left - 3.0));
+    assert!(!hit.contains(&point(px(content_left), px(32.0))));
+    // The former offset-expanded area extended 7px into the first source byte.
+    assert!(icon_left + 16.0 + 3.0 + 10.0 > content_left);
+    let with_left_padding = markdown_fold_hit_bounds(78.0, 2.0, 3.0, 100.0, 20.0, 24.0);
+    assert_eq!(with_left_padding.left(), px(73.0));
+    assert_eq!(with_left_padding.right(), px(97.0));
 }
 
 #[cfg(test)]
@@ -409,6 +441,16 @@ fn gutter_fold_row_hovered(gutter_hovered: bool, pointer_y: Pixels, top: f32, he
     gutter_hovered && (top..top + height).contains(&f32::from(pointer_y))
 }
 
+pub(super) fn gutter_fold_hover_x_contains(
+    pointer_x: Pixels,
+    column_left: f32,
+    column_width: f32,
+    hit_padding: f32,
+) -> bool {
+    let pointer_x = f32::from(pointer_x);
+    (column_left - hit_padding..=column_left + column_width + hit_padding).contains(&pointer_x)
+}
+
 #[cfg(test)]
 #[test]
 fn gutter_hover_reveals_only_the_current_row() {
@@ -425,6 +467,29 @@ fn gutter_hover_reveals_only_the_current_row() {
     assert!(!gutter_fold_row_hovered(false, px(150.0), 120.0, 80.0));
     assert!(!gutter_fold_row_hovered(true, px(200.0), 120.0, 80.0));
     assert!(gutter_fold_row_hovered(true, px(200.0), 200.0, 20.0));
+}
+
+#[cfg(test)]
+#[test]
+fn gutter_fold_hover_stays_inside_icon_column_and_hit_padding() {
+    let left = 50.0;
+    let width = 32.0;
+    let padding = 3.0;
+    for x in [47.0, 50.0, 66.0, 82.0, 85.0] {
+        assert!(gutter_fold_hover_x_contains(px(x), left, width, padding));
+    }
+    for x in [46.9, 85.1, 87.0] {
+        assert!(!gutter_fold_hover_x_contains(px(x), left, width, padding));
+    }
+    // Code-gutter layouts place the first source character after this gap.
+    assert!(!gutter_fold_hover_x_contains(
+        px(87.0),
+        left,
+        width,
+        padding
+    ));
+    // Markdown layouts start source text at 40px while the icon column ends at 32px.
+    assert!(!gutter_fold_hover_x_contains(px(40.0), 0.0, 32.0, padding));
 }
 
 fn callout_icon_path(kind: CalloutKind) -> &'static str {
@@ -3203,6 +3268,14 @@ struct EditorPrepaintFrame {
     cursor_reveal_requested: bool,
 }
 
+fn should_cull_line_geometry(
+    line: Range<f32>,
+    viewport: Range<f32>,
+    required_table_anchor: bool,
+) -> bool {
+    !required_table_anchor && (line.end < viewport.start || line.start > viewport.end)
+}
+
 impl EditorPrepaintFrame {
     const MAX_PASSES: usize = 3;
     const OFFSCREEN_WRAP_REFLOW_BUDGET: usize = 48;
@@ -3287,6 +3360,15 @@ mod passive_preview_reflow_tests {
                 // The first layout measures previews above this table. Its
                 // new prefix cache is not the origin used by this paint pass.
                 let table_top = if frame.pass == 0 { 1_000.0 } else { 1_800.0 };
+                let painted_table_top = viewport_top + table_top - scroll;
+                // Exercise the same post-shaping cull as Markdown prepaint.
+                // Before correction the entire target table can be offscreen
+                // in either direction, despite being inside the source window.
+                assert!(!should_cull_line_geometry(
+                    painted_table_top..painted_table_top + 3_000.0,
+                    viewport_top..viewport_top + viewport_height,
+                    true,
+                ));
                 painted_match_top = viewport_top + table_top + 2_400.0 - scroll;
                 let geometry = TableCursorGeometry::from_paint(
                     100,
@@ -3318,13 +3400,26 @@ mod passive_preview_reflow_tests {
     }
 
     #[test]
+    fn offscreen_table_measurement_is_required_only_for_the_navigation_target() {
+        let viewport = 80.0..680.0;
+        for table in [-3_000.0..-500.0, 1_000.0..4_000.0] {
+            assert!(should_cull_line_geometry(
+                table.clone(),
+                viewport.clone(),
+                false
+            ));
+            assert!(!should_cull_line_geometry(table, viewport.clone(), true));
+        }
+        for table in [-1_000.0..100.0, 200.0..300.0, 600.0..4_000.0] {
+            assert!(!should_cull_line_geometry(table, viewport.clone(), false));
+        }
+    }
+
+    #[test]
     fn scroll_requests_survive_rejected_and_exhausted_layout_attempts() {
         let mut center_confirm_frames = 1usize;
         let mut typing_guard = Some(PendingTypingScrollGuard {
             line: 30,
-            visual_row: 2,
-            visual_geometry_ready: true,
-            cursor_top: Some(1_200.0),
             viewport_height: 600.0,
             scroll_offset: 900.0,
         });
@@ -3707,6 +3802,7 @@ impl EditorElement {
         frame.explicit_caret_reveal_requested |= {
             let editor = self.editor.read(cx);
             editor.pending_typing_scroll_guard.is_some()
+                || editor.fold_scroll_guard.is_some()
                 || editor.pending_click_anchor.is_some()
                 || editor.pending_scroll_to_cursor
                 || editor.pending_center_cursor_in_view
@@ -4008,6 +4104,7 @@ impl EditorElement {
         let mut scroll_anchor_delta = 0.0_f32;
         let suppress_scroll_anchor_compensation = editor.editor_scrollbar_drag.is_some()
             || editor.pending_preview_reveal.is_some()
+            || editor.fold_scroll_guard.is_some()
             || editor.document_mode_scroll_anchor_is_current()
             || editor.pending_click_anchor.is_some()
             || editor.pending_center_cursor_in_view
@@ -4432,7 +4529,7 @@ impl EditorElement {
                     <= scroll_offset as f64;
             }
             let can_reuse_non_markdown_cached_line = editor.active_tab_is_non_markdown_text()
-                && !is_cursor_table_anchor
+                && !is_cursor_line_early
                 && !line_has_block_preview
                 && !editor.inline_diff_is_phantom_anchor(line_idx)
                 && cached_line.is_some_and(|cached| {
@@ -4733,6 +4830,14 @@ impl EditorElement {
             // Read-only views remain selectable, but should keep Markdown
             // markers folded while a selection changes so wrapping and height
             // do not shift underneath the pointer.
+            if syntax_expansion_allowed {
+                helpers::preserve_heading_syntax_focus(
+                    &decoration,
+                    line_start_offset..line_end_offset,
+                    std::iter::once(*cursor).chain(editor.extra_cursors.iter().copied()),
+                    &mut active_ranges,
+                );
+            }
             if !syntax_expansion_allowed {
                 active_ranges.clear();
             }
@@ -4879,9 +4984,7 @@ impl EditorElement {
                     }),
                 ));
 
-                if (line_bottom < origin_y || line_top > origin_y + viewport_height)
-                    && !is_cursor_line_early
-                {
+                if line_bottom < origin_y || line_top > origin_y + viewport_height {
                     y += total_line_height;
                     _last_line_height = total_line_height;
                     continue;
@@ -5432,12 +5535,10 @@ impl EditorElement {
                             }
                             _ => cursor_pos,
                         };
-                        let cursor_x = super::caret::text_caret_x(
+                        let cursor_x = super::caret::caret_x_between_grapheme_centers(
                             &cached.display_text,
                             disp_cursor_col,
                             cursor_pos,
-                            &cached.wrapped_line.unwrapped_layout,
-                            window.text_system(),
                             |index| {
                                 cached
                                     .wrapped_line
@@ -6506,7 +6607,13 @@ impl EditorElement {
                 }),
             ));
 
-            if line_bottom < origin_y || line_top > origin_y + viewport_height {
+            // Table cells (including the search target) are measured below,
+            // not while shaping this header's hidden source text.
+            if should_cull_line_geometry(
+                line_top..line_bottom,
+                origin_y..origin_y + viewport_height,
+                is_cursor_table_anchor,
+            ) {
                 if editor.active_tab_is_non_markdown_text()
                     && editor.editor_wraps_to_available_width()
                     && cached_line.is_none()
@@ -8067,13 +8174,10 @@ impl EditorElement {
                                                                         editor.wrap_boundary_affinity_for_offset(cur_off),
                                                                     );
                                                                     let caret_x =
-                                                                        super::caret::text_caret_x(
+                                                                        super::caret::caret_x_between_grapheme_centers(
                                                                             hard_display_text,
                                                                             disp_col,
                                                                             pos,
-                                                                            &shaped
-                                                                                .unwrapped_layout,
-                                                                            window.text_system(),
                                                                             |index| {
                                                                                 Some(hanging.position(
                                                                                     &shaped,
@@ -8874,7 +8978,6 @@ impl EditorElement {
             if !hidden_lines.contains(&line_idx) {
                 let gs = &editor.styles.gutter;
                 let fi_size = editor.scaled(gs.gutter_fold_icon_size_px);
-                let fi_offset = editor.scaled(gs.gutter_fold_icon_offset_px);
                 let fi_hit_padding = editor.scaled(gs.gutter_fold_hit_padding_px);
                 let markdown_fold_left_padding = if matches!(block_type, BlockType::Heading(_)) {
                     editor.scaled(editor.styles.format_toolbar.line_format_heading_icon_gap_px)
@@ -8980,15 +9083,13 @@ impl EditorElement {
                                 bounds.intersect(&window.content_mask().bounds),
                             )
                         } else {
-                            Bounds::new(
-                                point(px(fold_icon_x - markdown_fold_left_padding), px(line_top)),
-                                size(
-                                    px(fi_size
-                                        + markdown_fold_left_padding
-                                        + fi_hit_padding
-                                        + fi_offset),
-                                    px(total_line_height),
-                                ),
+                            markdown_fold_hit_bounds(
+                                fold_icon_x,
+                                markdown_fold_left_padding,
+                                fi_hit_padding,
+                                editor_left + editor.padding_left(),
+                                line_top,
+                                total_line_height,
                             )
                         },
                         fold_anchor,
@@ -9072,15 +9173,13 @@ impl EditorElement {
                                 ),
                             )
                         } else {
-                            Bounds::new(
-                                point(px(fold_icon_x - markdown_fold_left_padding), px(line_top)),
-                                size(
-                                    px(fi_size
-                                        + markdown_fold_left_padding
-                                        + fi_hit_padding
-                                        + fi_offset),
-                                    px(total_line_height),
-                                ),
+                            markdown_fold_hit_bounds(
+                                fold_icon_x,
+                                markdown_fold_left_padding,
+                                fi_hit_padding,
+                                editor_left + editor.padding_left(),
+                                line_top,
+                                total_line_height,
                             )
                         },
                         line_idx,
@@ -9111,7 +9210,7 @@ impl EditorElement {
                 image_edit_hit_areas_local.push((ie_bounds, line_idx));
                 editor_icon_tooltips.push((
                     ie_bounds,
-                    SharedString::from(editor.t(crate::i18n::TextKey::EditUrl)),
+                    SharedString::from(editor.t(crate::i18n::TextKey::SelectImage)),
                 ));
             }
 
@@ -9574,12 +9673,10 @@ impl EditorElement {
                                     let caret_pos = wrapped
                                         .position_for_index(display_head, px(r_line_height))
                                         .unwrap_or_default();
-                                    let caret_x = super::caret::text_caret_x(
+                                    let caret_x = super::caret::caret_x_between_grapheme_centers(
                                         &display_text,
                                         display_head,
                                         caret_pos,
-                                        &wrapped.unwrapped_layout,
-                                        window.text_system(),
                                         |index| {
                                             wrapped.position_for_index(index, px(r_line_height))
                                         },
@@ -10120,12 +10217,10 @@ impl EditorElement {
                         .unwrap_or(cursor_pos),
                         _ => cursor_pos,
                     };
-                    let cursor_x = super::caret::text_caret_x(
+                    let cursor_x = super::caret::caret_x_between_grapheme_centers(
                         &display_text,
                         disp_cursor_col,
                         cursor_pos,
-                        &wrapped.unwrapped_layout,
-                        window.text_system(),
                         |index| wrapped.position_for_index(index, px(line_height)),
                     );
 
@@ -11947,7 +12042,11 @@ impl EditorElement {
                 editor.scroll_offset = pending.scroll_offset.max(0.0);
                 did_adjust_preview_reveal = true;
             }
-            if editor.pending_center_cursor_in_view {
+            if let Some(offset) = editor.fold_scroll_guard {
+                editor.scroll_offset = offset;
+                editor.pending_scroll_to_cursor = false;
+                editor.pending_center_cursor_in_view = false;
+            } else if editor.pending_center_cursor_in_view {
                 if editor.pending_center_cursor_in_view_immediately {
                     editor.pending_center_cursor_in_view_immediately = false;
                     editor.center_cursor_in_view_immediately(cx);
@@ -12283,6 +12382,7 @@ impl Element for EditorElement {
             (
                 caret_was_visible,
                 editor.document_mode_scroll_anchor_is_current()
+                    || editor.fold_scroll_guard.is_some()
                     || editor.editor_scrollbar_drag.is_some()
                     || editor.center_cursor_confirm_frames > 0
                     || editor.pending_typing_scroll_guard.is_some()

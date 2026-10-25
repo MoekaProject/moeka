@@ -380,8 +380,9 @@ pub fn split_continuation_prefix(content: &str) -> (String, &str) {
     )
 }
 
-fn setext_heading_underline_len(content: &str) -> Option<usize> {
-    let trimmed_end = content.trim_end_matches([' ', '\t']);
+fn setext_heading_underline_range(content: &str) -> Option<Range<usize>> {
+    let container_len = blockquote_prefix_len(content);
+    let trimmed_end = content[container_len..].trim_end_matches([' ', '\t', '\r']);
     let leading_spaces = trimmed_end
         .as_bytes()
         .iter()
@@ -399,7 +400,9 @@ fn setext_heading_underline_len(content: &str) -> Option<usize> {
     if !matches!(first, '=' | '-') {
         return None;
     }
-    chars.all(|ch| ch == first).then_some(trimmed_end.len())
+    chars
+        .all(|ch| ch == first)
+        .then_some(container_len + leading_spaces..container_len + trimmed_end.len())
 }
 
 fn heading_attribute_range(content: &str) -> Option<Range<usize>> {
@@ -773,6 +776,30 @@ fn parse_decorations_with_options(
         | Options::ENABLE_TABLES;
 
     let mut parser_source = text.to_string();
+    if detect_document_front_matter {
+        detect_front_matter(&mut decorations, text, &line_starts);
+        if let Some(info) = decorations[0]
+            .table_info
+            .as_ref()
+            .filter(|info| info.is_front_matter)
+        {
+            let end = line_starts
+                .get(info.table_end_line)
+                .copied()
+                .unwrap_or(text.len());
+            let masked: String = text[..end]
+                .bytes()
+                .map(|byte| {
+                    if matches!(byte, b'\n' | b'\r') {
+                        byte as char
+                    } else {
+                        ' '
+                    }
+                })
+                .collect();
+            parser_source.replace_range(..end, &masked);
+        }
+    }
     if let Some(line) = pending_fence_line
         && let Some(start) = line_starts.get(line).copied()
     {
@@ -782,23 +809,13 @@ fn parse_decorations_with_options(
             parser_source.replace_range(start + leading..start + leading + run, &"x".repeat(run));
         }
     }
-    let mut open_tilde_fence: Option<std::ops::Range<usize>> = None;
-    for (line, start) in line_starts.iter().copied().enumerate() {
-        let content = get_line_content(text, &line_starts, line, decorations.len());
-        let leading = content.len() - content.trim_start_matches([' ', '\t']).len();
-        if content[leading..].trim_end() != "~~~~" {
-            continue;
-        }
-        let range = start + leading..start + leading + 4;
-        if open_tilde_fence.take().is_none() {
-            open_tilde_fence = Some(range);
-        }
-    }
-    if let Some(unpaired) = open_tilde_fence {
-        parser_source.replace_range(unpaired, "text");
-    }
     if let Some(span) = unclosed_code_fence_marker_span(&parser_source)
-        && !parser_source[span.end..].contains('\n')
+        && ((&parser_source[span.clone()] == "~~~~"
+            && parser_source[span.start..]
+                .lines()
+                .next()
+                .is_some_and(|line| line.trim_end() == "~~~~"))
+            || !parser_source[span.end..].contains('\n'))
     {
         parser_source.replace_range(span.clone(), &"x".repeat(span.len()));
     }
@@ -907,7 +924,13 @@ fn parse_decorations_with_options(
                         source_prefix.len() - source_prefix.trim_start_matches([' ', '\t']).len();
                     let marker_start = source_col + leading_ws;
                     let trimmed = &source_prefix[leading_ws..];
-                    if trimmed.starts_with('#') {
+                    let atx_marker_len = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+                    let is_atx = atx_marker_len == lvl as usize
+                        && trimmed
+                            .as_bytes()
+                            .get(atx_marker_len)
+                            .is_none_or(|byte| matches!(byte, b' ' | b'\t' | b'\r'));
+                    if is_atx {
                         decorations[line].block_type = BlockType::Heading(lvl);
                         let marker_end = marker_start + lvl as usize;
                         let line_len = line_content.len();
@@ -931,23 +954,13 @@ fn parse_decorations_with_options(
                         let underline_line = (line..=end_line.min(decorations.len() - 1))
                             .rev()
                             .find(|&candidate| {
-                                if decorations[candidate].block_contexts.iter().any(|context| {
-                                    matches!(
-                                        context,
-                                        BlockContext::ListItem
-                                            | BlockContext::UnorderedList
-                                            | BlockContext::OrderedList
-                                    )
-                                }) {
-                                    return false;
-                                }
                                 let candidate_content = get_line_content(
                                     text,
                                     &line_starts,
                                     candidate,
                                     decorations.len(),
                                 );
-                                setext_heading_underline_len(candidate_content).is_some()
+                                setext_heading_underline_range(candidate_content).is_some()
                             });
 
                         if let Some(underline_line) = underline_line {
@@ -960,7 +973,24 @@ fn parse_decorations_with_options(
                             // A short `-`/`=` run under a paragraph is still being
                             // typed, so it must not promote that paragraph to a
                             // heading; `-` additionally starts a list.
-                            if is_in_progress_setext_underline(underline_content) {
+                            let underline_range = setext_heading_underline_range(underline_content)
+                                .expect("the underline was validated above");
+                            if lvl == 2
+                                && line > 0
+                                && decorations[line - 1].block_type == BlockType::HorizontalRule
+                                && decorations[line - 1].block_contexts
+                                    == decorations[line].block_contexts
+                            {
+                                decorations[underline_line].block_type = BlockType::HorizontalRule;
+                                decorations[underline_line].syntax_ranges.push(SyntaxRange {
+                                    range: underline_range.clone(),
+                                    trigger_range: underline_range,
+                                });
+                                continue;
+                            }
+                            if is_in_progress_setext_underline(
+                                &underline_content[underline_range.clone()],
+                            ) {
                                 if let Some((marker_ws, marker_len)) =
                                     in_progress_unordered_marker(underline_content)
                                     && marker_len > 0
@@ -977,14 +1007,10 @@ fn parse_decorations_with_options(
                             for heading_line in line..underline_line {
                                 decorations[heading_line].block_type = BlockType::Heading(lvl);
                             }
-                            if let Some(underline_len) =
-                                setext_heading_underline_len(underline_content)
-                            {
-                                decorations[underline_line].syntax_ranges.push(SyntaxRange {
-                                    range: 0..underline_len,
-                                    trigger_range: 0..underline_len,
-                                });
-                            }
+                            decorations[underline_line].syntax_ranges.push(SyntaxRange {
+                                range: underline_range.clone(),
+                                trigger_range: underline_range,
+                            });
                         } else {
                             decorations[line].block_type = BlockType::Heading(lvl);
                         }
@@ -1539,9 +1565,6 @@ fn parse_decorations_with_options(
     assign_fenced_math_block_previews(&mut decorations, text, &line_starts);
     decorate_math_block_previews_as_code_blocks(&mut decorations, text, &line_starts);
 
-    if detect_document_front_matter {
-        detect_front_matter(&mut decorations, text, &line_starts);
-    }
     detect_callouts(&mut decorations, text, &line_starts);
 
     // Second pass: detect table lines
@@ -1633,6 +1656,9 @@ fn parse_decorations_with_options(
         let end = line_starts.get(line + 1).copied().unwrap_or(text.len());
         let content = &text[start..end];
         let line_len = content.strip_suffix('\n').unwrap_or(content);
+        if block_recovery_is_protected(decoration, line_len) {
+            continue;
+        }
         let leading_ws = line_len.len() - line_len.trim_start_matches([' ', '\t']).len();
         let trimmed = &line_len[leading_ws..];
         let prefix_len = ordered_list_prefix_len(trimmed);
@@ -1683,11 +1709,11 @@ fn parse_decorations_with_options(
     // Recover that physical-line pattern at any nesting depth (and inside a
     // blockquote) without changing ordinary `Title\n-` / `Title\n---` headings.
     for line in 0..decorations.len().saturating_sub(1) {
-        if decorations[line..=line + 1].iter().any(|decoration| {
-            decoration
-                .table_info
-                .as_ref()
-                .is_some_and(|table| table.is_front_matter)
+        if (line..=line + 1).any(|candidate| {
+            block_recovery_is_protected(
+                &decorations[candidate],
+                get_line_content(text, &line_starts, candidate, decoration_count),
+            )
         }) {
             continue;
         }
@@ -1732,6 +1758,9 @@ fn parse_decorations_with_options(
             continue;
         }
         let content = get_line_content(text, &line_starts, line, decoration_count);
+        if block_recovery_is_protected(decoration, content) {
+            continue;
+        }
         if blockquote_prefix_len(content) > 0 {
             decoration.block_type = BlockType::Blockquote;
             if !decoration
@@ -1952,7 +1981,9 @@ fn assign_fenced_math_block_previews(
     while line < line_count {
         let opener = get_line_content(text, line_starts, line, line_count);
         let trimmed_opener = opener.trim();
-        if decorations[line].block_type != BlockType::Normal {
+        if decorations[line].block_type != BlockType::Normal
+            || block_marker_is_protected(&decorations[line], opener)
+        {
             line += 1;
             continue;
         }
@@ -1998,6 +2029,7 @@ fn assign_fenced_math_block_previews(
             let closer = get_line_content(text, line_starts, close_line, line_count);
             if closer.trim() == close_marker
                 && decorations[close_line].block_type == BlockType::Normal
+                && !block_marker_is_protected(&decorations[close_line], closer)
             {
                 break;
             }
@@ -2240,7 +2272,7 @@ fn detect_callouts(decorations: &mut [LineDecoration], text: &str, line_starts: 
             .count()
             + marker_end;
         decoration.callout_kind = Some(kind);
-        let title_end = line_content.trim_end_matches([' ', '\t']).len();
+        let title_end = line_content.trim_end_matches([' ', '\t', '\r']).len();
         let mut display_text = callout_replacement_text(kind).to_string();
         let title_range = if replacement_end >= title_end {
             marker_start..replacement_end
@@ -2747,6 +2779,25 @@ pub fn ordered_list_prefix_len(content: &str) -> usize {
             .count()
 }
 
+fn block_marker_is_protected(decoration: &LineDecoration, content: &str) -> bool {
+    let quote_len = blockquote_prefix_len(content);
+    let marker_start = quote_len + content[quote_len..].len()
+        - content[quote_len..].trim_start_matches([' ', '\t']).len();
+    decoration
+        .protected_ranges
+        .iter()
+        .any(|range| range.contains(&marker_start))
+}
+
+fn block_recovery_is_protected(decoration: &LineDecoration, content: &str) -> bool {
+    decoration.table_info.is_some()
+        || matches!(
+            decoration.block_type,
+            BlockType::CodeBlock | BlockType::CodeBlockFence
+        )
+        || block_marker_is_protected(decoration, content)
+}
+
 fn get_line_content<'a>(
     text: &'a str,
     line_starts: &[usize],
@@ -2899,29 +2950,30 @@ pub(crate) fn fenced_code_block_line_ranges(text: &str) -> Vec<Range<usize>> {
 }
 
 /// Byte range of the marker run of a fence that is never closed.
-fn unclosed_code_fence_marker_span(text: &str) -> Option<Range<usize>> {
-    let mut open: Option<(char, usize, usize)> = None;
-    let mut offset = 0usize;
-
-    for line in text.split_inclusive('\n') {
-        let content = line.strip_suffix('\n').unwrap_or(line);
-        match open {
-            Some((marker, run, _)) => {
-                if is_code_fence_closer(content, marker, run) {
-                    open = None;
-                }
-            }
-            None => {
-                if let Some((marker, run)) = code_fence_opener(content) {
-                    let leading = content.len() - content.trim_start_matches(' ').len();
-                    open = Some((marker, run, offset + leading));
-                }
-            }
+pub(crate) fn unclosed_code_fence_marker_span(text: &str) -> Option<Range<usize>> {
+    for (event, range) in Parser::new(text).into_offset_iter() {
+        if !matches!(
+            event,
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_)))
+        ) {
+            continue;
         }
-        offset += line.len();
+        let mut lines = text[range.clone()].lines();
+        let Some(opener) = lines.next() else { continue };
+        let prefix = blockquote_prefix_len(opener);
+        let Some((marker, run)) = code_fence_opener(&opener[prefix..]) else {
+            continue;
+        };
+        if lines.last().is_some_and(|closer| {
+            is_code_fence_closer(&closer[blockquote_prefix_len(closer)..], marker, run)
+        }) {
+            continue;
+        }
+        let leading = opener[prefix..].len() - opener[prefix..].trim_start_matches(' ').len();
+        let start = range.start + prefix + leading;
+        return Some(start..start + run);
     }
-
-    open.map(|(_, run, marker_offset)| marker_offset..marker_offset + run)
+    None
 }
 
 /// The closing marker a fence opened on `line` still needs, or `None` when that
@@ -3075,10 +3127,17 @@ fn table_row_has_cell_math(decoration: &LineDecoration, content: &str, line_star
 fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[usize]) {
     let line_count = decorations.len();
     let mut line_idx = 0;
+    let quote_depth = |content: &str| {
+        content[..blockquote_prefix_len(content)]
+            .bytes()
+            .filter(|byte| *byte == b'>')
+            .count()
+    };
 
     while line_idx < line_count {
         let content = get_line_content(text, line_starts, line_idx, line_count);
         if decorations[line_idx].table_info.is_some()
+            || block_marker_is_protected(&decorations[line_idx], content)
             || (matches!(
                 decorations[line_idx].block_type,
                 BlockType::CodeBlock | BlockType::CodeBlockFence
@@ -3101,6 +3160,18 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
             ))
         });
         let starts_table = is_table_line(content)
+            && line_idx + 1 < line_count
+            && quote_depth(content)
+                == quote_depth(get_line_content(
+                    text,
+                    line_starts,
+                    line_idx + 1,
+                    line_count,
+                ))
+            && !block_marker_is_protected(
+                &decorations[line_idx + 1],
+                get_line_content(text, line_starts, line_idx + 1, line_count),
+            )
             && separator_cells.as_ref().is_some_and(|cells| {
                 cells.len() == header_cells.len()
                     && !cells.is_empty()
@@ -3117,6 +3188,11 @@ fn detect_tables(decorations: &mut [LineDecoration], text: &str, line_starts: &[
             line_idx += 2;
             while line_idx < line_count {
                 let c = get_line_content(text, line_starts, line_idx, line_count);
+                if quote_depth(c) != quote_depth(content)
+                    || block_marker_is_protected(&decorations[line_idx], c)
+                {
+                    break;
+                }
                 if !matches!(
                     decorations[line_idx].block_type,
                     BlockType::Normal | BlockType::Blockquote
@@ -5059,6 +5135,101 @@ mod tests {
     }
 
     #[test]
+    fn front_matter_cannot_define_links_or_open_fences_in_the_body() {
+        for newline in ["\n", "\r\n"] {
+            let text = "---\ndescription: |\n\n  [private]: https://private.example\n\n---\n\n[label][private]".replace('\n', newline);
+            let rows = parse_decorations(&text);
+            assert!(
+                rows.last()
+                    .unwrap()
+                    .inline_spans
+                    .iter()
+                    .all(|span| span.kind != InlineKind::Link)
+            );
+            for marker in ["```", "~~~~"] {
+                let text = format!("---\ndescription: |\n  {marker}\n---\n\n# Body")
+                    .replace('\n', newline);
+                let rows = parse_decorations(&text);
+                assert_eq!(
+                    rows.last().unwrap().block_type,
+                    BlockType::Heading(1),
+                    "{text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn closed_blocks_do_not_leak_syntax_state_into_following_blocks() {
+        let prefixes = [
+            "```text\n~~~~\n# literal\n```",
+            "~~~~\n```\n# literal\n~~~~",
+            "<pre>\n~~~~\n[hidden]: https://hidden.example\n</pre>",
+            "<!--\n**literal**\n-->",
+            "---\nvalue: |\n  ```\n  [hidden]: https://hidden.example\n---",
+            "> | A | B |\n> | --- | --- |\n> | one | two |",
+            "\\[\nx + y\n\\]",
+            "```mermaid\ngraph TD; A-->B\n```",
+        ];
+        let suffixes = [
+            "# Heading\n\ntext",
+            "Heading\n===",
+            "- item\n  - child\n- [x] done",
+            "1. first\n2. second",
+            "> [!NOTE]\n> body",
+            "| A | B |\n| --- | --- |\n| one | two |",
+            "\\[\nx + y\n\\]",
+            "**bold\nsecond** *italic* ~~strike~~",
+            "==highlight== ++underline++ H~2~O x^2^ :rocket:",
+            "[[note|alias]] [link](https://example.test) ![image](image.png)",
+            "[label][visible]\n\n[visible]: https://example.test",
+            "[^note]\n\n[^note]: definition",
+        ];
+        for newline in ["\n", "\r\n"] {
+            for prefix in prefixes {
+                for suffix in suffixes {
+                    let source = format!("{prefix}\n\n{suffix}").replace('\n', newline);
+                    let actual = parse_decorations(&source);
+                    let expected = parse_decorations(&suffix.replace('\n', newline));
+                    let first_line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 2;
+                    assert_eq!(actual.len() - first_line, expected.len(), "{source:?}");
+                    for (actual, expected) in actual[first_line..].iter().zip(expected) {
+                        assert_eq!(actual.block_type, expected.block_type, "{source:?}");
+                        assert_eq!(actual.inline_spans, expected.inline_spans, "{source:?}");
+                        assert_eq!(actual.syntax_ranges, expected.syntax_ranges, "{source:?}");
+                        assert_eq!(
+                            actual.protected_ranges, expected.protected_ranges,
+                            "{source:?}"
+                        );
+                        assert_eq!(actual.block_contexts, expected.block_contexts, "{source:?}");
+                        assert_eq!(
+                            actual.highlight_spans, expected.highlight_spans,
+                            "{source:?}"
+                        );
+                        assert_eq!(
+                            actual.superscript_spans, expected.superscript_spans,
+                            "{source:?}"
+                        );
+                        assert_eq!(
+                            actual.subscript_spans, expected.subscript_spans,
+                            "{source:?}"
+                        );
+                        assert_eq!(actual.wiki_links, expected.wiki_links, "{source:?}");
+                        assert_eq!(
+                            actual.footnote_references, expected.footnote_references,
+                            "{source:?}"
+                        );
+                        assert_eq!(
+                            actual.display_replacements, expected.display_replacements,
+                            "{source:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn front_matter_conversion_preserves_diff_metadata_only() {
         let text = "---\nimage: '![literal](image.png)'\n---\n\nBody\n";
         let mut decorations = super::parse_decorations_fragment(text);
@@ -5287,7 +5458,12 @@ mod tests {
                 }
             };
 
-            record("heading", has_heading, expects_heading);
+            let rule_delimited_paragraph = example.example == 96;
+            record(
+                "heading",
+                has_heading,
+                expects_heading && !rule_delimited_paragraph,
+            );
             record("thematic break", has_hr, expects_hr);
             // An unclosed fence stays plain text here so it can be typed, which
             // the spec's own unterminated-fence examples do not expect.
@@ -5583,6 +5759,185 @@ mod tests {
     }
 
     #[test]
+    fn neighboring_list_markers_do_not_reclassify_literal_blocks() {
+        for newline in ["\n", "\r\n"] {
+            for source in [
+                "```text\n- literal\n  - \n```\n",
+                "    - literal\n      - \n",
+            ] {
+                let source = source.replace('\n', newline);
+                let decorations = parse_decorations(&source);
+                for (line, content) in source.lines().enumerate() {
+                    if content.trim_start().starts_with("- ") {
+                        assert_eq!(
+                            decorations[line].block_type,
+                            BlockType::CodeBlock,
+                            "{source:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn quoted_multiline_setext_uses_the_container_relative_underline() {
+        for newline in ["\n", "\r\n"] {
+            let source = "> first\n> second\n> ===\n".replace('\n', newline);
+            let decorations = parse_decorations(&source);
+            assert_eq!(decorations[0].block_type, BlockType::Heading(1));
+            assert_eq!(decorations[1].block_type, BlockType::Heading(1));
+            assert!(
+                decorations[2]
+                    .syntax_ranges
+                    .iter()
+                    .any(|syntax| syntax.range == (2..5))
+            );
+        }
+    }
+
+    #[test]
+    fn neighboring_blocks_keep_literal_and_heading_boundaries() {
+        for newline in ["\n", "\r\n"] {
+            for (source, line, expected) in [
+                ("---\ncate\n---", 1, BlockType::Normal),
+                ("---\n\ncate\n\n---", 2, BlockType::Normal),
+                ("cate\n\n---", 0, BlockType::Normal),
+                ("cate\n***", 0, BlockType::Normal),
+                ("cate\n===", 0, BlockType::Heading(1)),
+                ("> first\n> second\n> --", 0, BlockType::Blockquote),
+                ("<pre>\n- literal\n  - \n</pre>", 1, BlockType::Normal),
+                ("<div>\n- literal\n  - \n</div>", 1, BlockType::Normal),
+                ("$$\n- literal\n  - \n$$", 1, BlockType::CodeBlock),
+                ("```\ncate\n---\n```", 1, BlockType::CodeBlock),
+            ] {
+                let source = source.replace('\n', newline);
+                let decorations = parse_decorations(&source);
+                assert_eq!(decorations[line].block_type, expected, "{source:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn horizontal_rules_surround_plain_text_without_promoting_it_to_a_heading() {
+        for newline in ["\n", "\r\n"] {
+            for source in ["---\ncate\n---", "intro\n\n---\ncate\nsecond line\n---"] {
+                let source = source.replace('\n', newline);
+                let decorations = parse_decorations(&source);
+                for (line, content) in source.lines().enumerate() {
+                    if content == "---" {
+                        assert_eq!(decorations[line].block_type, BlockType::HorizontalRule);
+                    } else {
+                        assert_eq!(decorations[line].block_type, BlockType::Normal);
+                    }
+                    assert!(decorations[line].front_matter.is_none());
+                }
+            }
+            assert_eq!(
+                parse_decorations(&"cate\n---".replace('\n', newline))[0].block_type,
+                BlockType::Heading(2)
+            );
+            assert_eq!(
+                parse_decorations(&"---\n# cate\n---".replace('\n', newline))[1].block_type,
+                BlockType::Heading(1)
+            );
+            assert!(
+                parse_decorations(&"---\ncate: value\n---".replace('\n', newline))[1]
+                    .front_matter
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn html_blocks_do_not_gain_tables_or_math_from_neighboring_rows() {
+        for newline in ["\n", "\r\n"] {
+            for source in [
+                "<div>\n| A | B |\n| --- | --- |\n| one | two |\n</div>",
+                "<pre>\n\\[\nx + y\n\\]\n</pre>",
+                "<!--\n\\[x + y\\]\n-->",
+            ] {
+                let source = source.replace('\n', newline);
+                for row in parse_decorations(&source) {
+                    assert!(row.table_info.is_none(), "{source:?}");
+                    assert!(row.block_preview.is_none(), "{source:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn setext_multiline_content_is_not_confused_with_atx_or_list_markers() {
+        for newline in ["\n", "\r\n"] {
+            for (source, level) in [("#plain\nsecond\n---", 2), ("- first\n  second\n  ===", 1)] {
+                let source = source.replace('\n', newline);
+                let rows = parse_decorations(&source);
+                assert_eq!(rows[0].block_type, BlockType::Heading(level), "{source:?}");
+                assert_eq!(rows[1].block_type, BlockType::Heading(level), "{source:?}");
+                assert!(!rows[2].syntax_ranges.is_empty(), "{source:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn callout_default_titles_do_not_depend_on_line_endings() {
+        for newline in ["\n", "\r\n"] {
+            let text = ["> [!NOTE]", "> body"].join(newline);
+            let rows = parse_decorations(&text);
+            assert_eq!(rows[0].callout_kind, Some(super::CalloutKind::Note));
+            assert!(
+                rows[0]
+                    .display_replacements
+                    .iter()
+                    .any(|replacement| { replacement.display_text.ends_with("NOTE") }),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn neighboring_literal_blocks_isolate_all_custom_inline_markers() {
+        let markers = "==hi== ++under++ H~2~O x^2^ :rocket: [[note|alias]] [^n]";
+        for newline in ["\n", "\r\n"] {
+            for (opener, closer) in [
+                ("```text", "```"),
+                ("<pre>", "</pre>"),
+                ("<!--", "-->"),
+                ("---\nkey: |", "---"),
+            ] {
+                let body = if opener.starts_with("---") {
+                    format!("  {markers}")
+                } else {
+                    markers.to_string()
+                };
+                let text =
+                    format!("{opener}\n{body}\n{closer}\n\n{markers}").replace('\n', newline);
+                let rows = parse_decorations(&text);
+                let last = rows.len() - 1;
+                for row in &rows[..last] {
+                    assert!(row.highlight_spans.is_empty(), "{text:?}");
+                    assert!(row.superscript_spans.is_empty(), "{text:?}");
+                    assert!(row.subscript_spans.is_empty(), "{text:?}");
+                    assert!(row.wiki_links.is_empty(), "{text:?}");
+                    assert!(row.footnote_references.is_empty(), "{text:?}");
+                    assert!(row.display_replacements.is_empty(), "{text:?}");
+                    assert!(
+                        !row.inline_spans
+                            .iter()
+                            .any(|span| span.kind == InlineKind::Underline),
+                        "{text:?}"
+                    );
+                }
+                assert!(!rows[last].highlight_spans.is_empty(), "{text:?}");
+                assert!(!rows[last].superscript_spans.is_empty(), "{text:?}");
+                assert!(!rows[last].subscript_spans.is_empty(), "{text:?}");
+                assert!(!rows[last].wiki_links.is_empty(), "{text:?}");
+                assert!(!rows[last].display_replacements.is_empty(), "{text:?}");
+            }
+        }
+    }
+
+    #[test]
     fn lone_dash_under_paragraph_starts_a_list_instead_of_a_setext_heading() {
         let typing_marker = parse_decorations("text\n-");
         assert_eq!(typing_marker[0].block_type, BlockType::Normal);
@@ -5768,6 +6123,25 @@ mod tests {
         assert_eq!(entered[5].block_type, BlockType::CodeBlock);
         let paired = parse_decorations(&format!("{prefix}```\n/\n```"));
         assert_eq!(paired[6].block_type, BlockType::CodeBlockFence);
+    }
+
+    #[test]
+    fn literal_tilde_fences_do_not_unpair_later_real_fences() {
+        for newline in ["\n", "\r\n"] {
+            for opener in ["~~~~rust", "~~~~~"] {
+                let text = format!("{opener}\n# literal heading").replace('\n', newline);
+                assert_eq!(parse_decorations(&text)[1].block_type, BlockType::CodeBlock);
+            }
+            for literal in ["```text\n~~~~\n```", "<pre>\n~~~~\n</pre>"] {
+                let text = format!("{literal}\n\n~~~~\n# literal heading\n~~~~\n\nafter")
+                    .replace('\n', newline);
+                let rows = parse_decorations(&text);
+                assert_eq!(rows[4].block_type, BlockType::CodeBlockFence, "{text:?}");
+                assert_eq!(rows[5].block_type, BlockType::CodeBlock, "{text:?}");
+                assert_eq!(rows[6].block_type, BlockType::CodeBlockFence, "{text:?}");
+                assert_eq!(rows[8].block_type, BlockType::Normal, "{text:?}");
+            }
+        }
     }
 
     #[test]
@@ -5979,6 +6353,32 @@ mod tests {
         assert_eq!(decorations[3].block_type, BlockType::Heading(1));
         assert!(decorations[3].table_info.is_none());
         assert!(decorations[4].table_info.is_none());
+    }
+
+    #[test]
+    fn tables_do_not_cross_blockquote_container_boundaries() {
+        for newline in ["\n", "\r\n"] {
+            for source in [
+                "> | A | B |\n> | --- | --- |\n| outside | row |",
+                "| A | B |\n| --- | --- |\n> | outside | row |",
+                "> | A | B |\n> | --- | --- |\n>> | nested | row |",
+            ] {
+                let source = source.replace('\n', newline);
+                let rows = parse_decorations(&source);
+                assert_eq!(
+                    rows[0].table_info.as_ref().unwrap().table_end_line,
+                    2,
+                    "{source:?}"
+                );
+                assert!(rows[2].table_info.is_none(), "{source:?}");
+            }
+            let source = "> | A | B |\n| --- | --- |".replace('\n', newline);
+            assert!(
+                parse_decorations(&source)
+                    .iter()
+                    .all(|row| row.table_info.is_none())
+            );
+        }
     }
 
     #[test]

@@ -36,6 +36,7 @@ const FILE_URL_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'?')
     .add(b'[')
     .add(b']')
+    .add(b'\\')
     .add(b'^')
     .add(b'`')
     .add(b'{')
@@ -127,7 +128,9 @@ pub(crate) fn path_to_file_url(path: &Path) -> Option<String> {
     if !path.is_absolute() {
         return None;
     }
-    let normalized = path.to_string_lossy().replace('\\', "/");
+    let path = path.to_str()?;
+    #[cfg(windows)]
+    let normalized = path.replace('\\', "/");
     #[cfg(windows)]
     let url = if let Some(unc) = normalized.strip_prefix("//") {
         format!("file://{unc}")
@@ -135,7 +138,7 @@ pub(crate) fn path_to_file_url(path: &Path) -> Option<String> {
         format!("file:///{normalized}")
     };
     #[cfg(not(windows))]
-    let url = format!("file://{normalized}");
+    let url = format!("file://{path}");
     Some(utf8_percent_encode(&url, FILE_URL_ENCODE_SET).to_string())
 }
 
@@ -178,6 +181,19 @@ pub(crate) fn asset_search_roots() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn file_urls_preserve_literal_backslashes_and_reject_lossy_paths() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new("/tmp/one\\two.md");
+        let url = path_to_file_url(path).unwrap();
+        assert_eq!(url, "file:///tmp/one%5Ctwo.md");
+        assert_eq!(path_from_file_url(&url).as_deref(), Some(path));
+        let invalid = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff.md"));
+        assert_eq!(path_to_file_url(invalid), None);
+    }
 
     #[cfg(not(windows))]
     const URL_DIR: &str = "/tmp/";

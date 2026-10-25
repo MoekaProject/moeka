@@ -905,7 +905,6 @@ pub(crate) type LineDisplayCache = Vec<Option<Box<LineDisplayInfo>>>;
 
 const LARGE_MARKDOWN_MIN_LINES: usize = 100_000;
 const LARGE_MARKDOWN_CHUNK_LINES: usize = 128;
-const LARGE_MARKDOWN_BOUNDARY_SCAN_LINES: usize = 512;
 const LARGE_DOCUMENT_FRAME_BENCH_WARMUP: usize = 60;
 const LARGE_DOCUMENT_FRAME_BENCH_SCROLL_FRAMES: usize = 240;
 const LARGE_DOCUMENT_FRAME_BENCH_EDIT_FRAMES: usize = 120;
@@ -1117,22 +1116,12 @@ pub(crate) fn parse_lazy_markdown_range(
         let core_start = chunk * LARGE_MARKDOWN_CHUNK_LINES;
         let core_end = ((chunk + 1) * LARGE_MARKDOWN_CHUNK_LINES).min(line_count);
         let mut parse_start = core_start;
-        let mut scanned = 0;
-        while parse_start > 0
-            && scanned < LARGE_MARKDOWN_BOUNDARY_SCAN_LINES
-            && !buffer.line_content(parse_start - 1).trim().is_empty()
-        {
+        while parse_start > 0 && !buffer.line_content(parse_start - 1).trim().is_empty() {
             parse_start -= 1;
-            scanned += 1;
         }
         let mut parse_end = core_end;
-        scanned = 0;
-        while parse_end < line_count
-            && scanned < LARGE_MARKDOWN_BOUNDARY_SCAN_LINES
-            && !buffer.line_content(parse_end).trim().is_empty()
-        {
+        while parse_end < line_count && !buffer.line_content(parse_end).trim().is_empty() {
             parse_end += 1;
-            scanned += 1;
         }
         if let Some(fenced_code_spans) = lazy.fenced_code_spans.as_ref() {
             let first_candidate = fenced_code_spans.partition_point(|span| span.end <= core_start);
@@ -1737,14 +1726,13 @@ pub(crate) struct TableCursorGeometry {
     pub(crate) paint_bounds: Bounds<Pixels>,
     pub(crate) content_top: f32,
     pub(crate) row_height: f32,
-    pub(crate) visual_row: usize,
 }
 
 impl TableCursorGeometry {
     fn from_paint(
         offset: usize,
         paint_bounds: Bounds<Pixels>,
-        visual_row: usize,
+        _visual_row: usize,
         row_bounds: Range<f32>,
         viewport_top: f32,
         painted_scroll: f32,
@@ -1756,7 +1744,6 @@ impl TableCursorGeometry {
             // that may already contain measurements from a later layout.
             content_top: row_bounds.start - viewport_top + painted_scroll,
             row_height: row_bounds.end - row_bounds.start,
-            visual_row,
         }
     }
 
@@ -1769,9 +1756,6 @@ impl TableCursorGeometry {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PendingTypingScrollGuard {
     pub(crate) line: usize,
-    pub(crate) visual_row: usize,
-    pub(crate) visual_geometry_ready: bool,
-    pub(crate) cursor_top: Option<f32>,
     pub(crate) viewport_height: f32,
     pub(crate) scroll_offset: f32,
 }
@@ -1788,7 +1772,14 @@ pub(crate) struct ClickScrollAnchor {
 
 pub(crate) struct PendingLineDisplayTransfer {
     cached_lines: LineDisplayCache,
+    folded_anchor_offsets: Vec<(usize, usize)>,
+    folded_image_anchor_offsets: Vec<(usize, usize)>,
     start_line: usize,
+    replaced_start_line: bool,
+    fold_line_swap: Option<usize>,
+    replaced_start_offset: usize,
+    replaced_end_offset: usize,
+    inserted_len: usize,
     old_end_line_exclusive: usize,
     new_end_line_exclusive: usize,
     dirty_start_line: usize,
@@ -1969,6 +1960,27 @@ fn line_display_transfer_line_bounds(
     let new_end_line_exclusive = start_line + new_line_count;
 
     (start_line, old_end_line_exclusive, new_end_line_exclusive)
+}
+
+fn list_indent_width_for_source(decoration: &LineDecoration, source: &str) -> Option<usize> {
+    match decoration.block_type {
+        BlockType::OrderedList => Some(3),
+        BlockType::UnorderedList | BlockType::TaskList(_) => Some(2),
+        BlockType::Normal | BlockType::Blockquote if decoration.table_info.is_none() => {
+            let quote = markdown::blockquote_prefix_len(source);
+            let content = source[quote..].trim_start_matches([' ', '\t']);
+            let column = source.len() - content.len();
+            if decoration
+                .protected_ranges
+                .iter()
+                .any(|range| range.contains(&column))
+            {
+                return None;
+            }
+            (markdown::ordered_list_prefix_len(content) > 0).then_some(3)
+        }
+        _ => None,
+    }
 }
 
 fn ordered_list_near_line(decorations: &[LineDecoration], line: usize) -> bool {
@@ -2296,6 +2308,7 @@ pub struct EditorView {
     /// Last text removed by KillToLineEnd (ctrl-k); pasted back by Yank.
     pub(crate) kill_ring: Option<String>,
     pub(crate) pending_preview_reveal: Option<PendingPreviewReveal>,
+    pub(crate) fold_scroll_guard: Option<f32>,
     pub(crate) pending_typing_scroll_guard: Option<PendingTypingScrollGuard>,
     pub(crate) pending_click_anchor: Option<ClickScrollAnchor>,
     pub(crate) document_mode_scroll_anchor: Option<DocumentModeScrollAnchor>,
@@ -2524,6 +2537,7 @@ pub struct EditorView {
     #[cfg(target_os = "linux")]
     pub(crate) client_side_window_decorations: bool,
     pub(crate) folded_sections: HashSet<usize>,
+    pub(crate) folded_section_ends: HashMap<usize, usize>,
     pub(crate) folded_image_previews: HashSet<usize>,
     pub(crate) generated_preview_keys: HashSet<String>,
     pub(crate) gutter_fold_areas: Vec<(gpui::Bounds<Pixels>, usize, bool)>,
@@ -3143,6 +3157,7 @@ impl EditorView {
             center_cursor_confirm_frames: 0,
             kill_ring: None,
             pending_preview_reveal: None,
+            fold_scroll_guard: None,
             pending_typing_scroll_guard: None,
             pending_click_anchor: None,
             document_mode_scroll_anchor: None,
@@ -3326,6 +3341,7 @@ impl EditorView {
             #[cfg(target_os = "linux")]
             client_side_window_decorations: false,
             folded_sections: HashSet::new(),
+            folded_section_ends: HashMap::new(),
             folded_image_previews: HashSet::new(),
             generated_preview_keys: HashSet::new(),
             gutter_fold_areas: Vec::new(),
@@ -4213,6 +4229,7 @@ impl EditorView {
 
         self.cancel_outline_navigation();
         self.document_mode_scroll_anchor = None;
+        self.fold_scroll_guard = None;
         self.pending_preview_reveal = None;
         self.pending_click_anchor = None;
         self.pending_typing_scroll_guard = None;
@@ -5222,12 +5239,8 @@ impl EditorView {
                     Ok(image) => {
                         editor.image_cache.insert(path, Some(image));
                     }
-                    Err(error) => {
+                    Err(_) => {
                         editor.image_cache.insert(path.clone(), None);
-                        editor.notify_error(
-                            format!("{}: {path}: {error}", editor.t(TextKey::OpenFailed)),
-                            cx,
-                        );
                     }
                 }
                 cx.notify();
@@ -6328,6 +6341,10 @@ impl EditorView {
             .as_deref()
             .or(markdown_table.as_deref())
             .unwrap_or(&normalized);
+        if text.contains('\n') {
+            self.skip_folded_anchor_for_line_break();
+        }
+        let selection = self.cursor.selection_range();
         self.capture_typing_scroll_guard();
         self.checkpoint();
         if self.has_extra_cursors() {
@@ -7193,7 +7210,7 @@ impl EditorView {
     }
 
     pub(crate) fn pause_cursor_blinking(&mut self, cx: &mut Context<Self>) {
-        self.reconcile_front_matter_fold_cursor();
+        self.reconcile_folded_cursors();
         self.schedule_fold_ime_cancellation(cx);
         self.sync_front_matter_group_focus();
         self.cursor_opacity = self.styles.cursor.cursor_opacity_max;
@@ -7220,6 +7237,7 @@ impl EditorView {
     /// presentation transfer. Other buffer replacements still clear it safely.
     pub(super) fn reparse_with_source_context(&mut self, preserve_source_context: bool) {
         self.document_mode_scroll_anchor = None;
+        self.fold_scroll_guard = None;
         let search_presentation_was_active =
             self.search_visible && self.search_current_index.is_some();
         self.front_matter_columns = None;
@@ -7288,9 +7306,14 @@ impl EditorView {
                 .as_ref()
                 .map(|transfer| PendingLineDisplayTransfer {
                     cached_lines: Vec::new(),
+                    folded_anchor_offsets: Vec::new(),
+                    folded_image_anchor_offsets: Vec::new(),
                     ..*transfer
                 })
         });
+        if let Some(transfer) = pending_line_display_transfer.as_ref() {
+            self.remap_folded_lines_after_transfer(transfer);
+        }
         let stable_layout_candidates = pending_line_display_transfer
             .as_ref()
             .filter(|_| file_kind.is_markdown())
@@ -7626,6 +7649,7 @@ impl EditorView {
                 Some(std::mem::replace(&mut self.decorations, presentation));
             self.invalidate_line_geometry_cache();
         }
+        self.prune_invalid_folded_sections();
         if self.collapsed_front_matter_range().is_some() {
             self.invalidate_line_display_info_for_line(0);
             self.front_matter_group_geometry_dirty = true;
@@ -7672,15 +7696,13 @@ impl EditorView {
             return;
         };
         let mut shifted = HashMap::with_capacity(overrides.len());
-        for (line, mut state) in std::mem::take(overrides) {
+        for (line, state) in std::mem::take(overrides) {
             let line = shift_line_after_transfer(
                 line,
                 transfer.start_line,
                 transfer.old_end_line_exclusive,
                 transfer.new_end_line_exclusive,
             );
-            state.horizontal_offset = 0.0;
-            state.max_horizontal_offset = 0.0;
             shifted.insert(line, state);
         }
         *overrides = shifted;
@@ -7703,8 +7725,15 @@ impl EditorView {
                 Some(BlockType::CodeBlock | BlockType::CodeBlockFence)
             )
         };
+        let table_source_start = self
+            .table_source
+            .as_ref()
+            .map(|source| source.start_line(&self.buffer));
         if let Some(overrides) = self.code_block_display_overrides.get_mut(&tab_id) {
-            overrides.retain(|line, _| is_code(*line) && (*line == 0 || !is_code(*line - 1)));
+            overrides.retain(|line, _| {
+                Some(*line) == table_source_start
+                    || (is_code(*line) && (*line == 0 || !is_code(*line - 1)))
+            });
         }
     }
 
@@ -8767,14 +8796,9 @@ impl EditorView {
         if self.reading_mode {
             self.set_document_mode(DocumentMode::Edit, cx);
         }
-        if self.collapsed_front_matter_range().is_some_and(|range| {
-            self.all_cursor_ranges().iter().any(|(head, anchor)| {
-                self.buffer.offset_to_line_col(*head).0 < range.end
-                    || self.buffer.offset_to_line_col(*anchor).0 < range.end
-            })
-        }) {
-            self.toggle_fold(0, cx);
-        }
+        self.reconcile_folded_cursors();
+        self.clip_folded_selections_for_edit();
+        self.capture_typing_scroll_guard();
         true
     }
 
@@ -9294,12 +9318,19 @@ impl EditorView {
     /// Apply a text insertion across all cursors. Cursors are processed from end
     /// to start so that earlier offsets remain valid.
     pub(crate) fn multi_cursor_insert(&mut self, text: &str) {
+        if text.contains('\n') {
+            self.skip_folded_anchor_for_line_break();
+        }
         if self.source_mode {
             self.apply_source_literal_insert(text);
             return;
         }
         if self.extra_cursors.is_empty() {
-            let text = self.table_cell_input_text(&self.cursor.selection_range(), text);
+            let range = self.cursor.selection_range();
+            let text = self.table_cell_input_text(&range, text);
+            if self.pending_line_display_transfer.is_none() {
+                self.queue_non_markdown_line_display_transfer(&range, &text);
+            }
             self.cursor.insert(&mut self.buffer, &text);
             return;
         }
@@ -9311,12 +9342,15 @@ impl EditorView {
                 self.table_cell_input_text(&((*offset).min(*anchor)..(*offset).max(*anchor)), text)
             })
             .collect();
+        let folded_anchors = self.snapshot_folded_anchor_offsets();
         let mut edits = Vec::with_capacity(all.len());
+        let mut fold_edits = Vec::with_capacity(all.len());
 
         for ((offset, anchor, is_primary), text) in all.iter().zip(&replacements) {
             let range_start = (*offset).min(*anchor);
             let range_end = (*offset).max(*anchor);
             let text_len = text.len();
+            fold_edits.push((range_start..range_end, text_len));
             self.buffer.replace(range_start..range_end, text);
             edits.push(MultiCursorResolvedEdit {
                 start: range_start,
@@ -9327,6 +9361,7 @@ impl EditorView {
             });
         }
 
+        self.remap_folded_anchor_offsets(folded_anchors, &fold_edits);
         self.apply_multi_cursor_resolved_edits(edits);
     }
 
@@ -9347,7 +9382,7 @@ impl EditorView {
         for c in &mut self.extra_cursors {
             c.move_left(&self.buffer);
         }
-        self.skip_front_matter_caret_navigation(&previous);
+        self.skip_folded_caret_navigation(&previous);
         self.dedup_cursors();
     }
 
@@ -9358,7 +9393,7 @@ impl EditorView {
         for c in &mut self.extra_cursors {
             c.move_right(&self.buffer);
         }
-        self.skip_front_matter_caret_navigation(&previous);
+        self.skip_folded_caret_navigation(&previous);
         self.dedup_cursors();
     }
 
@@ -9369,7 +9404,7 @@ impl EditorView {
         for c in &mut self.extra_cursors {
             c.move_up(&self.buffer);
         }
-        self.skip_front_matter_caret_navigation(&previous);
+        self.skip_folded_caret_navigation(&previous);
         self.dedup_cursors();
     }
 
@@ -9380,7 +9415,7 @@ impl EditorView {
         for c in &mut self.extra_cursors {
             c.move_down(&self.buffer);
         }
-        self.skip_front_matter_caret_navigation(&previous);
+        self.skip_folded_caret_navigation(&previous);
         self.dedup_cursors();
     }
 
@@ -9391,7 +9426,7 @@ impl EditorView {
         for c in &mut self.extra_cursors {
             c.select_left(&self.buffer);
         }
-        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.skip_folded_selection_navigation(&previous);
         self.dedup_cursors();
     }
 
@@ -9402,7 +9437,7 @@ impl EditorView {
         for c in &mut self.extra_cursors {
             c.select_right(&self.buffer);
         }
-        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.skip_folded_selection_navigation(&previous);
         self.dedup_cursors();
     }
 
@@ -9413,7 +9448,7 @@ impl EditorView {
         for c in &mut self.extra_cursors {
             c.select_up(&self.buffer);
         }
-        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.skip_folded_selection_navigation(&previous);
         self.dedup_cursors();
     }
 
@@ -9424,7 +9459,7 @@ impl EditorView {
         for c in &mut self.extra_cursors {
             c.select_down(&self.buffer);
         }
-        self.skip_folded_front_matter_selection_navigation(&previous);
+        self.skip_folded_selection_navigation(&previous);
         self.dedup_cursors();
     }
 
@@ -9452,7 +9487,7 @@ impl EditorView {
         for c in &mut self.extra_cursors {
             c.move_word_left(&self.buffer);
         }
-        self.skip_front_matter_caret_navigation(&previous);
+        self.skip_folded_caret_navigation(&previous);
         self.dedup_cursors();
     }
 
@@ -9462,7 +9497,7 @@ impl EditorView {
         for c in &mut self.extra_cursors {
             c.move_word_right(&self.buffer);
         }
-        self.skip_front_matter_caret_navigation(&previous);
+        self.skip_folded_caret_navigation(&previous);
         self.dedup_cursors();
     }
 
@@ -9631,17 +9666,19 @@ impl EditorView {
         if !self.restore_table_source_snapshot(&snapshot.text) {
             self.buffer = Buffer::from_text(&snapshot.text);
         }
-        self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
-        self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());
+        self.cursor.offset = self.buffer.clamp_grapheme_offset(snapshot.cursor_offset);
+        self.cursor.anchor = self.buffer.clamp_grapheme_offset(snapshot.cursor_anchor);
         self.extra_cursors = snapshot
             .extra_cursors
             .into_iter()
             .map(|(offset, anchor)| Cursor {
-                offset: offset.min(self.buffer.len()),
-                anchor: anchor.min(self.buffer.len()),
+                offset: self.buffer.clamp_grapheme_offset(offset),
+                anchor: self.buffer.clamp_grapheme_offset(anchor),
             })
             .collect();
-        self.scroll_offset = snapshot.scroll_offset;
+        self.scroll_offset = self
+            .pending_typing_scroll_guard
+            .map_or(snapshot.scroll_offset, |guard| guard.scroll_offset);
         self.clear_marked_ranges();
         self.reset_cursor_visual_targeting();
         self.ime_composition_snapshot = None;
@@ -9654,14 +9691,14 @@ impl EditorView {
         self.table_boundary_caret = None;
         self.table_source = None;
         self.buffer = Buffer::from_text(&snapshot.text);
-        self.cursor.offset = snapshot.cursor_offset.min(self.buffer.len());
-        self.cursor.anchor = snapshot.cursor_anchor.min(self.buffer.len());
+        self.cursor.offset = self.buffer.clamp_grapheme_offset(snapshot.cursor_offset);
+        self.cursor.anchor = self.buffer.clamp_grapheme_offset(snapshot.cursor_anchor);
         self.extra_cursors = snapshot
             .extra_cursors
             .iter()
             .map(|(offset, anchor)| Cursor {
-                offset: (*offset).min(self.buffer.len()),
-                anchor: (*anchor).min(self.buffer.len()),
+                offset: self.buffer.clamp_grapheme_offset(*offset),
+                anchor: self.buffer.clamp_grapheme_offset(*anchor),
             })
             .collect();
         self.scroll_offset = snapshot.scroll_offset;
@@ -10561,15 +10598,7 @@ impl EditorView {
     }
 
     pub(crate) fn list_indent_width_for_line(&self, line: usize) -> Option<usize> {
-        match self
-            .decorations
-            .get(line)
-            .map(|decoration| &decoration.block_type)
-        {
-            Some(BlockType::OrderedList) => Some(3),
-            Some(BlockType::UnorderedList | BlockType::TaskList(_)) => Some(2),
-            _ => None,
-        }
+        list_indent_width_for_source(self.decorations.get(line)?, self.buffer.line_content(line))
     }
 
     pub(crate) fn normalize_ordered_lists_in_line_span(
@@ -12162,7 +12191,7 @@ impl EditorView {
     fn clear_line_display_info(&mut self) {
         self.front_matter_columns = None;
         if fold::front_matter_fold_range(&self.decorations, 0).is_some() {
-            self.reconcile_front_matter_fold_cursor();
+            self.reconcile_folded_cursors();
             self.front_matter_group_geometry_dirty = true;
             self.last_stable_input_bounds = None;
             self.pending_input_bounds = None;
@@ -12182,6 +12211,7 @@ impl EditorView {
     /// resident even though nothing is open.
     pub(crate) fn release_document_state(&mut self) {
         self.document_mode_scroll_anchor = None;
+        self.fold_scroll_guard = None;
         self.table_source = None;
         self.reset_table_handles();
         self.buffer = Buffer::from_text("");
@@ -12783,7 +12813,7 @@ impl EditorView {
         let Some(file_kind) = self.active_file_kind().cloned() else {
             return;
         };
-        if !file_kind.supports_text_buffer() || self.line_display_info.is_empty() {
+        if !file_kind.supports_text_buffer() {
             return;
         }
 
@@ -12795,6 +12825,9 @@ impl EditorView {
 
         let (start_line, old_end_line_exclusive, new_end_line_exclusive) =
             line_display_transfer_line_bounds(&self.buffer, replaced_range, inserted_text);
+        let replaced_start_line = !replaced_range.is_empty()
+            && replaced_range.start <= self.buffer.line_start(start_line)
+            && replaced_range.end >= self.buffer.line_end(start_line);
         let markdown_plain_decoration_transfer = file_kind.is_markdown()
             && (markdown_plain_structural_edit_is_safe(
                 &self.buffer,
@@ -12828,7 +12861,22 @@ impl EditorView {
 
         self.pending_line_display_transfer = Some(PendingLineDisplayTransfer {
             cached_lines: self.take_line_display_info(),
+            folded_anchor_offsets: self
+                .folded_sections
+                .iter()
+                .map(|&line| (line, self.buffer.line_start(line)))
+                .collect(),
+            folded_image_anchor_offsets: self
+                .folded_image_previews
+                .iter()
+                .map(|&line| (line, self.buffer.line_start(line)))
+                .collect(),
             start_line,
+            replaced_start_line,
+            fold_line_swap: None,
+            replaced_start_offset: replaced_range.start.min(self.buffer.len()),
+            replaced_end_offset: replaced_range.end.min(self.buffer.len()),
+            inserted_len: inserted_text.len(),
             old_end_line_exclusive,
             new_end_line_exclusive,
             dirty_start_line: dirty_range.start,
@@ -13939,7 +13987,16 @@ mod tests {
         .expect("local edit uses incremental Markdown parsing");
         let transfer = super::PendingLineDisplayTransfer {
             cached_lines: Vec::new(),
+            folded_anchor_offsets: Vec::new(),
+            folded_image_anchor_offsets: Vec::new(),
             start_line,
+            replaced_start_line: !range.is_empty()
+                && range.start <= old_buffer.line_start(start_line)
+                && range.end >= old_buffer.line_end(start_line),
+            replaced_start_offset: range.start,
+            replaced_end_offset: range.end,
+            inserted_len: inserted.len(),
+            fold_line_swap: None,
             old_end_line_exclusive,
             new_end_line_exclusive,
             dirty_start_line: parsed.start,
@@ -14576,6 +14633,70 @@ mod tests {
     }
 
     #[test]
+    fn discontinuous_ordered_markers_remain_indentable_without_reclassifying_code() {
+        let source = "intro\n3. three\n9. nine";
+        let rows = parse_decorations(source);
+        for line in 1..3 {
+            assert_eq!(
+                super::list_indent_width_for_source(&rows[line], source.lines().nth(line).unwrap()),
+                Some(3)
+            );
+        }
+        let source = "```text\n3. literal\n```";
+        let rows = parse_decorations(source);
+        assert_eq!(
+            super::list_indent_width_for_source(&rows[1], "3. literal"),
+            None
+        );
+    }
+
+    #[test]
+    fn incremental_markdown_tracks_neighboring_block_changes() {
+        let mut incremental_cases = 0;
+        for newline in ["\n", "\r\n"] {
+            for (before, after) in [
+                (
+                    "> | A | B |\n> | --- | --- |\n> | one | two |",
+                    "> | A | B |\n> | --- | --- |\n| one | two |",
+                ),
+                (
+                    "| A | B |\n| --- | --- |\n| one | two |",
+                    "| A | B |\n| --- | --- |\n> | one | two |",
+                ),
+                (
+                    "```text\nplain\n```\n\n~~~~\ncode\n~~~~",
+                    "```text\n~~~~\n```\n\n~~~~\ncode\n~~~~",
+                ),
+                ("cate\n---", "cate\n\n---"),
+                ("cate\n---", "---\ncate\n---"),
+                ("---\ncate\n---", "---\n\ncate\n---"),
+                ("#plain\nsecond\n--", "#plain\nsecond\n---"),
+                ("- first\n  second\n  ==", "- first\n  second\n  ==="),
+                ("> [!NOTE]\n> body", "> [!NOTE] title\n> body"),
+                (
+                    "<div>\n| A | B |\n| -- | -- |\n</div>",
+                    "<div>\n| A | B |\n| --- | --- |\n</div>",
+                ),
+                ("> first\n> second\n> ==", "> first\n> second\n> ==="),
+                (
+                    "```text\n- literal\n  x\n```",
+                    "```text\n- literal\n  - \n```",
+                ),
+                (
+                    "<pre>\n- literal\n  x\n</pre>",
+                    "<pre>\n- literal\n  - \n</pre>",
+                ),
+            ] {
+                let before = format!("intro\n\n{before}\n\noutro\n").replace('\n', newline);
+                let after = format!("intro\n\n{after}\n\noutro\n").replace('\n', newline);
+                incremental_cases += usize::from(assert_incremental_matches_full(&before, &after));
+                incremental_cases += usize::from(assert_incremental_matches_full(&after, &before));
+            }
+        }
+        assert!(incremental_cases > 0);
+    }
+
+    #[test]
     fn incremental_markdown_matches_full_for_newline_insertion() {
         assert!(assert_incremental_matches_full(
             "alpha\n\nfirst line\n\nbeta\n\ngamma\n",
@@ -14640,6 +14761,54 @@ mod tests {
         assert_eq!(decorations[800].block_type, BlockType::CodeBlock);
     }
 
+    #[test]
+    fn lazy_markdown_keeps_rule_delimited_text_plain_across_chunks() {
+        for newline in ["\n", "\r\n"] {
+            for start in [
+                super::LARGE_MARKDOWN_CHUNK_LINES - 1,
+                super::LARGE_MARKDOWN_CHUNK_LINES,
+            ] {
+                let mut lines = vec![""; start];
+                lines.extend(["---", "cate", "---", "", "after"]);
+                let source = lines.join(newline);
+                let buffer = Buffer::from_text(&source);
+                let full = parse_decorations(&source);
+                let (mut decorations, mut lazy) =
+                    new_lazy_markdown_decorations(buffer.line_count());
+                parse_lazy_markdown_range(
+                    &buffer,
+                    &mut decorations,
+                    &mut lazy,
+                    start + 1..start + 2,
+                )
+                .expect("rule-delimited paragraph parsed");
+                assert_eq!(decorations[start + 1].block_type, BlockType::Normal);
+                for line in start..start + 3 {
+                    assert_eq!(decorations[line], full[line], "line {line}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_markdown_keeps_context_for_long_multiline_emphasis() {
+        let mut lines = vec!["*opening".to_string()];
+        lines.extend((0..700).map(|line| format!("middle {line}")));
+        lines.extend(["closing*".to_string(), String::new(), "after".to_string()]);
+        let source = lines.join("\n");
+        let buffer = Buffer::from_text(&source);
+        let full = parse_decorations(&source);
+        let (mut decorations, mut lazy) = new_lazy_markdown_decorations(buffer.line_count());
+
+        let parsed = parse_lazy_markdown_range(&buffer, &mut decorations, &mut lazy, 600..601)
+            .expect("long paragraph parsed");
+        assert_eq!(parsed.start, 0);
+        assert!(parsed.end > 600);
+        for line in parsed {
+            assert_eq!(decorations[line], full[line], "line {line}");
+        }
+    }
+
     fn assert_lazy_front_matter_matches_full(source: &str, requested: std::ops::Range<usize>) {
         let buffer = Buffer::from_text(source);
         let full = parse_decorations(source);
@@ -14663,6 +14832,24 @@ mod tests {
             parse_lazy_markdown_range(&buffer, &mut decorations, &mut lazy, 0..buffer.line_count())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn lazy_front_matter_does_not_leak_code_or_reference_context_into_body() {
+        for newline in ["\n", "\r\n"] {
+            let source = "---\ndescription: |\n  ```\n\n  [hidden]: https://hidden.example\n\n---\n\n# Body\n\n[label][hidden]".replace('\n', newline);
+            assert_lazy_front_matter_matches_full(&source, 8..9);
+            let buffer = Buffer::from_text(&source);
+            let (mut decorations, mut lazy) = new_lazy_markdown_decorations(buffer.line_count());
+            parse_lazy_markdown_range(&buffer, &mut decorations, &mut lazy, 8..buffer.line_count());
+            assert_eq!(decorations[8].block_type, BlockType::Heading(1));
+            assert!(
+                decorations[10]
+                    .inline_spans
+                    .iter()
+                    .all(|span| span.kind != crate::markdown::InlineKind::Link)
+            );
+        }
     }
 
     #[test]

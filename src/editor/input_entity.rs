@@ -74,6 +74,36 @@ fn uses_table_ime_geometry(active_tab_is_diff: bool, table_info: &TableLineInfo)
 
 #[cfg(test)]
 #[test]
+fn ime_body_bounds_follow_hidden_front_matter_geometry_exactly_once() {
+    let wrapped = super::input_wrap::test_wrapped_line(&[24.0]);
+    let mut geometry = super::SparseLineGeometry::default();
+    geometry.ensure_dimensions(5, 24.0);
+    geometry.set_measured_height(0, 24.0);
+    geometry.set_measured_height(1, 72.0);
+    let mut visible_top = None;
+    for closing_height in [24.0, 0.0, 24.0, 0.0] {
+        geometry.set_measured_height(2, closing_height);
+        let body_top = geometry.y_offset(3, 12.0) as f32;
+        let painted_text_top = 100.0 + body_top - 30.0;
+        let input = input_bounds_for_wrapped_position(
+            &wrapped,
+            point(px(10.0), px(0.0)),
+            20.0,
+            24.0,
+            80.0,
+            painted_text_top,
+        );
+        assert_eq!(input.top(), px(painted_text_top));
+        if closing_height == 24.0 {
+            visible_top = Some(input.top());
+        } else {
+            assert_eq!(input.top(), visible_top.unwrap() - px(24.0));
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
 fn front_matter_uses_inline_ime_geometry() {
     let front_matter = crate::markdown::parse_decorations("---\ntitle: Moeka\n---");
     let front_matter_info = front_matter[1].table_info.as_ref().unwrap();
@@ -85,12 +115,13 @@ fn front_matter_uses_inline_ime_geometry() {
     assert!(!uses_table_ime_geometry(true, table_info));
 }
 
+#[cfg(test)]
 fn stable_input_bounds_are_usable(
     layout_dirty: bool,
     group_geometry_dirty: bool,
     anchor_rows: Option<usize>,
 ) -> bool {
-    layout_dirty && !group_geometry_dirty && anchor_rows != Some(0)
+    !layout_dirty && !group_geometry_dirty && anchor_rows != Some(0)
 }
 
 /// Native composition may replace neither folded source nor the displayed summary.
@@ -166,45 +197,12 @@ fn front_matter_ime_rejects_hidden_caches_and_stable_anchors_before_next_prepain
     assert!(bounds.size.height > px(0.0));
 }
 
-#[cfg(test)]
-#[test]
-fn front_matter_ime_top_accounts_for_header_and_list_visibility_before_prepaint() {
-    // A previously hidden header now contributes a physical text row.
-    assert_eq!(
-        input_top_with_current_front_matter_heights(200.0, [(0.0, 24.0)]),
-        224.0
-    );
-    // Default unmeasured physical rows must not count hidden list items.
-    assert_eq!(
-        input_top_with_current_front_matter_heights(
-            200.0,
-            [(24.0, 24.0), (24.0, 0.0), (24.0, 0.0)]
-        ),
-        152.0
-    );
-    // Long-key fallback wraps source visibly in both focused and collapsed shapes.
-    assert_eq!(
-        input_top_with_current_front_matter_heights(200.0, [(24.0, 72.0)]),
-        248.0
-    );
-}
-
 fn cached_input_geometry_is_visible(
     visual_rows: usize,
     line_height: f32,
     group_geometry_dirty: bool,
 ) -> bool {
     !group_geometry_dirty && visual_rows > 0 && line_height > 0.0
-}
-
-fn input_top_with_current_front_matter_heights(
-    top: f32,
-    heights: impl IntoIterator<Item = (f32, f32)>,
-) -> f32 {
-    top + heights
-        .into_iter()
-        .map(|(cached, current)| current - cached)
-        .sum::<f32>()
 }
 
 /// Survives local unmarking and unfolding: neither proves that the native
@@ -538,40 +536,6 @@ impl EditorView {
         )
     }
 
-    fn current_front_matter_input_top(
-        &self,
-        window: &mut Window,
-        line: usize,
-        bounds: Bounds<Pixels>,
-    ) -> f32 {
-        let top = self.text_y_offset_for_line(line);
-        if !self.front_matter_group_geometry_dirty {
-            return top;
-        }
-        let end = self
-            .decorations
-            .first()
-            .and_then(|d| d.table_info.as_ref())
-            .filter(|table| table.is_front_matter)
-            .map_or(0, |table| table.table_end_line.min(line));
-        let group_plans = self.front_matter_group_plan_for_width(f32::from(bounds.size.width));
-        input_top_with_current_front_matter_heights(
-            top,
-            (0..end).map(|row| {
-                let old = self.visual_height_for_line(row);
-                let height = self
-                    .inline_line_display_info_with_group_plan(window, row, bounds, &group_plans)
-                    .map_or(0.0, |info| {
-                        let padding = self.block_padding_for_line(row);
-                        f32::from(info.wrapped_line.size(px(info.line_height)).height)
-                            + padding.0
-                            + padding.1
-                    });
-                (old, height)
-            }),
-        )
-    }
-
     fn input_bounds_for_display_line(
         &self,
         anchor_offset: usize,
@@ -653,7 +617,7 @@ impl EntityInputHandler for EditorView {
         if !self.active_tab_supports_text_buffer() {
             return None;
         }
-        self.reconcile_front_matter_fold_cursor();
+        self.reconcile_folded_cursors();
         self.schedule_fold_ime_cancellation(cx);
         self.sync_front_matter_group_focus();
         if self.selected_handle.is_some() {
@@ -1258,51 +1222,8 @@ impl EntityInputHandler for EditorView {
         if self.front_matter_presentation_line_is_hidden(line) {
             return None;
         }
-        let anchor_rows = self
-            .line_display_info
-            .get(line)
-            .and_then(|info| info.as_ref())
-            .map(|info| info.visual_line_count);
-        if stable_input_bounds_are_usable(
-            self.layout_dirty,
-            self.front_matter_group_geometry_dirty,
-            anchor_rows,
-        ) && let Some(bounds) = self.last_stable_input_bounds
-        {
-            if ime_debug_enabled() {
-                ime_debug_log(format!(
-                    "bounds_for_range using cached stable bounds during layout_dirty anchor_utf8={} -> x={} y={} w={} h={}",
-                    anchor_offset,
-                    f32::from(bounds.origin.x),
-                    f32::from(bounds.origin.y),
-                    f32::from(bounds.size.width),
-                    f32::from(bounds.size.height)
-                ));
-            }
-            return Some(bounds);
-        }
-        if stable_input_bounds_are_usable(
-            self.layout_dirty,
-            self.front_matter_group_geometry_dirty,
-            anchor_rows,
-        ) && let Some(bounds) = self.pending_input_bounds
-        {
-            if ime_debug_enabled() {
-                ime_debug_log(format!(
-                    "bounds_for_range using pending input bounds during layout_dirty anchor_utf8={} -> x={} y={} w={} h={}",
-                    anchor_offset,
-                    f32::from(bounds.origin.x),
-                    f32::from(bounds.origin.y),
-                    f32::from(bounds.size.width),
-                    f32::from(bounds.size.height)
-                ));
-            }
-            return Some(bounds);
-        }
         let origin_y: f32 = editor_bounds.origin.y.into();
-        let text_top_y = origin_y
-            + self.current_front_matter_input_top(window, line, editor_bounds)
-            - self.scroll_offset;
+        let text_top_y = origin_y + self.text_y_offset_for_line(line) - self.scroll_offset;
 
         if let Some(table_info) = self
             .decorations

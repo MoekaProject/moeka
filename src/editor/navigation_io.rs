@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -237,6 +237,45 @@ fn resolve_local_target(
         format!("link target ‘{target}’ was not found in {}", root.display()),
     )
     .into())
+}
+
+pub(super) fn read_document_image_bytes(
+    target: &str,
+    current_file: Option<&Path>,
+    root: &Path,
+    workspaces: &[PathBuf],
+) -> anyhow::Result<Vec<u8>> {
+    fs_task::check_deadline()?;
+    if helpers::is_remote_image_url(target) {
+        let response = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .get(target)
+            .call()?;
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .take(64 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() <= 64 * 1024 * 1024,
+            "image exceeds 64 MiB download limit"
+        );
+        fs_task::check_deadline()?;
+        return Ok(bytes);
+    }
+    let expanded = expanded_image_target(target)?;
+    for candidate_root in std::iter::once(root).chain(workspaces.iter().map(PathBuf::as_path)) {
+        for candidate in direct_candidates(candidate_root, current_file, &expanded)? {
+            if candidate_exists(&candidate)? {
+                fs_task::check_deadline()?;
+                return Ok(fs::read(candidate)?);
+            }
+        }
+    }
+    let path = resolve_local_target(root, current_file, &expanded)?;
+    fs_task::check_deadline()?;
+    Ok(fs::read(path)?)
 }
 
 pub(super) fn load_document_image(
@@ -618,6 +657,20 @@ mod tests {
         assert_eq!(
             resolve_local_target(&missing_root, Some(&source), "linked.md").unwrap(),
             linked
+        );
+    }
+
+    #[test]
+    fn image_save_reads_original_bytes_without_reencoding() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("note.md");
+        let bytes =
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"10\"/></svg>";
+        fs::write(directory.path().join("original.svg"), bytes).unwrap();
+        assert_eq!(
+            read_document_image_bytes("original.svg", Some(&source), directory.path(), &[])
+                .unwrap(),
+            bytes
         );
     }
 

@@ -72,32 +72,67 @@ fn line_is_commented(line: &str, style: CommentStyle) -> bool {
     }
 }
 
-fn comment_line(line: &str, style: CommentStyle) -> String {
+fn line_comment_edits(
+    line: &str,
+    style: CommentStyle,
+    uncomment: bool,
+) -> Vec<table_cell_list_edit::Edit> {
+    use table_cell_list_edit::Edit;
+
     let leading_len = line.len() - line.trim_start_matches([' ', '\t']).len();
-    let (leading, body) = line.split_at(leading_len);
-    match style.suffix {
-        Some(suffix) => format!("{}{} {} {}", leading, style.prefix, body, suffix),
-        None => format!("{}{} {}", leading, style.prefix, body),
+    let end = line.len() - usize::from(line.ends_with('\r'));
+    if !uncomment {
+        let mut edits = vec![Edit::new(
+            leading_len..leading_len,
+            format!("{} ", style.prefix),
+        )];
+        if let Some(suffix) = style.suffix {
+            edits.push(Edit::new(end..end, format!(" {suffix}")));
+        }
+        return edits;
     }
-}
-
-fn uncomment_line(line: &str, style: CommentStyle) -> String {
-    let leading_len = line.len() - line.trim_start_matches([' ', '\t']).len();
-    let (leading, body) = line.split_at(leading_len);
-    let mut body = body;
-
-    if let Some(rest) = body.strip_prefix(style.prefix) {
-        body = rest.strip_prefix(' ').unwrap_or(rest);
-    }
-
+    let body = &line[leading_len..end];
+    let Some(rest) = body.strip_prefix(style.prefix) else {
+        return Vec::new();
+    };
+    let prefix_end = leading_len + style.prefix.len() + usize::from(rest.starts_with(' '));
+    let mut edits = vec![Edit::new(leading_len..prefix_end, String::new())];
     if let Some(suffix) = style.suffix {
-        let trimmed_end_len = body.trim_end().len();
-        if let Some(before_suffix) = body[..trimmed_end_len].strip_suffix(suffix) {
-            body = before_suffix.strip_suffix(' ').unwrap_or(before_suffix);
+        let trimmed = line[..end].trim_end();
+        if let Some(before_suffix) = trimmed.strip_suffix(suffix) {
+            let suffix_start = before_suffix.len() - usize::from(before_suffix.ends_with(' '));
+            edits.push(Edit::new(
+                suffix_start.max(prefix_end)..trimmed.len(),
+                String::new(),
+            ));
         }
     }
+    edits
+}
 
-    format!("{}{}", leading, body)
+fn apply_line_comment_edits(
+    buffer: &mut Buffer,
+    cursors: &mut [(Cursor, bool)],
+    edits: Vec<table_cell_list_edit::Edit>,
+) {
+    let suffix_len = |offset| {
+        edits
+            .iter()
+            .find_map(|edit| {
+                (edit.range.is_empty() && edit.range.start == offset && edit.text.starts_with(' '))
+                    .then_some(edit.text.len())
+            })
+            .unwrap_or(0)
+    };
+    let biases: Vec<_> = cursors
+        .iter()
+        .map(|(cursor, _)| (suffix_len(cursor.offset), suffix_len(cursor.anchor)))
+        .collect();
+    table_cell_list_edit::apply_prefix_edits(buffer, cursors, edits);
+    for ((cursor, _), (offset_bias, anchor_bias)) in cursors.iter_mut().zip(biases) {
+        cursor.offset -= offset_bias;
+        cursor.anchor -= anchor_bias;
+    }
 }
 
 fn join_separator(left: &str, right: &str) -> &'static str {
@@ -109,6 +144,54 @@ fn join_separator(left: &str, right: &str) -> &'static str {
         ""
     } else {
         " "
+    }
+}
+
+struct JoinedLinesEdit {
+    range: Range<usize>,
+    text: String,
+    boundaries: Vec<(Range<usize>, usize)>,
+}
+
+impl JoinedLinesEdit {
+    fn remap_cursor(&self, cursor: &mut Cursor) {
+        for (range, inserted_len) in self.boundaries.iter().rev() {
+            cursor.offset = offset_after_source_replacement(cursor.offset, range, *inserted_len);
+            cursor.anchor = offset_after_source_replacement(cursor.anchor, range, *inserted_len);
+        }
+    }
+}
+
+fn joined_lines_edit(buffer: &Buffer, start: usize, end: usize) -> JoinedLinesEdit {
+    let range = buffer.line_start(start)..buffer.line_end(end);
+    let mut text = String::with_capacity(range.len());
+    let mut boundaries = Vec::with_capacity(end.saturating_sub(start));
+    for line in start..=end {
+        let raw = buffer.line_content(line);
+        let content = if line < end {
+            raw.strip_suffix('\r').unwrap_or(raw)
+        } else {
+            raw
+        };
+        if line == start {
+            text.push_str(content);
+        } else {
+            let trimmed = content.trim_start_matches([' ', '\t']);
+            let separator = join_separator(&text, trimmed);
+            let previous_end = buffer.line_end(line - 1)
+                - usize::from(buffer.line_content(line - 1).ends_with('\r'));
+            boundaries.push((
+                previous_end..buffer.line_start(line) + content.len() - trimmed.len(),
+                separator.len(),
+            ));
+            text.push_str(separator);
+            text.push_str(trimmed);
+        }
+    }
+    JoinedLinesEdit {
+        range,
+        text,
+        boundaries,
     }
 }
 
@@ -165,20 +248,26 @@ impl EditorView {
         let should_uncomment = actionable
             .iter()
             .all(|(line, style)| line_is_commented(self.buffer.line_content(*line), *style));
-
+        let edits: Vec<_> = actionable
+            .into_iter()
+            .flat_map(|(line, style)| {
+                let start = self.buffer.line_start(line);
+                line_comment_edits(self.buffer.line_content(line), style, should_uncomment)
+                    .into_iter()
+                    .map(move |edit| edit.translated(start))
+            })
+            .collect();
+        let fold_edits: Vec<_> = edits
+            .iter()
+            .map(|edit| (edit.range.clone(), edit.text.len()))
+            .collect();
+        let anchors = self.snapshot_folded_anchor_offsets();
+        let mut cursors = self.cursor_states_with_primary_flag();
         self.checkpoint();
-        for (line, style) in actionable.into_iter().rev() {
-            let line_start = self.buffer.line_start(line);
-            let line_end = self.buffer.line_end(line);
-            let current = self.buffer.line_content(line).to_string();
-            let replacement = if should_uncomment {
-                uncomment_line(&current, style)
-            } else {
-                comment_line(&current, style)
-            };
-            self.buffer.replace(line_start..line_end, &replacement);
-        }
-
+        self.pending_line_display_transfer = None;
+        apply_line_comment_edits(&mut self.buffer, &mut cursors, edits);
+        self.restore_cursor_states(cursors);
+        self.remap_folded_anchor_offsets(anchors, &fold_edits);
         self.reparse();
         self.scroll_to_cursor();
         self.pause_blinking(cx);
@@ -218,18 +307,14 @@ impl EditorView {
             return;
         };
         if self.folded_sections.remove(&line) {
-            self.clear_line_display_info();
-            cx.notify();
-            self.pause_blinking(cx);
+            self.finish_fold_change(cx);
         }
     }
 
     pub(crate) fn toggle_current_fold(&mut self, cx: &mut Context<Self>) {
         if let Some(line) = self.folded_line_containing_cursor() {
             self.folded_sections.remove(&line);
-            self.clear_line_display_info();
-            cx.notify();
-            self.pause_blinking(cx);
+            self.finish_fold_change(cx);
         } else if let Some(line) = self.fold_line_near_cursor() {
             self.toggle_fold(line, cx);
         }
@@ -243,9 +328,7 @@ impl EditorView {
             }
         }
         if changed {
-            self.clear_line_display_info();
-            cx.notify();
-            self.pause_blinking(cx);
+            self.finish_fold_change(cx);
         }
     }
 
@@ -254,15 +337,14 @@ impl EditorView {
             return;
         }
         self.folded_sections.clear();
-        self.clear_line_display_info();
-        cx.notify();
-        self.pause_blinking(cx);
+        self.finish_fold_change(cx);
     }
 
     pub(crate) fn join_lines(&mut self, cx: &mut Context<Self>) {
         if !self.begin_content_edit(cx) {
             return;
         }
+        self.skip_folded_anchor_for_line_break();
 
         let (start_line, mut end_line) = self.selected_line_span();
         if start_line == end_line {
@@ -272,24 +354,16 @@ impl EditorView {
             end_line = start_line + 1;
         }
 
+        let edit = joined_lines_edit(&self.buffer, start_line, end_line);
+        self.queue_non_markdown_line_display_transfer(&edit.range, &edit.text);
         self.checkpoint();
-        for line in (start_line..end_line).rev() {
-            let left_end = self.buffer.line_end(line);
-            let next_start = self.buffer.line_start(line + 1);
-            let next_line = self.buffer.line_content(line + 1).to_string();
-            let next_trimmed = next_line.trim_start_matches([' ', '\t']);
-            let leading = next_line.len() - next_trimmed.len();
-            let left_line = self.buffer.line_content(line).to_string();
-            let separator = join_separator(&left_line, next_trimmed);
-            self.buffer
-                .replace(left_end..next_start + leading, separator);
+        for cursor in std::iter::once(&mut self.cursor).chain(&mut self.extra_cursors) {
+            edit.remap_cursor(cursor);
         }
-
-        self.cursor.offset = self.cursor.offset.min(self.buffer.len());
-        self.cursor.anchor = self.cursor.anchor.min(self.buffer.len());
-        for cursor in &mut self.extra_cursors {
-            cursor.offset = cursor.offset.min(self.buffer.len());
-            cursor.anchor = cursor.anchor.min(self.buffer.len());
+        self.buffer.replace(edit.range, &edit.text);
+        for cursor in std::iter::once(&mut self.cursor).chain(&mut self.extra_cursors) {
+            cursor.offset = self.buffer.clamp_grapheme_offset(cursor.offset);
+            cursor.anchor = self.buffer.clamp_grapheme_offset(cursor.anchor);
         }
         self.reparse();
         self.scroll_to_cursor();
@@ -339,20 +413,76 @@ impl EditorView {
 mod tests {
     use super::*;
 
+    fn commented_line(line: &str, style: CommentStyle, uncomment: bool) -> String {
+        let mut buffer = Buffer::from_text(line);
+        apply_line_comment_edits(
+            &mut buffer,
+            &mut [],
+            line_comment_edits(line, style, uncomment),
+        );
+        buffer.text().to_string()
+    }
+
     #[test]
     fn line_comment_style_roundtrips() {
         let style = CommentStyle::line("//");
-        let commented = comment_line("  let value = 1;", style);
+        let commented = commented_line("  let value = 1;", style, false);
         assert_eq!(commented, "  // let value = 1;");
-        assert_eq!(uncomment_line(&commented, style), "  let value = 1;");
+        assert_eq!(commented_line(&commented, style, true), "  let value = 1;");
     }
 
     #[test]
     fn block_comment_style_roundtrips() {
         let style = CommentStyle::block("<!--", "-->");
-        let commented = comment_line("  title", style);
+        let commented = commented_line("  title", style, false);
         assert_eq!(commented, "  <!-- title -->");
-        assert_eq!(uncomment_line(&commented, style), "  title");
+        assert_eq!(commented_line(&commented, style, true), "  title");
+    }
+
+    #[test]
+    fn comment_edits_preserve_crlf_and_map_all_unicode_carets() {
+        for style in [CommentStyle::line("//"), CommentStyle::block("<!--", "-->")] {
+            let source = "  \u{1f642}\r\nnext";
+            let mut buffer = Buffer::from_text(source);
+            let mut cursors = vec![
+                (
+                    Cursor {
+                        anchor: 2,
+                        offset: 6,
+                    },
+                    true,
+                ),
+                (
+                    Cursor {
+                        anchor: buffer.len(),
+                        offset: buffer.len(),
+                    },
+                    false,
+                ),
+            ];
+            for uncomment in [false, true] {
+                let edits = line_comment_edits(buffer.line_content(0), style, uncomment);
+                apply_line_comment_edits(&mut buffer, &mut cursors, edits);
+                assert_eq!(
+                    buffer.text_for_range(cursors[0].0.selection_range()),
+                    "\u{1f642}"
+                );
+                assert_eq!(cursors[1].0.offset, buffer.len());
+                assert!(buffer.line_content(0).ends_with('\r'));
+            }
+            assert_eq!(buffer.text(), source);
+            assert_eq!(
+                cursors[0].0,
+                Cursor {
+                    anchor: 2,
+                    offset: 6
+                }
+            );
+        }
+        assert_eq!(
+            commented_line("<!-- -->", CommentStyle::block("<!--", "-->"), true),
+            ""
+        );
     }
 
     #[test]
@@ -380,5 +510,55 @@ mod tests {
         assert_eq!(join_separator("hello", "world"), " ");
         assert_eq!(join_separator("hello ", "world"), "");
         assert_eq!(join_separator("hello", " world"), "");
+    }
+
+    #[test]
+    fn joined_lines_edit_preserves_spacing_and_line_endings() {
+        for (source, expected) in [
+            ("one\n  two\nthree", "one two three"),
+            ("one\n \n  three", "one three"),
+            ("one\n  two  \nthree", "one two  three"),
+            ("one\r\n  two\r\nthree", "one two three"),
+            ("one\r\n  two\r\n", "one two\r\n"),
+        ] {
+            let mut buffer = Buffer::from_text(source);
+            let end = if source.ends_with('\n') {
+                buffer.line_count() - 2
+            } else {
+                buffer.line_count() - 1
+            };
+            let edit = joined_lines_edit(&buffer, 0, end);
+            buffer.replace(edit.range, &edit.text);
+            assert_eq!(buffer.text(), expected);
+        }
+    }
+
+    #[test]
+    fn joined_lines_edit_remaps_selection_and_extra_carets() {
+        let mut buffer = Buffer::from_text("a\r\n  \u{1f642}\r\nz");
+        let mut cursor = Cursor {
+            anchor: 5,
+            offset: 9,
+        };
+        let mut after = Cursor {
+            anchor: buffer.len(),
+            offset: buffer.len(),
+        };
+        let edit = joined_lines_edit(&buffer, 0, 1);
+        edit.remap_cursor(&mut cursor);
+        edit.remap_cursor(&mut after);
+        buffer.replace(edit.range, &edit.text);
+        assert_eq!(buffer.text(), "a \u{1f642}\r\nz");
+        assert_eq!(buffer.text_for_range(cursor.selection_range()), "\u{1f642}");
+        assert_eq!(after.offset, buffer.len());
+        assert_eq!(after.anchor, after.offset);
+    }
+
+    #[test]
+    fn joined_lines_edit_handles_large_selections() {
+        let source = "word\n".repeat(4096);
+        let buffer = Buffer::from_text(&source);
+        let edit = joined_lines_edit(&buffer, 0, 4095);
+        assert_eq!(edit.text, vec!["word"; 4096].join(" "));
     }
 }

@@ -1928,6 +1928,7 @@ impl EditorView {
     }
 
     pub(crate) fn scroll_to_line(&mut self, target_line: usize, cx: &mut Context<Self>) {
+        self.fold_scroll_guard = None;
         let target_line = target_line.min(self.buffer.line_count().saturating_sub(1));
         self.ensure_lazy_markdown_decorations(target_line..target_line + 1);
         let folded_count = self.folded_sections.len();

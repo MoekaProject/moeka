@@ -159,6 +159,11 @@ impl DragBlocks {
                         DragBlockKind::Atomic
                     },
                 );
+                if info.is_front_matter {
+                    for row in info.table_start_line + 1..info.table_end_line.saturating_sub(1) {
+                        result.add(row..row + 1, DragBlockKind::FrontMatter);
+                    }
+                }
             }
             if let Some(preview) = &decoration.block_preview
                 && preview.is_anchor
@@ -217,6 +222,23 @@ impl DragBlocks {
         self.at(line).is_none_or(|block| {
             block.lines.start == line && block.kind != DragBlockKind::FrontMatter
         })
+    }
+
+    fn boundary_allowed_for(&self, source: &Range<usize>, line: usize) -> bool {
+        let metadata = self
+            .blocks
+            .iter()
+            .find(|block| block.kind == DragBlockKind::FrontMatter && block.lines.start == 0);
+        if let Some(metadata) = metadata {
+            let inside = source.start > metadata.lines.start && source.end < metadata.lines.end;
+            if inside {
+                return line > metadata.lines.start && line < metadata.lines.end;
+            }
+            if source.start < metadata.lines.end {
+                return false;
+            }
+        }
+        self.boundary_allowed(line)
     }
 }
 
@@ -359,13 +381,6 @@ impl EditorView {
 
     fn line_drag_target(&self, position: Point<Pixels>) -> Option<LineDropTarget> {
         let drag = self.line_drag.as_ref()?;
-        if drag
-            .blocks
-            .at(drag.source.start)
-            .is_some_and(|block| block.kind == DragBlockKind::FrontMatter)
-        {
-            return None;
-        }
         let viewport = self.line_format_toolbar_geometries.first()?.viewport;
         let boundaries =
             self.format_line_areas
@@ -389,7 +404,11 @@ impl EditorView {
                         .get(*line)
                         .and_then(|dec| dec.table_info.as_ref())
                     {
-                        after = info.table_end_line;
+                        after = if info.is_front_matter {
+                            line + 1
+                        } else {
+                            info.table_end_line
+                        };
                     }
                     if let Some(preview) = self
                         .decorations
@@ -415,14 +434,22 @@ impl EditorView {
             position,
             viewport,
             &drag.source,
-            boundaries.filter(|(line, _)| drag.blocks.boundary_allowed(*line)),
+            boundaries.filter(|(line, _)| drag.blocks.boundary_allowed_for(&drag.source, *line)),
         )?;
         let steps = (f32::from(position.x - drag.start.x)
             / self
                 .scaled(self.styles.format_toolbar.line_drag_indent_step_px)
                 .max(1.0))
         .trunc() as i32;
-        let indent = drop_indent(&self.buffer, &drag.blocks, &drag.source, line, steps);
+        let indent = if drag
+            .blocks
+            .at(drag.source.start)
+            .is_some_and(|block| block.kind == DragBlockKind::FrontMatter)
+        {
+            leading_indent(self.buffer.line_content(drag.source.start)).to_string()
+        } else {
+            drop_indent(&self.buffer, &drag.blocks, &drag.source, line, steps)
+        };
         if (line == drag.source.start || line == drag.source.end)
             && indent_columns(&indent)
                 == source_indent_columns(&self.buffer, &drag.blocks, drag.source.start)
@@ -535,10 +562,12 @@ impl EditorView {
             }
         } else if let Some(destination) = destination {
             let base_indent = source_indent_columns(&self.buffer, &drag.blocks, drag.source.start);
-            let separate_blocks = drag
-                .blocks
-                .at(drag.source.start)
-                .is_some_and(|block| block.kind != DragBlockKind::ListItem);
+            let separate_blocks = drag.blocks.at(drag.source.start).is_some_and(|block| {
+                !matches!(
+                    block.kind,
+                    DragBlockKind::ListItem | DragBlockKind::FrontMatter
+                )
+            });
             self.move_dragged_lines(drag.source, destination, base_indent, separate_blocks, cx);
         }
         cx.notify();
@@ -567,7 +596,28 @@ impl EditorView {
         if !self.begin_content_edit(cx) {
             return;
         }
-        let ordered_before = ordered_drag_lists(&self.buffer);
+        let ordered_before = if self
+            .decorations
+            .get(source.start)
+            .and_then(|row| row.table_info.as_ref())
+            .is_some_and(|table| table.is_front_matter)
+        {
+            Vec::new()
+        } else {
+            ordered_drag_lists(&self.buffer)
+        };
+        let folded_ends: Vec<_> = self
+            .folded_section_ends
+            .iter()
+            .map(|(&anchor, &end)| {
+                let (line, column) = self.buffer.offset_to_line_col(end);
+                (
+                    movement.remap_line(anchor),
+                    movement.remap_line(line),
+                    column,
+                )
+            })
+            .collect();
         self.checkpoint();
         self.buffer.replace(movement.range.clone(), &movement.text);
         renumber_dragged_lists(&mut self.buffer, &ordered_before, &source, &movement);
@@ -586,6 +636,10 @@ impl EditorView {
             .folded_image_previews
             .iter()
             .map(|line| movement.remap_line(*line))
+            .collect();
+        self.folded_section_ends = folded_ends
+            .into_iter()
+            .map(|(anchor, line, column)| (anchor, self.buffer.line_col_to_offset(line, column)))
             .collect();
         self.selected_handle = None;
         self.table_boundary_caret = None;
@@ -1187,6 +1241,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn front_matter_rows_drag_only_inside_the_delimiters() {
+        let buffer = Buffer::from_text("---\na: one\nb: two\n---\nbody");
+        let blocks = DragBlocks::new(&buffer, &crate::markdown::parse_decorations(buffer.text()));
+        assert_eq!(blocks.source(1), 1..2);
+        assert!(blocks.boundary_allowed_for(&(1..2), 3));
+        assert!(!blocks.boundary_allowed_for(&(1..2), 0));
+        assert!(!blocks.boundary_allowed_for(&(1..2), 4));
+        assert!(!blocks.boundary_allowed_for(&(4..5), 2));
+        let movement = line_move_with_indent(&buffer, 1..2, 3, "", 0, false).unwrap();
+        let mut edited = Buffer::from_text(buffer.text());
+        edited.replace(movement.range, &movement.text);
+        assert_eq!(edited.text(), "---\nb: two\na: one\n---\nbody");
+    }
+
+    #[test]
     fn ordered_list_drag_renumbers_destination_and_source_in_one_transaction() {
         for (text, source, destination, expected) in [
             (
@@ -1384,7 +1453,7 @@ mod tests {
             ("[^note]: text\n    more\n\nafter", 1, 0..2),
             ("<div>\ncontent\n</div>\n\nafter", 1, 0..3),
             ("$$\nx + y\n$$\n\nafter", 1, 0..3),
-            ("---\ntitle: Example\n---\n\nbody", 1, 0..3),
+            ("---\ntitle: Example\n---\n\nbody", 1, 1..2),
             ("![image](path.png)\n\n---\n", 0, 0..1),
         ] {
             let buffer = Buffer::from_text(text);

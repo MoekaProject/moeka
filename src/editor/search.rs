@@ -352,6 +352,7 @@ impl EditorView {
         if !self.active_tab_supports_text_search() && !is_terminal {
             return;
         }
+        self.pending_typing_scroll_guard = None;
         let with_replace = with_replace && self.search_can_replace();
         let was_visible = self.search_visible;
         self.search_visible = true;
@@ -631,6 +632,9 @@ impl EditorView {
     }
 
     fn reveal_current_search_match(&mut self, cx: &mut Context<Self>) {
+        if self.pending_typing_scroll_guard.is_some() {
+            return;
+        }
         if self.marked_ranges().next().is_some() || self.ime_composition_snapshot.is_some() {
             // Delayed native callbacks belong to the old composition, not to
             // the destination. Reuse the pane-local native cancellation barrier.
@@ -684,6 +688,7 @@ impl EditorView {
     }
 
     pub(crate) fn search_navigate(&mut self, forward: bool, cx: &mut Context<Self>) {
+        self.pending_typing_scroll_guard = None;
         if let Some(tab_id) = self.active_terminal_tab_id() {
             self.terminal_search_navigate(&tab_id, forward, cx);
             return;

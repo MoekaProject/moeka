@@ -178,6 +178,20 @@ fn cursor_visibility_scroll_delta(
     }
 }
 
+fn edit_scroll_target(
+    scroll_before: f32,
+    viewport_height: f32,
+    cursor_top: f32,
+    cursor_bottom: f32,
+) -> f32 {
+    if viewport_height <= 0.0 {
+        return scroll_before.max(0.0);
+    }
+    (scroll_before
+        + cursor_visibility_scroll_delta(cursor_top, cursor_bottom, scroll_before, viewport_height))
+    .max(0.0)
+}
+
 fn centered_row_scroll_target(top: f32, bottom: f32, viewport_height: f32) -> f32 {
     ((top + bottom - viewport_height) * 0.5).max(0.0)
 }
@@ -236,8 +250,9 @@ fn settled_cursor_center_target(
     }
 }
 
+#[cfg(test)]
 fn typing_scroll_should_restore(
-    same_logical_line: bool,
+    _same_logical_line: bool,
     _pending_fence_on_same_visual_row: bool,
     _visual_geometry_ready: bool,
     scroll_before: f32,
@@ -245,25 +260,23 @@ fn typing_scroll_should_restore(
     cursor_top: f32,
     cursor_bottom: f32,
 ) -> bool {
-    same_logical_line
-        && (viewport_height <= 0.0
-            || caret_vertical_overflow(
-                cursor_top,
-                cursor_bottom,
-                scroll_before,
-                scroll_before + viewport_height,
-            ) == std::cmp::Ordering::Equal)
+    viewport_height <= 0.0
+        || caret_vertical_overflow(
+            cursor_top,
+            cursor_bottom,
+            scroll_before,
+            scroll_before + viewport_height,
+        ) == std::cmp::Ordering::Equal
 }
 
+#[cfg(test)]
 fn typing_scroll_restore_offset(
     scroll_before: f32,
-    applied_anchor_delta: f32,
-    previous_cursor_top: Option<f32>,
-    cursor_top: f32,
+    _applied_anchor_delta: f32,
+    _previous_cursor_top: Option<f32>,
+    _cursor_top: f32,
 ) -> f32 {
-    (scroll_before
-        + previous_cursor_top.map_or(applied_anchor_delta, |previous| cursor_top - previous))
-    .max(0.0)
+    scroll_before.max(0.0)
 }
 
 #[derive(Debug, PartialEq)]
@@ -1282,26 +1295,12 @@ impl EditorView {
         }
     }
 
-    fn typing_cursor_visual_row(&self) -> Option<usize> {
-        if self.table_cursor_cell().is_some() && !self.active_tab_is_diff() {
-            return self
-                .table_cursor_paint_bounds
-                .filter(|geometry| geometry.offset == self.cursor.offset)
-                .map(|geometry| geometry.visual_row);
-        }
-        self.cursor_visual_position(self.cursor.offset)
-            .map(|(row, _)| row)
-    }
-
     pub(crate) fn capture_typing_scroll_guard(&mut self) {
         self.scroll_anim_epoch = self.scroll_anim_epoch.wrapping_add(1);
         let line = self.cursor_line();
-        if self
-            .pending_click_anchor
-            .is_some_and(|anchor| anchor.line != line)
-        {
-            self.pending_click_anchor = None;
-        }
+        self.pending_click_anchor = None;
+        self.pending_preview_reveal = None;
+        self.document_mode_scroll_anchor = None;
         self.pending_center_cursor_in_view = false;
         self.pending_center_cursor_in_view_immediately = false;
         self.center_cursor_confirm_frames = 0;
@@ -1312,16 +1311,8 @@ impl EditorView {
         {
             return;
         }
-        let visual_row = self.typing_cursor_visual_row();
         self.pending_typing_scroll_guard = Some(PendingTypingScrollGuard {
             line,
-            visual_row: visual_row.unwrap_or(0),
-            visual_geometry_ready: visual_row.is_some()
-                && !self.layout_dirty
-                && self.last_viewport_height > 0.0,
-            cursor_top: (!self.layout_dirty && self.cursor_visible_in_viewport())
-                .then(|| self.cursor_vertical_bounds().map(|(top, _)| top))
-                .flatten(),
             viewport_height: if self.last_viewport_height > 0.0 {
                 self.editor_visible_height()
             } else {
@@ -1333,13 +1324,12 @@ impl EditorView {
 
     pub(crate) fn restore_scroll_if_typing_stayed_on_visual_line(
         &mut self,
-        applied_anchor_delta: f32,
+        _applied_anchor_delta: f32,
     ) -> bool {
         let Some(guard) = self.pending_typing_scroll_guard else {
             return false;
         };
         let line = self.cursor_line();
-        let visual_row = self.typing_cursor_visual_row().unwrap_or(0);
         let (row_top, row_bottom) = self
             .visual_row_vertical_bounds_for_offset(self.cursor.offset)
             .unwrap_or_else(|| (0.0, self.line_height_for_block(&BlockType::Normal)));
@@ -1353,31 +1343,12 @@ impl EditorView {
             } else {
                 (text_top + row_top, text_top + row_bottom)
             };
-        // Keep the edited row at its screen position when tables/previews above
-        // it reflow. A new soft row still follows the normal caret reveal path.
-        let previous_top = guard.cursor_top.filter(|_| {
-            guard.line == line && guard.visual_row == visual_row && guard.visual_geometry_ready
-        });
-        let restored_offset = typing_scroll_restore_offset(
+        let restored_offset = edit_scroll_target(
             guard.scroll_offset,
-            applied_anchor_delta,
-            previous_top,
-            cursor_top,
-        );
-        if !typing_scroll_should_restore(
-            guard.line == line,
-            self.pending_code_fence
-                .as_ref()
-                .is_some_and(|(fence_line, _)| *fence_line == line)
-                && guard.visual_row == visual_row,
-            guard.visual_geometry_ready,
-            restored_offset,
             guard.viewport_height,
             cursor_top,
             cursor_bottom,
-        ) {
-            return false;
-        }
+        );
 
         self.pending_scroll_to_cursor = false;
         self.pending_center_cursor_in_view = false;
@@ -1385,6 +1356,7 @@ impl EditorView {
             self.table_cursor_paint_bounds = None;
         }
         self.scroll_offset = restored_offset;
+        self.scroll_to_cursor();
         true
     }
 
@@ -1493,6 +1465,7 @@ impl EditorView {
             &mut self.scroll_anim_epoch,
             &mut self.outline_navigation_epoch,
         );
+        self.fold_scroll_guard = None;
         self.pending_preview_reveal = None;
         self.pending_click_anchor = None;
         self.pending_typing_scroll_guard = None;
@@ -1649,7 +1622,9 @@ impl EditorView {
     }
 
     pub(crate) fn clamp_scroll(&mut self) {
-        self.scroll_offset = self.scroll_offset.clamp(0.0, self.max_scroll_offset());
+        self.scroll_offset = self
+            .fold_scroll_guard
+            .unwrap_or_else(|| self.scroll_offset.clamp(0.0, self.max_scroll_offset()));
     }
 
     // ── Visual wrap-line cursor movement helpers ─────────────────────
@@ -2020,6 +1995,7 @@ impl EditorView {
     }
 
     pub(crate) fn set_document_mode(&mut self, mode: DocumentMode, cx: &mut Context<Self>) {
+        self.fold_scroll_guard = None;
         if self.document_mode() == mode || !self.active_tab_supports_text_buffer() {
             return;
         }
@@ -2922,7 +2898,7 @@ mod tests {
             let (top, _) = geometry.vertical_bounds();
             assert_eq!(
                 typing_scroll_restore_offset(scroll, 0.0, Some(3_000.0), top),
-                scroll + 200.0,
+                scroll,
             );
         }
     }
@@ -3171,6 +3147,40 @@ mod tests {
     }
 
     #[test]
+    fn multiline_history_reveal_has_one_stable_minimal_target() {
+        for (top, bottom, expected) in [
+            (180.0, 210.0, 120.0),
+            (90.0, 110.0, 90.0),
+            (410.0, 450.0, 150.0),
+        ] {
+            let before = 120.0;
+            let mut current = before;
+            for _ in 0..3 {
+                current = super::edit_scroll_target(before, 300.0, top, bottom);
+                assert_eq!(current, expected);
+            }
+            assert_eq!(
+                super::edit_scroll_target(before, 300.0, top, bottom),
+                current
+            );
+        }
+    }
+
+    #[test]
+    fn editing_keeps_viewport_when_caret_changes_lines_or_heading_height() {
+        assert_eq!(
+            typing_scroll_restore_offset(120.0, 30.0, Some(180.0), 210.0),
+            120.0
+        );
+        assert!(typing_scroll_should_restore(
+            false, false, true, 120.0, 300.0, 210.0, 250.0
+        ));
+        assert!(!typing_scroll_should_restore(
+            false, false, true, 120.0, 300.0, 410.0, 450.0
+        ));
+    }
+
+    #[test]
     fn typing_scroll_guard_preserves_first_layout_and_visible_short_edits() {
         assert!(typing_scroll_should_restore(
             true, false, false, 120.0, 0.0, 900.0, 920.0
@@ -3181,7 +3191,7 @@ mod tests {
         assert!(!typing_scroll_should_restore(
             true, false, true, 120.0, 300.0, 430.0, 450.0
         ));
-        assert!(!typing_scroll_should_restore(
+        assert!(typing_scroll_should_restore(
             false, false, false, 120.0, 300.0, 180.0, 200.0
         ));
     }
@@ -3227,22 +3237,13 @@ mod tests {
                 Some(previous_top),
                 cursor_top,
             );
-            assert_eq!(cursor_top - target, previous_top - scroll_before);
-            assert!(typing_scroll_should_restore(
-                true,
-                false,
-                true,
-                target,
-                300.0,
-                cursor_top,
-                cursor_top + 24.0
-            ));
+            assert_eq!(target, scroll_before);
         }
         // No reliable old row, or a newly wrapped row: preserve only the
         // independently measured viewport compensation.
         assert_eq!(
             typing_scroll_restore_offset(500.0, 80.0, None, 950.0),
-            580.0
+            500.0
         );
     }
 

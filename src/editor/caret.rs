@@ -21,61 +21,6 @@ pub(crate) fn centered_caret_left(boundary_x: Pixels, width: Pixels) -> Pixels {
     boundary_x - width / 2.0
 }
 
-pub(crate) fn text_caret_x(
-    text: &str,
-    offset: usize,
-    boundary: gpui::Point<Pixels>,
-    layout: &gpui::LineLayout,
-    text_system: &gpui::TextSystem,
-    mut position_for_index: impl FnMut(usize) -> Option<gpui::Point<Pixels>>,
-) -> Pixels {
-    let (Some(before), Some(after)) = (text.get(..offset), text.get(offset..)) else {
-        return boundary.x;
-    };
-    let previous = before.grapheme_indices(true).next_back();
-    let next = after.graphemes(true).next();
-    if let (Some((start, _)), Some(next)) = (previous, next) {
-        let end = offset + next.len();
-        if let (Some(left), Some(right)) = (position_for_index(start), position_for_index(end))
-            && left.y == boundary.y
-            && right.y == boundary.y
-        {
-            let ink = |range: std::ops::Range<usize>| -> Option<(Pixels, Pixels)> {
-                let mut edges: Option<(Pixels, Pixels)> = None;
-                for run in &layout.runs {
-                    for glyph in &run.glyphs {
-                        if !range.contains(&glyph.index) || glyph.is_emoji {
-                            continue;
-                        }
-                        let character = text[glyph.index..].chars().next()?;
-                        if character.is_whitespace() {
-                            continue;
-                        }
-                        let bounds = text_system
-                            .typographic_bounds(run.font_id, layout.font_size, character)
-                            .ok()?;
-                        if bounds.size.width <= gpui::px(0.0) {
-                            continue;
-                        }
-                        let left = glyph.position.x + bounds.left();
-                        let right = glyph.position.x + bounds.right();
-                        edges = Some(edges.map_or((left, right), |(old_left, old_right)| {
-                            (old_left.min(left), old_right.max(right))
-                        }));
-                    }
-                }
-                edges
-            };
-            if let (Some((_, left_end)), Some((right_start, _))) =
-                (ink(start..offset), ink(offset..end))
-            {
-                return boundary.x + (left_end + right_start) / 2.0 - layout.x_for_index(offset);
-            }
-        }
-    }
-    caret_x_between_grapheme_centers(text, offset, boundary, position_for_index)
-}
-
 pub(crate) fn caret_x_between_grapheme_centers(
     text: &str,
     offset: usize,

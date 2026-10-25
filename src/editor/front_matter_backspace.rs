@@ -31,6 +31,20 @@ pub(super) fn backspace_edit(
     }
     let line = buffer.offset_to_line_col(selection.start).0;
     let source = buffer.line_content(line).trim_end_matches('\r');
+    let column = selection.start - buffer.line_start(line);
+    if let Some(info) = decorations
+        .get(line)
+        .and_then(|row| row.front_matter.as_ref())
+        && let Some(key) = info.key_range.as_ref()
+        && column == key.end + 2
+        && source.get(key.end..column) == Some(": ")
+    {
+        return Some(BackspaceEdit {
+            range: buffer.line_start(line) + key.end..selection.start,
+            replacement: String::new(),
+            cursor: buffer.line_start(line) + key.end,
+        });
+    }
     let groups = front_matter_groups::groups(buffer, decorations);
     let group = groups.iter().find(|group| {
         if line <= group.header_line {
@@ -141,6 +155,20 @@ mod tests {
     use super::*;
     use crate::cursor::Cursor;
     use crate::markdown::parse_decorations;
+
+    #[test]
+    fn front_matter_backspace_deletes_colon_space_in_one_step() {
+        for key in ["title", "\u{5206}\u{7c7b}", "\"quoted key\""] {
+            let source = format!("---\n{key}: value\n---");
+            let mut buffer = Buffer::from_text(&source);
+            let column = buffer.line_start(1) + key.len() + 2;
+            let edit =
+                backspace_edit(&buffer, &parse_decorations(&source), column..column).unwrap();
+            buffer.replace(edit.range, &edit.replacement);
+            assert_eq!(buffer.text(), format!("---\n{key}value\n---"));
+            assert_eq!(edit.cursor, 4 + key.len());
+        }
+    }
 
     fn erased(source: &str, line: usize, column: usize) -> (Buffer, usize) {
         let mut buffer = Buffer::from_text(source);

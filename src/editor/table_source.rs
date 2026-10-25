@@ -167,6 +167,10 @@ impl TableSource {
             && line <= buffer.offset_to_line_col(self.range.end).0
     }
 
+    pub(super) fn start_line(&self, buffer: &Buffer) -> usize {
+        buffer.offset_to_line_col(self.range.start).0
+    }
+
     #[cfg(test)]
     fn apply_edit(&mut self, replaced: &Range<usize>, inserted_len: usize) -> bool {
         let removed = replaced.end - replaced.start;

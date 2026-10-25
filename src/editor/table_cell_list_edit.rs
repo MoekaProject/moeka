@@ -215,21 +215,42 @@ pub(super) fn deletion_ranges(plans: &[(Cursor, bool, Edit)]) -> Vec<Range<usize
     merged
 }
 
+#[cfg(test)]
 pub(super) fn apply_deletions(
     buffer: &mut Buffer,
     plans: &[(Cursor, bool, Edit)],
 ) -> Vec<(Cursor, bool, Option<(bool, usize)>)> {
     let ranges = deletion_ranges(plans);
-    for range in ranges.iter().rev() {
-        buffer.delete(range.clone());
+    let replacements: Vec<_> = ranges
+        .into_iter()
+        .map(|range| (range, String::new()))
+        .collect();
+    apply_deletions_with_replacements(buffer, plans, &replacements)
+}
+
+pub(super) fn apply_deletions_with_replacements(
+    buffer: &mut Buffer,
+    plans: &[(Cursor, bool, Edit)],
+    replacements: &[(Range<usize>, String)],
+) -> Vec<(Cursor, bool, Option<(bool, usize)>)> {
+    for (range, text) in replacements.iter().rev() {
+        buffer.replace(range.clone(), text);
     }
-    let remap = |mut offset: usize| {
-        for range in ranges.iter().rev() {
-            if offset >= range.start {
-                offset = offset.saturating_sub(range.len()).max(range.start);
+    let remap = |offset: usize| {
+        let mut delta = 0isize;
+        for (range, text) in replacements {
+            if offset >= range.end {
+                delta += text.len() as isize - range.len() as isize;
+            } else if offset >= range.start {
+                return buffer.clamp_offset(
+                    (range.start as isize + delta).max(0) as usize
+                        + (offset - range.start).min(text.len()),
+                );
+            } else {
+                break;
             }
         }
-        buffer.clamp_offset(offset)
+        buffer.clamp_offset(offset.saturating_add_signed(delta))
     };
     plans
         .iter()

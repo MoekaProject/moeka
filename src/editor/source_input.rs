@@ -251,11 +251,19 @@ impl EditorView {
             .map(|(edit, _)| edit)
             .collect();
         let changed = !changes.is_empty();
-        if let Some(edit) = changes.first() {
-            if changes
+        let identical_change = changes.first().is_some_and(|edit| {
+            changes
                 .iter()
                 .all(|other| other.range == edit.range && other.text == edit.text)
-            {
+        });
+        let folded_anchors =
+            (changed && !identical_change).then(|| self.snapshot_folded_anchor_offsets());
+        let fold_edits = changes
+            .iter()
+            .map(|edit| (edit.range.clone(), edit.text.len()))
+            .collect::<Vec<_>>();
+        if let Some(edit) = changes.first() {
+            if identical_change {
                 self.queue_non_markdown_line_display_transfer(&edit.range, &edit.text);
             } else {
                 let start = changes
@@ -271,6 +279,9 @@ impl EditorView {
         let Some(cursors) = source_edit::apply(&mut self.buffer, plans) else {
             return false;
         };
+        if let Some(folded_anchors) = folded_anchors {
+            self.remap_folded_anchor_offsets(folded_anchors, &fold_edits);
+        }
         self.restore_cursor_states(cursors);
         self.clear_marked_ranges();
         self.reset_cursor_visual_targeting();

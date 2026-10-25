@@ -941,6 +941,7 @@ impl EditorView {
         }
         // Restoring a tab's scroll position must supersede any pending heading reveal.
         self.cancel_outline_navigation();
+        self.fold_scroll_guard = None;
         // Only the metadata is copied out: cloning the whole `OpenTab` here
         // duplicated the document text and the undo history on every tab
         // switch, which is hundreds of megabytes on a large file.
@@ -954,6 +955,9 @@ impl EditorView {
         let tab_reading_mode = self.tabs[index].reading_mode && !tab_source_mode;
         let switching_tabs = self.active_tab_id.as_deref() != Some(tab_id.as_str());
         if switching_tabs {
+            self.folded_sections.clear();
+            self.folded_section_ends.clear();
+            self.folded_image_previews.clear();
             self.pending_code_fence = None;
             self.table_source = None;
             self.reset_table_handles();

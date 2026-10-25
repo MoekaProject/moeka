@@ -371,6 +371,7 @@ pane_state! {
     (pending_center_cursor_in_view_immediately, bool, false),
     (center_cursor_confirm_frames, u8, 0),
     (pending_preview_reveal, Option<PendingPreviewReveal>, None),
+    (fold_scroll_guard, Option<f32>, None),
     (pending_typing_scroll_guard, Option<PendingTypingScrollGuard>, None),
     (pending_click_anchor, Option<ClickScrollAnchor>, None),
     (document_mode_scroll_anchor, Option<DocumentModeScrollAnchor>, None),
@@ -488,6 +489,7 @@ pane_state! {
     (selection_drag_scroll_task, Option<Task<()>>, None),
     // ── Folding / gutter ──
     (folded_sections, HashSet<usize>, HashSet::new()),
+    (folded_section_ends, HashMap<usize, usize>, HashMap::new()),
     (folded_image_previews, HashSet<usize>, HashSet::new()),
     (generated_preview_keys, HashSet<String>, HashSet::new()),
     (gutter_fold_areas, Vec<(gpui::Bounds<Pixels>, usize, bool)>, Vec::new()),

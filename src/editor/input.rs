@@ -1355,6 +1355,7 @@ impl EditorView {
             preview.source_range.start.min(self.buffer.len())
         };
         self.folded_sections.remove(&preview.start_line);
+        self.folded_section_ends.remove(&preview.start_line);
         self.clear_extra_cursors();
         // Pin the block's TOP line (not the moving cursor line) so switching
         // edit↔render keeps the chart/formula visually anchored in place. The
@@ -1497,6 +1498,7 @@ impl EditorView {
     /// cache unreliable) or when the line is currently off-screen, so that a
     /// real scroll-into-view is never suppressed.
     fn capture_focus_scroll_anchor(&mut self, offset: usize) {
+        self.fold_scroll_guard = None;
         if self.layout_dirty {
             return;
         }
@@ -1689,17 +1691,23 @@ impl EditorView {
         )
     }
 
-    pub(super) fn skip_front_matter_caret_navigation(&mut self, previous: &[Cursor]) {
-        self.skip_front_matter_navigation(previous, false);
+    pub(super) fn skip_folded_caret_navigation(&mut self, previous: &[Cursor]) {
+        self.skip_folded_navigation(previous, false);
     }
 
-    pub(super) fn skip_folded_front_matter_selection_navigation(&mut self, previous: &[Cursor]) {
-        self.skip_front_matter_navigation(previous, true);
+    pub(super) fn skip_folded_selection_navigation(&mut self, previous: &[Cursor]) {
+        self.skip_folded_navigation(previous, true);
     }
 
-    fn skip_front_matter_navigation(&mut self, previous: &[Cursor], selecting: bool) {
-        let range = self.collapsed_front_matter_range();
-        let hidden: Vec<_> = if range.is_none() && !self.markdown_syntax_expansion_allowed() {
+    fn skip_folded_navigation(&mut self, previous: &[Cursor], selecting: bool) {
+        let folded_ranges: Vec<_> = self
+            .folded_sections
+            .iter()
+            .filter_map(|&line| self.fold_range_for_line(line))
+            .collect();
+        let hidden: Vec<_> = if self.collapsed_front_matter_range().is_none()
+            && !self.markdown_syntax_expansion_allowed()
+        {
             self.decorations
                 .first()
                 .and_then(|d| d.table_info.as_ref())
@@ -1718,14 +1726,22 @@ impl EditorView {
             .chain(&mut self.extra_cursors)
             .zip(previous)
         {
-            changed |= super::fold::skip_front_matter_navigation_head(
+            let skipped = super::fold::skip_collapsed_fold_navigation(
                 &self.buffer,
-                range.as_ref(),
-                |line| hidden.contains(&line),
+                &folded_ranges,
                 previous.offset,
                 cursor,
                 selecting,
             );
+            changed |= skipped
+                || super::fold::skip_front_matter_navigation_head(
+                    &self.buffer,
+                    None,
+                    |line| hidden.contains(&line),
+                    previous.offset,
+                    cursor,
+                    selecting,
+                );
         }
         if changed {
             self.reset_cursor_visual_targeting();
@@ -1943,7 +1959,7 @@ impl EditorView {
                 &bounds,
                 event.position,
             ) {
-                self.cursor.move_to(offset, &self.buffer);
+                preserve_context_menu_selection(&mut self.cursor, offset, &self.buffer);
             }
             let is_front_matter = self
                 .decorations
@@ -1983,12 +1999,7 @@ impl EditorView {
         }
 
         let offset = self.offset_for_position(event.position);
-        let selection = self.cursor.selection_range();
-        let clicked_selected_text =
-            self.cursor.has_selection() && offset >= selection.start && offset <= selection.end;
-        if !clicked_selected_text {
-            self.cursor.move_to(offset, &self.buffer);
-        }
+        preserve_context_menu_selection(&mut self.cursor, offset, &self.buffer);
 
         self.open_format_context_menu(event.position, cx);
     }
@@ -2602,9 +2613,12 @@ impl EditorView {
         let gutter_styles = &self.styles.gutter;
         let fold_hit_padding = self.scaled(gutter_styles.gutter_fold_hit_padding_px);
         let pane_left = self.last_editor_left;
-        let hover_x = f32::from(event.position.x);
-        let hovering_gutter_fold_area =
-            hover_x >= pane_left && hover_x <= self.last_content_left + fold_hit_padding;
+        let hovering_gutter_fold_area = super::element::gutter_fold_hover_x_contains(
+            event.position.x,
+            self.gutter_icon_column_left(pane_left),
+            self.gutter_icon_column_width(),
+            fold_hit_padding,
+        );
         if hovering_gutter_fold_area != self.hovering_gutter_fold_area {
             self.hovering_gutter_fold_area = hovering_gutter_fold_area;
             self.sync_gutter_fold_reveal(cx);
@@ -3830,6 +3844,14 @@ impl EditorView {
         if group_plan.is_some_and(|plan| plan.active) {
             active_ranges.push(0..line_content.len());
         }
+        if self.markdown_syntax_expansion_allowed() {
+            helpers::preserve_heading_syntax_focus(
+                &decoration,
+                line_start_offset..line_end_offset,
+                self.all_cursors_snapshot(),
+                &mut active_ranges,
+            );
+        }
         helpers::expand_source_syntax(self.source_mode, line_content.len(), &mut active_ranges);
         helpers::apply_front_matter_group_display(
             &mut decoration,
@@ -4404,6 +4426,7 @@ impl EditorView {
         // A queued preview layout must not restore an offset captured before
         // this wheel event (for example while a diagram was still loading).
         self.pending_preview_reveal = None;
+        self.fold_scroll_guard = None;
         self.pending_click_anchor = None;
         self.pending_typing_scroll_guard = None;
         self.pending_scroll_to_cursor = false;
@@ -4635,6 +4658,30 @@ mod table_cell_pointer_tests {
     };
     use crate::markdown::{self, LineDecoration, TableAlign};
     use std::ops::Range;
+
+    #[test]
+    fn context_menu_preserves_forward_and_reversed_cell_text_selections() {
+        let buffer =
+            crate::buffer::Buffer::from_text("| A | B |\n| --- | --- |\n| selected text | other |");
+        let start = buffer.text().find("selected").unwrap();
+        let end = start + "selected text".len();
+        for reversed in [false, true] {
+            let original = crate::cursor::Cursor {
+                anchor: if reversed { end } else { start },
+                offset: if reversed { start } else { end },
+            };
+            for hit in [start, start + 3, end] {
+                let mut cursor = original;
+                super::preserve_context_menu_selection(&mut cursor, hit, &buffer);
+                assert_eq!(cursor, original);
+            }
+            let mut cursor = original;
+            let other = buffer.text().find("other").unwrap();
+            super::preserve_context_menu_selection(&mut cursor, other, &buffer);
+            assert_eq!(cursor.offset, other);
+            assert_eq!(cursor.anchor, other);
+        }
+    }
 
     fn display_info(source: &str, active_ranges: &[Range<usize>]) -> TableCellDisplayInfo {
         let decoration =
@@ -4927,6 +4974,17 @@ mod table_cell_pointer_tests {
         for column in 0..source.lines().nth(2).unwrap().len() {
             assert_eq!(table_cell_footnote_label_for_click(row, column), None);
         }
+    }
+}
+
+fn preserve_context_menu_selection(
+    cursor: &mut crate::cursor::Cursor,
+    offset: usize,
+    buffer: &crate::buffer::Buffer,
+) {
+    let selection = cursor.selection_range();
+    if !cursor.has_selection() || offset < selection.start || offset > selection.end {
+        cursor.move_to(offset, buffer);
     }
 }
 
