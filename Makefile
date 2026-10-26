@@ -228,6 +228,20 @@ linux-one:
 
 publish: publish-check
 	@bash scripts/publish-release.sh publish "$(TAG)" "$(RELEASE_REPO)"
+	@$(MAKE) publish-homebrew TAG="$(TAG)" || { \
+		echo "The application release is already published. Retry only: make publish-homebrew TAG=$(TAG)" >&2; \
+		exit 1; \
+	}
+
+.PHONY: publish-homebrew homebrew-check test-publish-homebrew
+publish-homebrew:
+	@bash scripts/publish-homebrew.sh "$(TAG)"
+
+homebrew-check:
+	@bash scripts/publish-homebrew.sh "$(TAG)" check
+
+test-publish-homebrew:
+	@bash scripts/test-publish-homebrew.sh
 
 publish-beta: publish-check
 	@bash scripts/publish-release.sh publish-beta "$(TAG)" "$(RELEASE_REPO)"

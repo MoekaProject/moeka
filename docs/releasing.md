@@ -95,7 +95,45 @@ GitHub CLI needs release write access to MoekaProject/community. Repository
 permissions reported by the API do not prove that every fine-grained token
 scope or branch/tag protection rule will permit a later write: denial stops
 the process safely. No credentials are committed or configured by this helper.
-No Homebrew upload/update is performed.
+The binary helper itself does not update Homebrew. After stable publication,
+`make publish` runs the separate local Homebrew helper described below.
+`make publish-beta` never updates the stable tap.
+
+## Homebrew distribution
+
+The public `MoekaProject/homebrew-moeka` tap distributes the same signed and
+notarized macOS DMGs, without rebuilding them or running GitHub Actions.
+`make publish vX.Y.Z` updates the tap only after binary publication succeeds.
+This additional step requires local `git`, `gh`, `jq`, `shasum`, and `ruby`,
+a configured Git author, and Git write access to the public tap.
+
+For an existing stable release, or to retry only a failed tap update:
+
+```sh
+make homebrew-check TAG=vX.Y.Z
+make publish-homebrew TAG=vX.Y.Z
+```
+
+The check downloads and verifies both architectures in a temporary directory,
+without changing the working tree or pushing. Publication uses the same checks,
+then commits only `Casks/moeka.rb` in a fresh public tap clone and performs a
+non-forced push. Private source objects are never pushed to the tap.
+Both commands require a published, non-prerelease tag and unique uploaded DMGs
+with matching byte sizes and GitHub SHA-256 digests. Missing digests fail closed.
+Downgrades, protected v0.1.12, same-version checksum changes and unexpected cask
+formats are refused. An identical version and checksums is a verified no-op.
+The existing cask's livecheck and installation settings are preserved.
+
+If the tap update fails, the application Release is **already published**.
+Fix the reported error and retry `make publish-homebrew TAG=vX.Y.Z`, never
+`make publish`. After a concurrent push rejection, rerun the helper to read
+and verify the new tap state; do not force push or rebase stale checksums.
+No release assets, tags, notes or drafts are edited by the Homebrew helper.
+
+Run `make test-publish-homebrew` for offline regression tests. Native installation
+and Homebrew fetching are separate checks; the offline tests do not install apps.
+User installation and upgrade commands are in the
+[Homebrew documentation](../packaging/homebrew/README.md).
 
 ## Failure, retry and concurrency
 
