@@ -33,7 +33,7 @@ jobs:
         run: |
           rustc --version
           rustup target add "${{ matrix.target }}"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: candidate-${{ matrix.target }}
       - name: Build unsigned app and DMG
@@ -79,7 +79,7 @@ jobs:
             libvulkan-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev \
             libxcb-shm0-dev libxcb-xfixes0-dev libxcb-xkb-dev libxcb1-dev \
             libxkbcommon-dev libxkbcommon-x11-dev patchelf pkg-config
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: candidate-linux-${{ matrix.arch }}
       - name: Build package
@@ -109,7 +109,7 @@ jobs:
           persist-credentials: false
       - name: Install the pinned Rust toolchain
         run: rustc --version
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: candidate-windows-${{ matrix.arch }}
       - name: Build package
