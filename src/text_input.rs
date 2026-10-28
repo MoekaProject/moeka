@@ -2,8 +2,8 @@ use std::ops::Range;
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, KeyDownEvent, LayoutId,
+    App, Bounds, ClipboardItem, Context, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyDownEvent, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, anchored,
     deferred, div, fill, point, prelude::*, px, relative, size,
@@ -152,6 +152,11 @@ impl TextInput {
 
     pub fn set_styles(&mut self, styles: TextInputStyles, cx: &mut Context<Self>) {
         self.styles = styles;
+        // Pointer and IME geometry must not reuse glyphs measured with the old style.
+        self.last_layout = None;
+        self.last_bounds = None;
+        self.last_lines.clear();
+        self.last_center_offset = Pixels::ZERO;
         cx.notify();
     }
 
@@ -486,20 +491,10 @@ impl TextInput {
         _position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let s = &self.styles;
-        let menu_bg = s.text_input_menu_bg;
-        let text_color = s.text_input_menu_text_color;
-        let menu_font_size = s.text_input_menu_font_size_px;
-        let border_width = s.text_input_menu_border_width_px;
-        let border_color = s.text_input_menu_border_color;
-        let radius = s.text_input_menu_radius_px;
-        let padding_y = s.text_input_menu_padding_y_px;
-        let item_height = s.text_input_menu_item_height_px;
-        let item_padding_x = s.text_input_menu_item_padding_x_px;
-        let hover_bg = s.text_input_menu_hover_bg;
-        let separator_color = s.text_input_menu_separator_color;
-        let menu_width = s.text_input_menu_width_px;
-        let menu_shadow = s.text_input_menu_shadow;
+        let s = &self.styles.menu;
+        let menu_font_size = s.menu_item_font_size_px;
+        let padding_y = s.menu_padding_y_px;
+        let menu_width = self.styles.menu_width_px;
         let has_sel = self.has_selection();
         let language = crate::i18n::detect_system_language();
 
@@ -509,45 +504,31 @@ impl TextInput {
              enabled: bool,
              cx: &mut Context<Self>,
              action: fn(&mut TextInput, &mut Window, &mut Context<TextInput>)| {
-                let item_text_color = if enabled {
-                    text_color
-                } else {
-                    Hsla {
-                        a: text_color.a * 0.4,
-                        ..text_color
-                    }
-                };
-                div()
-                    .id(SharedString::from(format!("ctx-{id}")))
-                    .w_full()
-                    .h(px(item_height))
-                    .px(px(item_padding_x))
-                    .flex()
-                    .items_center()
-                    .text_size(px(menu_font_size))
-                    .text_color(item_text_color)
-                    .cursor(CursorStyle::Arrow)
-                    .when(enabled, |el| {
-                        el.hover(move |s| s.bg(hover_bg)).on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.context_menu_position = None;
-                                action(this, window, cx);
-                            }),
-                        )
-                    })
-                    .child(label.to_string())
+                crate::ui::list::list_item(
+                    s.item(),
+                    crate::style::ControlState {
+                        disabled: !enabled,
+                        ..Default::default()
+                    },
+                    1.0,
+                )
+                .id(SharedString::from(format!("ctx-{id}")))
+                .when(enabled, |el| {
+                    el.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.context_menu_position = None;
+                            action(this, window, cx);
+                        }),
+                    )
+                })
+                .child(label.to_string())
             };
 
         // The menu is positioned by anchored(), no need for offset calculations
-        div()
+        crate::ui::surface::surface(&s.surface(), 1.0)
             .w(px(menu_width))
-            .bg(menu_bg)
-            .border(px(border_width))
-            .border_color(border_color)
-            .rounded(px(radius))
-            .when(menu_shadow, |this| this.shadow_sm())
             .py(px(padding_y))
             .overflow_hidden()
             .flex()
@@ -580,7 +561,7 @@ impl TextInput {
                     this.on_paste(&TextInputPaste, w, cx);
                 },
             ))
-            .child(div().w_full().h(px(1.0)).my(px(2.0)).bg(separator_color))
+            .child(crate::ui::surface::separator(s.separator(), 1.0))
             .child(item(
                 "select-all",
                 crate::i18n::text_input_menu_label(language, "select_all"),
@@ -894,16 +875,6 @@ impl Render for TextInput {
         let is_focused = self.focus_handle.is_focused(window);
         self.sync_blink_allowed(is_focused, cx);
         let s = &self.styles;
-        let bg = if is_focused {
-            s.text_input_focus_bg
-        } else {
-            s.text_input_bg
-        };
-        let hover_bg = if is_focused {
-            Some(s.text_input_focus_bg)
-        } else {
-            s.text_input_hover_bg
-        };
         let height = s.text_input_height_px;
         let line_count = if self.multiline {
             self.text.split('\n').count().max(1)
@@ -911,12 +882,7 @@ impl Render for TextInput {
             1
         };
         let total_height = height * line_count as f32;
-        let padding_left = s.text_input_padding_left_px;
-        let padding_right = s.text_input_padding_right_px;
-        let font_size = s.text_input_font_size_px;
-
-        div()
-            .id("text-input")
+        crate::ui::input::input_shell(s, is_focused, total_height)
             .key_context("TextInput")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_left))
@@ -988,21 +954,6 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .cursor(CursorStyle::IBeam)
-            .w_full()
-            .h(px(total_height))
-            .pl(px(padding_left))
-            .pr(px(padding_right))
-            .bg(bg)
-            .when_some(hover_bg, |this, hover_bg| {
-                this.hover(move |style| style.bg(hover_bg))
-            })
-            .rounded(px(s.text_input_radius_px))
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .text_size(px(font_size))
-            .line_height(px(height))
             .child(TextElement { input: cx.entity() })
             .when_some(self.context_menu_position, |el, pos| {
                 el.child(

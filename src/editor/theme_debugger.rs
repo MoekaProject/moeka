@@ -9,11 +9,6 @@ use crate::theme::{self, ThemeColorField};
 use super::*;
 
 pub(crate) const THEME_DEBUGGER_WIDTH_PX: f32 = 320.0;
-const THEME_DEBUGGER_HEADER_HEIGHT_PX: f32 = 30.0;
-const THEME_DEBUGGER_ROW_HEIGHT_PX: f32 = 30.0;
-const THEME_DEBUGGER_SLIDER_HEIGHT_PX: f32 = 16.0;
-const THEME_DEBUGGER_SLIDER_HANDLE_WIDTH_PX: f32 = 12.0;
-const THEME_DEBUGGER_SV_HANDLE_SIZE_PX: f32 = 14.0;
 const THEME_DEBUGGER_HUE_SEGMENTS: usize = 6;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -61,13 +56,9 @@ struct ThemeDebuggerHsva {
 }
 
 impl EditorView {
-    pub(crate) fn refresh_theme_styles(
-        &mut self,
-        recreate_settings_editors: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn resolve_theme_styles(&mut self) {
         let ui_theme = self.app_settings.ui_theme_for(self.theme_kind);
-        self.styles = crate::style::Styles::from_theme_with_options(
+        self.styles = self.styles.retheme(
             &self.theme,
             &ui_theme,
             self.app_settings.sidebar_always_dark,
@@ -89,10 +80,48 @@ impl EditorView {
             self.styles.editor.editor_body_cjk_font_family;
         self.styles.editor.editor_monospace_font_family =
             crate::platform::fonts::intern_family(&self.app_settings.code_font);
+    }
+
+    pub(crate) fn set_ui_style_spec(
+        &mut self,
+        spec: crate::style::UiStyleSpec,
+        cx: &mut Context<Self>,
+    ) {
+        self.styles.ui.base_spec = spec;
+        self.resolve_theme_styles();
+        self.sync_overlay_text_input_styles(cx);
+        self.sync_panel_display_state();
+        self.sync_control_style_metrics(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_ui_appearance(
+        &mut self,
+        corners: crate::style::UiCorners,
+        elevation: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.app_settings.ui_corners == corners && self.app_settings.ui_elevation == elevation {
+            return;
+        }
+
+        self.app_settings.ui_corners = corners;
+        self.app_settings.ui_elevation = elevation;
+        self.set_ui_style_spec(self.app_settings.ui_style_spec(), cx);
+        self.app_settings.save();
+    }
+
+    pub(crate) fn refresh_theme_styles(
+        &mut self,
+        recreate_settings_editors: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.resolve_theme_styles();
         self.clear_all_tab_layout_caches();
         self.invalidate_generated_block_preview_render_caches();
         self.rerender_generated_block_previews();
         self.sync_overlay_text_input_styles(cx);
+        self.sync_control_style_metrics(cx);
 
         if recreate_settings_editors {
             self.settings_font_size_editor = None;
@@ -146,10 +175,8 @@ impl EditorView {
     }
 
     fn theme_debugger_text_input_styles(&self) -> crate::style::TextInputStyles {
-        let mut styles = self.styles.text_input.clone();
-        styles.text_input_height_px = 28.0;
-        styles.text_input_font_size_px = self.styles.ui_font_size_px;
-        styles
+        self.styles
+            .input_styles(crate::style::InputRole::ThemeDebugger, self.ui_scale)
     }
 
     pub(crate) fn update_theme_debugger_input_styles(&mut self, cx: &mut Context<Self>) {
@@ -407,7 +434,7 @@ impl EditorView {
     }
 
     fn export_theme_debugger_theme(&self, cx: &mut Context<Self>) {
-        let text = format_theme_debugger_export(&self.theme);
+        let text = format_theme_debugger_export_with_ui(&self.theme, &self.styles.ui.spec.colors);
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
     }
 
@@ -415,23 +442,19 @@ impl EditorView {
         self.ensure_theme_debugger_editors(cx);
 
         let width = self.theme_debugger_layout_width();
-        let header_height = self.scaled(THEME_DEBUGGER_HEADER_HEIGHT_PX);
-        let row_height = self.scaled(THEME_DEBUGGER_ROW_HEIGHT_PX);
-        let header_padding_x = self.scaled(14.0);
-        let section_gap = self.scaled(12.0);
-        let card_padding = self.scaled(12.0);
-        let input_gap = self.scaled(8.0);
-        let ui_border_width = self.ui_border_width(1.0);
-        let border_color = self.theme.border_secondary;
-        let divider_color = self.theme.border_primary;
-        let panel_bg = self.theme.bg_secondary;
-        let card_bg = self.theme.bg_elevated;
-        let hover_bg = self.theme.bg_hover;
-        let active_bg = self.theme.bg_selected;
-        let text_primary = self.theme.text_primary;
-        let text_secondary = self.theme.text_secondary;
-        let detail_label_font = self.scaled(12.0);
-        let row_font = self.scaled(12.0);
+        let ds = &self.styles.theme_debugger;
+        let header_height = self.scaled(ds.header_height_px);
+        let header_padding_x = self.scaled(ds.header_padding_x_px);
+        let section_gap = self.scaled(ds.section_gap_px);
+        let card_padding = self.scaled(ds.card_padding_px);
+        let input_gap = self.scaled(ds.input_gap_px);
+        let ui_border_width = self.ui_border_width(self.styles.ui.spec.border_width_px);
+        let border_color = ds.border;
+        let panel_bg = ds.panel;
+        let text_primary = ds.foreground;
+        let text_secondary = ds.muted;
+        let detail_label_font = self.scaled(ds.label_font_size_px);
+        let row_font = self.scaled(ds.label_font_size_px);
         let debugger_section = self.theme_debugger_section;
         let selected_field = self.theme_debugger_selected_field;
         let selected_color = self.theme.color(selected_field);
@@ -440,9 +463,9 @@ impl EditorView {
             (width - header_padding_x * 2.0 - card_padding * 2.0).max(self.scaled(120.0));
         let picker_size = card_inner_width;
         let slider_width = card_inner_width;
-        let slider_height = self.scaled(THEME_DEBUGGER_SLIDER_HEIGHT_PX);
-        let slider_handle_width = self.scaled(THEME_DEBUGGER_SLIDER_HANDLE_WIDTH_PX);
-        let sv_handle_size = self.scaled(THEME_DEBUGGER_SV_HANDLE_SIZE_PX);
+        let slider_height = self.scaled(self.styles.theme_debugger.slider_height_px);
+        let slider_handle_width = self.scaled(self.styles.theme_debugger.slider_handle_width_px);
+        let sv_handle_size = self.scaled(self.styles.theme_debugger.sv_handle_size_px);
         let pure_hue = theme_debugger_hue_color(selected_hsva.h);
         let opaque_selected = Hsla {
             a: 1.0,
@@ -499,53 +522,39 @@ impl EditorView {
                 let is_selected = field == selected_field;
                 let row_color = self.theme.color(field);
                 let row_hex = theme::hsla_to_hex_rgba(row_color);
-                let bg = if is_selected {
-                    active_bg
-                } else {
-                    gpui::transparent_black()
-                };
-
-                div()
-                    .id(SharedString::from(format!("theme-color-{}", field.label())))
-                    .h(px(row_height))
-                    .w_full()
-                    .px(px(header_padding_x))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(self.scaled(10.0)))
-                    .cursor(CursorStyle::Arrow)
-                    .bg(bg)
-                    .hover(move |style| style.bg(hover_bg))
-                    .child(
-                        div()
-                            .w(px(self.scaled(14.0)))
-                            .h(px(self.scaled(14.0)))
-                            .rounded(px(self.scaled(4.0)))
-                            .bg(row_color)
-                            .border(px(ui_border_width))
-                            .border_color(divider_color),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(row_font))
-                            .text_color(text_primary)
-                            .child(field.label()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(self.scaled(11.0)))
-                            .text_color(text_secondary)
-                            .child(row_hex),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.select_theme_debugger_field(field, cx);
-                        }),
-                    )
-                    .into_any_element()
+                crate::ui::list::list_item(
+                    self.styles.debugger_item(),
+                    crate::style::ControlState {
+                        selected: is_selected,
+                        ..Default::default()
+                    },
+                    self.ui_scale,
+                )
+                .id(SharedString::from(format!("theme-color-{}", field.label())))
+                .child(crate::ui::decoration::swatch(
+                    self.styles.debugger_swatch(row_color),
+                    self.ui_scale,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(row_font))
+                        .text_color(text_primary)
+                        .child(field.label()),
+                )
+                .child(
+                    div()
+                        .text_size(px(self.scaled(11.0)))
+                        .text_color(text_secondary)
+                        .child(row_hex),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.select_theme_debugger_field(field, cx);
+                    }),
+                )
+                .into_any_element()
             })
             .collect();
 
@@ -590,12 +599,12 @@ impl EditorView {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap(px(self.scaled(8.0)))
+                            .gap(px(self.scaled(self.styles.ui.space(crate::style::SpaceStep::Two))))
                             .child(
                                 div()
                                     .flex()
                                     .flex_row()
-                                    .rounded(px(self.scaled(6.0)))
+                                    .rounded(px(self.scaled(self.styles.ui.spec.application.debugger_segment_radius_px)))
                                     .border(px(ui_border_width))
                                     .border_color(border_color)
                                     .overflow_hidden()
@@ -607,31 +616,9 @@ impl EditorView {
                                     .enumerate()
                                     .map(|(index, section)| {
                                         let is_active = section == debugger_section;
-                                        div()
-                                            .id(SharedString::from(format!(
-                                                "theme-debugger-section-{}",
-                                                self.t(section.label_key())
-                                            )))
-                                            .px(px(self.scaled(10.0)))
-                                            .py(px(self.scaled(5.0)))
-                                            .text_color(if is_active {
-                                                panel_bg
-                                            } else {
-                                                text_primary
-                                            })
-                                            .bg(if is_active {
-                                                text_primary
-                                            } else {
-                                                gpui::transparent_black()
-                                            })
-                                            .cursor(CursorStyle::Arrow)
-                                            .when(index > 0, |this| {
-                                                this.border_l(px(ui_border_width))
-                                                    .border_color(border_color)
-                                            })
-                                            .when(!is_active, |this| {
-                                                this.hover(move |style| style.bg(hover_bg))
-                                            })
+                                        crate::ui::button::compact_action(self.styles.compact_action(crate::style::CompactActionRole::DebuggerSection), crate::style::ControlState { selected: is_active, ..Default::default() }, self.ui_scale)
+                                            .id(SharedString::from(format!("theme-debugger-section-{}", self.t(section.label_key()))))
+                                            .when(index > 0, |this| this.border_l(px(ui_border_width)).border_color(border_color))
                                             .child(self.t(section.label_key()))
                                             .on_mouse_down(
                                                 MouseButton::Left,
@@ -642,12 +629,9 @@ impl EditorView {
                                             .into_any_element()
                                     })),
                             )
-                            .gap(px(self.scaled(12.0)))
+                            .gap(px(self.scaled(self.styles.ui.space(crate::style::SpaceStep::Three))))
                             .child(
-                                div()
-                                    .cursor(CursorStyle::Arrow)
-                                    .text_color(text_primary)
-                                    .hover(move |style| style.opacity(0.75))
+                                crate::ui::button::compact_action(self.styles.compact_action(crate::style::CompactActionRole::DebuggerText), Default::default(), self.ui_scale)
                                     .child(self.t(crate::i18n::TextKey::Export))
                                     .on_mouse_down(
                                         MouseButton::Left,
@@ -657,10 +641,7 @@ impl EditorView {
                                     ),
                             )
                             .child(
-                                div()
-                                    .cursor(CursorStyle::Arrow)
-                                    .text_color(text_primary)
-                                    .hover(move |style| style.opacity(0.75))
+                                crate::ui::button::compact_action(self.styles.compact_action(crate::style::CompactActionRole::DebuggerText), Default::default(), self.ui_scale)
                                     .child(self.t(crate::i18n::TextKey::Reset))
                                     .on_mouse_down(
                                         MouseButton::Left,
@@ -672,22 +653,18 @@ impl EditorView {
                     ),
             )
             .child(
-                div()
+                crate::ui::surface::surface(&self.styles.debugger_card_surface(), self.ui_scale)
                     .mx(px(header_padding_x))
                     .mb(px(section_gap))
                     .p(px(card_padding))
                     .flex()
                     .flex_col()
                     .gap(px(section_gap))
-                    .bg(card_bg)
-                    .border(px(ui_border_width))
-                    .border_color(divider_color)
-                    .rounded(px(self.scaled(10.0)))
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(self.scaled(8.0)))
+                            .gap(px(self.scaled(self.styles.ui.space(crate::style::SpaceStep::Two))))
                             .child(
                                 div()
                                     .text_size(px(detail_label_font))
@@ -708,15 +685,8 @@ impl EditorView {
                                         }
                                     })
                                     .child(
-                                        div()
-                                            .id("theme-debugger-sv-picker")
-                                            .relative()
-                                            .w_full()
-                                            .h_full()
-                                            .overflow_hidden()
-                                            .rounded(px(self.scaled(10.0)))
-                                            .border(px(ui_border_width))
-                                            .border_color(divider_color)
+                                        crate::ui::surface::surface(&self.styles.debugger_picker_surface(false, false), self.ui_scale)
+                                            .id("theme-debugger-sv-picker").relative().w_full().h_full().overflow_hidden()
                                             .cursor(CursorStyle::Crosshair)
                                             .on_mouse_move(
                                                 cx.listener(Self::on_theme_debugger_mouse_move),
@@ -789,17 +759,10 @@ impl EditorView {
                                                     )),
                                             )
                                             .child(
-                                                div()
+                                                crate::ui::surface::surface(&self.styles.debugger_handle_surface(false, selected_color), self.ui_scale)
                                                     .absolute()
-                                                    .left(px(sv_handle_left))
-                                                    .top(px(sv_handle_top))
-                                                    .w(px(sv_handle_size))
-                                                    .h(px(sv_handle_size))
-                                                    .rounded_full()
-                                                    .bg(selected_color)
-                                                    .border(px(2.0))
-                                                    .border_color(gpui::white())
-                                                    .shadow_sm(),
+                                                    .left(px(sv_handle_left)).top(px(sv_handle_top))
+                                                    .w(px(sv_handle_size)).h(px(sv_handle_size)),
                                             ),
                                     )
                             })
@@ -807,7 +770,7 @@ impl EditorView {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(self.scaled(6.0)))
+                                    .gap(px(self.scaled(self.styles.ui.space(crate::style::SpaceStep::OneAndHalf))))
                                     .child(
                                         div()
                                             .text_size(px(detail_label_font))
@@ -828,15 +791,8 @@ impl EditorView {
                                                 }
                                             })
                                             .child(
-                                                div()
-                                                    .id("theme-debugger-hue-slider")
-                                                    .relative()
-                                                    .w_full()
-                                                    .h_full()
-                                                    .overflow_hidden()
-                                                    .rounded(px(slider_height * 0.5))
-                                                    .border(px(ui_border_width))
-                                                    .border_color(divider_color)
+                                                crate::ui::surface::surface(&self.styles.debugger_picker_surface(true, false), self.ui_scale)
+                                                    .id("theme-debugger-hue-slider").relative().w_full().h_full().overflow_hidden()
                                                     .cursor(CursorStyle::ResizeLeftRight)
                                                     .on_mouse_move(
                                                         cx.listener(Self::on_theme_debugger_mouse_move),
@@ -886,17 +842,10 @@ impl EditorView {
                                                             .children(hue_segments),
                                                     )
                                                     .child(
-                                                        div()
+                                                        crate::ui::surface::surface(&self.styles.debugger_handle_surface(true, crate::theme::COLOR_PICKER_HANDLE), self.ui_scale)
                                                             .absolute()
-                                                            .left(px(hue_handle_left))
-                                                            .top(px(0.0))
-                                                            .w(px(slider_handle_width))
-                                                            .h_full()
-                                                            .rounded(px(slider_height * 0.5))
-                                                            .bg(gpui::white())
-                                                            .border(px(ui_border_width))
-                                                            .border_color(divider_color)
-                                                            .shadow_sm(),
+                                                            .left(px(hue_handle_left)).top(px(0.0))
+                                                            .w(px(slider_handle_width)).h_full(),
                                                     ),
                                             )
                                     }),
@@ -905,7 +854,7 @@ impl EditorView {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(self.scaled(6.0)))
+                                    .gap(px(self.scaled(self.styles.ui.space(crate::style::SpaceStep::OneAndHalf))))
                                     .child(
                                         div()
                                             .text_size(px(detail_label_font))
@@ -926,16 +875,8 @@ impl EditorView {
                                                 }
                                             })
                                             .child(
-                                                div()
-                                                    .id("theme-debugger-alpha-slider")
-                                                    .relative()
-                                                    .w_full()
-                                                    .h_full()
-                                                    .overflow_hidden()
-                                                    .rounded(px(slider_height * 0.5))
-                                                    .border(px(ui_border_width))
-                                                    .border_color(divider_color)
-                                                    .bg(panel_bg)
+                                                crate::ui::surface::surface(&self.styles.debugger_picker_surface(true, true), self.ui_scale)
+                                                    .id("theme-debugger-alpha-slider").relative().w_full().h_full().overflow_hidden()
                                                     .cursor(CursorStyle::ResizeLeftRight)
                                                     .on_mouse_move(
                                                         cx.listener(Self::on_theme_debugger_mouse_move),
@@ -992,17 +933,10 @@ impl EditorView {
                                                             )),
                                                     )
                                                     .child(
-                                                        div()
+                                                        crate::ui::surface::surface(&self.styles.debugger_handle_surface(true, crate::theme::COLOR_PICKER_HANDLE), self.ui_scale)
                                                             .absolute()
-                                                            .left(px(alpha_handle_left))
-                                                            .top(px(0.0))
-                                                            .w(px(slider_handle_width))
-                                                            .h_full()
-                                                            .rounded(px(slider_height * 0.5))
-                                                            .bg(gpui::white())
-                                                            .border(px(ui_border_width))
-                                                            .border_color(divider_color)
-                                                            .shadow_sm(),
+                                                            .left(px(alpha_handle_left)).top(px(0.0))
+                                                            .w(px(slider_handle_width)).h_full(),
                                                     ),
                                             )
                                     }),
@@ -1012,7 +946,7 @@ impl EditorView {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(self.scaled(6.0)))
+                            .gap(px(self.scaled(self.styles.ui.space(crate::style::SpaceStep::OneAndHalf))))
                             .child(
                                 div()
                                     .text_size(px(detail_label_font))
@@ -1027,7 +961,7 @@ impl EditorView {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(self.scaled(6.0)))
+                            .gap(px(self.scaled(self.styles.ui.space(crate::style::SpaceStep::OneAndHalf))))
                             .child(
                                 div()
                                     .text_size(px(detail_label_font))
@@ -1072,6 +1006,17 @@ fn parse_theme_debugger_alpha(text: &str) -> Option<f32> {
     };
 
     Some(alpha.clamp(0.0, 1.0))
+}
+
+fn format_theme_debugger_export_with_ui(
+    theme: &crate::theme::Theme,
+    overrides: &crate::theme::UiColorOverrides,
+) -> String {
+    let mut text = format_theme_debugger_export(theme);
+    for (slot, color) in overrides.iter() {
+        text.push_str(&format!("\n// Independent application UI override: spec.colors.set(UiColor::{slot:?}, hex_hsla!(\"{}\"));", crate::theme::hsla_to_hex_rgba(color)));
+    }
+    text
 }
 
 fn format_theme_debugger_export(theme: &crate::theme::Theme) -> String {
@@ -1143,10 +1088,8 @@ fn format_theme_debugger_export(theme: &crate::theme::Theme) -> String {
             ThemeColorField::ListMarker,
             ThemeColorField::CheckboxChecked,
             ThemeColorField::GutterHeading,
-            ThemeColorField::GitStatusAdded,
-            ThemeColorField::GitStatusModified,
-            ThemeColorField::DiffAddedBg,
-            ThemeColorField::DiffRemovedBg,
+            ThemeColorField::StatusSuccess,
+            ThemeColorField::StatusWarning,
         ],
         theme,
     );
@@ -1163,6 +1106,14 @@ fn append_theme_debugger_export_section(
 ) {
     lines.push(format!("    // {title}"));
     for &field in fields {
+        let aliases: Vec<_> = crate::theme::UiColor::ALL
+            .iter()
+            .filter(|slot| slot.source() == field)
+            .map(|slot| format!("{slot:?}"))
+            .collect();
+        if !aliases.is_empty() {
+            lines.push(format!("    // UI aliases: {}", aliases.join(", ")));
+        }
         lines.push(format_theme_debugger_export_field(theme, field));
     }
 }
@@ -1203,8 +1154,6 @@ fn theme_debugger_export_uses_with_alpha(field: ThemeColorField) -> bool {
             | ThemeColorField::HighlightBg
             | ThemeColorField::SyntaxMarker
             | ThemeColorField::GutterHeading
-            | ThemeColorField::DiffAddedBg
-            | ThemeColorField::DiffRemovedBg
     )
 }
 
@@ -1371,6 +1320,52 @@ mod tests {
     use super::format_theme_debugger_export;
 
     #[test]
+    fn runtime_ui_spec_survives_theme_and_sidebar_round_trips() {
+        use crate::style::{InputRole, Styles, UiStyleSpec};
+        use crate::theme::{Theme, ThemeKind};
+
+        let dark = Theme::one_dark();
+        let light = ThemeKind::light_themes()[0].build();
+        let spec = UiStyleSpec {
+            menu_row_height_px: 37.0,
+            radius_px: 9.0,
+            control_font_size_px: 17.0,
+            ..Default::default()
+        };
+        let mut styles = Styles::from_theme_with_spec(&dark, &dark, true, spec);
+        for (theme, sidebar_dark) in [
+            (&light, false),
+            (&dark, true),
+            (&light, true),
+            (&dark, false),
+        ] {
+            let document_baseline = Styles::from_theme_with_options(theme, theme, sidebar_dark);
+            styles = styles.retheme(theme, theme, sidebar_dark);
+            assert_eq!(styles.ui.spec.menu_row_height_px, 37.0);
+            assert_eq!(styles.ui.spec.radius_px, 9.0);
+            assert_eq!(styles.ui.spec.control_font_size_px, 17.0);
+            assert_eq!(
+                styles
+                    .input_styles(InputRole::Picker, 1.5)
+                    .text_input_height_px,
+                37.0 * 1.5
+            );
+            assert_eq!(
+                styles.editor.editor_font_size_px,
+                document_baseline.editor.editor_font_size_px
+            );
+            assert_eq!(
+                styles.editor.editor_text_color,
+                document_baseline.editor.editor_text_color
+            );
+            assert_eq!(
+                styles.checkbox.checkbox_border_width_px,
+                document_baseline.checkbox.checkbox_border_width_px
+            );
+        }
+    }
+
+    #[test]
     fn export_includes_interface_semantic_colors() {
         let export = format_theme_debugger_export(&crate::theme::Theme::one_dark());
 
@@ -1385,5 +1380,23 @@ mod tests {
                 "missing exported theme field: {field}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ui_export_tests {
+    #[test]
+    fn independent_ui_overrides_export_without_rewriting_legacy_theme_fields() {
+        let theme = crate::theme::ThemeKind::OneDark.build();
+        let mut overrides = crate::theme::UiColorOverrides::default();
+        let original = super::format_theme_debugger_export(&theme);
+        assert_eq!(
+            super::format_theme_debugger_export_with_ui(&theme, &overrides),
+            original
+        );
+        overrides.set(crate::theme::UiColor::Primary, crate::hex_hsla!("#CB385C"));
+        let exported = super::format_theme_debugger_export_with_ui(&theme, &overrides);
+        assert!(exported.starts_with(&original));
+        assert!(exported.contains("spec.colors.set(UiColor::Primary"));
     }
 }

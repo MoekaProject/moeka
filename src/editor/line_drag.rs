@@ -1,3 +1,4 @@
+use crate::ui::self_drawn::DropIndicatorControl;
 use std::{
     borrow::Cow,
     ops::Range,
@@ -9,7 +10,7 @@ use crate::buffer::Buffer;
 use crate::markdown::{BlockType, LineDecoration};
 use gpui::{
     AnyElement, AvailableSpace, Bounds, Context, CursorStyle, Entity, MouseButton, MouseMoveEvent,
-    Pixels, Point, ScrollWheelEvent, SharedString, Window, canvas, div, fill, prelude::*, px, size,
+    Pixels, Point, ScrollWheelEvent, SharedString, Window, canvas, div, prelude::*, px, size,
 };
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
@@ -724,7 +725,7 @@ impl EditorView {
                     styles.line_drag_indicator_color,
                 )
             });
-        for (lines, opacity, mut color) in dimmed.into_iter().chain(flashed) {
+        for (lines, opacity, color) in dimmed.into_iter().chain(flashed) {
             let bounds = self
                 .format_line_areas
                 .iter()
@@ -733,8 +734,7 @@ impl EditorView {
                 .filter(|bounds| bounds.size.height > px(0.0) && bounds.size.width > px(0.0))
                 .reduce(|left, right| left.union(&right));
             if let Some(bounds) = bounds {
-                color.a = opacity.clamp(0.0, 1.0);
-                window.paint_quad(fill(bounds, color));
+                DropIndicatorControl::feedback(bounds, color, opacity, window);
             }
         }
     }
@@ -755,11 +755,27 @@ impl EditorView {
             .ghost
             .as_ref()
             .map(|ghost| f32::from(ghost.bounds.size.height))
-            .unwrap_or(self.scaled(80.0));
-        let ghost_left = (f32::from(drag.position.x) + 14.0 - border)
-            .clamp(0.0, (self.last_window_width - ghost_width - 8.0).max(0.0));
-        let ghost_top = (f32::from(drag.position.y) + 14.0 - border)
-            .clamp(0.0, (self.last_window_height - ghost_height - 8.0).max(0.0));
+            .unwrap_or(self.scaled(self.styles.self_drawn.line_drag_fallback_height_px));
+        let ghost_left = (f32::from(drag.position.x)
+            + self.styles.self_drawn.line_drag_pointer_offset_px
+            - border)
+            .clamp(
+                0.0,
+                (self.last_window_width
+                    - ghost_width
+                    - self.styles.self_drawn.line_drag_viewport_margin_px)
+                    .max(0.0),
+            );
+        let ghost_top = (f32::from(drag.position.y)
+            + self.styles.self_drawn.line_drag_pointer_offset_px
+            - border)
+            .clamp(
+                0.0,
+                (self.last_window_height
+                    - ghost_height
+                    - self.styles.self_drawn.line_drag_viewport_margin_px)
+                    .max(0.0),
+            );
         let indicator = self.line_drag_target(drag.position).map(|target| {
             let y = target.y;
             let viewport = self
@@ -773,18 +789,16 @@ impl EditorView {
             let left = (self.last_content_left + indent_px)
                 .max(f32::from(viewport.left()))
                 .min(right - 1.0);
-            div()
-                .absolute()
-                .left(px(left - border))
-                .top(
-                    (y - px(border + styles.line_drag_indicator_width_px / 2.0)).clamp(
-                        viewport.top() - px(border),
-                        viewport.bottom() - px(border + styles.line_drag_indicator_width_px),
-                    ),
-                )
-                .w(px((right - left).max(1.0)))
-                .h(px(styles.line_drag_indicator_width_px))
-                .bg(styles.line_drag_indicator_color)
+            DropIndicatorControl::line(
+                left - border,
+                (y - px(border + styles.line_drag_indicator_width_px / 2.0)).clamp(
+                    viewport.top() - px(border),
+                    viewport.bottom() - px(border + styles.line_drag_indicator_width_px),
+                ),
+                (right - left).max(1.0),
+                styles.line_drag_indicator_width_px,
+                styles.line_drag_indicator_color,
+            )
         });
         let ghost_content = if let Some(ghost) = drag.ghost.clone() {
             canvas(

@@ -1,3 +1,8 @@
+use crate::ui::self_drawn::code_block_horizontal_thumb_geometry;
+use crate::ui::self_drawn::{
+    FrontMatterControl, PaintedButton as CodeBlockCopyButtonPaint, PaintedButtonMetrics,
+    PaintedButtonRole, TableHandleControl, paint_code_block_button, shape_preview_button,
+};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
@@ -15,11 +20,17 @@ use crate::markdown::{BlockType, CalloutKind, TableLineInfo};
 use super::helpers;
 use super::*;
 
+#[cfg(test)]
 pub(super) const LINE_FORMAT_ICON_SIZE_PX: f32 = 18.0;
+#[cfg(test)]
 const LINE_FORMAT_ICON_GAP_PX: f32 = 0.0;
+#[cfg(test)]
 pub(super) const LINE_FORMAT_CONTENT_GAP_PX: f32 = 6.0;
+#[cfg(test)]
 const FRONT_MATTER_LIST_DELETE_GAP_PX: f32 = 4.0;
+#[cfg(test)]
 const FRONT_MATTER_LIST_DELETE_WIDTH_PX: f32 = 14.0;
+#[cfg(test)]
 const FRONT_MATTER_LIST_ITEM_GAP_PX: f32 = 3.0;
 
 /// Shared by prepaint and the uncached hit-test/IME shaping path. Reserve the
@@ -28,13 +39,14 @@ pub(super) fn front_matter_content_geometry(
     is_front_matter_line: bool,
     content_left: f32,
     wrap_width: f32,
-    scale: f32,
+    column_width: f32,
 ) -> (f32, f32) {
-    if !is_front_matter_line {
-        return (content_left, wrap_width);
-    }
-    let inset = (LINE_FORMAT_ICON_SIZE_PX + LINE_FORMAT_CONTENT_GAP_PX) * scale;
-    (content_left + inset, (wrap_width - inset).max(1.0))
+    FrontMatterControl::content_geometry(
+        is_front_matter_line,
+        content_left,
+        wrap_width,
+        column_width,
+    )
 }
 
 fn front_matter_svg_left_inset(svg: &[u8]) -> Option<f32> {
@@ -70,10 +82,7 @@ fn front_matter_type_icon_inset(path: &'static str, cx: &App) -> f32 {
 }
 
 fn front_matter_type_glyph_bounds(slot: Bounds<Pixels>, icon_size: Pixels) -> Bounds<Pixels> {
-    Bounds::new(
-        slot.origin + point(px(0.0), (slot.size.height - icon_size) * 0.5),
-        size(icon_size, icon_size),
-    )
+    FrontMatterControl::glyph_bounds(slot, icon_size)
 }
 
 pub(super) fn front_matter_fold_hit_bounds(
@@ -118,19 +127,19 @@ pub(super) fn front_matter_type_hit_bounds(
 #[test]
 fn front_matter_column_preserves_right_edge_and_source_indent_at_every_zoom() {
     for scale in [0.75, 1.0, 1.5, 2.0] {
-        let (left, width) = front_matter_content_geometry(true, 100.0, 400.0, scale);
+        let (left, width) = front_matter_content_geometry(true, 100.0, 400.0, 24.0 * scale);
         assert_eq!(left + width, 500.0);
         assert_eq!(left, 100.0 + 24.0 * scale);
         // Nested keys keep their source indent after the fixed icon column.
         let source_indent = 12.0 * scale;
         assert_eq!((left + source_indent) - left, source_indent);
         assert_eq!(
-            front_matter_content_geometry(false, 100.0, 400.0, scale),
+            front_matter_content_geometry(false, 100.0, 400.0, 24.0 * scale),
             (100.0, 400.0),
         );
     }
     assert_eq!(
-        front_matter_content_geometry(true, 0.0, 10.0, 1.0),
+        front_matter_content_geometry(true, 0.0, 10.0, 24.0),
         (24.0, 1.0)
     );
 }
@@ -147,7 +156,7 @@ fn front_matter_delimiters_and_summary_use_left_edge_and_fold_hits_stay_in_gutte
                     table.is_front_matter && !table.is_separator,
                     100.0,
                     400.0,
-                    scale
+                    24.0 * scale
                 ),
                 (100.0, 400.0)
             );
@@ -260,40 +269,6 @@ fn front_matter_scalar_focus_does_not_expand_neighboring_rows() {
     ));
 }
 
-fn table_border_track_path(
-    table_left: f32,
-    table_top: f32,
-    table_right: f32,
-    table_bottom: f32,
-    track_width: f32,
-    corner_radius: f32,
-) -> Option<Path<Pixels>> {
-    let radius = corner_radius.max(0.0);
-    let outer_left = table_left - track_width;
-    let outer_top = table_top - track_width;
-    let control_factor = 0.552_284_8;
-    let mut path = gpui::PathBuilder::fill();
-    path.move_to(point(px(table_left), px(table_bottom)));
-    path.line_to(point(px(outer_left), px(table_bottom)));
-    path.line_to(point(px(outer_left), px(outer_top + radius)));
-    path.cubic_bezier_to(
-        point(px(outer_left + radius), px(outer_top)),
-        point(
-            px(outer_left),
-            px(outer_top + radius * (1.0 - control_factor)),
-        ),
-        point(
-            px(outer_left + radius * (1.0 - control_factor)),
-            px(outer_top),
-        ),
-    );
-    path.line_to(point(px(table_right), px(outer_top)));
-    path.line_to(point(px(table_right), px(table_top)));
-    path.line_to(point(px(table_left), px(table_top)));
-    path.close();
-    path.build().ok()
-}
-
 fn generated_preview_heights_changed(
     decorations: &[crate::markdown::LineDecoration],
     updates: &[(usize, Option<LineDisplayInfo>)],
@@ -384,9 +359,10 @@ fn markdown_fold_opacity(
     row_hovered: bool,
     row_opacity: f32,
     persistent_opacity: f32,
+    hover_opacity: f32,
 ) -> f32 {
     if fold_hovered {
-        selection_toolbar::FORMAT_TRIGGER_HOVER_OPACITY
+        hover_opacity
     } else if row_hovered {
         row_opacity
     } else {
@@ -427,14 +403,14 @@ fn front_matter_hover_controls_share_heading_order_on_the_moved_property_row() {
 #[cfg(test)]
 #[test]
 fn front_matter_fold_buttons_are_hidden_until_row_or_button_hover() {
-    assert_eq!(markdown_fold_opacity(false, false, 0.34, 0.0), 0.0);
-    assert_eq!(markdown_fold_opacity(false, true, 0.34, 0.0), 0.34);
+    assert_eq!(markdown_fold_opacity(false, false, 0.34, 0.0, 0.9), 0.0);
+    assert_eq!(markdown_fold_opacity(false, true, 0.34, 0.0, 0.9), 0.34);
     assert_eq!(
-        markdown_fold_opacity(true, false, 0.34, 0.0),
+        markdown_fold_opacity(true, false, 0.34, 0.0, 0.9),
         selection_toolbar::FORMAT_TRIGGER_HOVER_OPACITY
     );
     // Other folded Markdown blocks retain their existing persistent affordance.
-    assert_eq!(markdown_fold_opacity(false, false, 0.34, 0.5), 0.5);
+    assert_eq!(markdown_fold_opacity(false, false, 0.34, 0.5, 0.9), 0.5);
 }
 
 fn gutter_fold_row_hovered(gutter_hovered: bool, pointer_y: Pixels, top: f32, height: f32) -> bool {
@@ -550,10 +526,8 @@ fn generated_preview_code_mode_active(
 fn uses_table_cell_selection(
     block_type: &BlockType,
     decoration: &crate::markdown::LineDecoration,
-    active_tab_is_diff: bool,
 ) -> bool {
     matches!(block_type, BlockType::Table)
-        && !active_tab_is_diff
         && decoration
             .table_info
             .as_ref()
@@ -674,19 +648,12 @@ fn markdown_tables_use_only_cell_selection_rendering() {
     assert!(uses_table_cell_selection(
         &BlockType::Table,
         &decorations[0],
-        false,
-    ));
-    assert!(!uses_table_cell_selection(
-        &BlockType::Table,
-        &decorations[0],
-        true,
     ));
 
     let front_matter = crate::markdown::parse_decorations("---\ntitle: Moeka\n---");
     assert!(!uses_table_cell_selection(
         &BlockType::Table,
         &front_matter[1],
-        false,
     ));
 
     let decorations = crate::markdown::parse_decorations(
@@ -695,7 +662,6 @@ fn markdown_tables_use_only_cell_selection_rendering() {
     assert!(uses_table_cell_selection(
         &BlockType::Table,
         &decorations[2],
-        false
     ));
     let row = decorations[2].table_info.as_ref().unwrap();
     let cell = helpers::table_cell_decoration(&decorations[2], &row.cells[1], &row.cell_ranges[1]);
@@ -777,10 +743,7 @@ pub(crate) struct EditorPrepaintState {
     whitespace_dots: Vec<PaintQuad>,
     selection_quads: Vec<PaintQuad>,
     search_match_quads: Vec<PaintQuad>,
-    diff_line_bgs: Vec<PaintQuad>,
-    diff_inline_quads: Vec<PaintQuad>,
-    inline_diff_gutter_bars: Vec<(Bounds<Pixels>, Hsla)>,
-    phantom_text_lines: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
+    inline_decoration_quads: Vec<PaintQuad>,
     line_highlight: Option<PaintQuad>,
     quote_block_bgs: Vec<PaintQuad>,
     code_block_bgs: Vec<PaintQuad>,
@@ -820,7 +783,6 @@ pub(crate) struct EditorPrepaintState {
     /// Per-cell shaped texts for table block rendering.
     table_cell_texts: Vec<(WrappedLine, Point<Pixels>, Pixels)>,
     code_block_copy_buttons: Vec<CodeBlockCopyButtonPaint>,
-    inline_diff_revert_buttons: Vec<CodeBlockCopyButtonPaint>,
     code_block_copy_hitboxes: Vec<Hitbox>,
     format_trigger_hitboxes: Vec<(Hitbox, usize)>,
     front_matter_type_hitboxes: Vec<(Hitbox, usize)>,
@@ -834,27 +796,6 @@ struct CodeBlockGroupBounds {
     top: f32,
     width: f32,
     bottom: f32,
-}
-
-fn code_block_horizontal_thumb_geometry(
-    track_left: f32,
-    track_width: f32,
-    max_scroll: f32,
-    scroll_offset: f32,
-    min_thumb_width: f32,
-) -> (f32, f32, f32) {
-    let track_width = track_width.max(1.0);
-    let max_scroll = max_scroll.max(0.0);
-    let content_width = track_width + max_scroll;
-    let thumb_width = (track_width * track_width / content_width)
-        .clamp(min_thumb_width.min(track_width), track_width);
-    let travel = (track_width - thumb_width).max(0.0);
-    let progress = if max_scroll <= 0.0 {
-        0.0
-    } else {
-        (scroll_offset / max_scroll).clamp(0.0, 1.0)
-    };
-    (track_left + travel * progress, thumb_width, travel)
 }
 
 fn code_block_text_viewport_geometry(
@@ -950,89 +891,6 @@ fn non_markdown_horizontal_extent_keeps_right_padding_and_caret_visible() {
     let max_offset = non_markdown_horizontal_max_offset(content_inset + width, 320.0, 20.0, 2.0);
     assert_eq!(max_offset, 250.0);
     assert_eq!(content_inset + width - max_offset + 20.0 + 2.0, 320.0);
-}
-
-struct CodeBlockCopyButtonPaint {
-    quad: PaintQuad,
-    label: Option<WrappedLine>,
-    origin: Point<Pixels>,
-    line_height: Pixels,
-    icon: Option<(Bounds<Pixels>, &'static str, Hsla)>,
-    trailing_labels: Vec<(WrappedLine, Point<Pixels>)>,
-}
-
-fn shape_preview_button(
-    window: &Window,
-    button_font: &Font,
-    button_font_size: f32,
-    button_padding_left_x: f32,
-    button_padding_right_x: f32,
-    button_padding_y: f32,
-    button_text_line_height: f32,
-    label_text: &str,
-    text_color: Hsla,
-) -> Option<(WrappedLine, f32, f32)> {
-    let label_run = TextRun {
-        len: label_text.len(),
-        font: button_font.clone(),
-        color: text_color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let label_lines = window
-        .text_system()
-        .shape_text(
-            label_text.to_string().into(),
-            px(button_font_size),
-            &[label_run],
-            None,
-            None,
-        )
-        .ok()?;
-    let label = label_lines.into_iter().next()?;
-    let button_width = f32::from(label.width()) + button_padding_left_x + button_padding_right_x;
-    let button_height = button_text_line_height + button_padding_y * 2.0;
-    Some((label, button_width, button_height))
-}
-
-fn paint_code_block_button(button: &CodeBlockCopyButtonPaint, window: &mut Window, cx: &mut App) {
-    window.paint_quad(button.quad.clone());
-    if let Some(label) = &button.label {
-        label
-            .paint(
-                button.origin,
-                button.line_height,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            )
-            .ok();
-    }
-    for (label, origin) in &button.trailing_labels {
-        label
-            .paint(
-                *origin,
-                button.line_height,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            )
-            .ok();
-    }
-    if let Some((icon_bounds, icon_path, color)) = &button.icon {
-        window
-            .paint_svg(
-                *icon_bounds,
-                (*icon_path).into(),
-                TransformationMatrix::default(),
-                *color,
-                cx,
-            )
-            .ok();
-    }
 }
 
 #[derive(Clone)]
@@ -1274,127 +1132,6 @@ fn text_clip_preserves_horizontal_scroll_limits_without_clipping_to_a_row() {
         horizontal_text_clip_bounds(row_clip, viewport),
         Bounds::new(point(px(40.0), px(30.0)), size(px(200.0), px(300.0))),
     );
-}
-
-fn diff_line_background(editor: &EditorView, line_idx: usize) -> Option<Hsla> {
-    if let Some(diff) = editor.active_git_diff_state() {
-        let row = diff.rows.get(line_idx)?;
-        return match row.kind {
-            GitDiffRowKind::Added => Some(editor.styles.selection.selection_diff_added_line_bg),
-            GitDiffRowKind::Removed => Some(editor.styles.selection.selection_diff_removed_line_bg),
-            GitDiffRowKind::Context => None,
-        };
-    }
-    // In-place working-tree diff: added/modified buffer lines get the green
-    // changed-line background. Removed lines are not in the buffer, so they are
-    // surfaced separately as phantom rows when a hunk is expanded.
-    if editor.inline_diff_line_is_changed(line_idx) {
-        return Some(editor.styles.selection.selection_diff_added_line_bg);
-    }
-    None
-}
-
-fn diff_hunk_label_text_color(editor: &EditorView, line_idx: usize) -> Option<Hsla> {
-    let row = editor.active_git_diff_state()?.rows.get(line_idx)?;
-    row.is_hunk_label.then_some(
-        editor
-            .styles
-            .editor
-            .editor_diff_collapsed_line_label_text_color,
-    )
-}
-
-fn diff_table_syntax_color_ranges(
-    line_content: &str,
-    table_info: &crate::markdown::TableLineInfo,
-) -> Vec<Range<usize>> {
-    let line_len = line_content.len();
-    if table_info.is_separator {
-        return (line_len > 0).then_some(0..line_len).into_iter().collect();
-    }
-
-    let mut ranges = Vec::new();
-    let mut cursor = 0usize;
-    for cell_range in &table_info.cell_ranges {
-        let start = cell_range.start.min(line_len);
-        let end = cell_range.end.min(line_len).max(start);
-        if cursor < start {
-            ranges.push(cursor..start);
-        }
-        cursor = end;
-    }
-    if cursor < line_len {
-        ranges.push(cursor..line_len);
-    }
-    ranges
-}
-
-fn apply_display_text_color_ranges(
-    runs: &mut Vec<TextRun>,
-    display_text: &str,
-    ranges: &[Range<usize>],
-    color: Hsla,
-) {
-    if runs.is_empty() || display_text.is_empty() || ranges.is_empty() {
-        return;
-    }
-
-    let mut byte_colors: Vec<Option<Hsla>> = vec![None; display_text.len()];
-    for range in ranges {
-        let start = range.start.min(display_text.len());
-        let end = range.end.min(display_text.len()).max(start);
-        for entry in byte_colors.iter_mut().take(end).skip(start) {
-            *entry = Some(color);
-        }
-    }
-
-    let original_runs = std::mem::take(runs);
-    let mut styled_runs = Vec::with_capacity(original_runs.len());
-    let mut run_start = 0usize;
-    for run in original_runs {
-        let run_end = run_start + run.len;
-        let mut segment_start = run_start;
-        let mut segment_color = byte_colors
-            .get(run_start)
-            .copied()
-            .flatten()
-            .unwrap_or(run.color);
-        let mut cursor = run_start;
-
-        while cursor < run_end {
-            let next = display_text[cursor..run_end]
-                .chars()
-                .next()
-                .map(|ch| cursor + ch.len_utf8())
-                .unwrap_or(run_end);
-            let next_color = if next < run_end {
-                byte_colors
-                    .get(next)
-                    .copied()
-                    .flatten()
-                    .unwrap_or(run.color)
-            } else {
-                segment_color
-            };
-            if next < run_end && next_color != segment_color {
-                let mut segment_run = run.clone();
-                segment_run.len = next - segment_start;
-                segment_run.color = segment_color;
-                styled_runs.push(segment_run);
-                segment_start = next;
-                segment_color = next_color;
-            }
-            cursor = next;
-        }
-
-        let mut segment_run = run;
-        segment_run.len = run_end - segment_start;
-        segment_run.color = segment_color;
-        styled_runs.push(segment_run);
-        run_start = run_end;
-    }
-
-    *runs = styled_runs;
 }
 
 fn inset_bounds_vertically(bounds: Bounds<Pixels>, inset: Pixels) -> Bounds<Pixels> {
@@ -1762,9 +1499,10 @@ pub(super) fn push_front_matter_group_paint(
             if clip.size.width <= px(0.0) || clip.size.height <= px(0.0) {
                 return;
             }
-            let gap = editor.scaled(FRONT_MATTER_LIST_DELETE_GAP_PX);
-            let delete_width = editor.scaled(FRONT_MATTER_LIST_DELETE_WIDTH_PX);
-            let item_gap = editor.scaled(FRONT_MATTER_LIST_ITEM_GAP_PX);
+            let gap = editor.scaled(editor.styles.self_drawn.front_matter_list_delete_gap_px);
+            let delete_width =
+                editor.scaled(editor.styles.self_drawn.front_matter_list_delete_width_px);
+            let item_gap = editor.scaled(editor.styles.self_drawn.front_matter_list_item_gap_px);
             let source = buffer.text();
             let mut shaped_items = Vec::new();
             let mut extent = 0.0;
@@ -1794,7 +1532,7 @@ pub(super) fn push_front_matter_group_paint(
                 window,
                 "×",
                 font,
-                editor.theme.text_secondary,
+                editor.styles.self_drawn.colors.front_matter_delete,
                 font_size,
                 0.0,
             );
@@ -2032,7 +1770,7 @@ fn push_unordered_list_marker_paint(
     }
 }
 
-fn push_diff_inline_highlight_quads(
+fn push_inline_highlight_quads(
     quads: &mut Vec<PaintQuad>,
     spans: &[Range<usize>],
     display_text: &str,
@@ -2330,8 +2068,6 @@ fn build_precise_table_layout(
             0,
             font_size,
             theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::BOLD,
             list_marker_text_color,
@@ -2940,183 +2676,6 @@ fn push_inline_text_overlay(
     overlays.push((shaped, overlay_origin, overlay_line_height));
 }
 
-fn push_rendered_inline_overlays(
-    editor: &EditorView,
-    window: &mut Window,
-    decoration: &crate::markdown::LineDecoration,
-    line_content: &str,
-    display_text: &str,
-    buffer_to_display: &[usize],
-    active_ranges: &[Range<usize>],
-    wrapped: &WrappedLine,
-    body_font: &Font,
-    body_cjk_font: &Font,
-    theme: &Theme,
-    font_size: f32,
-    content_x: f32,
-    text_line_top: f32,
-    indent_px: f32,
-    line_height: f32,
-    inline_svgs: &mut Vec<(Bounds<Pixels>, &'static str, Hsla)>,
-    inline_overlays: &mut Vec<(ShapedLine, Point<Pixels>, Pixels)>,
-) {
-    if let Some(callout_kind) = decoration.callout_kind
-        && let Some(replacement) = decoration.display_replacements.iter().find(|replacement| {
-            line_content
-                .get(replacement.source_range.clone())
-                .is_some_and(|source| source.trim_start().starts_with("[!"))
-        })
-        && !helpers::active_ranges_intersect(active_ranges, &replacement.trigger_range)
-    {
-        let disp_start =
-            helpers::buffer_to_display_offset(buffer_to_display, replacement.source_range.start);
-        let disp_end = (disp_start + callout_icon_placeholder_len(&replacement.display_text))
-            .min(display_text.len());
-        if let (Some(pos_start), Some(pos_end)) = (
-            wrapped.position_for_index(disp_start, px(line_height)),
-            wrapped.position_for_index(disp_end, px(line_height)),
-        ) && pos_start.y == pos_end.y
-        {
-            let indent_start = helpers::indent_for_y(indent_px, pos_start.y, line_height);
-            // Left-align the callout icon (no left gap) and size it to fill the
-            // placeholder minus a small style-defined gap to the label, so the
-            // icon→label spacing is controlled from style.rs.
-            let callout_gap = editor.scaled(
-                editor
-                    .styles
-                    .quote_block
-                    .quote_block_callout_icon_label_gap_px,
-            );
-            let display_width = f32::from(pos_end.x - pos_start.x);
-            let quote_styles = &editor.styles.quote_block;
-            let icon_size = callout_icon_size(
-                display_width - callout_gap,
-                font_size,
-                line_height,
-                quote_styles.quote_block_callout_icon_size_factor,
-                editor.scaled(quote_styles.quote_block_callout_icon_min_px),
-                quote_styles.quote_block_callout_icon_max_line_height_factor,
-            );
-            let icon_x = content_x + indent_start + f32::from(pos_start.x);
-            let row_height = f32::from(wrapped.row_height(
-                wrapped.row_for_y(pos_start.y, px(line_height)),
-                px(line_height),
-            ));
-            let icon_y = text_line_top + f32::from(pos_start.y) + (row_height - icon_size) / 2.0;
-            inline_svgs.push((
-                Bounds::new(
-                    point(px(icon_x), px(icon_y)),
-                    size(px(icon_size), px(icon_size)),
-                ),
-                callout_icon_path(callout_kind),
-                editor.styles.quote_block.quote_block_callout_icon_color,
-            ));
-        }
-    }
-
-    for superscript_range in &decoration.superscript_spans {
-        if !helpers::inline_range_is_collapsed(decoration, superscript_range, active_ranges) {
-            continue;
-        }
-        let disp_start =
-            helpers::buffer_to_display_offset(buffer_to_display, superscript_range.start);
-        let disp_end = helpers::buffer_to_display_offset(buffer_to_display, superscript_range.end);
-        push_inline_text_overlay(
-            inline_overlays,
-            window,
-            wrapped,
-            line_content
-                .get(superscript_range.clone())
-                .unwrap_or_default(),
-            disp_start..disp_end,
-            body_font,
-            body_cjk_font,
-            theme.syntax_marker,
-            font_size,
-            editor.styles.editor.editor_superscript_scale_factor,
-            InlineOverlayVerticalAlign::Top(
-                editor.scaled(editor.styles.editor.editor_superscript_offset_px),
-            ),
-            false,
-            content_x,
-            text_line_top,
-            indent_px,
-            line_height,
-        );
-    }
-
-    for subscript_range in &decoration.subscript_spans {
-        if !helpers::inline_range_is_collapsed(decoration, subscript_range, active_ranges) {
-            continue;
-        }
-        let disp_start =
-            helpers::buffer_to_display_offset(buffer_to_display, subscript_range.start);
-        let disp_end = helpers::buffer_to_display_offset(buffer_to_display, subscript_range.end);
-        push_inline_text_overlay(
-            inline_overlays,
-            window,
-            wrapped,
-            line_content
-                .get(subscript_range.clone())
-                .unwrap_or_default(),
-            disp_start..disp_end,
-            body_font,
-            body_cjk_font,
-            theme.syntax_marker,
-            font_size,
-            editor.styles.editor.editor_subscript_scale_factor,
-            InlineOverlayVerticalAlign::Bottom(
-                editor.scaled(editor.styles.editor.editor_subscript_offset_px),
-            ),
-            false,
-            content_x,
-            text_line_top,
-            indent_px,
-            line_height,
-        );
-    }
-
-    if decoration.footnote_definition_label.is_none() {
-        for footnote_reference in &decoration.footnote_references {
-            if !helpers::inline_range_is_collapsed(
-                decoration,
-                &footnote_reference.collapsed_range,
-                active_ranges,
-            ) {
-                continue;
-            }
-            let disp_start = helpers::buffer_to_display_offset(
-                buffer_to_display,
-                footnote_reference.collapsed_range.start,
-            );
-            let disp_end = helpers::buffer_to_display_offset(
-                buffer_to_display,
-                footnote_reference.collapsed_range.end,
-            );
-            push_inline_text_overlay(
-                inline_overlays,
-                window,
-                wrapped,
-                line_content
-                    .get(footnote_reference.collapsed_range.clone())
-                    .unwrap_or_default(),
-                disp_start..disp_end,
-                body_font,
-                body_cjk_font,
-                theme.link,
-                font_size,
-                editor.styles.editor.editor_superscript_scale_factor,
-                InlineOverlayVerticalAlign::Offset(-line_height * 0.14),
-                false,
-                content_x,
-                text_line_top,
-                indent_px,
-                line_height,
-            );
-        }
-    }
-}
-
 fn inline_math_image_bounds(
     placeholder: Bounds<Pixels>,
     natural_size: gpui::Size<Pixels>,
@@ -3689,24 +3248,6 @@ mod mode_prepaint_tests {
     }
 
     #[test]
-    fn document_mode_prepaint_remeasures_phantom_padding_without_a_scroll_delta() {
-        let mut measured_phantom_height = 0.0;
-        let mut attempts = 0;
-        let painted_height = reconciled_editor_prepaint(true, |frame| {
-            attempts += 1;
-            let height_used_by_layout = measured_phantom_height;
-            let changed = measured_phantom_height != 84.0;
-            measured_phantom_height = 84.0;
-            if frame.should_retry(900.0, 900.0, changed) {
-                return Err(());
-            }
-            Ok(height_used_by_layout)
-        });
-        assert_eq!(attempts, 2);
-        assert_eq!(painted_height, 84.0);
-    }
-
-    #[test]
     fn document_mode_prepaint_bounds_attempts_and_retains_per_frame_work_budget() {
         let mut attempts = 0;
         let mut preview_builds = 0;
@@ -3821,7 +3362,7 @@ impl EditorElement {
             if !editor.pending_scroll_to_cursor
                 || editor.pending_center_cursor_in_view
                 || editor.pending_preview_reveal.is_some()
-                || (editor.table_cursor_cell().is_some() && !editor.active_tab_is_diff())
+                || (editor.table_cursor_cell().is_some())
                 // A live typing guard means the end-of-prepaint restore will
                 // cancel this scroll when the cursor stays on its visual
                 // line; resolving it here first would snap the view to the
@@ -4187,25 +3728,8 @@ impl EditorElement {
         let mut table_border_paths: Vec<(Path<Pixels>, Hsla)> = Vec::new();
         let mut table_bgs: Vec<PaintQuad> = Vec::new();
         let table_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)> = Vec::new();
-        let mut diff_line_bgs: Vec<PaintQuad> = Vec::new();
-        let mut diff_inline_quads: Vec<PaintQuad> = Vec::new();
-        // In-place (working-tree) diff: left-edge indicator bars plus the
-        // per-visible-line geometry used to position them and their hit areas.
-        let mut inline_diff_gutter_bars: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
-        let mut inline_diff_line_geometry: Vec<(usize, f32, f32)> = Vec::new();
-        let mut inline_diff_gutter_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
-        let mut inline_diff_hunk_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
-        let mut inline_diff_revert_areas_local: Vec<(Bounds<Pixels>, usize)> = Vec::new();
-        let mut inline_diff_revert_buttons: Vec<CodeBlockCopyButtonPaint> = Vec::new();
-        // Read-only removed rows shaped for expanded inline-diff hunks.
-        let mut phantom_text_lines: Vec<(WrappedLine, Point<Pixels>, Pixels)> = Vec::new();
-        // Measured total height of the soft-wrapped removed rows anchored above /
-        // below each line, written back so `block_padding_for_line` reserves the
-        // right amount on the next frame.
-        let mut phantom_above_heights: HashMap<usize, f32> = HashMap::new();
-        let mut phantom_below_heights: HashMap<usize, f32> = HashMap::new();
-        // Per-removed-row geometry for read-only character-level selection.
-        let mut phantom_row_hits_local: Vec<PhantomRowHit> = Vec::new();
+        let mut inline_decoration_quads: Vec<PaintQuad> = Vec::new();
+        let mut visible_line_geometry: Vec<(usize, f32, f32)> = Vec::new();
         let mut table_cell_texts: Vec<(WrappedLine, Point<Pixels>, Pixels)> = Vec::new();
         let mut table_click_areas_local: Vec<(Bounds<Pixels>, usize, usize, usize)> = Vec::new();
         let mut table_col_handle_areas_local: Vec<(Bounds<Pixels>, usize, usize)> = Vec::new();
@@ -4531,7 +4055,6 @@ impl EditorElement {
             let can_reuse_non_markdown_cached_line = editor.active_tab_is_non_markdown_text()
                 && !is_cursor_line_early
                 && !line_has_block_preview
-                && !editor.inline_diff_is_phantom_anchor(line_idx)
                 && cached_line.is_some_and(|cached| {
                     non_markdown_cached_line_can_reuse(cached, non_markdown_cached_wrap_width)
                 });
@@ -4597,13 +4120,6 @@ impl EditorElement {
             }
 
             let decoration = decorations.get(line_idx).cloned().unwrap_or_default();
-            let mut decoration = decoration;
-            // Overlay in-place working-tree diff highlights onto the live buffer
-            // line. Removed spans stay empty (removed content is shown as phantom
-            // rows when a hunk is expanded), only added/changed chars highlight.
-            if let Some(added_spans) = editor.inline_diff_added_spans_for_line(line_idx) {
-                decoration.diff_added_spans = added_spans;
-            }
             let block_type = &decoration.block_type;
             let font_size = editor.font_size_for_block(block_type);
             let line_height = editor.line_height_for_block(block_type);
@@ -4924,7 +4440,10 @@ impl EditorElement {
                                 .is_some_and(|table| table.is_separator)),
                     editor_left + editor.padding_left(),
                     wrap_width,
-                    editor.scaled(1.0),
+                    crate::ui::self_drawn::FrontMatterControl::column_width(
+                        &editor.styles.self_drawn,
+                        editor.scaled(1.0),
+                    ),
                 );
 
             let table_width_chars = if *block_type == BlockType::Table && !is_front_matter_line {
@@ -4989,7 +4508,7 @@ impl EditorElement {
                     _last_line_height = total_line_height;
                     continue;
                 }
-                inline_diff_line_geometry.push((line_idx, line_top, total_line_height));
+                visible_line_geometry.push((line_idx, line_top, total_line_height));
 
                 let mut runs = cached.base_runs.clone();
                 helpers::apply_search_match_text_styles(
@@ -5083,8 +4602,9 @@ impl EditorElement {
                     editor.fold_range_for_line(line_idx)
                 };
                 if fold_range.is_some() {
-                    let fi_size = editor.scaled(gutter_styles.gutter_fold_icon_size_px);
-                    let fi_hit_padding = editor.scaled(gutter_styles.gutter_fold_hit_padding_px);
+                    let fi_size = editor.scaled(editor.styles.self_drawn.gutter_fold_icon_size_px);
+                    let fi_hit_padding =
+                        editor.scaled(editor.styles.self_drawn.gutter_fold_hit_padding_px);
                     let fi_x = editor.gutter_icon_x(editor_left, fi_size);
                     let fi_y = text_line_top
                         + (f32::from(cached.wrapped_line.row_height(0, px(line_height))) - fi_size)
@@ -5099,19 +4619,19 @@ impl EditorElement {
                             total_line_height,
                         );
                     let fi_alpha = if is_folded {
-                        gutter_styles.gutter_fold_folded_opacity
+                        editor.styles.self_drawn.gutter_fold_folded_opacity
                     } else if is_hovered {
-                        gutter_styles.gutter_fold_hover_opacity * reveal
+                        editor.styles.self_drawn.gutter_fold_hover_opacity * reveal
                     } else {
-                        0.0
+                        editor.styles.self_drawn.gutter_fold_idle_opacity
                     };
                     if fi_alpha > 0.0 {
                         let icon_bounds =
                             Bounds::new(point(px(fi_x), px(fi_y)), size(px(fi_size), px(fi_size)));
                         let mut fi_color = if is_folded {
-                            gutter_styles.gutter_fold_folded_color
+                            editor.styles.self_drawn.colors.gutter_fold_folded_color
                         } else {
-                            gutter_styles.gutter_fold_hover_color
+                            editor.styles.self_drawn.colors.gutter_fold_hover_color
                         };
                         fi_color.a = fi_alpha;
                         gutter_fold_icons.push((
@@ -5137,19 +4657,8 @@ impl EditorElement {
                     ));
                 }
 
-                if let Some(diff_bg) = diff_line_background(editor, line_idx) {
-                    diff_line_bgs.push(fill(
-                        Bounds::new(
-                            point(px(origin_x), px(line_top)),
-                            size(px(viewport_width), px(total_line_height)),
-                        ),
-                        diff_bg,
-                    ));
-                }
-
-                let selection_styles = &editor.styles.selection;
                 push_inline_code_background_quads(
-                    &mut diff_inline_quads,
+                    &mut inline_decoration_quads,
                     &decoration,
                     &cached.display_text,
                     line_content.len(),
@@ -5165,50 +4674,6 @@ impl EditorElement {
                     px(editor.scaled(editor.styles.editor.editor_inline_code_bg_x_padding_px)),
                     px(editor.scaled(editor.styles.editor.editor_inline_code_bg_radius_px)),
                     px(editor.scaled(editor.styles.editor.editor_inline_code_bg_y_inset_px)),
-                    editor_styles.editor_letter_spacing_px,
-                    window,
-                );
-                push_diff_inline_highlight_quads(
-                    &mut diff_inline_quads,
-                    &decoration.diff_removed_spans,
-                    &cached.display_text,
-                    line_content.len(),
-                    &cached.buffer_to_display,
-                    &runs,
-                    &cached.wrapped_line,
-                    content_x,
-                    text_line_top,
-                    line_height,
-                    font_size,
-                    cached.indent_px,
-                    selection_styles.selection_diff_removed_inline_bg,
-                    selection_styles.selection_diff_removed_inline_border_color,
-                    editor.scaled(selection_styles.selection_diff_inline_border_width_px),
-                    px(0.0),
-                    px(0.0),
-                    px(0.0),
-                    editor_styles.editor_letter_spacing_px,
-                    window,
-                );
-                push_diff_inline_highlight_quads(
-                    &mut diff_inline_quads,
-                    &decoration.diff_added_spans,
-                    &cached.display_text,
-                    line_content.len(),
-                    &cached.buffer_to_display,
-                    &runs,
-                    &cached.wrapped_line,
-                    content_x,
-                    text_line_top,
-                    line_height,
-                    font_size,
-                    cached.indent_px,
-                    selection_styles.selection_diff_added_inline_bg,
-                    selection_styles.selection_diff_added_inline_border_color,
-                    editor.scaled(selection_styles.selection_diff_inline_border_width_px),
-                    px(0.0),
-                    px(0.0),
-                    px(0.0),
                     editor_styles.editor_letter_spacing_px,
                     window,
                 );
@@ -5337,7 +4802,7 @@ impl EditorElement {
                         if sel_start_on_line < sel_end_on_line {
                             let buf_start_col = sel_start_on_line - line_start_offset;
                             let buf_end_col = sel_end_on_line - line_start_offset;
-                            push_diff_inline_highlight_quads(
+                            push_inline_highlight_quads(
                                 &mut search_match_quads,
                                 &[buf_start_col..buf_end_col],
                                 &cached.display_text,
@@ -5459,8 +4924,8 @@ impl EditorElement {
                         }
                     }
                     if !line_spans.is_empty() {
-                        push_diff_inline_highlight_quads(
-                            &mut diff_inline_quads,
+                        push_inline_highlight_quads(
+                            &mut inline_decoration_quads,
                             &line_spans,
                             &cached.display_text,
                             line_content.len(),
@@ -5485,7 +4950,6 @@ impl EditorElement {
                 }
 
                 if editor.selected_handle.is_none()
-                    && editor.phantom_selection.is_none()
                     && window.is_window_active()
                     && editor.focus_handle.is_focused(window)
                     && editor.focused_sidebar_path.is_none()
@@ -5644,7 +5108,6 @@ impl EditorElement {
                 _last_line_height = total_line_height;
                 continue;
             }
-            let active_tab_is_diff = editor.active_tab_is_diff();
             let front_matter_separator_line = decoration
                 .table_info
                 .as_ref()
@@ -5658,11 +5121,6 @@ impl EditorElement {
                     || (is_front_matter_line
                         && helpers::front_matter_row_is_active(&active_ranges, line_content.len()))
             };
-            let diff_table_syntax_line = active_tab_is_diff
-                && decoration
-                    .table_info
-                    .as_ref()
-                    .is_some_and(|ti| !ti.is_front_matter);
             let cursor_in_preview_source = |preview: &crate::markdown::BlockPreview| {
                 (preview.start_line..=preview.end_line).contains(&cursor_line)
                     && preview.source_range.start <= cursor.offset
@@ -5685,10 +5143,7 @@ impl EditorElement {
                         search_reveal_range.as_ref(),
                     )
                 });
-            let block_preview_active = block_preview_code_mode
-                || (syntax_expansion_allowed
-                    && active_tab_is_diff
-                    && decoration.block_preview.is_some());
+            let block_preview_active = block_preview_code_mode;
             let collapsed_block_preview = decoration
                 .block_preview
                 .as_ref()
@@ -5754,16 +5209,10 @@ impl EditorElement {
                 ));
                 continue;
             }
-            let mut render_decoration_override = diff_table_syntax_line.then(|| {
-                let mut render_decoration = crate::markdown::LineDecoration::default();
-                render_decoration.block_type = BlockType::CodeBlock;
-                render_decoration.diff_added_spans = decoration.diff_added_spans.clone();
-                render_decoration.diff_removed_spans = decoration.diff_removed_spans.clone();
-                render_decoration
-            });
+            let mut render_decoration_override = None;
             if render_decoration_override.is_none()
                 && !decoration.inline_math_spans.is_empty()
-                && (*block_type != BlockType::Table || active_tab_is_diff)
+                && (*block_type != BlockType::Table)
             {
                 let mut dynamic_decoration = decoration.clone();
                 let placeholder_unit_width =
@@ -5856,8 +5305,6 @@ impl EditorElement {
                     collapsed_task_prefix_display_columns,
                     font_size,
                     theme,
-                    editor.styles.selection.selection_diff_added_inline_bg,
-                    editor.styles.selection.selection_diff_removed_inline_bg,
                     editor.styles.wiki_link.wiki_link_text_color,
                     editor.styles.wiki_link.wiki_link_text_weight,
                     editor.styles.editor.editor_list_marker_text_color,
@@ -5916,20 +5363,6 @@ impl EditorElement {
                         editor.styles.search.search_match_text_color,
                         editor.styles.search.search_match_active_text_color,
                     );
-                }
-                if diff_table_syntax_line && let Some(table_info) = decoration.table_info.as_ref() {
-                    let syntax_ranges = diff_table_syntax_color_ranges(line_content, table_info);
-                    apply_display_text_color_ranges(
-                        &mut runs,
-                        &display_text,
-                        &syntax_ranges,
-                        theme.syntax_marker,
-                    );
-                }
-                if let Some(text_color) = diff_hunk_label_text_color(editor, line_idx) {
-                    for run in &mut runs {
-                        run.color = text_color;
-                    }
                 }
                 runs
             };
@@ -6289,7 +5722,7 @@ impl EditorElement {
                 .unwrap_or(0.0);
 
             // Compute table block extra height for header line (table rendered as block below)
-            let table_extra_height = if *block_type == BlockType::Table && !active_tab_is_diff {
+            let table_extra_height = if *block_type == BlockType::Table {
                 if let Some(ref ti) = decoration.table_info {
                     if ti.is_header && !ti.is_front_matter {
                         let layout = table_layout_cache
@@ -6315,7 +5748,9 @@ impl EditorElement {
                                         checkbox_text_gap_px,
                                     ),
                                     task_source_indent_step_chars,
-                                    editor.scaled(table_styles.table_border_track_width_px),
+                                    editor.scaled(
+                                        editor.styles.self_drawn.table_border_track_width_px,
+                                    ),
                                     &body_font,
                                     &body_cjk_font,
                                     &monospace_font,
@@ -6385,7 +5820,7 @@ impl EditorElement {
             // this in sync with `EditorView::text_y_offset_for_line`.
             let text_line_top = line_top + block_padding_top + image_extra_height;
             if line_bottom >= origin_y && line_top <= origin_y + viewport_height {
-                inline_diff_line_geometry.push((line_idx, line_top, total_line_height));
+                visible_line_geometry.push((line_idx, line_top, total_line_height));
             }
             let base_content_x = if is_front_matter_line {
                 front_matter_content_left
@@ -6455,11 +5890,13 @@ impl EditorElement {
                 .map_or(line_idx, |plan| plan.group.header_line);
             if editor.active_tab_is_markdown() && !editor.active_tab_is_read_only() {
                 let viewport = bounds.intersect(&window.content_mask().bounds);
-                let icon_size = editor.scaled(LINE_FORMAT_ICON_SIZE_PX);
-                let icon_gap = editor.scaled(LINE_FORMAT_ICON_GAP_PX);
-                let content_gap = editor.scaled(LINE_FORMAT_CONTENT_GAP_PX);
+                let icon_size = editor.scaled(editor.styles.self_drawn.format_trigger_size_px);
+                let icon_gap = editor.scaled(editor.styles.self_drawn.format_trigger_gap_px);
+                let content_gap =
+                    editor.scaled(editor.styles.self_drawn.format_trigger_content_gap_px);
                 let trigger_padding = editor.scaled(4.0);
-                let fold_icon_size = editor.scaled(editor.styles.gutter.gutter_fold_icon_size_px);
+                let fold_icon_size =
+                    editor.scaled(editor.styles.self_drawn.gutter_fold_icon_size_px);
                 let has_fold_icon = (editor.fold_range_for_line(line_idx).is_some()
                     && !super::fold::front_matter_opener_hides_fold_control(
                         &editor.decorations,
@@ -6635,7 +6072,7 @@ impl EditorElement {
                 None
             };
             if let Some(ty) = front_matter_icon_type {
-                let slot_size = editor.scaled(LINE_FORMAT_ICON_SIZE_PX);
+                let slot_size = editor.scaled(editor.styles.self_drawn.format_trigger_size_px);
                 let slot_bounds = Bounds::new(
                     point(
                         px(editor_left + editor.padding_left()),
@@ -6650,10 +6087,10 @@ impl EditorElement {
                     let color = if front_matter_summary.is_none()
                         && hit_bounds.contains(&window.mouse_position())
                     {
-                        editor.theme.text_accent
+                        editor.styles.self_drawn.colors.front_matter_type_hover
                     } else {
-                        let mut color = styles.format_toolbar_icon_color;
-                        color.a *= 0.76;
+                        let mut color = editor.styles.self_drawn.colors.front_matter_type;
+                        color.a *= editor.styles.self_drawn.front_matter_type_opacity;
                         color
                     };
                     let icon_size = editor
@@ -6851,7 +6288,6 @@ impl EditorElement {
             }
             let is_active_line_number = active_line_numbers.contains(&line_idx);
             let is_table_source_row = *block_type == BlockType::Table
-                && !active_tab_is_diff
                 && decoration
                     .table_info
                     .as_ref()
@@ -6907,7 +6343,6 @@ impl EditorElement {
 
             // Code block-like background
             if matches!(block_type, BlockType::CodeBlock | BlockType::CodeBlockFence)
-                || diff_table_syntax_line
                 || rendered_block_preview.is_some()
             {
                 let corner_r = px(editor.scaled(editor.styles.code_block.code_block_radius_px));
@@ -6915,7 +6350,7 @@ impl EditorElement {
                     editor.scaled(editor.styles.code_block.code_block_fill_inset_px),
                     window,
                 );
-                let (group_start, group_end) = if is_front_matter_line || diff_table_syntax_line {
+                let (group_start, group_end) = if is_front_matter_line {
                     let table_info = decoration.table_info.as_ref();
                     let start = table_info.map(|ti| ti.table_start_line).unwrap_or(line_idx);
                     let end = table_info
@@ -6969,7 +6404,7 @@ impl EditorElement {
             }
 
             // Table rendering (independent visual block on header line)
-            if *block_type == BlockType::Table && !active_tab_is_diff {
+            if *block_type == BlockType::Table {
                 if let Some(ref ti) = decoration.table_info {
                     if ti.is_header && !ti.is_front_matter {
                         let table_styles = &editor.styles.table;
@@ -7000,7 +6435,9 @@ impl EditorElement {
                                         checkbox_text_gap_px,
                                     ),
                                     task_source_indent_step_chars,
-                                    editor.scaled(table_styles.table_border_track_width_px),
+                                    editor.scaled(
+                                        editor.styles.self_drawn.table_border_track_width_px,
+                                    ),
                                     &body_font,
                                     &body_cjk_font,
                                     &monospace_font,
@@ -7235,7 +6672,7 @@ impl EditorElement {
                             // Per-cell text shaping
                             if let Some(row_cells) = layout.cells.get(vi) {
                                 for cell_layout in row_cells {
-                                    let decoration_start = diff_inline_quads.len();
+                                    let decoration_start = inline_decoration_quads.len();
                                     let selection_start = selection_quads.len();
                                     let search_highlight_start = search_match_quads.len();
                                     if border_selection.as_ref().is_some_and(|selection| {
@@ -7362,11 +6799,6 @@ impl EditorElement {
                                             0,
                                             font_size,
                                             theme,
-                                            editor.styles.selection.selection_diff_added_inline_bg,
-                                            editor
-                                                .styles
-                                                .selection
-                                                .selection_diff_removed_inline_bg,
                                             editor.styles.wiki_link.wiki_link_text_color,
                                             editor.styles.wiki_link.wiki_link_text_weight,
                                             editor.styles.editor.editor_list_marker_text_color,
@@ -7760,7 +7192,7 @@ impl EditorElement {
                                                 );
                                             }
                                             push_inline_code_background_quads(
-                                                &mut diff_inline_quads,
+                                                &mut inline_decoration_quads,
                                                 &cell_decoration,
                                                 hard_display_text,
                                                 cell_content.len(),
@@ -7795,8 +7227,8 @@ impl EditorElement {
                                                 window,
                                             );
                                             if !cell_decoration.highlight_spans.is_empty() {
-                                                push_diff_inline_highlight_quads(
-                                                    &mut diff_inline_quads,
+                                                push_inline_highlight_quads(
+                                                    &mut inline_decoration_quads,
                                                     &cell_decoration.highlight_spans,
                                                     hard_display_text,
                                                     cell_content.len(),
@@ -7976,7 +7408,7 @@ impl EditorElement {
                                                         if match_start >= match_end {
                                                             continue;
                                                         }
-                                                        push_diff_inline_highlight_quads(
+                                                        push_inline_highlight_quads(
                                                             &mut search_match_quads,
                                                             &[match_start - cell_source_start
                                                                 ..match_end - cell_source_start],
@@ -8396,10 +7828,10 @@ impl EditorElement {
                                         point(px(table_left + cell_layout.x), px(row_y)),
                                         size(px(cell_layout.width), px(row_h)),
                                     );
-                                    if diff_inline_quads.len() > decoration_start {
+                                    if inline_decoration_quads.len() > decoration_start {
                                         clipped_table_decorations.push((
                                             cell_bounds,
-                                            diff_inline_quads.split_off(decoration_start),
+                                            inline_decoration_quads.split_off(decoration_start),
                                         ));
                                     }
                                     if selection_quads.len() > selection_start {
@@ -8430,9 +7862,8 @@ impl EditorElement {
                             }
 
                             let handle_w = layout.handle_size;
-                            let handle_bounds = Bounds::new(
-                                point(px(table_left - handle_w), px(row_y)),
-                                size(px(handle_w), px(row_h)),
+                            let handle_bounds = TableHandleControl::segment(
+                                table_left, row_y, row_h, handle_w, false,
                             );
                             if !editor.active_tab_is_read_only() {
                                 table_row_handle_areas_local.push((
@@ -8453,9 +7884,12 @@ impl EditorElement {
                                     .and_then(|row| row.get(ci))
                                     .map(|c| c.width)
                                     .unwrap_or(0.0);
-                                let handle_bounds = Bounds::new(
-                                    point(px(table_left + hx), px(table_top - handle_h)),
-                                    size(px(cell_w), px(handle_h)),
+                                let handle_bounds = TableHandleControl::segment(
+                                    table_left + hx,
+                                    table_top,
+                                    cell_w,
+                                    handle_h,
+                                    true,
                                 );
                                 if !editor.active_tab_is_read_only() {
                                     table_col_handle_areas_local.push((
@@ -8474,18 +7908,12 @@ impl EditorElement {
                                 selection.table_start_line == ti.table_start_line
                             });
                         let border_width_px =
-                            editor.scaled(table_styles.table_border_track_width_px);
+                            editor.scaled(editor.styles.self_drawn.table_border_track_width_px);
                         let outer_radius_px = table_styles.table_outer_radius_px;
                         if show_table_border {
-                            let neutral = gpui::Hsla {
-                                a: 0.25,
-                                ..table_styles.table_border_color
-                            };
-                            let active_color = gpui::Hsla {
-                                a: 0.3,
-                                ..theme.cursor
-                            };
-                            if let Some(path) = table_border_track_path(
+                            let neutral = editor.styles.self_drawn.colors.table_handle_neutral;
+                            let active_color = editor.styles.self_drawn.colors.table_handle_active;
+                            if let Some(path) = TableHandleControl::track_path(
                                 table_left,
                                 table_top,
                                 table_left + table_width,
@@ -8510,12 +7938,12 @@ impl EditorElement {
                                     });
                                 if active {
                                     table_borders.push(quad(
-                                        Bounds::new(
-                                            point(
-                                                px(table_left + hx),
-                                                px(table_top - border_width_px),
-                                            ),
-                                            size(px(cell_w), px(border_width_px)),
+                                        TableHandleControl::segment(
+                                            table_left + hx,
+                                            table_top,
+                                            cell_w,
+                                            border_width_px,
+                                            true,
                                         ),
                                         Corners::all(px(0.0)),
                                         active_color,
@@ -8538,9 +7966,12 @@ impl EditorElement {
                                     });
                                 if active {
                                     table_borders.push(quad(
-                                        Bounds::new(
-                                            point(px(table_left - border_width_px), px(row_y)),
-                                            size(px(border_width_px), px(row_h)),
+                                        TableHandleControl::segment(
+                                            table_left,
+                                            row_y,
+                                            row_h,
+                                            border_width_px,
+                                            false,
                                         ),
                                         Corners::all(px(0.0)),
                                         active_color,
@@ -8584,14 +8015,18 @@ impl EditorElement {
                                 ),
                                 Corners::all(px(0.0)),
                                 gpui::transparent_black(),
-                                px(editor.scaled(2.0)),
-                                theme.cursor,
+                                px(editor.scaled(
+                                    editor.styles.self_drawn.table_cell_selection_width_px,
+                                )),
+                                editor.styles.self_drawn.colors.table_handle_indicator,
                                 BorderStyle::default(),
                             ));
                         }
                         if let Some(drag) = &editor.table_drag {
-                            let indicator_color = theme.cursor;
-                            let indicator_width = table_styles.table_drag_indicator_width_px;
+                            let indicator_color =
+                                editor.styles.self_drawn.colors.table_handle_indicator;
+                            let indicator_width =
+                                editor.styles.self_drawn.table_drag_indicator_width_px;
                             match drag {
                                 TableDragState::DraggingColumn {
                                     source_indices,
@@ -8914,7 +8349,7 @@ impl EditorElement {
                 }
             }
 
-            if *block_type != BlockType::Table || active_tab_is_diff {
+            if *block_type != BlockType::Table {
                 push_inline_math_images(
                     render_decoration,
                     line_content,
@@ -8976,27 +8411,30 @@ impl EditorElement {
 
             // Gutter fold icon
             if !hidden_lines.contains(&line_idx) {
-                let gs = &editor.styles.gutter;
-                let fi_size = editor.scaled(gs.gutter_fold_icon_size_px);
-                let fi_hit_padding = editor.scaled(gs.gutter_fold_hit_padding_px);
+                let fi_size = editor.scaled(editor.styles.self_drawn.gutter_fold_icon_size_px);
+                let fi_hit_padding =
+                    editor.scaled(editor.styles.self_drawn.gutter_fold_hit_padding_px);
                 let markdown_fold_left_padding = if matches!(block_type, BlockType::Heading(_)) {
                     editor.scaled(editor.styles.format_toolbar.line_format_heading_icon_gap_px)
                         * 0.5
                 } else {
-                    editor.scaled(LINE_FORMAT_ICON_GAP_PX) * 0.5
+                    editor.scaled(editor.styles.self_drawn.format_trigger_gap_px) * 0.5
                 };
-                let format_icon_size = editor.scaled(LINE_FORMAT_ICON_SIZE_PX);
+                let format_icon_size =
+                    editor.scaled(editor.styles.self_drawn.format_trigger_size_px);
                 let format_icon_x = line_format_trigger_left(
                     editor_left + editor.padding_left(),
                     format_icon_size,
                     Some(fi_size),
-                    editor.scaled(LINE_FORMAT_ICON_GAP_PX),
-                    editor.scaled(LINE_FORMAT_CONTENT_GAP_PX),
+                    editor.scaled(editor.styles.self_drawn.format_trigger_gap_px),
+                    editor.scaled(editor.styles.self_drawn.format_trigger_content_gap_px),
                 );
                 let fold_icon_expanded_x = if editor.editor_uses_code_gutter() {
                     editor.gutter_icon_x(editor_left, fi_size)
                 } else {
-                    format_icon_x + format_icon_size + editor.scaled(LINE_FORMAT_ICON_GAP_PX)
+                    format_icon_x
+                        + format_icon_size
+                        + editor.scaled(editor.styles.self_drawn.format_trigger_gap_px)
                 };
 
                 if fold_range.is_some() {
@@ -9030,17 +8468,18 @@ impl EditorElement {
                             is_hovered,
                             editor.format_trigger_opacity,
                             if is_folded && front_matter_fold_anchor.is_none() {
-                                gs.gutter_fold_folded_opacity
+                                editor.styles.self_drawn.gutter_fold_folded_opacity
                             } else {
                                 0.0
                             },
+                            editor.styles.self_drawn.format_trigger_hover_opacity,
                         )
                     } else if is_folded {
-                        gs.gutter_fold_folded_opacity
+                        editor.styles.self_drawn.gutter_fold_folded_opacity
                     } else if is_hovered {
-                        gs.gutter_fold_hover_opacity * reveal
+                        editor.styles.self_drawn.gutter_fold_hover_opacity * reveal
                     } else {
-                        0.0
+                        editor.styles.self_drawn.gutter_fold_idle_opacity
                     };
                     if fi_alpha > 0.0 {
                         let icon_bounds = Bounds::new(
@@ -9050,9 +8489,9 @@ impl EditorElement {
                         let mut fi_color = if !editor.editor_uses_code_gutter() && is_hovered {
                             editor.styles.format_toolbar.format_toolbar_icon_color
                         } else if is_folded {
-                            gs.gutter_fold_folded_color
+                            editor.styles.self_drawn.colors.gutter_fold_folded_color
                         } else {
-                            gs.gutter_fold_hover_color
+                            editor.styles.self_drawn.colors.gutter_fold_hover_color
                         };
                         fi_color.a = fi_alpha;
                         gutter_fold_icons.push((
@@ -9125,19 +8564,18 @@ impl EditorElement {
                         text_line_top
                             + (f32::from(wrapped.row_height(0, px(line_height))) - fi_size) / 2.0
                     };
-                    let gs = &editor.styles.gutter;
                     let reveal = editor.gutter_fold_reveal.max(0.0);
                     let fold_hovered = editor.hovering_fold_line == Some(line_idx);
                     let fi_alpha = if !editor.active_tab_is_non_markdown_text() && fold_hovered {
-                        selection_toolbar::FORMAT_TRIGGER_HOVER_OPACITY
+                        editor.styles.self_drawn.format_trigger_hover_opacity
                     } else if !editor.active_tab_is_non_markdown_text() && is_hovered {
                         editor.format_trigger_opacity
                     } else if is_img_folded {
-                        gs.gutter_fold_folded_opacity
+                        editor.styles.self_drawn.gutter_fold_folded_opacity
                     } else if is_hovered {
-                        gs.gutter_fold_hover_opacity * reveal
+                        editor.styles.self_drawn.gutter_fold_hover_opacity * reveal
                     } else {
-                        0.0
+                        editor.styles.self_drawn.gutter_fold_idle_opacity
                     };
                     if fi_alpha > 0.0 {
                         let icon_bounds = Bounds::new(
@@ -9148,9 +8586,9 @@ impl EditorElement {
                             if !editor.active_tab_is_non_markdown_text() && is_hovered {
                                 editor.styles.format_toolbar.format_toolbar_icon_color
                             } else if is_img_folded {
-                                gs.gutter_fold_folded_color
+                                editor.styles.self_drawn.colors.gutter_fold_folded_color
                             } else {
-                                gs.gutter_fold_hover_color
+                                editor.styles.self_drawn.colors.gutter_fold_hover_color
                             };
                         fi_color.a = fi_alpha;
                         gutter_fold_icons.push((
@@ -9190,22 +8628,26 @@ impl EditorElement {
 
             // Image URL-edit icon
             if image_active && !editor.active_tab_is_read_only() {
-                let ie_size = editor.scaled(13.0);
-                // Follow the syntax to its true end, including the wrapped row
-                // it lands on, so folding/expanding never strands the icon.
+                let control = crate::ui::self_drawn::ImageEditControl::new(
+                    &editor.styles.self_drawn,
+                    editor.scaled(1.0),
+                    editor.hovering_image_edit_line == Some(line_idx),
+                );
+                // Syntax can end on a wrapped row; paint and pointer areas use
+                // that measured row, not the first row of the image source.
                 let syntax_end = wrapped
                     .position_for_index(display_text.len(), px(line_height))
                     .unwrap_or_default();
-                let ie_x = content_x + f32::from(syntax_end.x) + editor.scaled(10.0);
                 let row_height = f32::from(wrapped.row_height(
                     wrapped.row_for_y(syntax_end.y, px(line_height)),
                     px(line_height),
                 ));
-                let ie_y = text_line_top + f32::from(syntax_end.y) + (row_height - ie_size) / 2.0;
-                let ie_bounds =
-                    Bounds::new(point(px(ie_x), px(ie_y)), size(px(ie_size), px(ie_size)));
-                let is_hovered = editor.hovering_image_edit_line == Some(line_idx);
-                let alpha = if is_hovered { 0.55 } else { 0.7 };
+                let ie_bounds = control.bounds(
+                    content_x + f32::from(syntax_end.x),
+                    text_line_top + f32::from(syntax_end.y),
+                    row_height,
+                );
+                let alpha = control.opacity;
                 image_edit_icons.push((ie_bounds, line_idx, alpha));
                 image_edit_hit_areas_local.push((ie_bounds, line_idx));
                 editor_icon_tooltips.push((
@@ -9219,556 +8661,10 @@ impl EditorElement {
                 .table_info
                 .as_ref()
                 .is_some_and(|ti| !ti.is_front_matter && line_idx == ti.table_start_line);
-            if let Some(diff_bg) = diff_line_background(editor, line_idx) {
-                diff_line_bgs.push(fill(
-                    Bounds::new(
-                        point(px(origin_x), px(line_top)),
-                        size(px(viewport_width), px(total_line_height)),
-                    ),
-                    diff_bg,
-                ));
-            }
-            let selection_styles = &editor.styles.selection;
-            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff) {
-                push_diff_inline_highlight_quads(
-                    &mut diff_inline_quads,
-                    &decoration.diff_removed_spans,
-                    &display_text,
-                    line_content.len(),
-                    &buffer_to_display,
-                    &runs,
-                    wrapped,
-                    content_x,
-                    text_line_top,
-                    line_height,
-                    font_size,
-                    indent_px,
-                    selection_styles.selection_diff_removed_inline_bg,
-                    selection_styles.selection_diff_removed_inline_border_color,
-                    editor.scaled(selection_styles.selection_diff_inline_border_width_px),
-                    px(0.0),
-                    px(0.0),
-                    px(0.0),
-                    letter_spacing,
-                    window,
-                );
-                push_diff_inline_highlight_quads(
-                    &mut diff_inline_quads,
-                    &decoration.diff_added_spans,
-                    &display_text,
-                    line_content.len(),
-                    &buffer_to_display,
-                    &runs,
-                    wrapped,
-                    content_x,
-                    text_line_top,
-                    line_height,
-                    font_size,
-                    indent_px,
-                    selection_styles.selection_diff_added_inline_bg,
-                    selection_styles.selection_diff_added_inline_border_color,
-                    editor.scaled(selection_styles.selection_diff_inline_border_width_px),
-                    px(0.0),
-                    px(0.0),
-                    px(0.0),
-                    letter_spacing,
-                    window,
-                );
-            }
-            // Read-only phantom rows: an expanded inline-diff hunk's removed
-            // lines render in the padding band reserved by `block_padding_for_line`
-            // (above the anchor line, or below the last line for a trailing
-            // deletion). Their HEAD decorations are projected into the current
-            // document mode. They soft-wrap like live lines, but never enter
-            // the buffer. The painted band is top-aligned at the reserved height
-            // so the anchor's geometry stays consistent; the measured height is
-            // recorded for the next frame.
-            {
-                let above_rows = editor.inline_diff_phantom_removed_above(line_idx);
-                let below_rows = editor.inline_diff_phantom_removed_below(line_idx);
-                if !above_rows.is_empty() || !below_rows.is_empty() {
-                    let phantom_content_x = editor_left + editor.padding_left();
-                    let phantom_border_width =
-                        editor.scaled(selection_styles.selection_diff_inline_border_width_px);
-                    let mut render_band = |rows: &[(usize, usize, InlineDiffRemovedLine)],
-                                           band_top: f32|
-                     -> f32 {
-                        let mut row_top = band_top;
-                        for (hunk_base_start, row_in_hunk, removed) in rows {
-                            let projected_decoration = super::inline_diff::phantom_row_decoration(
-                                &removed.decoration,
-                                editor.source_mode,
-                            );
-                            let r_decoration = projected_decoration.as_ref();
-                            let mut r_active_ranges = Vec::new();
-                            helpers::expand_source_syntax(
-                                editor.source_mode,
-                                removed.text.len(),
-                                &mut r_active_ranges,
-                            );
-                            let r_font_size = editor.font_size_for_block(&r_decoration.block_type);
-                            let r_line_height =
-                                editor.line_height_for_block(&r_decoration.block_type);
-                            let row_is_front_matter = r_decoration
-                                .table_info
-                                .as_ref()
-                                .is_some_and(|table_info| table_info.is_front_matter);
-                            let row_is_block_syntax = matches!(
-                                r_decoration.block_type,
-                                BlockType::CodeBlock | BlockType::CodeBlockFence
-                            ) || row_is_front_matter;
-                            let mut row_content_x = if row_is_block_syntax {
-                                phantom_content_x
-                                    + editor.scaled(
-                                        editor.styles.code_block.code_block_text_padding_left_px,
-                                    )
-                            } else {
-                                phantom_content_x
-                            };
-                            let row_wrap_width = if row_is_block_syntax {
-                                (wrap_width
-                                    - editor.scaled(
-                                        editor.styles.code_block.code_block_text_padding_left_px,
-                                    )
-                                    - editor.scaled(
-                                        editor.styles.code_block.code_block_wrap_right_padding_px,
-                                    ))
-                                .max(editor.scaled(80.0))
-                            } else {
-                                wrap_width
-                            };
-                            let preview = r_decoration.block_preview.as_ref();
-                            if preview.is_some_and(|preview| !preview.is_anchor) {
-                                continue;
-                            }
-                            let preview_image = preview
-                                .filter(|preview| preview.is_anchor)
-                                .and_then(|preview| {
-                                    image_cache
-                                        .get(&preview.cache_key)
-                                        .and_then(|image| image.as_ref())
-                                        .map(|image| (preview, image.clone()))
-                                });
-                            let (
-                                mut display_text,
-                                display_to_buffer,
-                                buffer_to_display,
-                                prefix_collapsed,
-                            ) = if preview_image.is_some() {
-                                (
-                                    String::new(),
-                                    Vec::new(),
-                                    vec![0; removed.text.len().saturating_add(1)],
-                                    false,
-                                )
-                            } else {
-                                helpers::build_display_text(
-                                    &removed.text,
-                                    r_decoration,
-                                    &r_active_ranges,
-                                    false,
-                                    None,
-                                    table_cell_padding_chars,
-                                    collapsed_task_prefix_display_columns,
-                                    checkbox_indent_step_display_columns,
-                                    editor.styles.checkbox.checkbox_parent_prefix_chars as usize,
-                                    0,
-                                    editor.styles.editor.editor_superscript_scale_factor,
-                                    editor.styles.editor.editor_subscript_scale_factor,
-                                    editor.styles.editor.editor_superscript_scale_factor,
-                                )
-                            };
-                            editor.apply_list_display_styles(
-                                &removed.text,
-                                r_decoration,
-                                &mut display_text,
-                                prefix_collapsed,
-                            );
-                            let runs = if display_text.is_empty() {
-                                vec![TextRun {
-                                    len: 1,
-                                    font: body_font.clone(),
-                                    color: gpui::transparent_black(),
-                                    background_color: None,
-                                    underline: None,
-                                    strikethrough: None,
-                                }]
-                            } else {
-                                helpers::build_text_runs_for_display_with_language(
-                                    &display_text,
-                                    &removed.text,
-                                    &display_to_buffer,
-                                    r_decoration,
-                                    &r_active_ranges,
-                                    false,
-                                    prefix_collapsed,
-                                    &body_font,
-                                    &body_cjk_font,
-                                    &monospace_font,
-                                    &heading_font,
-                                    &heading_cjk_font,
-                                    &italic_font,
-                                    &italic_cjk_font,
-                                    collapsed_task_prefix_display_columns,
-                                    r_font_size,
-                                    theme,
-                                    selection_styles.selection_diff_added_inline_bg,
-                                    selection_styles.selection_diff_removed_inline_bg,
-                                    editor.styles.wiki_link.wiki_link_text_color,
-                                    editor.styles.wiki_link.wiki_link_text_weight,
-                                    editor.styles.editor.editor_list_marker_text_color,
-                                    editor.styles.editor.editor_list_marker_font_weight,
-                                    editor.styles.editor.editor_heading_marker_text_color,
-                                    row_is_front_matter
-                                        .then_some(editor.styles.table.front_matter_key_text_color),
-                                    false,
-                                    None,
-                                )
-                            };
-                            let shared: SharedString = if display_text.is_empty() {
-                                " ".into()
-                            } else {
-                                display_text.clone().into()
-                            };
-                            let Ok(shaped) = window.text_system().shape_text(
-                                shared,
-                                px(r_font_size),
-                                &runs,
-                                Some(px(row_wrap_width)),
-                                None,
-                            ) else {
-                                row_top += r_line_height;
-                                continue;
-                            };
-                            let Some(wrapped) = shaped.into_iter().next() else {
-                                row_top += r_line_height;
-                                continue;
-                            };
-                            let visual_lines =
-                                helpers::wrap_boundary_byte_indices(&wrapped, &display_text)
-                                    .len()
-                                    .saturating_add(1);
-                            if matches!(r_decoration.block_type, BlockType::TaskList(_))
-                                && prefix_collapsed
-                            {
-                                let prefix_bytes = helpers::compute_display_prefix_bytes(
-                                    &display_text,
-                                    &r_decoration.block_type,
-                                    prefix_collapsed,
-                                    collapsed_task_prefix_display_columns,
-                                )
-                                .min(display_text.len());
-                                let indent_px = wrapped
-                                    .position_for_index(prefix_bytes, px(r_line_height))
-                                    .map(|pos| f32::from(pos.x))
-                                    .unwrap_or(0.0);
-                                let target_prefix_width = helpers::task_prefix_target_width_px(
-                                    &removed.text,
-                                    r_font_size * editor.styles.checkbox.checkbox_size_factor,
-                                    checkbox_text_gap_px,
-                                    task_source_indent_step_chars,
-                                )
-                                .unwrap_or(indent_px);
-                                row_content_x += target_prefix_width - indent_px;
-                            }
-                            let text_height = visual_lines as f32 * r_line_height;
-                            let row_height = if let Some((preview, img_data)) = preview_image {
-                                let img_size = img_data.size(0);
-                                let img_w = img_size.width.0 as f32;
-                                let img_h = img_size.height.0 as f32;
-                                if img_w > 0.0 && img_h > 0.0 {
-                                    let (display_w, full_display_h, _, display_h) =
-                                        helpers::fit_generated_preview_size(
-                                            img_w,
-                                            img_h,
-                                            preview.kind,
-                                            text_width,
-                                            editor.scaled(
-                                                editor
-                                                    .styles
-                                                    .code_block
-                                                    .generated_preview_min_height_px,
-                                            ),
-                                            editor.scaled(
-                                                editor
-                                                    .styles
-                                                    .code_block
-                                                    .generated_preview_max_height_px,
-                                            ),
-                                            0.0,
-                                            0.0,
-                                        );
-                                    let preview_top = row_top + text_height + image_gap_top;
-                                    let img_left = if preview.kind
-                                        == crate::markdown::BlockPreviewKind::Mermaid
-                                    {
-                                        phantom_content_x + (text_width - display_w) * 0.5
-                                    } else {
-                                        phantom_content_x
-                                            + ((text_width - display_w) / 2.0).max(0.0)
-                                    };
-                                    let img_top = preview_top + (display_h - full_display_h) * 0.5;
-                                    let img_bounds = Bounds::new(
-                                        point(px(img_left), px(img_top)),
-                                        size(px(display_w), px(full_display_h)),
-                                    );
-                                    let visible_img_bounds = Bounds::new(
-                                        point(px(phantom_content_x), px(preview_top)),
-                                        size(px(text_width.max(1.0)), px(display_h.max(1.0))),
-                                    );
-                                    image_previews.push((
-                                        img_bounds,
-                                        img_data.clone(),
-                                        px(0.0),
-                                        Some(visible_img_bounds),
-                                    ));
-                                    text_height
-                                        + display_h
-                                        + image_gap_top
-                                        + r_line_height
-                                        + image_gap_top
-                                } else {
-                                    text_height
-                                }
-                            } else {
-                                text_height
-                            };
-                            push_task_checkbox_paint(
-                                editor,
-                                &r_decoration.block_type,
-                                prefix_collapsed,
-                                &display_text,
-                                &wrapped,
-                                r_font_size,
-                                r_line_height,
-                                row_content_x,
-                                row_top,
-                                row_top,
-                                row_height,
-                                collapsed_task_prefix_display_columns,
-                                None,
-                                checkbox_text_gap_px,
-                                None,
-                                &mut gutter_quads,
-                                &mut gutter_svgs,
-                                &mut checkbox_hit_areas,
-                            );
-                            push_unordered_list_marker_paint(
-                                editor,
-                                &removed.text,
-                                &r_decoration.block_type,
-                                prefix_collapsed,
-                                &wrapped,
-                                &buffer_to_display,
-                                r_font_size,
-                                r_line_height,
-                                row_content_x,
-                                phantom_content_x,
-                                row_top,
-                                &monospace_font,
-                                window,
-                                &mut unordered_list_markers,
-                            );
-                            push_rendered_inline_overlays(
-                                editor,
-                                window,
-                                r_decoration,
-                                &removed.text,
-                                &display_text,
-                                &buffer_to_display,
-                                &[],
-                                &wrapped,
-                                &body_font,
-                                &body_cjk_font,
-                                theme,
-                                r_font_size,
-                                row_content_x,
-                                row_top,
-                                0.0,
-                                r_line_height,
-                                &mut inline_svgs,
-                                &mut inline_overlays,
-                            );
-                            let row_bounds = Bounds::new(
-                                point(px(origin_x), px(row_top)),
-                                size(px(viewport_width), px(row_height)),
-                            );
-                            diff_line_bgs.push(fill(
-                                row_bounds,
-                                selection_styles.selection_diff_removed_line_bg,
-                            ));
-                            // Record geometry so a later mouse event can hit-test
-                            // this soft-wrapped removed row down to a byte offset.
-                            phantom_row_hits_local.push(PhantomRowHit {
-                                bounds: row_bounds,
-                                hunk_base_start: *hunk_base_start,
-                                row: *row_in_hunk,
-                                content_x: row_content_x,
-                                row_top,
-                                line_height: r_line_height,
-                                wrapped: wrapped.clone(),
-                                text_len: removed.text.len(),
-                                display_to_buffer: display_to_buffer.clone(),
-                            });
-                            // Read-only character-level selection + caret.
-                            if let Some(sel) = editor.phantom_selection
-                                && sel.hunk_base_start == *hunk_base_start
-                            {
-                                let text_len = removed.text.len();
-                                let clamp_off = |mut off: usize| -> usize {
-                                    off = off.min(text_len);
-                                    while off > 0 && !removed.text.is_char_boundary(off) {
-                                        off -= 1;
-                                    }
-                                    off
-                                };
-                                if !sel.is_collapsed() {
-                                    let (sr, so, er, eo) = sel.ordered();
-                                    if *row_in_hunk >= sr && *row_in_hunk <= er {
-                                        let raw_start =
-                                            if *row_in_hunk == sr { clamp_off(so) } else { 0 };
-                                        let raw_end = if *row_in_hunk == er {
-                                            clamp_off(eo)
-                                        } else {
-                                            text_len
-                                        };
-                                        let disp_start = raw_offset_to_display_offset(
-                                            &buffer_to_display,
-                                            raw_start,
-                                        )
-                                        .min(display_text.len());
-                                        let disp_end = raw_offset_to_display_offset(
-                                            &buffer_to_display,
-                                            raw_end,
-                                        )
-                                        .min(display_text.len());
-                                        if disp_start < disp_end {
-                                            selection_quads.extend(helpers::build_selection_quads(
-                                                &display_text,
-                                                &runs,
-                                                &wrapped,
-                                                disp_start,
-                                                disp_end,
-                                                row_content_x,
-                                                row_top,
-                                                r_line_height,
-                                                r_font_size,
-                                                0.0,
-                                                0.0,
-                                                theme.selection,
-                                                letter_spacing,
-                                                window,
-                                            ));
-                                        }
-                                    }
-                                }
-                                if sel.head_row == *row_in_hunk
-                                    && window.is_window_active()
-                                    && editor.focus_handle.is_focused(window)
-                                {
-                                    let head_off = clamp_off(sel.head_offset);
-                                    let display_head =
-                                        raw_offset_to_display_offset(&buffer_to_display, head_off)
-                                            .min(display_text.len());
-                                    let caret_pos = wrapped
-                                        .position_for_index(display_head, px(r_line_height))
-                                        .unwrap_or_default();
-                                    let caret_x = super::caret::caret_x_between_grapheme_centers(
-                                        &display_text,
-                                        display_head,
-                                        caret_pos,
-                                        |index| {
-                                            wrapped.position_for_index(index, px(r_line_height))
-                                        },
-                                    );
-                                    let caret_height = r_line_height
-                                        * editor.styles.cursor.cursor_height_factor.clamp(0.1, 1.0);
-                                    let caret_top = row_top
-                                        + f32::from(caret_pos.y)
-                                        + (r_line_height - caret_height) / 2.0;
-                                    let caret_width = px(editor.styles.cursor.cursor_width_px);
-                                    cursor_paints.push(super::caret::CaretPaint {
-                                        bounds: Bounds::new(
-                                            point(
-                                                px(row_content_x)
-                                                    + super::caret::centered_caret_left(
-                                                        caret_x,
-                                                        caret_width,
-                                                    ),
-                                                px(caret_top),
-                                            ),
-                                            size(caret_width, px(caret_height)),
-                                        ),
-                                        color: theme.cursor,
-                                        force_visible: editor.phantom_selecting,
-                                    });
-                                }
-                            }
-                            if !removed.removed_spans.is_empty() {
-                                push_diff_inline_highlight_quads(
-                                    &mut diff_inline_quads,
-                                    &removed.removed_spans,
-                                    &display_text,
-                                    removed.text.len(),
-                                    &buffer_to_display,
-                                    &runs,
-                                    &wrapped,
-                                    row_content_x,
-                                    row_top,
-                                    r_line_height,
-                                    r_font_size,
-                                    0.0,
-                                    selection_styles.selection_diff_removed_inline_bg,
-                                    selection_styles.selection_diff_removed_inline_border_color,
-                                    phantom_border_width,
-                                    px(0.0),
-                                    px(0.0),
-                                    px(0.0),
-                                    letter_spacing,
-                                    window,
-                                );
-                            }
-                            let row_baseline = helpers::stable_text_baseline(
-                                &helpers::line_baseline_font(
-                                    r_decoration,
-                                    false,
-                                    &body_font,
-                                    &heading_font,
-                                    &monospace_font,
-                                ),
-                                px(r_font_size),
-                                px(r_line_height),
-                                &mut text_baseline_cache,
-                                window,
-                            );
-                            let paint_origin = helpers::baseline_aligned_text_origin(
-                                &wrapped,
-                                point(px(row_content_x), px(row_top)),
-                                px(r_line_height),
-                                row_baseline,
-                            );
-                            phantom_text_lines.push((wrapped, paint_origin, px(r_line_height)));
-                            row_top += row_height;
-                        }
-                        row_top - band_top
-                    };
-                    if !above_rows.is_empty() {
-                        let reserved = editor.inline_diff_phantom_reserved_above(line_idx);
-                        let measured = render_band(&above_rows, text_line_top - reserved);
-                        phantom_above_heights.insert(line_idx, measured);
-                    }
-                    if !below_rows.is_empty() {
-                        let reserved = editor.inline_diff_phantom_reserved_below(line_idx);
-                        let measured =
-                            render_band(&below_rows, line_top + total_line_height - reserved);
-                        phantom_below_heights.insert(line_idx, measured);
-                    }
-                }
-            }
-            let inline_decoration_start = diff_inline_quads.len();
-            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff) {
+            let inline_decoration_start = inline_decoration_quads.len();
+            if !uses_table_cell_selection(block_type, &decoration) {
                 push_inline_code_background_quads(
-                    &mut diff_inline_quads,
+                    &mut inline_decoration_quads,
                     &decoration,
                     &display_text,
                     line_content.len(),
@@ -9788,11 +8684,11 @@ impl EditorElement {
                     window,
                 );
             }
-            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff)
+            if !uses_table_cell_selection(block_type, &decoration)
                 && !decoration.highlight_spans.is_empty()
             {
-                push_diff_inline_highlight_quads(
-                    &mut diff_inline_quads,
+                push_inline_highlight_quads(
+                    &mut inline_decoration_quads,
                     &decoration.highlight_spans,
                     &display_text,
                     line_content.len(),
@@ -9814,7 +8710,7 @@ impl EditorElement {
                     window,
                 );
             }
-            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff)
+            if !uses_table_cell_selection(block_type, &decoration)
                 && !selection_match_ranges.is_empty()
             {
                 let mut line_spans: Vec<std::ops::Range<usize>> = Vec::new();
@@ -9828,8 +8724,8 @@ impl EditorElement {
                     }
                 }
                 if !line_spans.is_empty() {
-                    push_diff_inline_highlight_quads(
-                        &mut diff_inline_quads,
+                    push_inline_highlight_quads(
+                        &mut inline_decoration_quads,
                         &line_spans,
                         &display_text,
                         line_content.len(),
@@ -9852,7 +8748,7 @@ impl EditorElement {
                     );
                 }
             }
-            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff)
+            if !uses_table_cell_selection(block_type, &decoration)
                 && !bracket_match_ranges.is_empty()
             {
                 let mut line_spans: Vec<std::ops::Range<usize>> = Vec::new();
@@ -9866,8 +8762,8 @@ impl EditorElement {
                     }
                 }
                 if !line_spans.is_empty() {
-                    push_diff_inline_highlight_quads(
-                        &mut diff_inline_quads,
+                    push_inline_highlight_quads(
+                        &mut inline_decoration_quads,
                         &line_spans,
                         &display_text,
                         line_content.len(),
@@ -9891,11 +8787,11 @@ impl EditorElement {
                 }
             }
             if let Some(clip_bounds) = nowrap_clip_bounds
-                && diff_inline_quads.len() > inline_decoration_start
+                && inline_decoration_quads.len() > inline_decoration_start
             {
                 clipped_code_block_decorations.push((
                     clip_bounds,
-                    diff_inline_quads.split_off(inline_decoration_start),
+                    inline_decoration_quads.split_off(inline_decoration_start),
                 ));
             }
             if editor.selected_handle.is_none()
@@ -9934,7 +8830,7 @@ impl EditorElement {
             // ordinary folded-line path as well selects synthetic inter-cell
             // padding and produces duplicate blocks around cell boundaries.
             let selection_start = selection_quads.len();
-            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff) {
+            if !uses_table_cell_selection(block_type, &decoration) {
                 // Selection quads — iterate over all cursors (primary + extra)
                 for sr in &all_sel_ranges {
                     if sr.start == sr.end {
@@ -10039,7 +8935,7 @@ impl EditorElement {
 
             // Search match quads
             let search_highlight_start = search_match_quads.len();
-            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff)
+            if !uses_table_cell_selection(block_type, &decoration)
                 && !editor.search_matches.is_empty()
             {
                 let match_bg = editor.styles.search.search_match_bg;
@@ -10054,7 +8950,7 @@ impl EditorElement {
                     if sel_start_on_line < sel_end_on_line {
                         let buf_start_col = sel_start_on_line - line_start_offset;
                         let buf_end_col = sel_end_on_line - line_start_offset;
-                        push_diff_inline_highlight_quads(
+                        push_inline_highlight_quads(
                             &mut search_match_quads,
                             &[buf_start_col..buf_end_col],
                             &display_text,
@@ -10080,7 +8976,7 @@ impl EditorElement {
                 }
             }
 
-            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff)
+            if !uses_table_cell_selection(block_type, &decoration)
                 && editor.current_file_path == editor.workspace_search_highlight_path
             {
                 let match_bg = editor.styles.search.search_match_bg;
@@ -10118,7 +9014,7 @@ impl EditorElement {
                     }
                 }
             }
-            if !uses_table_cell_selection(block_type, &decoration, active_tab_is_diff)
+            if !uses_table_cell_selection(block_type, &decoration)
                 && editor.current_file_path == editor.outline_flash_highlight_path
             {
                 let match_bg = editor.styles.search.search_match_bg;
@@ -10167,7 +9063,6 @@ impl EditorElement {
             // Cursor bars — paint for all cursors (primary + extra)
             // Skip for table lines — table cursor is rendered within the table block
             if editor.selected_handle.is_none()
-                && editor.phantom_selection.is_none()
                 && (*block_type != BlockType::Table || is_front_matter_line)
                 && window.is_window_active()
                 && editor.focus_handle.is_focused(window)
@@ -10544,12 +9439,11 @@ impl EditorElement {
             }
 
             // Determine if this is a table row with per-cell rendering
-            let is_table_block_line =
-                uses_table_cell_selection(block_type, &decoration, active_tab_is_diff)
-                    && decoration
-                        .table_info
-                        .as_ref()
-                        .is_some_and(|ti| !ti.is_separator);
+            let is_table_block_line = uses_table_cell_selection(block_type, &decoration)
+                && decoration
+                    .table_info
+                    .as_ref()
+                    .is_some_and(|ti| !ti.is_separator);
 
             lines.push(PrepaintLine {
                 wrapped: wrapped.clone(),
@@ -10588,16 +9482,26 @@ impl EditorElement {
 
         let mut code_block_copy_hitboxes = Vec::new();
         let code_block_styles = &editor.styles.code_block;
-        let preview_button_gap = editor.scaled(code_block_styles.generated_preview_action_gap_px);
-        let button_font_size = editor.scaled(code_block_styles.code_block_copy_button_font_size_px);
-        let button_padding_x = editor.scaled(code_block_styles.code_block_copy_button_padding_x_px);
-        let button_padding_y = editor.scaled(code_block_styles.code_block_copy_button_padding_y_px);
-        let button_text_line_height = button_font_size * 1.2;
-        let button_right = editor.scaled(code_block_styles.code_block_copy_button_right_px);
-        let button_top = editor.scaled(code_block_styles.code_block_copy_button_top_px);
-        let button_radius = px(editor.scaled(code_block_styles.code_block_copy_button_radius_px));
-        let button_border_width =
-            px(editor.scaled(code_block_styles.code_block_copy_button_border_width_px));
+        let button_metrics = PaintedButtonMetrics::new(
+            &editor.styles.self_drawn,
+            editor.scaled(1.0),
+            PaintedButtonRole::Copy,
+        );
+        let action_metrics = PaintedButtonMetrics::new(
+            &editor.styles.self_drawn,
+            editor.scaled(1.0),
+            PaintedButtonRole::PreviewAction,
+        );
+        let preview_button_gap =
+            editor.scaled(editor.styles.self_drawn.generated_preview_action_gap_px);
+        let button_font_size = button_metrics.font_size;
+        let button_padding_x = button_metrics.padding_x;
+        let button_padding_y = button_metrics.padding_y;
+        let button_text_line_height = button_metrics.line_height;
+        let button_right = editor.scaled(editor.styles.self_drawn.code_block_copy_button_right_px);
+        let button_top = editor.scaled(editor.styles.self_drawn.code_block_copy_button_top_px);
+        let button_radius = button_metrics.radius;
+        let button_border_width = button_metrics.border_width;
         let button_min_left = editor.scaled(code_block_styles.code_block_text_padding_left_px);
         let mut button_font = text_style.font();
         button_font.family = configured_font_family(editor.styles.ui_font_family);
@@ -10607,30 +9511,45 @@ impl EditorElement {
         );
         let overlay_active = editor.preview_overlay_state().is_some();
         let preview_outer_button_padding_x = button_padding_x;
-        let preview_inner_button_padding_x =
-            editor.scaled(code_block_styles.generated_preview_action_inner_padding_x_px);
+        let preview_inner_button_padding_x = action_metrics.padding_x;
         let preview_action_padding = editor
-            .scaled(code_block_styles.generated_preview_action_padding_px)
+            .scaled(editor.styles.self_drawn.generated_preview_action_padding_px)
             .round();
         let preview_action_button_size = editor
-            .scaled(code_block_styles.generated_preview_action_button_size_px)
+            .scaled(
+                editor
+                    .styles
+                    .self_drawn
+                    .generated_preview_action_button_size_px,
+            )
             .round();
         let preview_action_icon_size = editor
-            .scaled(code_block_styles.generated_preview_action_icon_size_px)
+            .scaled(
+                editor
+                    .styles
+                    .self_drawn
+                    .generated_preview_action_icon_size_px,
+            )
             .round();
-        let preview_action_button_radius =
-            px(editor.scaled(code_block_styles.generated_preview_action_button_radius_px));
-        let preview_action_border_width =
-            px(editor.scaled(code_block_styles.generated_preview_action_border_width_px));
-        let preview_action_border_color = code_block_styles.generated_preview_action_border_color;
+        let preview_action_button_radius = action_metrics.radius;
+        let preview_action_border_width = action_metrics.border_width;
+        let preview_action_border_color = editor
+            .styles
+            .self_drawn
+            .colors
+            .generated_preview_action_border_color;
         if non_markdown_nowrap {
             let max_horizontal_offset = non_markdown_horizontal_state
                 .max_offset
                 .max(non_markdown_horizontal_extent);
             if max_horizontal_offset > 0.5 {
-                let scrollbar_styles = &editor.styles.editor;
-                let margin =
-                    editor.scaled(code_block_styles.code_block_horizontal_scrollbar_margin_x_px);
+                let scrollbar_styles = &editor.styles.self_drawn.scrollbar;
+                let margin = editor.scaled(
+                    editor
+                        .styles
+                        .self_drawn
+                        .code_block_horizontal_scrollbar_margin_x_px,
+                );
                 let track_left = editor_left + margin;
                 let track_width = (editor_width - margin * 2.0).max(1.0);
                 let (thumb_left, thumb_width, travel) = code_block_horizontal_thumb_geometry(
@@ -10638,16 +9557,16 @@ impl EditorElement {
                     track_width,
                     max_horizontal_offset,
                     non_markdown_horizontal_state.offset,
-                    editor.scaled(scrollbar_styles.editor_scrollbar_min_thumb_height_px),
+                    editor.scaled(scrollbar_styles.min_thumb_height_px),
                 );
                 let hit_height = editor.scaled(
                     scrollbar_styles
-                        .editor_scrollbar_hit_width_px
-                        .max(scrollbar_styles.editor_scrollbar_width_px)
-                        .max(scrollbar_styles.editor_scrollbar_hover_width_px),
+                        .hit_width_px
+                        .max(scrollbar_styles.width_px)
+                        .max(scrollbar_styles.hover_width_px),
                 );
-                let bar_bottom = origin_y + viewport_height
-                    - editor.scaled(scrollbar_styles.editor_scrollbar_bottom_margin_px);
+                let bar_bottom =
+                    origin_y + viewport_height - editor.scaled(scrollbar_styles.bottom_margin_px);
                 let track_top = bar_bottom - hit_height;
                 code_block_horizontal_scrollbars_local.push(CodeBlockHorizontalScrollbarGeometry {
                     start_line: NON_MARKDOWN_HORIZONTAL_SCROLL_TARGET,
@@ -10721,9 +9640,13 @@ impl EditorElement {
                 .copied()
                 .unwrap_or(display_override.max_horizontal_offset);
             if !editor.code_block_word_wrap_enabled(*start_line) && max_horizontal_offset > 0.5 {
-                let scrollbar_styles = &editor.styles.editor;
-                let track_margin =
-                    editor.scaled(code_block_styles.code_block_horizontal_scrollbar_margin_x_px);
+                let scrollbar_styles = &editor.styles.self_drawn.scrollbar;
+                let track_margin = editor.scaled(
+                    editor
+                        .styles
+                        .self_drawn
+                        .code_block_horizontal_scrollbar_margin_x_px,
+                );
                 let track_left = group.left + track_margin;
                 let track_width = (group.width - track_margin * 2.0).max(1.0);
                 let (thumb_left, thumb_width, travel) = code_block_horizontal_thumb_geometry(
@@ -10731,18 +9654,17 @@ impl EditorElement {
                     track_width,
                     max_horizontal_offset,
                     display_override.horizontal_offset,
-                    editor.scaled(scrollbar_styles.editor_scrollbar_min_thumb_height_px),
+                    editor.scaled(scrollbar_styles.min_thumb_height_px),
                 );
                 let requested_hit_height = editor.scaled(
                     scrollbar_styles
-                        .editor_scrollbar_hit_width_px
-                        .max(scrollbar_styles.editor_scrollbar_width_px)
-                        .max(scrollbar_styles.editor_scrollbar_hover_width_px),
+                        .hit_width_px
+                        .max(scrollbar_styles.width_px)
+                        .max(scrollbar_styles.hover_width_px),
                 );
                 let visible_bottom = group.bottom.min(origin_y + viewport_height);
                 let visible_top = group.top.max(origin_y);
-                let bar_bottom = visible_bottom
-                    - editor.scaled(scrollbar_styles.editor_scrollbar_bottom_margin_px);
+                let bar_bottom = visible_bottom - editor.scaled(scrollbar_styles.bottom_margin_px);
                 let hit_height = requested_hit_height.min((bar_bottom - visible_top).max(1.0));
                 let track_top = bar_bottom - hit_height;
                 let track_bounds = Bounds::new(
@@ -11047,20 +9969,40 @@ impl EditorElement {
                     };
                     let (mut button_bg, mut icon_color, mut border_color) = if copy_copied {
                         (
-                            code_block_styles.code_block_copy_button_copied_bg,
-                            code_block_styles.code_block_copy_button_copied_text_color,
+                            editor
+                                .styles
+                                .self_drawn
+                                .colors
+                                .code_block_copy_button_copied_bg,
+                            editor
+                                .styles
+                                .self_drawn
+                                .colors
+                                .code_block_copy_button_copied_text_color,
                             preview_action_border_color,
                         )
                     } else if hovered {
                         (
-                            code_block_styles.code_block_copy_button_hover_bg,
-                            code_block_styles.code_block_copy_button_hover_text_color,
+                            editor
+                                .styles
+                                .self_drawn
+                                .colors
+                                .code_block_copy_button_hover_bg,
+                            editor
+                                .styles
+                                .self_drawn
+                                .colors
+                                .code_block_copy_button_hover_text_color,
                             preview_action_border_color,
                         )
                     } else {
                         (
-                            code_block_styles.code_block_copy_button_bg,
-                            code_block_styles.code_block_copy_button_text_color,
+                            editor.styles.self_drawn.colors.code_block_copy_button_bg,
+                            editor
+                                .styles
+                                .self_drawn
+                                .colors
+                                .code_block_copy_button_text_color,
                             preview_action_border_color,
                         )
                     };
@@ -11092,13 +10034,12 @@ impl EditorElement {
                     ));
                     preview_zoom_hitboxes.push(hitbox);
                     preview_zoom_buttons.push(CodeBlockCopyButtonPaint {
-                        quad: quad(
+                        quad: CodeBlockCopyButtonPaint::surface(
                             button_bounds,
                             Corners::all(preview_action_button_radius),
                             button_bg,
                             preview_action_border_width,
                             border_color,
-                            BorderStyle::default(),
                         ),
                         label: None,
                         origin: point(px(button_x), px(button_y)),
@@ -11130,34 +10071,66 @@ impl EditorElement {
             let (label_text, button_bg, button_text_color, button_border_color) = if is_copied {
                 (
                     editor.t(crate::i18n::TextKey::Copied).to_string(),
-                    code_block_styles.code_block_copy_button_copied_bg,
-                    code_block_styles.code_block_copy_button_copied_text_color,
+                    editor
+                        .styles
+                        .self_drawn
+                        .colors
+                        .code_block_copy_button_copied_bg,
+                    editor
+                        .styles
+                        .self_drawn
+                        .colors
+                        .code_block_copy_button_copied_text_color,
                     if is_preview_action {
                         preview_action_border_color
                     } else {
-                        code_block_styles.code_block_copy_button_copied_border_color
+                        editor
+                            .styles
+                            .self_drawn
+                            .colors
+                            .code_block_copy_button_copied_border_color
                     },
                 )
             } else if is_button_hovered {
                 (
                     language_label.clone(),
-                    code_block_styles.code_block_copy_button_hover_bg,
-                    code_block_styles.code_block_copy_button_hover_text_color,
+                    editor
+                        .styles
+                        .self_drawn
+                        .colors
+                        .code_block_copy_button_hover_bg,
+                    editor
+                        .styles
+                        .self_drawn
+                        .colors
+                        .code_block_copy_button_hover_text_color,
                     if is_preview_action {
                         preview_action_border_color
                     } else {
-                        code_block_styles.code_block_copy_button_hover_border_color
+                        editor
+                            .styles
+                            .self_drawn
+                            .colors
+                            .code_block_copy_button_hover_border_color
                     },
                 )
             } else {
                 (
                     language_label,
-                    code_block_styles.code_block_copy_button_bg,
-                    code_block_styles.code_block_copy_button_text_color,
+                    editor.styles.self_drawn.colors.code_block_copy_button_bg,
+                    editor
+                        .styles
+                        .self_drawn
+                        .colors
+                        .code_block_copy_button_text_color,
                     if is_preview_action {
                         preview_action_border_color
                     } else {
-                        code_block_styles.code_block_copy_button_border_color
+                        editor
+                            .styles
+                            .self_drawn
+                            .colors
+                            .code_block_copy_button_border_color
                     },
                 )
             };
@@ -11214,14 +10187,26 @@ impl EditorElement {
                     editor.hovering_generated_preview_zoom_line == Some(*start_line);
                 let (zoom_bg, zoom_text_color, zoom_border_color) = if is_zoom_hovered {
                     (
-                        code_block_styles.code_block_copy_button_hover_bg,
-                        code_block_styles.code_block_copy_button_hover_text_color,
+                        editor
+                            .styles
+                            .self_drawn
+                            .colors
+                            .code_block_copy_button_hover_bg,
+                        editor
+                            .styles
+                            .self_drawn
+                            .colors
+                            .code_block_copy_button_hover_text_color,
                         preview_action_border_color,
                     )
                 } else {
                     (
-                        code_block_styles.code_block_copy_button_bg,
-                        code_block_styles.code_block_copy_button_text_color,
+                        editor.styles.self_drawn.colors.code_block_copy_button_bg,
+                        editor
+                            .styles
+                            .self_drawn
+                            .colors
+                            .code_block_copy_button_text_color,
                         preview_action_border_color,
                     )
                 };
@@ -11280,10 +10265,18 @@ impl EditorElement {
             );
 
             if !is_preview_action {
-                let display_button_width =
-                    editor.scaled(code_block_styles.code_block_display_action_button_size_px);
-                let display_icon_size =
-                    editor.scaled(code_block_styles.code_block_display_action_icon_size_px);
+                let display_button_width = editor.scaled(
+                    editor
+                        .styles
+                        .self_drawn
+                        .code_block_display_action_button_size_px,
+                );
+                let display_icon_size = editor.scaled(
+                    editor
+                        .styles
+                        .self_drawn
+                        .code_block_display_action_icon_size_px,
+                );
                 let display_actions = [
                     (
                         CodeBlockDisplayAction::LineNumbers,
@@ -11305,7 +10298,7 @@ impl EditorElement {
                     ),
                 ];
                 let display_action_gap =
-                    editor.scaled(code_block_styles.code_block_display_action_gap_px);
+                    editor.scaled(editor.styles.self_drawn.code_block_display_action_gap_px);
                 let display_group_width = display_actions.len() as f32 * display_button_width
                     + display_actions.len() as f32 * display_action_gap;
                 let display_group_x = button_x - display_group_width;
@@ -11323,21 +10316,53 @@ impl EditorElement {
                             == Some((*start_line, action));
                         let (background, icon_color, border_color) = if hovered {
                             (
-                                code_block_styles.code_block_copy_button_hover_bg,
-                                code_block_styles.code_block_copy_button_hover_text_color,
-                                code_block_styles.code_block_copy_button_hover_border_color,
+                                editor
+                                    .styles
+                                    .self_drawn
+                                    .colors
+                                    .code_block_copy_button_hover_bg,
+                                editor
+                                    .styles
+                                    .self_drawn
+                                    .colors
+                                    .code_block_copy_button_hover_text_color,
+                                editor
+                                    .styles
+                                    .self_drawn
+                                    .colors
+                                    .code_block_copy_button_hover_border_color,
                             )
                         } else if enabled {
                             (
-                                code_block_styles.code_block_copy_button_copied_bg,
-                                code_block_styles.code_block_copy_button_copied_text_color,
-                                code_block_styles.code_block_copy_button_copied_border_color,
+                                editor
+                                    .styles
+                                    .self_drawn
+                                    .colors
+                                    .code_block_copy_button_copied_bg,
+                                editor
+                                    .styles
+                                    .self_drawn
+                                    .colors
+                                    .code_block_copy_button_copied_text_color,
+                                editor
+                                    .styles
+                                    .self_drawn
+                                    .colors
+                                    .code_block_copy_button_copied_border_color,
                             )
                         } else {
                             (
-                                code_block_styles.code_block_copy_button_bg,
-                                code_block_styles.code_block_copy_button_text_color,
-                                code_block_styles.code_block_copy_button_border_color,
+                                editor.styles.self_drawn.colors.code_block_copy_button_bg,
+                                editor
+                                    .styles
+                                    .self_drawn
+                                    .colors
+                                    .code_block_copy_button_text_color,
+                                editor
+                                    .styles
+                                    .self_drawn
+                                    .colors
+                                    .code_block_copy_button_border_color,
                             )
                         };
                         code_block_display_action_areas_local.push((
@@ -11350,13 +10375,12 @@ impl EditorElement {
                         editor_icon_tooltips
                             .push((action_bounds, SharedString::from(tooltip_title)));
                         code_block_copy_buttons.push(CodeBlockCopyButtonPaint {
-                            quad: quad(
+                            quad: CodeBlockCopyButtonPaint::surface(
                                 action_bounds,
                                 Corners::all(button_radius),
                                 background,
                                 button_border_width,
                                 border_color,
-                                BorderStyle::default(),
                             ),
                             label: None,
                             origin: point(px(action_x), px(button_y)),
@@ -11383,7 +10407,7 @@ impl EditorElement {
             code_block_copy_hitboxes
                 .push(window.insert_hitbox(button_bounds, HitboxBehavior::Normal));
             code_block_copy_buttons.push(CodeBlockCopyButtonPaint {
-                quad: quad(
+                quad: CodeBlockCopyButtonPaint::surface(
                     button_bounds,
                     Corners::all(if is_preview_action {
                         preview_action_button_radius
@@ -11397,7 +10421,6 @@ impl EditorElement {
                         button_border_width
                     },
                     button_border_color,
-                    BorderStyle::default(),
                 ),
                 label,
                 origin: point(
@@ -11433,13 +10456,12 @@ impl EditorElement {
                 preview_zoom_hitboxes
                     .push(window.insert_hitbox(zoom_bounds, HitboxBehavior::Normal));
                 preview_zoom_buttons.push(CodeBlockCopyButtonPaint {
-                    quad: quad(
+                    quad: CodeBlockCopyButtonPaint::surface(
                         zoom_bounds,
                         Corners::all(preview_action_button_radius),
                         zoom_bg,
                         preview_action_border_width,
                         zoom_border_color,
-                        BorderStyle::default(),
                     ),
                     label: None,
                     origin: point(px(zoom_x), px(button_y)),
@@ -11473,7 +10495,11 @@ impl EditorElement {
                         button_padding_y,
                         button_text_line_height,
                         "ZOOM",
-                        code_block_styles.code_block_copy_button_text_color,
+                        editor
+                            .styles
+                            .self_drawn
+                            .colors
+                            .code_block_copy_button_text_color,
                     )
                 else {
                     continue;
@@ -11497,13 +10523,16 @@ impl EditorElement {
                 preview_zoom_hitboxes
                     .push(window.insert_hitbox(zoom_bounds, HitboxBehavior::Normal));
                 preview_zoom_buttons.push(CodeBlockCopyButtonPaint {
-                    quad: quad(
+                    quad: CodeBlockCopyButtonPaint::surface(
                         zoom_bounds,
                         Corners::all(button_radius),
-                        code_block_styles.code_block_copy_button_bg,
+                        editor.styles.self_drawn.colors.code_block_copy_button_bg,
                         button_border_width,
-                        code_block_styles.code_block_copy_button_border_color,
-                        BorderStyle::default(),
+                        editor
+                            .styles
+                            .self_drawn
+                            .colors
+                            .code_block_copy_button_border_color,
                     ),
                     label: Some(zoom_label),
                     origin: point(
@@ -11517,327 +10546,12 @@ impl EditorElement {
             }
         }
 
-        // ── In-place diff gutter indicators + hover revert button ───────
-        // Draw the left-edge bars from the active inline diff and the geometry
-        // captured for visible lines above. Added/modified hunks get a green bar
-        // over their buffer lines; pure deletions get a short red marker. A
-        // full-width hover region per hunk reveals a top-right "revert" button.
-        if let Some(inline_diff) = editor.active_inline_diff()
-            && !inline_diff.hunks.is_empty()
-            && !inline_diff_line_geometry.is_empty()
-        {
-            let geometry: HashMap<usize, (f32, f32)> = inline_diff_line_geometry
-                .iter()
-                .map(|(line, top, height)| (*line, (*top, *height)))
-                .collect();
-            let selection_styles = &editor.styles.selection;
-            let bar_width = editor.scaled(selection_styles.selection_diff_bar_width_px);
-            // Flush against the editor's far-left edge with no margin. The click
-            // target is exactly the bar width, so the gap between the bar and the
-            // text content still behaves as normal editor text (I-beam cursor).
-            let bar_x = origin_x;
-            let gutter_hit_left = bar_x;
-            let gutter_hit_width = bar_width;
-            let added_bar = selection_styles.selection_diff_added_bar_color;
-            let removed_bar = selection_styles.selection_diff_removed_bar_color;
-            let collapsed_opacity = selection_styles.selection_diff_bar_collapsed_opacity;
-            let expanded_opacity = selection_styles.selection_diff_bar_expanded_opacity;
-            let removed_marker_h = editor.scaled(10.0);
-            for (hunk_index, hunk) in inline_diff.hunks.iter().enumerate() {
-                // Dimmer while collapsed, full brightness while expanded.
-                let bar_opacity = if hunk.expanded {
-                    expanded_opacity
-                } else {
-                    collapsed_opacity
-                };
-                let mut added_bar = added_bar;
-                added_bar.a *= bar_opacity;
-                let mut removed_bar = removed_bar;
-                removed_bar.a *= bar_opacity;
-                // Region spanning the hunk's visible buffer lines plus any
-                // expanded phantom band, used for the hover hit area and to
-                // anchor the revert button.
-                let mut region_top = f32::MAX;
-                let mut region_bottom = f32::MIN;
-                if hunk.expanded
-                    && !hunk.removed_lines.is_empty()
-                    && let Some(&(top, _)) = geometry.get(&hunk.buffer_start)
-                {
-                    // `top` is the buffer_start block's top, which already sits
-                    // above the removed-row band (the band lives inside that
-                    // line's top padding). So the hunk's visual top is `top`
-                    // itself — do not subtract the reserved band height again.
-                    region_top = region_top.min(top);
-                    region_bottom = region_bottom.max(top);
-                }
-                match hunk.kind {
-                    InlineDiffHunkKind::Added | InlineDiffHunkKind::Modified => {
-                        let mut bar_top = f32::MAX;
-                        let mut bar_bottom = f32::MIN;
-                        let visible_hunk_start = hunk.buffer_start.max(render_start_line);
-                        let visible_hunk_end = hunk.buffer_end.min(render_end_line);
-                        for line in visible_hunk_start..visible_hunk_end {
-                            let Some(&(top, height)) = geometry.get(&line) else {
-                                continue;
-                            };
-                            bar_top = bar_top.min(top);
-                            bar_bottom = bar_bottom.max(top + height);
-                        }
-                        if bar_bottom > bar_top {
-                            inline_diff_gutter_bars.push((
-                                Bounds::new(
-                                    point(px(bar_x), px(bar_top)),
-                                    size(px(bar_width), px(bar_bottom - bar_top)),
-                                ),
-                                added_bar,
-                            ));
-                            region_top = region_top.min(bar_top);
-                            region_bottom = region_bottom.max(bar_bottom);
-                            // Toggle hit area covers only the visible bar so the
-                            // text to its right stays a normal editor click target.
-                            inline_diff_gutter_areas_local.push((
-                                Bounds::new(
-                                    point(px(gutter_hit_left), px(bar_top)),
-                                    size(px(gutter_hit_width), px(bar_bottom - bar_top)),
-                                ),
-                                hunk_index,
-                            ));
-                        }
-                    }
-                    InlineDiffHunkKind::Removed => {
-                        let anchor_y = geometry
-                            .get(&hunk.buffer_start)
-                            .map(|&(top, _)| top)
-                            .or_else(|| {
-                                if hunk.buffer_start >= line_count {
-                                    geometry
-                                        .get(&line_count.saturating_sub(1))
-                                        .map(|&(top, height)| top + height)
-                                } else {
-                                    None
-                                }
-                            });
-                        if let Some(anchor_y) = anchor_y {
-                            let marker_top = anchor_y - removed_marker_h / 2.0;
-                            inline_diff_gutter_bars.push((
-                                Bounds::new(
-                                    point(px(bar_x), px(marker_top)),
-                                    size(px(bar_width), px(removed_marker_h)),
-                                ),
-                                removed_bar,
-                            ));
-                            inline_diff_gutter_areas_local.push((
-                                Bounds::new(
-                                    point(
-                                        px(gutter_hit_left),
-                                        px(marker_top - removed_marker_h / 2.0),
-                                    ),
-                                    size(px(gutter_hit_width), px(removed_marker_h * 2.0)),
-                                ),
-                                hunk_index,
-                            ));
-                            if region_bottom <= region_top {
-                                region_top = marker_top - removed_marker_h / 2.0;
-                                region_bottom = marker_top + removed_marker_h * 1.5;
-                            }
-                        }
-                    }
-                }
-
-                if region_bottom <= region_top {
-                    continue;
-                }
-
-                let mut hunk_hover_top = region_top;
-
-                // Expanded hunks always expose their revert action, aligned
-                // flush with the text column's left edge.
-                if hunk.expanded {
-                    let is_revert_hovered =
-                        editor.hovering_inline_diff_revert_hunk == Some(hunk_index);
-                    let revert_button_font_size =
-                        editor.scaled(selection_styles.selection_diff_revert_button_font_size_px);
-                    let revert_button_padding_x =
-                        editor.scaled(selection_styles.selection_diff_revert_button_padding_x_px);
-                    let revert_button_padding_y =
-                        editor.scaled(selection_styles.selection_diff_revert_button_padding_y_px);
-                    let revert_button_text_line_height = revert_button_font_size * 1.2;
-                    let revert_button_radius =
-                        px(editor.scaled(selection_styles.selection_diff_revert_button_radius_px));
-                    let revert_button_border_width = px(editor
-                        .scaled(selection_styles.selection_diff_revert_button_border_width_px));
-                    let revert_button_gap_y =
-                        editor.scaled(selection_styles.selection_diff_revert_button_gap_y_px);
-                    let revert_button_icon_size =
-                        editor.scaled(selection_styles.selection_diff_revert_button_icon_size_px);
-                    let revert_button_icon_gap =
-                        editor.scaled(selection_styles.selection_diff_revert_button_icon_gap_px);
-                    let revert_button_stat_leading_gap = editor.scaled(8.0);
-                    let revert_button_stat_inner_gap = editor.scaled(3.0);
-                    let brighten_stat_color = |mut color: Hsla| {
-                        color.l = (color.l + 0.24).min(0.92);
-                        color
-                    };
-                    let added_count = hunk.buffer_end.saturating_sub(hunk.buffer_start);
-                    let removed_count = hunk.removed_lines.len();
-                    let (revert_bg, revert_text_color, revert_border_color) = if is_revert_hovered {
-                        (
-                            selection_styles.selection_diff_revert_button_hover_bg,
-                            selection_styles.selection_diff_revert_button_hover_text_color,
-                            selection_styles.selection_diff_revert_button_hover_border_color,
-                        )
-                    } else {
-                        (
-                            selection_styles.selection_diff_revert_button_bg,
-                            selection_styles.selection_diff_revert_button_text_color,
-                            selection_styles.selection_diff_revert_button_border_color,
-                        )
-                    };
-                    if let Some((revert_label, revert_button_width, revert_button_height)) =
-                        shape_preview_button(
-                            window,
-                            &button_font,
-                            revert_button_font_size,
-                            revert_button_padding_x
-                                + revert_button_icon_size
-                                + revert_button_icon_gap,
-                            revert_button_padding_x,
-                            revert_button_padding_y,
-                            revert_button_text_line_height,
-                            editor.t(crate::i18n::TextKey::InlineDiffRevert),
-                            revert_text_color,
-                        )
-                    {
-                        let stat_runs = [
-                            (
-                                format!("+{added_count}"),
-                                brighten_stat_color(editor.theme.diff_added_bg),
-                                added_count > 0,
-                            ),
-                            (
-                                format!("-{removed_count}"),
-                                brighten_stat_color(editor.theme.diff_removed_bg),
-                                removed_count > 0,
-                            ),
-                        ];
-                        let mut stat_labels = Vec::new();
-                        let mut stat_width = 0.0;
-                        for (text, color, visible) in stat_runs {
-                            if !visible {
-                                continue;
-                            }
-                            let stat_run = TextRun {
-                                len: text.len(),
-                                font: button_font.clone(),
-                                color,
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            };
-                            if let Ok(mut lines) = window.text_system().shape_text(
-                                text.into(),
-                                px(revert_button_font_size),
-                                &[stat_run],
-                                None,
-                                None,
-                            ) {
-                                if let Some(label) = lines.pop() {
-                                    stat_width += f32::from(label.width());
-                                    stat_labels.push(label);
-                                }
-                            }
-                        }
-                        if stat_labels.len() > 1 {
-                            stat_width += revert_button_stat_inner_gap
-                                * stat_labels.len().saturating_sub(1) as f32;
-                        }
-                        let label_width = f32::from(revert_label.width());
-                        let stat_leading_gap = if stat_labels.is_empty() {
-                            0.0
-                        } else {
-                            revert_button_stat_leading_gap
-                        };
-                        let revert_button_width =
-                            (revert_button_width + stat_leading_gap + stat_width).ceil();
-                        let revert_button_height = revert_button_height.ceil();
-                        let content_left = editor_left + editor.padding_left();
-                        let revert_x = content_left.round();
-                        let revert_y = (region_top - revert_button_height - revert_button_gap_y)
-                            .max(origin_y)
-                            .round();
-                        hunk_hover_top = hunk_hover_top.min(revert_y);
-                        let revert_bounds = Bounds::new(
-                            point(px(revert_x), px(revert_y)),
-                            size(px(revert_button_width), px(revert_button_height)),
-                        );
-                        let label_x = revert_x
-                            + revert_button_padding_x
-                            + revert_button_icon_size
-                            + revert_button_icon_gap;
-                        let mut stat_x = label_x + label_width + stat_leading_gap;
-                        let trailing_labels = stat_labels
-                            .into_iter()
-                            .map(|label| {
-                                let origin =
-                                    point(px(stat_x), px(revert_y + revert_button_padding_y));
-                                stat_x += f32::from(label.width()) + revert_button_stat_inner_gap;
-                                (label, origin)
-                            })
-                            .collect();
-                        inline_diff_revert_buttons.push(CodeBlockCopyButtonPaint {
-                            quad: quad(
-                                revert_bounds,
-                                Corners::all(revert_button_radius),
-                                revert_bg,
-                                revert_button_border_width,
-                                revert_border_color,
-                                BorderStyle::default(),
-                            ),
-                            label: Some(revert_label),
-                            origin: point(px(label_x), px(revert_y + revert_button_padding_y)),
-                            line_height: px(revert_button_text_line_height),
-                            icon: Some({
-                                let icon_left = revert_x + revert_button_padding_x;
-                                let icon_top = revert_y
-                                    + (revert_button_height - revert_button_icon_size) * 0.5;
-                                (
-                                    Bounds::new(
-                                        point(px(icon_left), px(icon_top)),
-                                        size(
-                                            px(revert_button_icon_size),
-                                            px(revert_button_icon_size),
-                                        ),
-                                    ),
-                                    BACK_SVG_PATH,
-                                    revert_text_color,
-                                )
-                            }),
-                            trailing_labels,
-                        });
-                        inline_diff_revert_areas_local.push((revert_bounds, hunk_index));
-                    }
-                }
-
-                // Keep a full-width hunk hover region for pointer feedback. The
-                // always-visible button is drawn above the rows, so include the
-                // vertical gap through the button.
-                inline_diff_hunk_areas_local.push((
-                    Bounds::new(
-                        point(px(editor_left), px(hunk_hover_top)),
-                        size(px(editor_width), px(region_bottom - hunk_hover_top)),
-                    ),
-                    hunk_index,
-                ));
-            }
-        }
-
         for (tooltip_bounds, tooltip_title) in editor_icon_tooltips {
             let hitbox = window.insert_hitbox(tooltip_bounds, HitboxBehavior::Normal);
             generated_preview_tooltips.push((hitbox, tooltip_bounds, tooltip_title));
         }
         frame.offscreen_wrap_reflows -=
             initial_offscreen_wrap_reflows - remaining_offscreen_wrap_reflows;
-        let mut mode_geometry_changed = false;
         self.editor.update(cx, |editor, cx| {
             editor.release_retired_images(cx);
             editor.code_block_horizontal_scrollbars =
@@ -11879,7 +10593,7 @@ impl EditorElement {
             {
                 editor.front_matter_group_geometry_dirty = false;
             }
-            editor.visible_line_geometry = inline_diff_line_geometry.clone();
+            editor.visible_line_geometry = visible_line_geometry.clone();
             editor.last_viewport_height = viewport_height;
             editor.last_viewport_width = viewport_width;
             editor.checkbox_areas = checkbox_hit_areas.clone();
@@ -11915,51 +10629,10 @@ impl EditorElement {
             editor.format_line_areas = format_line_areas_local.clone();
             editor.format_trigger_areas = format_trigger_areas_local.clone();
             editor.line_format_toolbar_geometries = line_format_toolbar_geometries_local.clone();
-            editor.inline_diff_gutter_areas = inline_diff_gutter_areas_local.clone();
-            editor.inline_diff_hunk_areas = inline_diff_hunk_areas_local.clone();
-            editor.inline_diff_revert_areas = inline_diff_revert_areas_local.clone();
-            editor.phantom_row_hits = phantom_row_hits_local;
             editor.image_edit_areas = image_edit_hit_areas_local.clone();
             editor.last_editor_left = editor_left;
             editor.last_editor_width = editor_width;
             editor.last_content_left = editor_left + editor.padding_left();
-            // Reconcile measured phantom (removed-row) heights. A wrap-width
-            // change invalidates the cached heights; apply this frame's
-            // measurements and, if anything changed, invalidate the geometry
-            // cache so the reserved bands match on the next frame.
-            let phantom_width_changed = (editor.last_text_width - text_width).abs() > 0.5;
-            let mut phantom_heights_changed = false;
-            if phantom_width_changed
-                && (!editor.inline_diff_phantom_height_above.is_empty()
-                    || !editor.inline_diff_phantom_height_below.is_empty())
-            {
-                editor.inline_diff_phantom_height_above.clear();
-                editor.inline_diff_phantom_height_below.clear();
-                phantom_heights_changed = true;
-            }
-            for (line, height) in phantom_above_heights {
-                match editor.inline_diff_phantom_height_above.get(&line) {
-                    Some(&existing) if (existing - height).abs() <= 0.5 => {}
-                    _ => {
-                        editor.inline_diff_phantom_height_above.insert(line, height);
-                        phantom_heights_changed = true;
-                    }
-                }
-            }
-            for (line, height) in phantom_below_heights {
-                match editor.inline_diff_phantom_height_below.get(&line) {
-                    Some(&existing) if (existing - height).abs() <= 0.5 => {}
-                    _ => {
-                        editor.inline_diff_phantom_height_below.insert(line, height);
-                        phantom_heights_changed = true;
-                    }
-                }
-            }
-            mode_geometry_changed = phantom_heights_changed;
-            if phantom_heights_changed {
-                editor.invalidate_line_geometry_cache();
-                cx.notify();
-            }
             editor.last_text_width = text_width;
             editor.last_window_scale_factor = window_scale_factor;
             if editor.refresh_editor_scrollbar_drag_after_layout() {
@@ -12089,11 +10762,7 @@ impl EditorElement {
             }
         });
 
-        if frame.should_retry(
-            scroll_offset,
-            self.editor.read(cx).scroll_offset,
-            mode_geometry_changed,
-        ) {
+        if frame.should_retry(scroll_offset, self.editor.read(cx).scroll_offset, false) {
             // Window::transact removes this attempt's hitboxes/tooltips. Keep
             // the measured line caches and offset for the next attempt, but do
             // not publish stale caret, drag, menu or input geometry.
@@ -12232,10 +10901,7 @@ impl EditorElement {
             whitespace_dots,
             selection_quads,
             search_match_quads,
-            diff_line_bgs,
-            diff_inline_quads,
-            inline_diff_gutter_bars,
-            phantom_text_lines,
+            inline_decoration_quads,
             line_highlight,
             quote_block_bgs,
             code_block_bgs,
@@ -12260,7 +10926,6 @@ impl EditorElement {
             table_icons,
             table_cell_texts,
             code_block_copy_buttons,
-            inline_diff_revert_buttons,
             code_block_copy_hitboxes,
             format_trigger_hitboxes,
             front_matter_type_hitboxes,
@@ -12454,8 +11119,6 @@ impl Element for EditorElement {
             None if editor.preview_overlay_state().is_some() => CursorStyle::OpenHand,
             None if editor.hovering_generated_preview_zoom_line.is_some() => CursorStyle::Arrow,
             None if editor.hovering_generated_preview_line.is_some() => CursorStyle::OpenHand,
-            None if editor.hovering_inline_diff_gutter_hunk.is_some() => CursorStyle::Arrow,
-            None if editor.hovering_inline_diff_revert_hunk.is_some() => CursorStyle::Arrow,
             None if editor.code_block_horizontal_scrollbar_hovered.is_some()
                 || editor.code_block_horizontal_scrollbar_drag.is_some() =>
             {
@@ -12623,10 +11286,6 @@ impl Element for EditorElement {
             window.paint_quad(quad);
         }
 
-        for quad in prepaint.diff_line_bgs.drain(..) {
-            window.paint_quad(quad);
-        }
-
         paint_quads_with_optional_mask(
             &mut prepaint.indent_guide_quads,
             prepaint.horizontal_editor_clip_bounds,
@@ -12634,7 +11293,7 @@ impl Element for EditorElement {
         );
 
         paint_quads_with_optional_mask(
-            &mut prepaint.diff_inline_quads,
+            &mut prepaint.inline_decoration_quads,
             prepaint.horizontal_editor_clip_bounds,
             window,
         );
@@ -12737,38 +11396,6 @@ impl Element for EditorElement {
 
         for quad in prepaint.gutter_quads.drain(..) {
             window.paint_quad(quad);
-        }
-        // In-place diff gutter bars: a spaced diagonal hatch clipped to each
-        // bar's strip. Sweeping the intercept on a stable absolute grid keeps
-        // the pattern from crawling while scrolling.
-        if !prepaint.inline_diff_gutter_bars.is_empty() {
-            let selection_styles = &editor.styles.selection;
-            let stripe_thickness = editor
-                .scaled(selection_styles.selection_diff_bar_stripe_thickness_px)
-                .max(0.5);
-            let stripe_spacing = editor
-                .scaled(selection_styles.selection_diff_bar_stripe_spacing_px)
-                .max(0.0);
-            let stripe_period = (stripe_thickness + stripe_spacing).max(1.0);
-            for (bar_bounds, color) in prepaint.inline_diff_gutter_bars.drain(..) {
-                let x0 = f32::from(bar_bounds.origin.x);
-                let x1 = x0 + f32::from(bar_bounds.size.width);
-                let top = f32::from(bar_bounds.origin.y);
-                let bottom = top + f32::from(bar_bounds.size.height);
-                window.with_content_mask(Some(ContentMask { bounds: bar_bounds }), |window| {
-                    let c_min = x0 + top - stripe_thickness;
-                    let c_max = x1 + bottom;
-                    let mut c0 = (c_min / stripe_period).floor() * stripe_period;
-                    while c0 < c_max {
-                        let mut path = Path::new(point(px(x0), px(c0 - x0)));
-                        path.line_to(point(px(x1), px(c0 - x1)));
-                        path.line_to(point(px(x1), px(c0 + stripe_thickness - x1)));
-                        path.line_to(point(px(x0), px(c0 + stripe_thickness - x0)));
-                        window.paint_path(path, color);
-                        c0 += stripe_period;
-                    }
-                });
-            }
         }
         for (icon_bounds, icon_path, color) in &prepaint.gutter_svgs {
             window
@@ -12951,12 +11578,6 @@ impl Element for EditorElement {
             }
         }
 
-        for (wrapped, origin, line_height) in &prepaint.phantom_text_lines {
-            wrapped
-                .paint(*origin, *line_height, TextAlign::Left, None, window, cx)
-                .ok();
-        }
-
         for (marker, origin, line_height) in &prepaint.unordered_list_markers {
             marker
                 .paint(*origin, *line_height, TextAlign::Left, None, window, cx)
@@ -12964,10 +11585,6 @@ impl Element for EditorElement {
         }
 
         for button in &prepaint.code_block_copy_buttons {
-            paint_code_block_button(button, window, cx);
-        }
-
-        for button in &prepaint.inline_diff_revert_buttons {
             paint_code_block_button(button, window, cx);
         }
 
@@ -13013,8 +11630,13 @@ impl Element for EditorElement {
 
         // Image URL-edit icons
         for (icon_bounds, _line, alpha) in &prepaint.image_edit_icons {
-            let theme = &self.editor.read(cx).theme;
-            let mut color = theme.text_secondary;
+            let mut color = self
+                .editor
+                .read(cx)
+                .styles
+                .self_drawn
+                .colors
+                .image_edit_icon_color;
             color.a = *alpha;
             window
                 .paint_svg(

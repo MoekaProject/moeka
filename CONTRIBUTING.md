@@ -17,8 +17,8 @@ For a substantial feature or architectural change, discuss the intended behavior
 ## Working on a change
 
 1. Fork the source repository and create a focused branch.
-2. Follow the [development guide](docs/development.md) for prerequisites and local builds. No signing or publishing credentials are needed.
-3. Read the [architecture overview](docs/architecture.md), especially the pane-state invariants when changing editor state.
+2. Follow the [build and test guidance](AGENTS.md#build-and-test) for prerequisites and local builds. No signing or publishing credentials are needed.
+3. Read the [architecture overview](AGENTS.md#architecture), especially the pane-state invariants when changing editor state.
 4. Keep the patch focused. Avoid unrelated formatting, generated files, or dependency updates.
 5. Add or update tests for changed behavior and documentation for user-visible changes.
 6. Open a pull request against the source repository's `main` branch. Explain the motivation, implementation, and verification performed.
@@ -28,14 +28,16 @@ For a substantial feature or architectural change, discuss the intended behavior
 Use release-mode builds and tests for local development:
 
 ```sh
-cargo fmt --check
-cargo build --release
-cargo test --release
+cargo fmt --all -- --check
+cargo build --release --locked
+cargo test --release --locked
 ```
 
-For Rust changes, also consider `cargo clippy --release --all-targets`. The [development guide](docs/development.md#tests-and-checks) explains focused tests and the current workflow configuration.
+For Rust changes, also consider `cargo clippy --release --locked --all-targets`. The [verification guidance](AGENTS.md#build-and-test) explains focused tests and manual checks.
 
 Documentation-only changes normally need a content and link review, not a build. For behavior changes, report the commands you ran and their results; explicitly list checks or platforms you could not test. UI, IME, pane state, persistence, and platform changes may also need manual testing. Do not claim an untested platform works or assume that automated tests cover the interaction.
+
+Pull requests run the [CI workflow](.github/workflows/ci.yml): release-mode builds, Clippy, and tests on macOS, Windows, and Linux, plus asset and offline release-safety checks. CI does not replace native GUI checks or license review. The separate [candidate workflow](.github/workflows/release.yml) is manually dispatched and produces unsigned artifacts, not official releases.
 
 ## Code and dependency guidelines
 
@@ -48,6 +50,6 @@ Documentation-only changes normally need a content and link review, not a build.
 
 ## Licensing contributions
 
-Submit original code contributions under Moeka's planned **GPL-3.0-or-later** license, and only contribute material you have the right to share under the applicable terms. The full project license text is being added separately for the open-source release.
+Submit original code contributions under Moeka's **GPL-3.0-or-later** license, and only contribute material you have the right to share under the applicable terms. See [LICENSE](LICENSE) for the full text.
 
 Third-party material retains its own license: identify its origin and preserve copyright, license, and attribution notices. Do not relabel third-party code or assets as your own or assume the project's license overrides theirs.

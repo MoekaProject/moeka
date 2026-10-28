@@ -2,7 +2,6 @@ mod app_settings;
 mod assets;
 mod attachments;
 mod auto_save;
-mod branch_picker;
 mod caret;
 mod chat_panel;
 mod code_commands;
@@ -10,6 +9,7 @@ mod command_palette;
 pub(crate) mod config_paths;
 mod config_store;
 mod element;
+mod export;
 mod file_list;
 pub(crate) mod file_ops;
 mod file_watch;
@@ -19,14 +19,11 @@ mod front_matter_backspace;
 mod front_matter_enter;
 mod front_matter_groups;
 mod front_matter_layout;
-mod git_ops;
-mod git_panel;
 mod handlers;
 mod helpers;
 mod history_store;
 mod image_view;
 mod info_panel;
-mod inline_diff;
 mod input;
 mod input_entity;
 mod input_ime;
@@ -80,20 +77,12 @@ mod theme_debugger;
 mod tooltip;
 mod types;
 mod updater;
-mod whiteboard;
-mod whiteboard_element;
-mod whiteboard_export;
-mod whiteboard_geometry;
-mod whiteboard_input;
-mod whiteboard_panel;
 mod workspace_search;
 
 pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
 pub(crate) use assets::*;
 pub(crate) use attachments::AttachmentPolicy;
-pub(crate) use branch_picker::BranchPickerItem;
 pub(crate) use file_list::FileListItem;
-pub(crate) use git_ops::*;
 use language_detection::classify_pasted_text_kind;
 pub(crate) use outline::MarkdownOutlineIndex;
 pub(crate) use pane::{
@@ -106,7 +95,6 @@ pub(crate) use shortcut::{register_keybinding_overrides, set_application_menus};
 pub(crate) use status_bar::IndentSettings;
 pub(crate) use types::*;
 pub(crate) use updater::{APP_VERSION, PreparedUpdate, UpdateState};
-pub(crate) use whiteboard::*;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -115,7 +103,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use chrono::Local;
 use gpui::{
@@ -141,8 +129,6 @@ fn typing_starts_undo_group(text: &str) -> bool {
         .next()
         .is_some_and(|character| character.is_whitespace() || character.is_ascii_punctuation())
 }
-const SIDEBAR_GIT_STATUS_REFRESH_MIN_INTERVAL_MS: u64 = 350;
-const GIT_HISTORY_REFRESH_MIN_INTERVAL_MS: u64 = 350;
 const GENERATED_PREVIEW_RENDER_BUDGET: usize = 24;
 const GENERATED_PREVIEW_CACHE_RETAIN: usize = 96;
 /// Entry count alone says nothing about cost: one full-width retina diagram can
@@ -193,25 +179,6 @@ fn generated_preview_content_in_range(decorations: &[LineDecoration], range: Ran
     decorations[start..end].iter().any(|decoration| {
         decoration.block_preview.is_some() || !decoration.inline_math_spans.is_empty()
     })
-}
-
-#[derive(Clone, Copy, Default)]
-struct GitMetadataImpact {
-    affects_sidebar_status: bool,
-    affects_history: bool,
-    affects_working_tree_diff: bool,
-}
-
-impl GitMetadataImpact {
-    fn any(self) -> bool {
-        self.affects_sidebar_status || self.affects_history || self.affects_working_tree_diff
-    }
-
-    fn merge(&mut self, other: Self) {
-        self.affects_sidebar_status |= other.affects_sidebar_status;
-        self.affects_history |= other.affects_history;
-        self.affects_working_tree_diff |= other.affects_working_tree_diff;
-    }
 }
 
 fn ease_in_out_cubic(t: f32) -> f32 {
@@ -276,17 +243,6 @@ fn matching_bracket_offset(text: &str, bracket_offset: usize) -> Option<usize> {
         }
     }
     None
-}
-
-fn remaining_refresh_delay(scanned_at: Option<SystemTime>, minimum_interval_ms: u64) -> Duration {
-    let Some(scanned_at) = scanned_at else {
-        return Duration::ZERO;
-    };
-    let minimum_interval = Duration::from_millis(minimum_interval_ms);
-    let Ok(elapsed) = scanned_at.elapsed() else {
-        return Duration::ZERO;
-    };
-    minimum_interval.saturating_sub(elapsed)
 }
 
 fn timestamp_file_stem() -> String {
@@ -453,7 +409,6 @@ pub(crate) enum ContextMenuKind {
     },
     Workspace,
     Image,
-    Whiteboard,
     Table {
         table_start_line: usize,
         row: usize,
@@ -476,7 +431,7 @@ fn front_matter_type_icon(ty: front_matter::FrontMatterType) -> &'static str {
         Text | MultilineText | Empty => "assets/icons/format/front-matter-text.svg",
         Checkbox => FMT_TODO_SVG,
         Date => FMT_DATE_TIME_SVG,
-        DateTime => GIT_HISTORY_SVG_PATH,
+        DateTime => HISTORY_SVG_PATH,
         List => FMT_LIST_SVG,
         Number => "assets/icons/format/front-matter-number.svg",
 
@@ -703,9 +658,7 @@ pub(crate) struct DraggedSidebarItems {
 pub(crate) struct DraggedSidebarItemsView {
     pub label: String,
     pub count: usize,
-    pub font_size_px: f32,
-    pub background_color: gpui::Hsla,
-    pub text_color: gpui::Hsla,
+    pub style: crate::style::DragPreviewStyle,
     pub cursor_offset: gpui::Point<gpui::Pixels>,
 }
 
@@ -715,26 +668,12 @@ impl Render for DraggedSidebarItemsView {
         _window: &mut gpui::Window,
         _cx: &mut Context<Self>,
     ) -> impl gpui::IntoElement {
-        use gpui::{div, prelude::*, px};
         let text = if self.count > 1 {
             format!("{} (+{})", self.label, self.count - 1)
         } else {
             self.label.clone()
         };
-        div()
-            .pl(self.cursor_offset.x + px(16.0))
-            .pt(self.cursor_offset.y + px(16.0))
-            .child(
-                div()
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .bg(self.background_color)
-                    .text_color(self.text_color)
-                    .text_size(px(self.font_size_px))
-                    .rounded(px(4.0))
-                    .shadow_md()
-                    .child(text),
-            )
+        crate::ui::surface::drag_preview(&self.style, self.cursor_offset, text)
     }
 }
 
@@ -789,9 +728,7 @@ pub(crate) struct DraggedTab {
 
 pub(crate) struct DraggedTabView {
     pub title: String,
-    pub font_size_px: f32,
-    pub background_color: gpui::Hsla,
-    pub text_color: gpui::Hsla,
+    pub style: crate::style::DragPreviewStyle,
     pub cursor_offset: gpui::Point<gpui::Pixels>,
 }
 
@@ -801,50 +738,19 @@ impl Render for DraggedTabView {
         _window: &mut gpui::Window,
         _cx: &mut Context<Self>,
     ) -> impl gpui::IntoElement {
-        use gpui::{div, prelude::*, px};
-        div()
-            .pl(self.cursor_offset.x + px(16.0))
-            .pt(self.cursor_offset.y + px(16.0))
-            .child(
-                div()
-                    .px(px(10.0))
-                    .py(px(4.0))
-                    .bg(self.background_color)
-                    .text_color(self.text_color)
-                    .text_size(px(self.font_size_px))
-                    .rounded(px(4.0))
-                    .shadow_md()
-                    .opacity(0.85)
-                    .child(self.title.clone()),
-            )
+        crate::ui::surface::drag_preview(&self.style, self.cursor_offset, self.title.clone())
     }
 }
 
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) enum DialogAction {
-    CloseTabUnsaved {
-        tab_id: String,
-    },
-    CloseRunningTerminal {
-        tab_id: String,
-    },
-    SaveAndCloseTab {
-        tab_id: String,
-    },
-    DeletePath {
-        path: PathBuf,
-    },
-    DeletePaths {
-        paths: Vec<PathBuf>,
-    },
-    InstallUpdate {
-        update: PreparedUpdate,
-    },
-    GitDiscardEntries {
-        tracked: Vec<String>,
-        untracked: Vec<String>,
-    },
+    CloseTabUnsaved { tab_id: String },
+    CloseRunningTerminal { tab_id: String },
+    SaveAndCloseTab { tab_id: String },
+    DeletePath { path: PathBuf },
+    DeletePaths { paths: Vec<PathBuf> },
+    InstallUpdate { update: PreparedUpdate },
     FormatWholeDocument,
     DismissOnly,
 }
@@ -1643,8 +1549,6 @@ fn markdown_decoration_is_plain_text(decoration: &LineDecoration) -> bool {
         && decoration.block_contexts.is_empty()
         && decoration.callout_kind.is_none()
         && decoration.inline_spans.is_empty()
-        && decoration.diff_added_spans.is_empty()
-        && decoration.diff_removed_spans.is_empty()
         && decoration.syntax_ranges.is_empty()
         && decoration.display_replacements.is_empty()
         && decoration.block_preview.is_none()
@@ -1965,7 +1869,16 @@ fn line_display_transfer_line_bounds(
 fn list_indent_width_for_source(decoration: &LineDecoration, source: &str) -> Option<usize> {
     match decoration.block_type {
         BlockType::OrderedList => Some(3),
-        BlockType::UnorderedList | BlockType::TaskList(_) => Some(2),
+        BlockType::TaskList(_) => {
+            let quote = markdown::blockquote_prefix_len(source);
+            let body = source[quote..].trim_start_matches([' ', '\t']);
+            Some(if markdown::ordered_list_prefix_len(body) > 0 {
+                3
+            } else {
+                2
+            })
+        }
+        BlockType::UnorderedList => Some(2),
         BlockType::Normal | BlockType::Blockquote if decoration.table_info.is_none() => {
             let quote = markdown::blockquote_prefix_len(source);
             let content = source[quote..].trim_start_matches([' ', '\t']);
@@ -1989,9 +1902,13 @@ fn ordered_list_near_line(decorations: &[LineDecoration], line: usize) -> bool {
             .saturating_add(1)
             .min(decorations.len().saturating_sub(1)))
         .any(|line| {
-            decorations
-                .get(line)
-                .is_some_and(|decoration| decoration.block_type == BlockType::OrderedList)
+            decorations.get(line).is_some_and(|decoration| {
+                decoration.block_type == BlockType::OrderedList
+                    || (matches!(decoration.block_type, BlockType::TaskList(_))
+                        && decoration
+                            .block_contexts
+                            .contains(&markdown::BlockContext::OrderedList))
+            })
         })
 }
 
@@ -2324,21 +2241,6 @@ pub struct EditorView {
     pub(crate) generated_preview_rerender_pending: bool,
     pub(crate) last_viewport_height: f32,
     pub(crate) last_viewport_width: f32,
-    /// Screen bounds of the whiteboard canvas element from the last paint, used
-    /// to map pointer positions into canvas coordinates.
-    pub(crate) whiteboard_canvas_bounds: Option<Bounds<Pixels>>,
-    /// Active pointer interaction on the whiteboard canvas, if any.
-    pub(crate) whiteboard_drag: Option<WhiteboardDrag>,
-    /// Last known pointer position over the whiteboard canvas (screen space),
-    /// used to compute the hover cursor during paint.
-    pub(crate) whiteboard_pointer: Option<Point<Pixels>>,
-    /// Whether Space is held (enables drag-to-pan on the whiteboard).
-    pub(crate) whiteboard_space_down: bool,
-    /// Elements currently highlighted as magnetic bind targets while dragging
-    /// linear endpoints over them.
-    pub(crate) whiteboard_bind_targets: Vec<String>,
-    /// Active inline text editor for a whiteboard element, if any.
-    pub(crate) whiteboard_text_editor: Option<whiteboard_input::WhiteboardTextEditor>,
     // Cursor blink state
     pub(crate) cursor_opacity: f32,
     pub(crate) blink_epoch: usize,
@@ -2684,11 +2586,6 @@ pub struct EditorView {
     /// True when the currently open sidebar context menu was opened from a
     /// FileList item (used to route the follow-up rename/create input row).
     pub(crate) file_list_menu_origin: bool,
-    pub(crate) sidebar_git_statuses: HashMap<PathBuf, SidebarGitStatus>,
-    pub(crate) sidebar_git_statuses_dirty: bool,
-    pub(crate) sidebar_git_statuses_scanned_at: Option<SystemTime>,
-    pub(crate) sidebar_git_statuses_refresh_epoch: usize,
-    pub(crate) sidebar_git_statuses_task: Option<Task<()>>,
     pub(crate) workspaces: Vec<PathBuf>,
     pub(crate) _watcher_task: Option<Task<()>>,
     pub(crate) temp_save_tasks: HashMap<String, Task<()>>,
@@ -2714,51 +2611,14 @@ pub struct EditorView {
     /// as keep-visible. 0 when the rail is not shown.
     pub(crate) outline_rail_zone_from_right: Cell<f32>,
     pub(crate) info_panel_scroll_handle: ScrollHandle,
-    pub(crate) git_history_scroll_handle: ScrollHandle,
     pub(crate) outline_panel_scroll_handle: ScrollHandle,
     pub(crate) info_panel_cache_tab_id: Option<String>,
     pub(crate) info_panel_cache_result: Option<Option<Arc<info_panel::InfoPanelData>>>,
     pub(crate) info_panel_refresh_epoch: usize,
     pub(crate) info_panel_refresh_task: Option<Task<()>>,
-    pub(crate) git_history_cache_path: Option<PathBuf>,
-    pub(crate) git_history_cache_result: Option<Option<Vec<GitHistoryItem>>>,
-    pub(crate) git_history_cache_dirty: bool,
-    pub(crate) git_history_has_more: bool,
-    pub(crate) git_history_cache_scanned_at: Option<SystemTime>,
-    pub(crate) git_history_refresh_epoch: usize,
-    pub(crate) git_history_refresh_task: Option<Task<()>>,
-    pub(crate) git_panel_tab: GitPanelTab,
-    pub(crate) git_branch_status: status_bar::GitBranchStatus,
-    pub(crate) git_panel_snapshot: Option<GitPanelSnapshot>,
-    pub(crate) git_panel_status_dirty: bool,
-    pub(crate) git_panel_status_scanned_at: Option<SystemTime>,
-    pub(crate) git_panel_status_epoch: usize,
-    pub(crate) git_panel_status_task: Option<Task<()>>,
-    pub(crate) git_operation_in_flight: Option<GitOperation>,
-    pub(crate) git_commit_message: String,
-    pub(crate) git_commit_message_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
-    pub(crate) git_changes_scroll_handle: ScrollHandle,
-    pub(crate) git_history_scope: GitHistoryScope,
-    pub(crate) git_history_expanded_commit: Option<String>,
-    pub(crate) git_commit_files: Option<(String, Vec<GitCommitFileEntry>)>,
-    pub(crate) git_commit_files_task: Option<Task<()>>,
-    pub(crate) git_remote_input_visible: bool,
-    pub(crate) git_remote_input_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
-    pub(crate) branch_picker_visible: bool,
-    pub(crate) branch_picker_anchor: Option<Bounds<Pixels>>,
-    pub(crate) status_bar_branch_button_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    pub(crate) git_panel_branch_button_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    pub(crate) branch_picker_query: String,
-    pub(crate) branch_picker_all: Vec<String>,
-    pub(crate) branch_picker_current: Option<String>,
-    pub(crate) branch_picker_items: Vec<BranchPickerItem>,
-    pub(crate) branch_picker_selected_index: usize,
-    pub(crate) branch_picker_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
-    pub(crate) branch_picker_scroll_handle: ScrollHandle,
     pub(crate) utility_panel: Option<RightUtilityPanel>,
     pub(crate) displayed_utility_panel: Option<RightUtilityPanel>,
     pub(crate) info_panel_custom_width: Option<f32>,
-    pub(crate) git_history_panel_custom_width: Option<f32>,
     pub(crate) outline_panel_custom_width: Option<f32>,
     pub(crate) utility_panel_resizing: bool,
     pub(crate) utility_panel_display_width: f32,
@@ -2797,40 +2657,6 @@ pub struct EditorView {
     pub(crate) toolbar_corner_hide_task: Option<Task<()>>,
     pub(crate) last_window_width: f32,
     pub(crate) last_window_height: f32,
-
-    // ── Inline (working-tree vs HEAD) diff overlay ──────────────────
-    /// Set when the active editor buffer changed and its inline diff needs to
-    /// be recomputed (consumed on the next render, which has a `Context`).
-    pub(crate) inline_diff_dirty: bool,
-    /// Set when the HEAD baseline must be re-read from git (file open, tab
-    /// switch, or a git working-tree change) rather than reusing the cached one.
-    pub(crate) inline_diff_base_dirty: bool,
-    /// Supersede token so only the latest debounced recompute applies.
-    pub(crate) inline_diff_epoch: u64,
-    /// Hit areas for the left-edge diff indicators: `(bounds, hunk_index)`.
-    pub(crate) inline_diff_gutter_areas: Vec<(gpui::Bounds<gpui::Pixels>, usize)>,
-    pub(crate) hovering_inline_diff_gutter_hunk: Option<usize>,
-    /// Full-width per-hunk regions used to reveal the hover "revert" button:
-    /// `(bounds, hunk_index)`.
-    pub(crate) inline_diff_hunk_areas: Vec<(gpui::Bounds<gpui::Pixels>, usize)>,
-    /// Hit areas for the hover "revert" buttons: `(bounds, hunk_index)`.
-    pub(crate) inline_diff_revert_areas: Vec<(gpui::Bounds<gpui::Pixels>, usize)>,
-    /// Hunk currently hovered (controls revert-button visibility).
-    pub(crate) hovering_inline_diff_hunk: Option<usize>,
-    /// Revert button currently hovered (controls its highlight + cursor).
-    pub(crate) hovering_inline_diff_revert_hunk: Option<usize>,
-    /// Measured total height of the expanded removed rows anchored above / below
-    /// a buffer line, keyed by that line. Filled during prepaint after the
-    /// removed lines are shaped (they soft-wrap), and read by
-    /// `block_padding_for_line` so the reserved band matches what is painted.
-    pub(crate) inline_diff_phantom_height_above: HashMap<usize, f32>,
-    pub(crate) inline_diff_phantom_height_below: HashMap<usize, f32>,
-    /// Per-removed-row geometry for hit-testing read-only phantom-row selection.
-    pub(crate) phantom_row_hits: Vec<PhantomRowHit>,
-    /// Read-only character-level selection over an expanded hunk's removed rows.
-    pub(crate) phantom_selection: Option<PhantomSelection>,
-    /// True while a phantom-row selection is being dragged.
-    pub(crate) phantom_selecting: bool,
 
     // ── Buffer search state ─────────────────────────────────────────
     pub(crate) search_visible: bool,
@@ -3061,10 +2887,11 @@ impl EditorView {
             theme_kind.is_dark(),
         );
         let ui_theme = app_settings.ui_theme_for(theme_kind);
-        let mut styles = crate::style::Styles::from_theme_with_options(
+        let mut styles = crate::style::Styles::from_theme_with_spec(
             &theme,
             &ui_theme,
             app_settings.sidebar_always_dark,
+            app_settings.ui_style_spec(),
         );
         // Keep Markdown headings at their original sizes while rendering body
         // text one point smaller than the configured legacy size.
@@ -3114,8 +2941,8 @@ impl EditorView {
         let init_padding_left = styles.editor.editor_padding_left_px;
         let init_padding_right = styles.editor.editor_padding_right_px;
         let init_cursor_opacity = styles.cursor.cursor_opacity_max;
-        let init_scrollbar_opacity = styles.editor.editor_scrollbar_idle_opacity;
-        let init_scrollbar_width = styles.editor.editor_scrollbar_width_px;
+        let init_scrollbar_opacity = styles.self_drawn.scrollbar.idle_opacity;
+        let init_scrollbar_width = styles.self_drawn.scrollbar.width_px;
         let mut this = Self {
             buffer,
             cursor: Cursor::new(),
@@ -3167,12 +2994,6 @@ impl EditorView {
             generated_preview_rerender_pending: false,
             last_viewport_height: 0.0,
             last_viewport_width: init_max_width,
-            whiteboard_canvas_bounds: None,
-            whiteboard_drag: None,
-            whiteboard_pointer: None,
-            whiteboard_space_down: false,
-            whiteboard_bind_targets: Vec::new(),
-            whiteboard_text_editor: None,
             cursor_opacity: init_cursor_opacity,
             blink_epoch: 0,
             cursor_blink_allowed: false,
@@ -3470,11 +3291,6 @@ impl EditorView {
             file_list_pending_reveal_centered: false,
             sidebar_edit_in_file_list: false,
             file_list_menu_origin: false,
-            sidebar_git_statuses: HashMap::new(),
-            sidebar_git_statuses_dirty: true,
-            sidebar_git_statuses_scanned_at: None,
-            sidebar_git_statuses_refresh_epoch: 0,
-            sidebar_git_statuses_task: None,
             workspaces: Vec::new(),
             _watcher_task: None,
             temp_save_tasks: HashMap::new(),
@@ -3497,51 +3313,14 @@ impl EditorView {
             outline_rail_hover_since: Cell::new(None),
             outline_rail_zone_from_right: Cell::new(0.0),
             info_panel_scroll_handle: ScrollHandle::new(),
-            git_history_scroll_handle: ScrollHandle::new(),
             outline_panel_scroll_handle: ScrollHandle::new(),
             info_panel_cache_tab_id: None,
             info_panel_cache_result: None,
             info_panel_refresh_epoch: 0,
             info_panel_refresh_task: None,
-            git_history_cache_path: None,
-            git_history_cache_result: None,
-            git_history_cache_dirty: true,
-            git_history_has_more: false,
-            git_history_cache_scanned_at: None,
-            git_history_refresh_epoch: 0,
-            git_history_refresh_task: None,
-            git_panel_tab: GitPanelTab::Changes,
-            git_branch_status: status_bar::GitBranchStatus::default(),
-            git_panel_snapshot: None,
-            git_panel_status_dirty: true,
-            git_panel_status_scanned_at: None,
-            git_panel_status_epoch: 0,
-            git_panel_status_task: None,
-            git_operation_in_flight: None,
-            git_commit_message: String::new(),
-            git_commit_message_editor: None,
-            git_changes_scroll_handle: ScrollHandle::new(),
-            git_history_scope: GitHistoryScope::Repository,
-            git_history_expanded_commit: None,
-            git_commit_files: None,
-            git_commit_files_task: None,
-            git_remote_input_visible: false,
-            git_remote_input_editor: None,
-            branch_picker_visible: false,
-            branch_picker_anchor: None,
-            status_bar_branch_button_bounds: Rc::new(Cell::new(None)),
-            git_panel_branch_button_bounds: Rc::new(Cell::new(None)),
-            branch_picker_query: String::new(),
-            branch_picker_all: Vec::new(),
-            branch_picker_current: None,
-            branch_picker_items: Vec::new(),
-            branch_picker_selected_index: 0,
-            branch_picker_editor: None,
-            branch_picker_scroll_handle: ScrollHandle::new(),
             utility_panel: None,
             displayed_utility_panel: None,
             info_panel_custom_width: None,
-            git_history_panel_custom_width: None,
             outline_panel_custom_width: None,
             utility_panel_resizing: false,
             utility_panel_display_width: 0.0,
@@ -3577,21 +3356,6 @@ impl EditorView {
             toolbar_corner_hide_task: None,
             last_window_width: 1360.0,
             last_window_height: 820.0,
-
-            inline_diff_dirty: false,
-            inline_diff_base_dirty: false,
-            inline_diff_epoch: 0,
-            inline_diff_gutter_areas: Vec::new(),
-            hovering_inline_diff_gutter_hunk: None,
-            inline_diff_hunk_areas: Vec::new(),
-            inline_diff_revert_areas: Vec::new(),
-            hovering_inline_diff_hunk: None,
-            hovering_inline_diff_revert_hunk: None,
-            inline_diff_phantom_height_above: HashMap::new(),
-            inline_diff_phantom_height_below: HashMap::new(),
-            phantom_row_hits: Vec::new(),
-            phantom_selection: None,
-            phantom_selecting: false,
 
             search_visible: false,
             search_query: String::new(),
@@ -3925,11 +3689,11 @@ impl EditorView {
     }
 
     fn editor_scrollbar_track_top(&self) -> f32 {
-        self.scaled(self.styles.editor.editor_scrollbar_top_margin_px)
+        self.scaled(self.styles.self_drawn.scrollbar.top_margin_px)
     }
 
     fn editor_scrollbar_track_bottom_margin(&self) -> f32 {
-        self.scaled(self.styles.editor.editor_scrollbar_bottom_margin_px)
+        self.scaled(self.styles.self_drawn.scrollbar.bottom_margin_px)
     }
 
     fn editor_scrollbar_track_height(&self) -> f32 {
@@ -3940,17 +3704,16 @@ impl EditorView {
     }
 
     fn editor_scrollbar_hit_width(&self) -> f32 {
-        self.scaled(
-            self.styles
-                .editor
-                .editor_scrollbar_hit_width_px
-                .max(self.styles.editor.editor_scrollbar_width_px)
-                .max(self.styles.editor.editor_scrollbar_hover_width_px),
+        crate::ui::self_drawn::ScrollbarControl::new(
+            self.styles.self_drawn.scrollbar,
+            self.scaled(1.0),
         )
+        .hit_width()
     }
 
     fn desired_editor_scrollbar_width(&self) -> f32 {
-        self.styles.editor.editor_scrollbar_width_px
+        crate::ui::self_drawn::ScrollbarControl::new(self.styles.self_drawn.scrollbar, 1.0)
+            .width(self.editor_scrollbar_hovered || self.editor_scrollbar_drag.is_some())
     }
 
     pub(crate) fn editor_scrollbar_region_contains(&self, position: Point<Pixels>) -> bool {
@@ -3966,7 +3729,7 @@ impl EditorView {
         let x = f32::from(position.x);
         let y = f32::from(position.y);
         let hit_width = self.editor_scrollbar_hit_width();
-        let right_margin = self.scaled(self.styles.editor.editor_scrollbar_right_margin_px);
+        let right_margin = self.scaled(self.styles.self_drawn.scrollbar.right_margin_px);
         let track_top = top + self.editor_scrollbar_track_top();
         x >= right - right_margin - hit_width && x <= right && y >= track_top && y <= bottom
     }
@@ -3985,18 +3748,23 @@ impl EditorView {
             self.total_content_height()
         }
         .max(1.0);
-        let min_thumb_height = self.scaled(self.styles.editor.editor_scrollbar_min_thumb_height_px);
-        let thumb_height = (viewport_height * (viewport_height / total_content_height))
-            .clamp(min_thumb_height, viewport_height.max(min_thumb_height));
-
         let max_scroll = self.editor_scrollbar_max_scroll();
         if max_scroll <= 0.0 {
             return None;
         }
-
-        let track_travel = (viewport_height - thumb_height).max(0.0);
-        let thumb_top =
-            track_top + (self.scroll_offset / max_scroll).clamp(0.0, 1.0) * track_travel;
+        let (offset, thumb_height, _) = crate::ui::self_drawn::ScrollbarControl::new(
+            self.styles.self_drawn.scrollbar,
+            self.scaled(1.0),
+        )
+        .thumb_geometry(
+            viewport_height,
+            viewport_height,
+            total_content_height,
+            self.scroll_offset,
+            max_scroll,
+            false,
+        );
+        let thumb_top = track_top + offset;
         Some((thumb_top, thumb_height))
     }
 
@@ -4010,11 +3778,11 @@ impl EditorView {
         if !self.editor_scrollbar_can_show() {
             0.0
         } else if self.editor_scrollbar_hovered || self.editor_scrollbar_drag.is_some() {
-            self.styles.editor.editor_scrollbar_hover_opacity
+            self.styles.self_drawn.scrollbar.hover_opacity
         } else if self.editor_scrollbar_revealed {
-            self.styles.editor.editor_scrollbar_opacity
+            self.styles.self_drawn.scrollbar.opacity
         } else {
-            self.styles.editor.editor_scrollbar_idle_opacity
+            self.styles.self_drawn.scrollbar.idle_opacity
         }
     }
 
@@ -4031,12 +3799,8 @@ impl EditorView {
 
         self.editor_scrollbar_opacity_epoch += 1;
         let epoch = self.editor_scrollbar_opacity_epoch;
-        let duration_ms = self.styles.editor.editor_scrollbar_fade_animation_ms.max(1);
-        let frame_ms = self
-            .styles
-            .editor
-            .editor_scrollbar_animation_frame_ms
-            .max(1);
+        let duration_ms = self.styles.self_drawn.scrollbar.fade_animation_ms.max(1);
+        let frame_ms = self.styles.self_drawn.scrollbar.animation_frame_ms.max(1);
         let step = (frame_ms as f32 / duration_ms as f32).clamp(0.08, 1.0);
 
         let pane_id = self.current_pane_id();
@@ -4091,16 +3855,8 @@ impl EditorView {
 
         self.editor_scrollbar_width_epoch += 1;
         let epoch = self.editor_scrollbar_width_epoch;
-        let duration_ms = self
-            .styles
-            .editor
-            .editor_scrollbar_width_animation_ms
-            .max(1);
-        let frame_ms = self
-            .styles
-            .editor
-            .editor_scrollbar_animation_frame_ms
-            .max(1);
+        let duration_ms = self.styles.self_drawn.scrollbar.width_animation_ms.max(1);
+        let frame_ms = self.styles.self_drawn.scrollbar.animation_frame_ms.max(1);
         let step = (frame_ms as f32 / duration_ms as f32).clamp(0.08, 1.0);
 
         let pane_id = self.current_pane_id();
@@ -4156,7 +3912,7 @@ impl EditorView {
 
         self.editor_scrollbar_idle_epoch += 1;
         let epoch = self.editor_scrollbar_idle_epoch;
-        let delay_ms = self.styles.editor.editor_scrollbar_idle_delay_ms;
+        let delay_ms = self.styles.self_drawn.scrollbar.idle_delay_ms;
         let pane_id = self.current_pane_id();
         self.editor_scrollbar_idle_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -4366,13 +4122,16 @@ impl EditorView {
             self.code_block_horizontal_scrollbar_active_line(),
             self.code_block_horizontal_scrollbar_hovered,
             self.code_block_horizontal_scrollbar_drag.is_some(),
-            self.styles.editor.editor_scrollbar_opacity,
-            self.styles.editor.editor_scrollbar_hover_opacity,
+            self.styles.self_drawn.scrollbar.opacity,
+            self.styles.self_drawn.scrollbar.hover_opacity,
         )
     }
 
     fn desired_code_block_horizontal_scrollbar_thickness(&self) -> f32 {
-        self.styles.editor.editor_scrollbar_width_px
+        crate::ui::self_drawn::ScrollbarControl::new(self.styles.self_drawn.scrollbar, 1.0).width(
+            self.code_block_horizontal_scrollbar_hovered.is_some()
+                || self.code_block_horizontal_scrollbar_drag.is_some(),
+        )
     }
 
     pub(crate) fn sync_code_block_horizontal_scrollbar(&mut self, cx: &mut Context<Self>) {
@@ -4397,12 +4156,8 @@ impl EditorView {
             .code_block_horizontal_scrollbar_opacity_epoch
             .wrapping_add(1);
         let epoch = self.code_block_horizontal_scrollbar_opacity_epoch;
-        let frame_ms = self
-            .styles
-            .editor
-            .editor_scrollbar_animation_frame_ms
-            .max(1);
-        let duration_ms = self.styles.editor.editor_scrollbar_fade_animation_ms.max(1);
+        let frame_ms = self.styles.self_drawn.scrollbar.animation_frame_ms.max(1);
+        let duration_ms = self.styles.self_drawn.scrollbar.fade_animation_ms.max(1);
         let step = (frame_ms as f32 / duration_ms as f32).clamp(0.08, 1.0);
         let pane_id = self.current_pane_id();
         self.code_block_horizontal_scrollbar_opacity_task =
@@ -4459,16 +4214,8 @@ impl EditorView {
             .code_block_horizontal_scrollbar_thickness_epoch
             .wrapping_add(1);
         let epoch = self.code_block_horizontal_scrollbar_thickness_epoch;
-        let frame_ms = self
-            .styles
-            .editor
-            .editor_scrollbar_animation_frame_ms
-            .max(1);
-        let duration_ms = self
-            .styles
-            .editor
-            .editor_scrollbar_width_animation_ms
-            .max(1);
+        let frame_ms = self.styles.self_drawn.scrollbar.animation_frame_ms.max(1);
+        let duration_ms = self.styles.self_drawn.scrollbar.width_animation_ms.max(1);
         let step = (frame_ms as f32 / duration_ms as f32).clamp(0.08, 1.0);
         let pane_id = self.current_pane_id();
         self.code_block_horizontal_scrollbar_thickness_task =
@@ -4558,7 +4305,7 @@ impl EditorView {
         let thumb_height = self
             .scaled(
                 self.code_block_horizontal_scrollbar_thickness
-                    .max(self.styles.editor.editor_scrollbar_width_px),
+                    .max(self.styles.self_drawn.scrollbar.width_px),
             )
             .min(track_height);
         Some(CodeBlockHorizontalScrollbarOverlayGeometry {
@@ -4784,7 +4531,6 @@ impl EditorView {
     pub(crate) fn utility_panel_custom_width_for(&self, panel: RightUtilityPanel) -> Option<f32> {
         match panel {
             RightUtilityPanel::Info => self.info_panel_custom_width,
-            RightUtilityPanel::GitHistory => self.git_history_panel_custom_width,
             RightUtilityPanel::Outline => self.outline_panel_custom_width,
         }
     }
@@ -4796,7 +4542,6 @@ impl EditorView {
     ) {
         match panel {
             RightUtilityPanel::Info => self.info_panel_custom_width = width,
-            RightUtilityPanel::GitHistory => self.git_history_panel_custom_width = width,
             RightUtilityPanel::Outline => self.outline_panel_custom_width = width,
         }
     }
@@ -5154,8 +4899,8 @@ impl EditorView {
         // a plain content-bounds test would otherwise treat it as "inside"). The
         // rail records its exact interactive width each frame.
         let right_edge_zone = self.outline_rail_zone_from_right.get().max(self.scaled(
-            self.styles.editor.editor_scrollbar_right_margin_px
-                + self.styles.editor.editor_scrollbar_hover_width_px,
+            self.styles.self_drawn.scrollbar.right_margin_px
+                + self.styles.self_drawn.scrollbar.hover_width_px,
         ));
         let hovering_right_edge = y >= top && y <= bottom && x >= right - right_edge_zone;
         let hovering = hovering_side_gutters
@@ -5262,13 +5007,29 @@ impl EditorView {
     }
 
     pub(crate) fn sync_overlay_text_input_styles(&mut self, cx: &mut Context<Self>) {
-        if let Some(editor) = &self.search_query_editor {
-            let styles = self.search_query_text_input_styles();
-            editor.update(cx, |input, cx| input.set_styles(styles, cx));
-        }
-        if let Some(editor) = &self.search_replace_editor {
-            let styles = self.search_replace_text_input_styles();
-            editor.update(cx, |input, cx| input.set_styles(styles, cx));
+        use crate::style::InputRole;
+
+        // Visit the live root and stored slots without nesting pane swaps. During
+        // a temporary swap, one stored slot contains the focused pane's inputs.
+        let mut updated = std::collections::HashSet::new();
+        for (query, replace) in
+            std::iter::once((&self.search_query_editor, &self.search_replace_editor)).chain(
+                self.panes.iter().map(|pane| {
+                    (
+                        &pane.state.search_query_editor,
+                        &pane.state.search_replace_editor,
+                    )
+                }),
+            )
+        {
+            for (editor, role) in [(query, InputRole::Search), (replace, InputRole::Replace)] {
+                if let Some(editor) = editor
+                    && updated.insert(editor.entity_id())
+                {
+                    let styles = self.styles.input_styles(role, self.ui_scale);
+                    editor.update(cx, |input, cx| input.set_styles(styles, cx));
+                }
+            }
         }
         if let Some(editor) = &self.workspace_search_editor {
             let styles = self.workspace_search_text_input_styles();
@@ -5293,10 +5054,6 @@ impl EditorView {
             editor.update(cx, |input, cx| input.set_styles(styles, cx));
         }
         if let Some(editor) = &self.language_picker_editor {
-            let styles = self.search_menu_text_input_styles();
-            editor.update(cx, |input, cx| input.set_styles(styles, cx));
-        }
-        if let Some(editor) = &self.branch_picker_editor {
             let styles = self.search_menu_text_input_styles();
             editor.update(cx, |input, cx| input.set_styles(styles, cx));
         }
@@ -5578,51 +5335,6 @@ impl EditorView {
         })
     }
 
-    fn is_git_metadata_change_path(&self, path: &Path) -> bool {
-        path.components()
-            .any(|component| component.as_os_str().to_str() == Some(".git"))
-    }
-
-    fn git_metadata_change_impact(&self, path: &Path) -> GitMetadataImpact {
-        let mut components = path.components();
-        while let Some(component) = components.next() {
-            if component.as_os_str().to_str() != Some(".git") {
-                continue;
-            }
-
-            let category = components
-                .next()
-                .and_then(|component| component.as_os_str().to_str());
-
-            return match category {
-                None => GitMetadataImpact {
-                    affects_sidebar_status: true,
-                    affects_history: true,
-                    affects_working_tree_diff: true,
-                },
-                Some(
-                    "HEAD" | "refs" | "packed-refs" | "rebase-apply" | "rebase-merge" | "sequencer"
-                    | "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD" | "ORIG_HEAD",
-                ) => GitMetadataImpact {
-                    affects_sidebar_status: true,
-                    affects_history: true,
-                    affects_working_tree_diff: true,
-                },
-                Some("index") => GitMetadataImpact {
-                    affects_sidebar_status: true,
-                    affects_history: true,
-                    affects_working_tree_diff: false,
-                },
-                // `index.lock` only marks a git command in flight; the real
-                // change arrives with the `index` write that follows.
-                Some("index.lock") => GitMetadataImpact::default(),
-                _ => GitMetadataImpact::default(),
-            };
-        }
-
-        GitMetadataImpact::default()
-    }
-
     fn fs_rename_mappings(events: &[notify::Event]) -> Vec<(PathBuf, PathBuf)> {
         use notify::EventKind;
         use notify::event::{ModifyKind, RenameMode};
@@ -5831,16 +5543,11 @@ impl EditorView {
     ) {
         let mut changed_paths_in_workspace = Vec::new();
         let mut seen_paths_in_workspace = HashSet::new();
-        let mut git_metadata_impact = GitMetadataImpact::default();
         for path in changed_paths.iter().map(PathBuf::as_path) {
             if self.sidebar_root.as_os_str().is_empty() || !path.starts_with(&self.sidebar_root) {
                 continue;
             }
             if self.is_internal_temp_change_path(path) {
-                continue;
-            }
-            if self.is_git_metadata_change_path(path) {
-                git_metadata_impact.merge(self.git_metadata_change_impact(path));
                 continue;
             }
             if self.path_contains_ignored_workspace_component(path) {
@@ -5869,7 +5576,7 @@ impl EditorView {
             }
         }
 
-        if changed_paths_for_tabs.is_empty() && !git_metadata_impact.any() {
+        if changed_paths_for_tabs.is_empty() {
             return;
         }
 
@@ -5903,65 +5610,25 @@ impl EditorView {
             self.mark_workspace_search_index_dirty(&changed_paths_in_workspace);
             needs_notify = true;
         }
-        let git_status_changed =
-            git_metadata_impact.affects_sidebar_status || !changed_paths_in_workspace.is_empty();
-        if git_status_changed || git_metadata_impact.affects_history {
-            // A subdirectory workspace or linked worktree may not watch .git;
-            // worktree changes can be the only observable sign of a checkout.
-            self.invalidate_status_bar_git_branch();
-        }
-        if git_status_changed {
-            self.invalidate_sidebar_git_statuses();
-            self.invalidate_git_panel_status();
-            needs_notify = true;
-        }
-        if git_metadata_impact.affects_history {
-            self.invalidate_git_history_cache();
-            self.invalidate_git_panel_status();
-            needs_notify = true;
-        }
         if current_file_hit {
             self.invalidate_info_panel_cache();
-            self.invalidate_git_history_cache();
             needs_notify = true;
         }
 
         // Apply external file changes to every pane's tabs (marking deleted
-        // files, reloading clean buffers, refreshing diff tabs).
+        // files and reloading clean buffers).
         for pane_id in self.pane_ids() {
             let pane_notified = self.with_pane(pane_id, |this| {
                 let mut needs_notify = false;
                 let mut active_tab_needs_reload = false;
-                let mut diff_tabs_to_refresh = Vec::new();
                 let active_tab_id = this.active_tab_id.clone();
 
-                for (tab_index, tab) in this.tabs.iter_mut().enumerate() {
+                for tab in &mut this.tabs {
                     if let Some(ref tab_path) = tab.path {
                         let path_changed = changed_paths_for_tabs
                             .iter()
                             .any(|path| path == tab_path || tab_path.starts_with(path));
-                        let should_refresh_diff = tab.git_diff.as_ref().is_some_and(|diff| {
-                            diff.source.tracks_local_state()
-                                && (path_changed || git_metadata_impact.affects_working_tree_diff)
-                        });
-                        if path_changed || should_refresh_diff {
-                            if tab.kind == TabKind::Diff {
-                                if !should_refresh_diff {
-                                    continue;
-                                }
-                                if let Some(exists) = contents
-                                    .get(tab_path)
-                                    .and_then(file_watch::FileObservation::exists)
-                                {
-                                    if tab.is_deleted == exists {
-                                        tab.is_deleted = !exists;
-                                        needs_notify = true;
-                                    }
-                                }
-                                diff_tabs_to_refresh.push(tab_index);
-                                continue;
-                            }
-
+                        if path_changed {
                             let Some(exists) = contents
                                 .get(tab_path)
                                 .and_then(file_watch::FileObservation::exists)
@@ -6011,18 +5678,6 @@ impl EditorView {
                             }
                         }
                     }
-                }
-
-                for tab_index in diff_tabs_to_refresh {
-                    needs_notify |= this.refresh_git_diff_tab(tab_index, cx);
-                }
-
-                // A HEAD move (commit, checkout, reset) changes the inline-diff
-                // baseline for the active editable tab, so re-read it from git
-                // on the next render.
-                if git_metadata_impact.affects_working_tree_diff {
-                    this.mark_inline_diff_dirty(true);
-                    needs_notify = true;
                 }
 
                 // Reload the active tab's buffer if it was externally modified
@@ -6100,9 +5755,6 @@ impl EditorView {
             DialogAction::InstallUpdate { update } => {
                 self.install_update(update);
             }
-            DialogAction::GitDiscardEntries { tracked, untracked } => {
-                self.run_git_operation(GitOperation::DiscardPaths { tracked, untracked }, cx);
-            }
             DialogAction::FormatWholeDocument => {
                 self.format_whole_markdown_document(cx);
             }
@@ -6135,27 +5787,15 @@ impl EditorView {
                         editor.tabs[index].snapshot.clone()
                     };
                     let tab = &editor.tabs[index];
-                    let is_whiteboard = tab.file_kind.as_ref().is_some_and(FileKind::is_whiteboard);
-                    let text = if is_whiteboard {
-                        tab.whiteboard.as_ref()?.document.to_json_string()
-                    } else {
-                        snapshot.text.clone()
-                    };
-                    let extension = if is_whiteboard {
-                        WHITEBOARD_EXTENSION
-                    } else {
-                        "md"
-                    };
+                    let text = snapshot.text.clone();
                     Some((
                         tab.path.clone(),
                         snapshot,
                         text,
-                        format!("{}.{extension}", tab.title),
-                        is_whiteboard,
+                        format!("{}.md", tab.title),
                     ))
                 });
-                let Some((original_path, snapshot, text, default_name, is_whiteboard)) = payload
-                else {
+                let Some((original_path, snapshot, text, default_name)) = payload else {
                     self.pending_close_tab_ids.clear();
                     let path = self
                         .all_tabs()
@@ -6248,11 +5888,7 @@ impl EditorView {
                             if editor.tabs[index].path != original_path {
                                 return false;
                             }
-                            let unchanged = if is_whiteboard {
-                                editor.tabs[index].whiteboard.as_ref().is_some_and(|state| {
-                                    state.document.to_json_string() == saved_text
-                                })
-                            } else if editor.active_tab_id.as_deref() == Some(&tab_id) {
+                            let unchanged = if editor.active_tab_id.as_deref() == Some(&tab_id) {
                                 editor.buffer.text() == saved_text
                             } else {
                                 editor.tabs[index].snapshot.text == saved_text
@@ -6291,7 +5927,6 @@ impl EditorView {
             DialogAction::DeletePath { .. }
             | DialogAction::DeletePaths { .. }
             | DialogAction::InstallUpdate { .. }
-            | DialogAction::GitDiscardEntries { .. }
             | DialogAction::FormatWholeDocument
             | DialogAction::CloseRunningTerminal { .. } => {
                 // No save action for delete
@@ -6991,8 +6626,6 @@ impl EditorView {
             || self.quick_open_visible
             || self.command_palette_visible
             || self.language_picker_visible
-            || self.branch_picker_visible
-            || self.git_remote_input_visible
     }
 
     pub(crate) fn render_dialog(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -7000,7 +6633,6 @@ impl EditorView {
 
         let ds = &self.styles.dialog;
         let backdrop_color = ds.dialog_backdrop_color;
-        let btn_hover_opacity = ds.dialog_btn_hover_opacity;
 
         let Some(ref dialog) = self.dialog else {
             return div().into_any_element();
@@ -7050,12 +6682,8 @@ impl EditorView {
             .on_mouse_move(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .child(
-                div()
-                    .w(px(self.scaled(ds.dialog_width_px)))
-                    .bg(ds.dialog_bg)
-                    .border(px(ds.dialog_border_width_px))
-                    .border_color(ds.dialog_border_color)
-                    .rounded(px(ds.dialog_radius_px))
+                crate::ui::surface::surface(&self.styles.dialog_surface(), 1.0)
+                    .w(px(self.scaled(self.styles.dialog_width())))
                     .px(px(self.scaled(ds.dialog_padding_x_px)))
                     .py(px(self.scaled(ds.dialog_padding_y_px)))
                     .flex()
@@ -7084,63 +6712,48 @@ impl EditorView {
                             .gap(px(self.scaled(ds.dialog_btn_gap_px)))
                             .when(has_cancel, |this| {
                                 this.child(
-                                    div()
-                                        .id("dialog-cancel")
-                                        .h(px(self.scaled(ds.dialog_btn_height_px)))
-                                        .px(px(self.scaled(ds.dialog_btn_padding_x_px)))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .bg(secondary_bg)
-                                        .text_color(secondary_text)
-                                        .text_size(px(self.scaled(ds.dialog_btn_font_size_px)))
-                                        .rounded(px(ds.dialog_btn_radius_px))
-                                        .cursor(CursorStyle::Arrow)
-                                        .hover(move |s| s.opacity(btn_hover_opacity))
-                                        .child(cancel_label)
-                                        .on_click(cx.listener(|this, _, _, cx| {
+                                    crate::ui::button::button(
+                                        "dialog-cancel",
+                                        self.styles.dialog_button(secondary_bg, secondary_text),
+                                        Default::default(),
+                                        self.ui_scale,
+                                    )
+                                    .child(cancel_label)
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
                                             this.dismiss_dialog(cx);
-                                        })),
+                                        },
+                                    )),
                                 )
                             })
                             .child(
-                                div()
-                                    .id("dialog-confirm")
-                                    .h(px(self.scaled(ds.dialog_btn_height_px)))
-                                    .px(px(self.scaled(ds.dialog_btn_padding_x_px)))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .bg(secondary_bg)
-                                    .text_color(secondary_text)
-                                    .text_size(px(self.scaled(ds.dialog_btn_font_size_px)))
-                                    .rounded(px(ds.dialog_btn_radius_px))
-                                    .cursor(CursorStyle::Arrow)
-                                    .hover(move |s| s.opacity(btn_hover_opacity))
-                                    .child(confirm_label)
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                crate::ui::button::button(
+                                    "dialog-confirm",
+                                    self.styles.dialog_button(secondary_bg, secondary_text),
+                                    Default::default(),
+                                    self.ui_scale,
+                                )
+                                .child(confirm_label)
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.confirm_dialog(cx);
-                                    })),
+                                    },
+                                )),
                             )
                             .when(has_save, |this| {
                                 this.child(
-                                    div()
-                                        .id("dialog-save")
-                                        .h(px(self.scaled(ds.dialog_btn_height_px)))
-                                        .px(px(self.scaled(ds.dialog_btn_padding_x_px)))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .bg(save_btn_bg)
-                                        .text_color(save_btn_text)
-                                        .text_size(px(self.scaled(ds.dialog_btn_font_size_px)))
-                                        .rounded(px(ds.dialog_btn_radius_px))
-                                        .cursor(CursorStyle::Arrow)
-                                        .hover(move |s| s.opacity(btn_hover_opacity))
-                                        .child(save_label.unwrap_or_default())
-                                        .on_click(cx.listener(|this, _, _, cx| {
+                                    crate::ui::button::button(
+                                        "dialog-save",
+                                        self.styles.dialog_button(save_btn_bg, save_btn_text),
+                                        Default::default(),
+                                        self.ui_scale,
+                                    )
+                                    .child(save_label.unwrap_or_default())
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
                                             this.save_and_close_dialog(cx);
-                                        })),
+                                        },
+                                    )),
                                 )
                             }),
                     ),
@@ -7426,14 +7039,8 @@ impl EditorView {
         self.workspace_search_highlight_path = None;
         self.workspace_search_highlight_ranges.clear();
         self.workspace_search_highlight_current_index = None;
-        let git_diff_rows = self.active_git_diff_state().map(|diff| diff.rows.clone());
         let decorations_started = Instant::now();
-        if let Some(rows) = git_diff_rows {
-            self.set_decorations(rows.into_iter().map(|row| row.decoration).collect());
-            if self.decorations.is_empty() {
-                self.decorations.push(LineDecoration::default());
-            }
-        } else if file_kind.is_markdown() && self.table_source.is_some() {
+        if file_kind.is_markdown() && self.table_source.is_some() {
             self.lazy_markdown_decorations = None;
             let decorations = self
                 .table_source
@@ -7668,7 +7275,6 @@ impl EditorView {
         self.retain_valid_active_code_block_display_overrides();
         self.layout_dirty = true;
         self.invalidate_info_panel_cache();
-        self.mark_inline_diff_dirty(false);
         if let Some(bench) = self.large_document_frame_bench.as_mut() {
             bench
                 .reparse_prepare_times
@@ -8094,11 +7700,6 @@ impl EditorView {
     }
 
     fn refresh_generated_block_previews_with_mode(&mut self, force: bool) -> bool {
-        if self.active_tab_is_diff() {
-            self.prune_generated_preview_caches(HashSet::new());
-            return false;
-        }
-
         let mut preview_entries = Vec::new();
         let mut inline_math_entries = Vec::new();
         for (line, decoration) in self.decorations.iter().enumerate() {
@@ -8120,19 +7721,6 @@ impl EditorView {
                 preview_entries.push(preview.clone());
             }
         }
-        if let Some(inline_diff) = self.active_inline_diff() {
-            for hunk in &inline_diff.hunks {
-                for removed in &hunk.removed_lines {
-                    let Some(preview) = removed.decoration.block_preview.as_ref() else {
-                        continue;
-                    };
-                    if preview.is_anchor && !preview.source_text.is_empty() {
-                        preview_entries.push(preview.clone());
-                    }
-                }
-            }
-        }
-
         let next_generated_keys = preview_entries
             .iter()
             .map(|preview| preview.cache_key.clone())
@@ -8707,10 +8295,6 @@ impl EditorView {
             tab.is_dirty = false;
             return;
         }
-        if tab.file_kind.as_ref().is_some_and(FileKind::is_whiteboard) {
-            // Whiteboard dirty state is driven by canvas mutations, not text diff.
-            return;
-        }
         if !tab
             .file_kind
             .as_ref()
@@ -8751,40 +8335,13 @@ impl EditorView {
         self.active_file_kind().is_some_and(FileKind::is_binary)
     }
 
-    pub(crate) fn active_tab_is_whiteboard(&self) -> bool {
-        self.active_file_kind().is_some_and(FileKind::is_whiteboard)
-    }
-
-    pub(crate) fn active_whiteboard(&self) -> Option<&WhiteboardTabState> {
-        self.active_tab_index()
-            .and_then(|index| self.tabs.get(index))
-            .and_then(|tab| tab.whiteboard.as_ref())
-    }
-
-    pub(crate) fn active_whiteboard_mut(&mut self) -> Option<&mut WhiteboardTabState> {
-        let index = self.active_tab_index()?;
-        self.tabs.get_mut(index)?.whiteboard.as_mut()
-    }
-
-    pub(crate) fn active_tab_is_diff(&self) -> bool {
-        self.active_tab_id
-            .as_ref()
-            .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
-            .is_some_and(|tab| tab.kind == TabKind::Diff)
-    }
-
     pub(crate) fn active_tab_is_read_only(&self) -> bool {
-        editor_is_read_only(
-            self.embedded_read_only,
-            self.reading_mode,
-            self.active_tab_is_diff(),
-        )
+        editor_is_read_only(self.embedded_read_only, self.reading_mode)
     }
 
     pub(crate) fn active_tab_can_start_content_edit(&self) -> bool {
         editor_can_start_content_edit(
             self.embedded_read_only,
-            self.active_tab_is_diff(),
             self.active_tab_supports_text_buffer(),
         )
     }
@@ -9043,7 +8600,8 @@ impl EditorView {
             (image_width, image_height)
         };
         let is_chart = matches!(preview_kind, Some(markdown::BlockPreviewKind::Mermaid));
-        let fit_scale = preview_overlay::fit_scale(
+        let chrome = crate::ui::self_drawn::ImagePreviewChrome::new(&self.styles.self_drawn);
+        let fit_scale = chrome.fit_scale(
             intrinsic_width,
             intrinsic_height,
             viewport_width,
@@ -9053,7 +8611,7 @@ impl EditorView {
         let display_width = intrinsic_width * fit_scale * view.zoom_factor;
         let display_height = intrinsic_height * fit_scale * view.zoom_factor;
         let (pan_width, pan_height) = if is_chart {
-            preview_overlay::inner_size(viewport_width, viewport_height)
+            chrome.inner_size(viewport_width, viewport_height)
         } else {
             (viewport_width, viewport_height)
         };
@@ -9590,7 +9148,7 @@ impl EditorView {
         self.gutter_fold_reveal_target = target;
         self.gutter_fold_reveal_epoch += 1;
         let epoch = self.gutter_fold_reveal_epoch;
-        let duration_ms = self.styles.gutter.gutter_fold_animation_ms.max(1);
+        let duration_ms = self.styles.self_drawn.gutter_fold_animation_ms.max(1);
         let step = (16.0 / duration_ms as f32).clamp(0.08, 1.0);
 
         let pane_id = self.current_pane_id();
@@ -9813,14 +9371,6 @@ impl EditorView {
     }
 
     pub(crate) fn copy_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
-        // A read-only phantom-row selection takes precedence so the deleted
-        // lines under an expanded hunk can be copied.
-        if let Some(text) = self.phantom_selection_text() {
-            self.multi_cursor_clipboard = None;
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            return;
-        }
-
         if self
             .cursor_states_with_primary_flag()
             .iter()
@@ -10428,12 +9978,9 @@ impl EditorView {
     }
 
     fn detect_block_prefix_len(trimmed: &str) -> usize {
-        // Check todo variants first (longest match)
-        if trimmed.starts_with("- [x] ") || trimmed.starts_with("- [X] ") {
-            return 6;
-        }
-        if trimmed.starts_with("- [ ] ") {
-            return 6;
+        let task_len = task_prefix_len(trimmed);
+        if task_len > 0 {
+            return task_len;
         }
         // Unordered list
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
@@ -10571,6 +10118,7 @@ impl EditorView {
         self.app_settings.ui_scale = clamped;
         self.sync_panel_display_state();
         self.sync_overlay_text_input_styles(cx);
+        self.sync_control_style_metrics(cx);
         // Zooming changes the scaled font sizes, so the cached per-line layout
         // (heights, wrapping, geometry) must be rebuilt to avoid geometry drift.
         // This affects every tab, so invalidate the inactive tab caches too;
@@ -10759,12 +10307,11 @@ impl EditorView {
         }
         let line_content = self.buffer.line_content(line).to_string();
         let line_start = self.buffer.line_start(line);
-        if let Some(pos) = line_content.find("[ ]") {
-            self.buffer
-                .replace(line_start + pos..line_start + pos + 3, "[x]");
-        } else if let Some(pos) = line_content.find("[x]") {
-            self.buffer
-                .replace(line_start + pos..line_start + pos + 3, "[ ]");
+        if let Some((range, replacement)) = task_checkbox_edit(&line_content) {
+            self.buffer.replace(
+                line_start + range.start..line_start + range.end,
+                replacement,
+            );
         }
     }
 
@@ -11502,7 +11049,8 @@ impl EditorView {
             if plen < 2 {
                 break;
             }
-            let current_str = &trimmed[..plen - 2];
+            let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+            let current_str = &trimmed[..digits];
             let Ok(current_number) = current_str.parse::<u32>() else {
                 break;
             };
@@ -11534,11 +11082,12 @@ impl EditorView {
         if line >= self.buffer.line_count() {
             return None;
         }
-        if !self
-            .decorations
-            .get(line)
-            .is_some_and(|decoration| matches!(decoration.block_type, BlockType::OrderedList))
-        {
+        if !self.decorations.get(line).is_some_and(|decoration| {
+            matches!(
+                decoration.block_type,
+                BlockType::OrderedList | BlockType::TaskList(_)
+            )
+        }) {
             return None;
         }
 
@@ -11550,7 +11099,8 @@ impl EditorView {
             return None;
         }
 
-        let number_text = &trimmed[..prefix_len - 2];
+        let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+        let number_text = &trimmed[..digits];
         let number = number_text.parse::<u32>().ok()?;
         let line_start = self.buffer.line_start(line);
         Some((
@@ -11638,7 +11188,8 @@ impl EditorView {
             if plen < 2 {
                 break;
             }
-            let current_str = &trimmed[..plen - 2];
+            let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+            let current_str = &trimmed[..digits];
             let Ok(current_number) = current_str.parse::<u32>() else {
                 break;
             };
@@ -11759,11 +11310,15 @@ fn normalize_ordered_list_numbers_in_buffer(buffer: &mut Buffer) -> Option<(usiz
 
         let trimmed = &line_content[leading_ws..];
         let prefix_len = markdown::ordered_list_prefix_len(trimmed);
-        let is_list = decorations
-            .get(line)
-            .is_some_and(|decoration| matches!(decoration.block_type, BlockType::OrderedList));
+        let is_list = decorations.get(line).is_some_and(|decoration| {
+            matches!(
+                decoration.block_type,
+                BlockType::OrderedList | BlockType::TaskList(_)
+            )
+        });
         let current_number = if is_list && prefix_len >= 2 {
-            trimmed[..prefix_len - 2].parse::<u32>().ok()
+            let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+            trimmed[..digits].parse::<u32>().ok()
         } else {
             None
         };
@@ -11903,10 +11458,6 @@ pub(crate) fn classify_file_kind_for_bytes(path: &Path, bytes: &[u8]) -> FileKin
 
     if is_image_file(path) {
         return FileKind::Image;
-    }
-
-    if is_whiteboard_file(path) {
-        return FileKind::Whiteboard;
     }
 
     let first_line = String::from_utf8_lossy(
@@ -12123,9 +11674,7 @@ pub(crate) fn parse_decorations_for_file_kind(
     match file_kind {
         FileKind::Markdown => markdown::parse_decorations(text),
         FileKind::Code { language } => plain_text_decorations(text, Some(language.clone())),
-        FileKind::Text | FileKind::Image | FileKind::Binary | FileKind::Whiteboard => {
-            plain_text_decorations(text, None)
-        }
+        FileKind::Text | FileKind::Image | FileKind::Binary => plain_text_decorations(text, None),
     }
 }
 
@@ -13239,16 +12788,12 @@ impl EditorView {
     }
 }
 
-fn editor_is_read_only(embedded_read_only: bool, reading_mode: bool, active_diff: bool) -> bool {
-    embedded_read_only || reading_mode || active_diff
+fn editor_is_read_only(embedded_read_only: bool, reading_mode: bool) -> bool {
+    embedded_read_only || reading_mode
 }
 
-fn editor_can_start_content_edit(
-    embedded_read_only: bool,
-    active_diff: bool,
-    supports_text_buffer: bool,
-) -> bool {
-    !embedded_read_only && !active_diff && supports_text_buffer
+fn editor_can_start_content_edit(embedded_read_only: bool, supports_text_buffer: bool) -> bool {
+    !embedded_read_only && supports_text_buffer
 }
 
 fn markdown_syntax_expansion_allowed(embedded_read_only: bool, reading_mode: bool) -> bool {
@@ -13330,9 +12875,6 @@ pub(super) fn builtin_welcome_tab(ui_language: UiLanguage) -> OpenTab {
             extra_cursors: Vec::new(),
         },
         image_view: ImageViewState::default(),
-        whiteboard: None,
-        git_diff: None,
-        inline_diff: None,
         is_preview: false,
         is_dirty: false,
         is_deleted: false,
@@ -13367,14 +12909,74 @@ pub(crate) fn classify_word_char(ch: char) -> WordCharClass {
 }
 
 pub(crate) fn task_prefix_len(trimmed: &str) -> usize {
-    for marker in [
-        "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
-    ] {
-        if trimmed.starts_with(marker) {
-            return marker.len();
-        }
+    let core_len = task_core_syntax_len(trimmed);
+    if core_len > 0
+        && trimmed
+            .as_bytes()
+            .get(core_len)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        core_len + 1
+    } else {
+        0
     }
-    0
+}
+
+pub(crate) fn task_core_syntax_len(trimmed: &str) -> usize {
+    let marker_len = markdown::unordered_list_prefix_len(trimmed)
+        .max(markdown::ordered_list_prefix_len(trimmed));
+    if marker_len == 0
+        || !trimmed
+            .as_bytes()
+            .get(marker_len - 1)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        return 0;
+    }
+    let checkbox = trimmed.as_bytes().get(marker_len..marker_len + 3);
+    match checkbox {
+        Some([b'[', b' ' | b'x' | b'X', b']']) => marker_len + 3,
+        _ => 0,
+    }
+}
+
+pub(crate) fn task_list_continuation(trimmed: &str) -> Option<(String, Option<u32>)> {
+    if task_prefix_len(trimmed) == 0 {
+        return None;
+    }
+    let ordered_len = markdown::ordered_list_prefix_len(trimmed);
+    if ordered_len > 0 {
+        let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+        let number = trimmed[..digits].parse::<u32>().ok()?;
+        let next = number.saturating_add(1).min(999_999_999);
+        Some((
+            format!("{next}{}[ ] ", &trimmed[digits..ordered_len]),
+            Some(number),
+        ))
+    } else {
+        let marker_len = markdown::unordered_list_prefix_len(trimmed);
+        Some((format!("{}[ ] ", &trimmed[..marker_len]), None))
+    }
+}
+
+fn task_checkbox_edit(line: &str) -> Option<(Range<usize>, &'static str)> {
+    let leading = helpers::list_marker_indent(line);
+    let core_len = task_core_syntax_len(&line[leading..]);
+    if core_len == 0
+        || line
+            .as_bytes()
+            .get(leading + core_len)
+            .is_some_and(|byte| !matches!(byte, b' ' | b'\t' | b'\r'))
+    {
+        return None;
+    }
+    let index = leading + core_len - 2;
+    let replacement = match line.as_bytes()[index] {
+        b' ' => "x",
+        b'x' | b'X' => " ",
+        _ => return None,
+    };
+    Some((index..index + 1, replacement))
 }
 
 fn normalize_pasted_newlines(text: &str) -> std::borrow::Cow<'_, str> {
@@ -13462,15 +13064,12 @@ fn table_task_checkbox_edit_at(cell: &str, offset: usize) -> Option<(usize, &'st
     let fragment = table_cell_fragment_range(cell, offset);
     let segment_start = fragment.start;
     let segment = &cell[fragment];
-    let leading = segment.len() - segment.trim_start_matches([' ', '\t']).len();
-    let prefix = &segment[leading..];
-    let checked = ["- [x] ", "* [x] ", "+ [x] "]
-        .iter()
-        .any(|item| prefix.starts_with(item));
-    let unchecked = ["- [ ] ", "* [ ] ", "+ [ ] "]
-        .iter()
-        .any(|item| prefix.starts_with(item));
-    (checked || unchecked).then_some((segment_start + leading + 3, if checked { " " } else { "x" }))
+    let leading = helpers::list_marker_indent(segment);
+    if task_prefix_len(&segment[leading..]) == 0 {
+        return None;
+    }
+    let (range, replacement) = task_checkbox_edit(segment)?;
+    Some((segment_start + range.start, replacement))
 }
 
 #[cfg(test)]
@@ -13643,6 +13242,21 @@ mod tests {
             let at = cell.find("literal").unwrap();
             assert_eq!(super::table_cell_fragment_range(cell, at), 0..cell.len());
             assert!(super::table_task_checkbox_edit_at(cell, at).is_none());
+        }
+    }
+
+    #[test]
+    fn table_task_click_supports_ordered_and_uppercase_markers() {
+        for (cell, expected) in [
+            ("1. [X] first", "1. [ ] first"),
+            ("2) [ ] todo<br>3) [x] done", "2) [ ] todo<br>3) [ ] done"),
+            ("- [ ] first<br>1. [ ] 项目", "- [ ] first<br>1. [x] 项目"),
+        ] {
+            let (offset, replacement) =
+                super::table_task_checkbox_edit_at(cell, cell.len()).unwrap();
+            let mut updated = cell.to_string();
+            updated.replace_range(offset..offset + 1, replacement);
+            assert_eq!(updated, expected);
         }
     }
 
@@ -14072,19 +13686,18 @@ mod tests {
 
     #[test]
     fn reading_mode_is_read_only_and_keeps_markdown_syntax_folded() {
-        assert!(editor_is_read_only(false, true, false));
+        assert!(editor_is_read_only(false, true));
         assert!(!markdown_syntax_expansion_allowed(false, true));
 
-        assert!(editor_is_read_only(true, false, false));
+        assert!(editor_is_read_only(true, false));
         assert!(!markdown_syntax_expansion_allowed(true, false));
 
-        assert!(editor_is_read_only(false, false, true));
+        assert!(!editor_is_read_only(false, false));
         assert!(markdown_syntax_expansion_allowed(false, false));
 
-        assert!(editor_can_start_content_edit(false, false, true));
-        assert!(!editor_can_start_content_edit(true, false, true));
-        assert!(!editor_can_start_content_edit(false, true, true));
-        assert!(!editor_can_start_content_edit(false, false, false));
+        assert!(editor_can_start_content_edit(false, true));
+        assert!(!editor_can_start_content_edit(true, true));
+        assert!(!editor_can_start_content_edit(false, false));
     }
 
     #[test]
@@ -14585,6 +14198,85 @@ mod tests {
             "# Title\n\npara one\npara two\n\nmore\n",
             "# Title\n\npara **one**\npara two\n\nmore\n",
         ));
+    }
+
+    #[test]
+    fn incremental_list_recovery_matches_full_parse_when_typing_or_removing_empty_items() {
+        for (old, new) in [
+            (
+                "intro\n\n- abc\n- [x] abc\n-\n\noutro\n",
+                "intro\n\n- abc\n- [x] abc\n- \n\noutro\n",
+            ),
+            (
+                "intro\n\n1. [ ] abc\n2.\n\noutro\n",
+                "intro\n\n1. [ ] abc\n2. \n\noutro\n",
+            ),
+            (
+                "intro\n\n> - [X] abc\n> - \n\noutro\n",
+                "intro\n\n> - [X] abc\n> -\n\noutro\n",
+            ),
+        ] {
+            assert!(
+                assert_incremental_matches_full(old, new),
+                "{old:?} -> {new:?}"
+            );
+            assert!(
+                assert_incremental_matches_full(new, old),
+                "{new:?} -> {old:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lazy_list_recovery_matches_full_parse_across_chunk_boundaries() {
+        let padding = "paragraph\n\n".repeat(super::LARGE_MARKDOWN_CHUNK_LINES / 2 - 1);
+        let source = format!("{padding}- abc\n- [x] **done**\n- \n\n1. [ ] task\n2. \n\noutro\n");
+        let buffer = Buffer::from_text(&source);
+        let full = parse_decorations(&source);
+        let (mut lazy_rows, mut lazy) = super::new_lazy_markdown_decorations(buffer.line_count());
+        for line in (0..buffer.line_count()).rev() {
+            if matches!(buffer.line_content(line), "- [x] **done**" | "1. [ ] task") {
+                super::parse_lazy_markdown_range(
+                    &buffer,
+                    &mut lazy_rows,
+                    &mut lazy,
+                    line..line + 1,
+                );
+                assert_eq!(lazy_rows[line], full[line], "line {line}");
+                assert_eq!(lazy_rows[line + 1], full[line + 1], "line {}", line + 1);
+                assert!(matches!(lazy_rows[line].block_type, BlockType::TaskList(_)));
+            }
+        }
+    }
+
+    #[test]
+    fn task_checkbox_edits_target_the_marker_not_checkbox_text_in_content() {
+        for (source, expected) in [
+            ("- [x] item [ ]", "- [ ] item [ ]"),
+            ("- [X] item", "- [ ] item"),
+            ("  * [ ] item [x]", "  * [x] item [x]"),
+            ("1. [x] item", "1. [ ] item"),
+            ("> 12) [ ] 项目", "> 12) [x] 项目"),
+            ("-\t[X]\titem", "-\t[ ]\titem"),
+        ] {
+            let (range, replacement) = super::task_checkbox_edit(source).unwrap();
+            let mut result = source.to_string();
+            result.replace_range(range, replacement);
+            assert_eq!(result, expected, "{source:?}");
+        }
+        for source in ["text [ ]", "1.[x] text", "- [x]not a task"] {
+            assert!(super::task_checkbox_edit(source).is_none());
+        }
+        assert_eq!(super::EditorView::detect_block_prefix_len("1. [x] done"), 7);
+        assert_eq!(super::EditorView::detect_block_prefix_len("* [X] done"), 6);
+        for (source, expected) in [
+            ("- [x] item", "- [ ] "),
+            ("*\t[X]\titem", "*\t[ ] "),
+            ("9. [ ] item", "10. [ ] "),
+            ("9)\t[x] item", "10)\t[ ] "),
+        ] {
+            assert_eq!(super::task_list_continuation(source).unwrap().0, expected);
+        }
     }
 
     #[test]
@@ -15227,6 +14919,13 @@ mod tests {
         normalize_ordered_list_numbers_in_buffer(&mut buffer);
 
         assert_eq!(buffer.text(), "1. one\n2. three\n3. four\n");
+    }
+
+    #[test]
+    fn normalize_ordered_list_numbers_includes_tasks_and_preserves_markers() {
+        let mut buffer = Buffer::from_text("1. [x] first\n4. [ ] second\n7. ordinary\n");
+        assert!(super::normalize_ordered_list_numbers_in_buffer(&mut buffer).is_some());
+        assert_eq!(buffer.text(), "1. [x] first\n2. [ ] second\n3. ordinary\n");
     }
 
     #[test]

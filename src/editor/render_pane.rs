@@ -2,6 +2,8 @@
 //! (tab bar + content), divider resize handles, and the per-pane editor pane
 //! body extracted from `render.rs`.
 
+use crate::ui::self_drawn::{DropIndicatorControl, ResizeHandleControl, ScrollbarControl};
+
 use gpui::{
     AnyElement, Bounds, CursorStyle, ExternalPaths, MouseButton, MouseDownEvent, MouseMoveEvent,
     Point, ScrollWheelEvent, SharedString, Window, canvas, deferred, div, prelude::*, px, relative,
@@ -299,9 +301,13 @@ impl EditorView {
     /// Divider thickness in logical pixels, snapped to whole device pixels so
     /// the hairline stays crisp on fractional display scales.
     fn pane_divider_thickness(&self) -> f32 {
-        let scale = self.last_window_scale_factor.max(1.0);
-        // At least one device pixel, rounded to a whole number of them.
-        ((self.scaled(1.0) * scale).round().max(1.0)) / scale
+        ResizeHandleControl::new(
+            &self.styles.self_drawn,
+            self.scaled(1.0),
+            self.last_window_scale_factor,
+            false,
+        )
+        .thickness
     }
 
     /// A solid divider strip between two split children. It participates in
@@ -315,43 +321,22 @@ impl EditorView {
         thickness: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let ss = &self.styles.sidebar;
-        let hover_indicator_color = ss.sidebar_resize_active_indicator_color;
-        let handle_width = self.scaled(ss.sidebar_resize_handle_width_px).max(6.0);
         let is_active = self.pane_resize_drag.as_ref().is_some_and(|drag| {
             drag.axis == axis && drag.path == path && drag.divider_index == divider_index
         });
-        let line_color = if is_active {
-            hover_indicator_color
-        } else {
-            self.styles.tab_bar.tab_bar_border_color
-        };
-
-        let anchor = div().relative().flex_none().bg(line_color);
-        let anchor = match axis {
-            SplitAxis::Horizontal => anchor.w(px(thickness)).h_full(),
-            SplitAxis::Vertical => anchor.h(px(thickness)).w_full(),
-        };
-
-        let hit = div()
-            .id(SharedString::from(format!(
-                "pane-divider-{path:?}-{divider_index}"
-            )))
-            .absolute();
-        let hit = match axis {
-            SplitAxis::Horizontal => hit
-                .top_0()
-                .left(px(-(handle_width - thickness) / 2.0))
-                .w(px(handle_width))
-                .h_full()
-                .cursor(CursorStyle::ResizeLeftRight),
-            SplitAxis::Vertical => hit
-                .left_0()
-                .top(px(-(handle_width - thickness) / 2.0))
-                .h(px(handle_width))
-                .w_full()
-                .cursor(CursorStyle::ResizeUpDown),
-        };
+        let control = ResizeHandleControl::new(
+            &self.styles.self_drawn,
+            self.scaled(1.0),
+            self.last_window_scale_factor,
+            is_active,
+        );
+        debug_assert_eq!(control.thickness, thickness);
+        let hover_indicator_color = control.active_color;
+        let vertical = axis == SplitAxis::Horizontal;
+        let anchor = control.anchor(vertical);
+        let hit = control.hit(vertical).id(SharedString::from(format!(
+            "pane-divider-{path:?}-{divider_index}"
+        )));
         let hit = hit
             .when(is_active, |style| style.bg(hover_indicator_color))
             .hover(move |style| style.bg(hover_indicator_color))
@@ -505,7 +490,6 @@ impl EditorView {
         let _ = &window;
         let is_focused_pane = pane_id == self.focused_pane_id;
         let renders_document = !self.active_tab_is_terminal()
-            && !self.active_tab_is_whiteboard()
             && !self.active_tab_is_image()
             && !self.active_tab_is_binary();
         let editor_pane_views = renders_document.then(|| {
@@ -549,9 +533,6 @@ impl EditorView {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .when(self.active_tab_is_diff(), |this| {
-                this.child(self.render_active_tab_path_bar(cx))
-            })
             .child(
                 div()
                     .id("editor-pane-content")
@@ -619,7 +600,7 @@ impl EditorView {
                     ))
                     .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)
                     .drag_over::<ExternalPaths>({
-                        let file_drop_bg = self.styles.editor.editor_file_drop_bg;
+                        let file_drop_bg = self.styles.self_drawn.colors.drop_overlay;
                         move |style, _, _, _| style.bg(file_drop_bg)
                     })
                     // NOTE: tab drops on the content area (split/merge) are
@@ -644,12 +625,6 @@ impl EditorView {
                     }))
                     .child(if let Some(terminal_tab_id) = self.active_terminal_tab_id() {
                         self.render_terminal_tab_content(terminal_tab_id, window, cx)
-                    } else if self.active_tab_is_whiteboard() {
-                        whiteboard_element::WhiteboardElement {
-                            editor: cx.entity().clone(),
-                            pane_id,
-                        }
-                        .into_any_element()
                     } else if self.active_tab_is_image() {
                         image_view::ImageViewElement {
                             editor: cx.entity().clone(),
@@ -680,43 +655,11 @@ impl EditorView {
                             .with_priority(1),
                         )
                     })
-                    .when(self.active_tab_is_whiteboard(), |this| {
-                        this.child(self.render_whiteboard_toolbar(cx)).when_some(
-                            self.whiteboard_text_overlay_rect(),
-                            |this, rect| {
-                                let input = self
-                                    .whiteboard_text_editor
-                                    .as_ref()
-                                    .map(|editor| editor.input.clone());
-                                this.when_some(input, |this, input| {
-                                    this.child(
-                                        div()
-                                            .id("wb-text-overlay")
-                                            .occlude()
-                                            .absolute()
-                                            .left(px(rect.0))
-                                            .top(px(rect.1))
-                                            .w(px(rect.2))
-                                            .h(px(rect.3))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|_, _: &MouseDownEvent, _, cx| {
-                                                    cx.stop_propagation();
-                                                }),
-                                            )
-                                            .child(input),
-                                    )
-                                })
-                            },
-                        )
-                    })
                     .when_some(
                         self.code_block_horizontal_scrollbar_overlay_geometry(),
                         |this, geometry| {
-                            let radius =
-                                self.scaled(self.styles.editor.editor_scrollbar_radius_px);
-                            let mut color = self.styles.editor.editor_scrollbar_thumb_color;
-                            color.a *= geometry.opacity;
+                            let control = ScrollbarControl::new(self.styles.self_drawn.scrollbar, self.scaled(1.0));
+                            let color = control.color(false, geometry.opacity);
                             this.child(
                                 div()
                                     .absolute()
@@ -725,15 +668,12 @@ impl EditorView {
                                     .w(px(geometry.track_width))
                                     .h(px(geometry.track_height))
                                     .child(
-                                        div()
-                                            .absolute()
+                                        control.thumb(geometry.thumb_width, geometry.thumb_height, color)
                                             .left(px(geometry.thumb_left))
                                             .top(px(
                                                 geometry.track_height - geometry.thumb_height,
                                             ))
-                                            .w(px(geometry.thumb_width))
-                                            .h(px(geometry.thumb_height))
-                                            .cursor(CursorStyle::Arrow)
+
                                             .on_mouse_down(
                                                 MouseButton::Left,
                                                 cx.listener(
@@ -745,9 +685,7 @@ impl EditorView {
                                                         );
                                                     },
                                                 ),
-                                            )
-                                            .rounded(px(radius))
-                                            .bg(color),
+                                            ),
                                     ),
                             )
                         },
@@ -758,11 +696,9 @@ impl EditorView {
                             let thumb_width = self.scaled(self.editor_scrollbar_width);
                             let hit_width = self.editor_scrollbar_hit_width();
                             let right_margin =
-                                self.scaled(self.styles.editor.editor_scrollbar_right_margin_px);
-                            let thumb_radius =
-                                self.scaled(self.styles.editor.editor_scrollbar_radius_px);
-                            let mut thumb_color = self.styles.editor.editor_scrollbar_thumb_color;
-                            thumb_color.a *= self.editor_scrollbar_opacity.clamp(0.0, 1.0);
+                                self.scaled(self.styles.self_drawn.scrollbar.right_margin_px);
+                            let control = ScrollbarControl::new(self.styles.self_drawn.scrollbar, self.scaled(1.0));
+                            let thumb_color = control.color(false, self.editor_scrollbar_opacity);
                             this.child(
                                 div()
                                     .absolute()
@@ -771,13 +707,10 @@ impl EditorView {
                                     .h_full()
                                     .w(px(hit_width + right_margin))
                                     .child(
-                                        div()
-                                            .absolute()
+                                        control.thumb(thumb_width, thumb_height, thumb_color)
                                             .top(px(thumb_top))
                                             .right(px(right_margin))
-                                            .w(px(thumb_width))
-                                            .h(px(thumb_height))
-                                            .cursor(CursorStyle::Arrow)
+
                                             .on_mouse_down(
                                                 MouseButton::Left,
                                                 cx.listener(
@@ -789,9 +722,7 @@ impl EditorView {
                                                         );
                                                     },
                                                 ),
-                                            )
-                                            .rounded(px(thumb_radius))
-                                            .bg(thumb_color),
+                                            ),
                                     ),
                             )
                         },
@@ -986,8 +917,7 @@ impl EditorView {
                                 .tab_drag_split_target
                                 .or(self.context_menu_pane_target)
                                 .and_then(|(_, direction)| direction);
-                            let overlay_bg = self.styles.editor.editor_file_drop_bg;
-                            let overlay = div().absolute().bg(overlay_bg);
+                            let overlay = DropIndicatorControl::overlay(self.styles.self_drawn.colors.drop_overlay);
                             let overlay = match direction {
                                 None => overlay.top_0().left_0().right_0().bottom_0(),
                                 Some(SplitDirection::Up) => {

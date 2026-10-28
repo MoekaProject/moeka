@@ -1,3 +1,4 @@
+use crate::ui::self_drawn::ImagePreviewChrome;
 use std::sync::Arc;
 
 use gpui::{
@@ -8,10 +9,6 @@ use gpui::{
 
 use super::{EditorView, GeneratedPreviewAction, ImageDragState, helpers};
 
-const PREVIEW_OVERLAY_PADDING_PX: f32 = 32.0;
-const CHART_INITIAL_VIEW_FRACTION: f32 = 0.8;
-const PREVIEW_CLICK_SLOP_PX: f32 = 4.0;
-
 #[derive(Clone, Copy)]
 pub(crate) enum PreviewOverlayPress {
     Action,
@@ -21,21 +18,29 @@ pub(crate) enum PreviewOverlayPress {
     },
 }
 
+#[cfg(test)]
+fn default_chrome() -> ImagePreviewChrome {
+    let spec = crate::style::SelfDrawnSpec::default();
+    ImagePreviewChrome {
+        padding: spec.preview_overlay_padding_px,
+        chart_fraction: spec.preview_chart_initial_fraction,
+        click_slop: spec.preview_click_slop_px,
+    }
+}
+#[cfg(test)]
 fn moved_beyond_click_slop(start: Point<Pixels>, position: Point<Pixels>) -> bool {
-    let dx = f32::from(position.x - start.x);
-    let dy = f32::from(position.y - start.y);
-    dx * dx + dy * dy > PREVIEW_CLICK_SLOP_PX * PREVIEW_CLICK_SLOP_PX
+    default_chrome().moved(start, position)
 }
 
 impl PreviewOverlayPress {
-    fn on_move(self, position: Point<Pixels>) -> Self {
+    fn on_move(self, position: Point<Pixels>, chrome: ImagePreviewChrome) -> Self {
         match self {
             Self::Pan {
                 start_position,
                 moved,
             } => Self::Pan {
                 start_position,
-                moved: moved || moved_beyond_click_slop(start_position, position),
+                moved: moved || chrome.moved(start_position, position),
             },
             action => action,
         }
@@ -46,34 +51,25 @@ fn should_close_on_release(
     press: PreviewOverlayPress,
     position: Point<Pixels>,
     inside: bool,
+    chrome: ImagePreviewChrome,
 ) -> bool {
     matches!(press, PreviewOverlayPress::Pan { start_position, moved }
-        if inside && !moved && !moved_beyond_click_slop(start_position, position))
+        if inside && !moved && !chrome.moved(start_position, position))
 }
 
-pub(super) fn inner_size(viewport_width: f32, viewport_height: f32) -> (f32, f32) {
-    (
-        (viewport_width - PREVIEW_OVERLAY_PADDING_PX * 2.0).max(1.0),
-        (viewport_height - PREVIEW_OVERLAY_PADDING_PX * 2.0).max(1.0),
-    )
+#[cfg(test)]
+pub(super) fn inner_size(width: f32, height: f32) -> (f32, f32) {
+    default_chrome().inner_size(width, height)
 }
-
+#[cfg(test)]
 pub(super) fn fit_scale(
     width: f32,
     height: f32,
     viewport_width: f32,
     viewport_height: f32,
-    is_chart: bool,
+    chart: bool,
 ) -> f32 {
-    let (available_width, available_height) = inner_size(viewport_width, viewport_height);
-    let fraction = if is_chart {
-        CHART_INITIAL_VIEW_FRACTION
-    } else {
-        1.0
-    };
-    let fit = (available_width * fraction / width.max(1.0))
-        .min(available_height * fraction / height.max(1.0));
-    if is_chart { fit } else { fit.min(1.0) }
+    default_chrome().fit_scale(width, height, viewport_width, viewport_height, chart)
 }
 
 pub(super) fn clamp_pan(pan: f32, display_size: f32, inner_size: f32) -> f32 {
@@ -143,7 +139,10 @@ impl EditorView {
             cx.notify();
             return;
         }
-        let press = press.on_move(event.position);
+        let press = press.on_move(
+            event.position,
+            ImagePreviewChrome::new(&self.styles.self_drawn),
+        );
         self.preview_overlay_press = Some(press);
         if !matches!(press, PreviewOverlayPress::Pan { moved: true, .. }) {
             return;
@@ -176,7 +175,12 @@ impl EditorView {
                     .preview_overlay_action_areas
                     .iter()
                     .any(|(bounds, _)| bounds.contains(&event.position));
-            if should_close_on_release(press, event.position, inside) {
+            if should_close_on_release(
+                press,
+                event.position,
+                inside,
+                ImagePreviewChrome::new(&self.styles.self_drawn),
+            ) {
                 self.close_preview_overlay();
             }
         }
@@ -262,7 +266,8 @@ impl EditorView {
                             if width <= 0.0 || height <= 0.0 {
                                 return None;
                             }
-                            let scale = fit_scale(
+                            let chrome = ImagePreviewChrome::new(&editor.styles.self_drawn);
+                            let scale = chrome.fit_scale(
                                 width,
                                 height,
                                 bounds.size.width.into(),
@@ -331,18 +336,21 @@ impl EditorView {
                                 image_bounds,
                                 image,
                                 editor.styles.editor.editor_bg,
+                                chrome,
                                 matches!(kind, Some(crate::markdown::BlockPreviewKind::Mermaid)),
                             ))
                         })
                     },
                     |_, paint, window, _| {
-                        if let Some((bounds, image_bounds, image, background, is_chart)) = paint {
+                        if let Some((bounds, image_bounds, image, background, chrome, is_chart)) =
+                            paint
+                        {
                             window.paint_quad(fill(bounds, background));
                             let content_bounds = if is_chart {
                                 let viewport_width = f32::from(bounds.size.width);
                                 let viewport_height = f32::from(bounds.size.height);
                                 let (inner_width, inner_height) =
-                                    inner_size(viewport_width, viewport_height);
+                                    chrome.inner_size(viewport_width, viewport_height);
                                 let inset_x = (viewport_width - inner_width) / 2.0;
                                 let inset_y = (viewport_height - inner_height) / 2.0;
                                 Bounds::new(
@@ -381,8 +389,8 @@ impl EditorView {
 #[cfg(test)]
 mod tests {
     use super::{
-        PreviewOverlayPress, clamp_pan, fit_scale, inner_size, moved_beyond_click_slop,
-        should_close_on_release,
+        PreviewOverlayPress, clamp_pan, default_chrome, fit_scale, inner_size,
+        moved_beyond_click_slop, should_close_on_release,
     };
     use gpui::{point, px};
 
@@ -393,28 +401,46 @@ mod tests {
             start_position: start,
             moved,
         };
-        assert!(should_close_on_release(pan(false), start, true));
+        assert!(should_close_on_release(
+            pan(false),
+            start,
+            true,
+            default_chrome()
+        ));
         let small_move = point(px(102.0), px(103.0));
         assert!(should_close_on_release(
-            pan(false).on_move(small_move),
+            pan(false).on_move(small_move, default_chrome()),
             small_move,
-            true
+            true,
+            default_chrome()
         ));
         assert!(!should_close_on_release(
             pan(false),
             point(px(105.0), px(100.0)),
-            true
+            true,
+            default_chrome()
         ));
         assert!(moved_beyond_click_slop(start, point(px(105.0), px(100.0))));
         let dragged_back = pan(false)
-            .on_move(point(px(105.0), px(100.0)))
-            .on_move(start);
-        assert!(!should_close_on_release(dragged_back, start, true));
-        assert!(!should_close_on_release(pan(false), start, false));
+            .on_move(point(px(105.0), px(100.0)), default_chrome())
+            .on_move(start, default_chrome());
+        assert!(!should_close_on_release(
+            dragged_back,
+            start,
+            true,
+            default_chrome()
+        ));
+        assert!(!should_close_on_release(
+            pan(false),
+            start,
+            false,
+            default_chrome()
+        ));
         assert!(!should_close_on_release(
             PreviewOverlayPress::Action,
             start,
-            true
+            true,
+            default_chrome()
         ));
     }
 
@@ -429,8 +455,8 @@ mod tests {
             let scale = fit_scale(width, height, viewport_width, viewport_height, true);
             let (inner_width, inner_height) = inner_size(viewport_width, viewport_height);
             assert!(scale > 0.0);
-            assert!(width * scale <= inner_width * super::CHART_INITIAL_VIEW_FRACTION + 0.01);
-            assert!(height * scale <= inner_height * super::CHART_INITIAL_VIEW_FRACTION + 0.01);
+            assert!(width * scale <= inner_width * default_chrome().chart_fraction + 0.01);
+            assert!(height * scale <= inner_height * default_chrome().chart_fraction + 0.01);
             let other_scale = fit_scale(width, height, viewport_width, viewport_height, false);
             assert!(other_scale <= 1.0);
             assert!(width * other_scale <= inner_width + 0.01);

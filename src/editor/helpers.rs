@@ -535,8 +535,15 @@ impl EditorView {
         };
         let text_width =
             (editor_width - self.padding_left() - self.padding_right()).max(self.scaled(120.0));
-        let (_, available_width) =
-            super::element::front_matter_content_geometry(true, 0.0, text_width, self.scaled(1.0));
+        let (_, available_width) = super::element::front_matter_content_geometry(
+            true,
+            0.0,
+            text_width,
+            crate::ui::self_drawn::FrontMatterControl::column_width(
+                &self.styles.self_drawn,
+                self.scaled(1.0),
+            ),
+        );
         if self.front_matter_columns.is_some() {
             super::front_matter_layout::constrain_groups(
                 &mut plans,
@@ -1085,13 +1092,9 @@ pub(super) fn source_markdown_decoration(decoration: &mut LineDecoration) {
         } else {
             None
         };
-        let added = std::mem::take(&mut decoration.diff_added_spans);
-        let removed = std::mem::take(&mut decoration.diff_removed_spans);
         *decoration = LineDecoration::default();
-        if language.is_some() || !added.is_empty() || !removed.is_empty() {
+        if language.is_some() {
             decoration.code_language = language;
-            decoration.diff_added_spans = added;
-            decoration.diff_removed_spans = removed;
         }
     } else if let Some(payload) = decoration.payload_mut() {
         payload.image_path = None;
@@ -2022,7 +2025,7 @@ pub(crate) fn table_cell_decoration(
         let (block_type, marker_len) = if task_core > 0 {
             if task_len > 0 {
                 (
-                    BlockType::TaskList(matches!(trimmed.as_bytes()[3], b'x' | b'X')),
+                    BlockType::TaskList(matches!(trimmed.as_bytes()[task_core - 2], b'x' | b'X')),
                     task_len,
                 )
             } else {
@@ -3015,17 +3018,6 @@ pub(crate) fn table_cell_fragment_prefix_is_folded(
     }
 }
 
-fn task_core_syntax_len(trimmed: &str) -> usize {
-    for marker in [
-        "- [ ]", "- [x]", "- [X]", "* [ ]", "* [x]", "* [X]", "+ [ ]", "+ [x]", "+ [X]",
-    ] {
-        if trimmed.starts_with(marker) {
-            return marker.len();
-        }
-    }
-    0
-}
-
 fn task_prefix_is_folded(
     line_content: &str,
     leading_ws: usize,
@@ -3059,7 +3051,7 @@ fn task_prefix_is_folded(
             return line_content
                 .as_bytes()
                 .get(core_end)
-                .is_some_and(|byte| *byte == b' ');
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t'));
         }
         true
     })
@@ -3792,8 +3784,6 @@ mod tests {
                 3,
                 16.0,
                 &theme,
-                theme.git_status_added,
-                theme.text_danger,
                 theme.link,
                 FontWeight::NORMAL,
                 theme.list_marker,
@@ -5339,8 +5329,6 @@ mod tests {
             0,
             16.0,
             theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -5444,6 +5432,47 @@ mod tests {
             5,
             &[Range { start: 6, end: 6 }],
         ));
+    }
+
+    #[test]
+    fn task_rendering_folds_the_correct_marker_after_an_empty_list_item() {
+        for (text, line) in [
+            ("- abc\n- [x] abc\n- ", "- [x] abc"),
+            ("- abc\n- [ ] **abc**\n- ", "- [ ] **abc**"),
+            ("1. [x] abc\n2. ", "1. [x] abc"),
+            ("> 1. [ ] abc\n> 2. ", "> 1. [ ] abc"),
+        ] {
+            let index = text
+                .lines()
+                .position(|candidate| candidate == line)
+                .unwrap();
+            let decoration = markdown::parse_decorations(text)[index].clone();
+            assert!(
+                matches!(decoration.block_type, markdown::BlockType::TaskList(_)),
+                "{text:?}"
+            );
+            let (display, _, _, collapsed) = build_display_text(
+                line,
+                &decoration,
+                &[line.len()..line.len()],
+                false,
+                None,
+                0,
+                3,
+                3,
+                2,
+                0,
+                1.0,
+                1.0,
+                1.0,
+            );
+            assert!(collapsed, "{text:?}");
+            assert!(
+                !display.contains("[x]") && !display.contains("[ ]"),
+                "{display:?}"
+            );
+            assert!(display.contains("abc"), "{display:?}");
+        }
     }
 
     #[test]
@@ -5668,8 +5697,6 @@ mod tests {
             0,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -5729,8 +5756,6 @@ mod tests {
             0,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             list_marker_color,
@@ -6174,7 +6199,7 @@ mod tests {
         let mut diagrams = Vec::new();
         let mut current_title = String::new();
         let mut current_source: Option<String> = None;
-        for line in include_str!("../../docs/mermaid-gallery.md").lines() {
+        for line in include_str!("../../tests/fixtures/mermaid-gallery.md").lines() {
             if current_source.is_none() && line.starts_with("### ") {
                 current_title = line.trim_start_matches("### ").to_string();
             } else if line.trim() == "```mermaid" {
@@ -6435,8 +6460,6 @@ mod tests {
                     3,
                     16.0,
                     &theme,
-                    theme.git_status_added,
-                    theme.text_danger,
                     theme.link,
                     FontWeight::NORMAL,
                     theme.list_marker,
@@ -6538,8 +6561,6 @@ mod tests {
             3,
             16.0,
             theme,
-            theme.git_status_added,
-            theme.text_danger,
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -7158,8 +7179,6 @@ mod tests {
                 0,
                 16.0,
                 theme,
-                theme.diff_added_bg,
-                theme.diff_removed_bg,
                 theme.link,
                 FontWeight::NORMAL,
                 theme.list_marker,
@@ -7367,8 +7386,6 @@ mod tests {
                         0,
                         16.0,
                         theme,
-                        theme.diff_added_bg,
-                        theme.diff_removed_bg,
                         theme.link,
                         FontWeight::NORMAL,
                         theme.list_marker,
@@ -7671,19 +7688,15 @@ mod tests {
     }
 
     #[test]
-    fn source_projection_keeps_diff_spans_and_normalizes_table_syntax_languages() {
+    fn source_projection_normalizes_table_syntax_languages() {
         for source in [
             "```rust\nlet x = 1;\n```",
             "```mermaid\nflowchart TD\nA --> B\n```",
             "$$\n\\alpha\n$$",
         ] {
             for mut row in markdown::parse_decorations(source) {
-                row.diff_added_spans = vec![0..1];
-                row.diff_removed_spans = vec![1..2];
                 super::source_markdown_decoration(&mut row);
                 assert!(row.code_language.is_some());
-                assert_eq!(row.diff_added_spans, vec![0..1]);
-                assert_eq!(row.diff_removed_spans, vec![1..2]);
                 let projected = row.clone();
                 super::source_markdown_decoration(&mut row);
                 assert_eq!(row, projected);
@@ -7761,8 +7774,6 @@ mod tests {
             0,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -7798,8 +7809,6 @@ mod tests {
             0,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -7902,8 +7911,6 @@ mod tests {
             0,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -7963,8 +7970,6 @@ mod tests {
             0,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -8080,8 +8085,6 @@ mod tests {
             0,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -8147,8 +8150,6 @@ mod tests {
             0,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -8207,8 +8208,6 @@ mod tests {
             0,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -8281,8 +8280,6 @@ mod tests {
             0,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -8439,8 +8436,6 @@ mod tests {
             3,
             16.0,
             theme,
-            theme.git_status_added,
-            theme.text_danger,
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -9237,8 +9232,6 @@ mod tests {
                 0,
                 16.0,
                 &theme,
-                theme.git_status_added,
-                theme.text_danger,
                 theme.link,
                 FontWeight::NORMAL,
                 theme.list_marker,
@@ -9319,8 +9312,6 @@ mod tests {
             0,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -9864,8 +9855,6 @@ mod tests {
             3,
             16.0,
             &theme,
-            theme.git_status_added,
-            theme.text_danger,
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -10214,6 +10203,9 @@ mod tests {
             ("- item", markdown::BlockType::UnorderedList),
             ("1. item", markdown::BlockType::OrderedList),
             ("- [ ] item", markdown::BlockType::TaskList(false)),
+            ("1. [x] item", markdown::BlockType::TaskList(true)),
+            ("2) [X] item", markdown::BlockType::TaskList(true)),
+            ("3. [ ] item", markdown::BlockType::TaskList(false)),
         ] {
             let decoration =
                 table_cell_decoration(&markdown::LineDecoration::default(), cell, &(0..cell.len()));
@@ -10527,8 +10519,6 @@ mod tests {
             0,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -10596,8 +10586,6 @@ mod tests {
             0,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,
@@ -11921,7 +11909,7 @@ fn mermaid_fill_palette(theme: &Theme) -> [String; 8] {
     let primary = [
         theme.text_accent,
         theme.link,
-        theme.git_status_added,
+        theme.status_success,
         theme.text_warning,
     ]
     .into_iter()
@@ -11929,10 +11917,10 @@ fn mermaid_fill_palette(theme: &Theme) -> [String; 8] {
         let rgb = parse_svg_hex_color(&svg_color(*color)).expect("theme colors are valid");
         rgb[..3].iter().max().unwrap() - rgb[..3].iter().min().unwrap() >= 40
     })
-    .unwrap_or(theme.git_status_added);
+    .unwrap_or(theme.status_success);
     let accents = [
         primary,
-        theme.git_status_added,
+        theme.status_success,
         theme.text_warning,
         theme.text_danger,
     ];
@@ -12705,8 +12693,6 @@ pub(crate) fn build_text_runs_for_display(
     collapsed_task_prefix_chars: usize,
     font_size: f32,
     theme: &Theme,
-    diff_inline_added_bg: Hsla,
-    diff_inline_removed_bg: Hsla,
     wiki_link_text_color: Hsla,
     wiki_link_text_weight: FontWeight,
     list_marker_text_color: Hsla,
@@ -12733,8 +12719,6 @@ pub(crate) fn build_text_runs_for_display(
         collapsed_task_prefix_chars,
         font_size,
         theme,
-        diff_inline_added_bg,
-        diff_inline_removed_bg,
         wiki_link_text_color,
         wiki_link_text_weight,
         list_marker_text_color,
@@ -12764,8 +12748,6 @@ pub(crate) fn build_text_runs_for_display_with_language(
     collapsed_task_prefix_chars: usize,
     _font_size: f32,
     theme: &Theme,
-    diff_inline_added_bg: Hsla,
-    diff_inline_removed_bg: Hsla,
     wiki_link_text_color: Hsla,
     wiki_link_text_weight: FontWeight,
     list_marker_text_color: Hsla,
@@ -13241,23 +13223,6 @@ pub(crate) fn build_text_runs_for_display_with_language(
                 buf_colors[i] = theme.syntax_marker;
             }
             assign_font_roles(start..end, FontRole::Monospace, FontRole::Monospace);
-        }
-    }
-
-    for span in &decoration.diff_removed_spans {
-        let start = span.start.min(buf_len);
-        let end = span.end.min(buf_len);
-        for index in start..end {
-            buf_bg_colors[index] = Some(diff_inline_removed_bg);
-            buf_strikethroughs[index] = true;
-        }
-    }
-
-    for span in &decoration.diff_added_spans {
-        let start = span.start.min(buf_len);
-        let end = span.end.min(buf_len);
-        for index in start..end {
-            buf_bg_colors[index] = Some(diff_inline_added_bg);
         }
     }
 

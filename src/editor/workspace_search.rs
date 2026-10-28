@@ -1030,57 +1030,23 @@ impl EditorView {
     pub(crate) fn workspace_search_filter_text_input_styles(
         &self,
     ) -> crate::style::TextInputStyles {
-        let mut styles = self.workspace_search_text_input_styles();
-        styles.text_input_focus_bg = self.styles.workspace_search.ws_search_input_focus_bg;
-        styles.text_input_padding_left_px =
-            self.scaled(self.styles.text_input.text_input_padding_right_px);
-        styles
+        self.styles
+            .input_styles(crate::style::InputRole::WorkspaceFilter, self.ui_scale)
     }
 
     pub(crate) fn workspace_search_text_input_styles(&self) -> crate::style::TextInputStyles {
-        let mut styles = self.styles.text_input.clone();
-        let workspace_styles = &self.styles.workspace_search;
-        styles.text_input_height_px = self.scaled(
-            workspace_styles.ws_search_input_height_px
-                - 2.0 * workspace_styles.ws_search_input_border_width_px,
-        );
-        styles.text_input_padding_left_px =
-            self.scaled(workspace_styles.ws_search_input_left_inset_px);
-        styles.text_input_padding_right_px =
-            self.scaled(self.styles.text_input.text_input_padding_right_px);
-        styles.text_input_font_size_px =
-            self.scaled(self.styles.text_input.text_input_font_size_px);
-        styles.text_input_bg = gpui::transparent_black();
-        styles.text_input_focus_bg = gpui::transparent_black();
-        styles.text_input_text_color = self.styles.sidebar.sidebar_item_text_color;
-        styles.text_input_placeholder_color = self.styles.sidebar.sidebar_empty_text_color;
-        styles.text_input_radius_px = self.scaled(workspace_styles.ws_search_input_radius_px);
-        styles.text_input_border_width_px = 0.0;
-        styles.text_input_cursor_color = self.styles.sidebar.sidebar_item_selected_text_color;
-        styles.text_input_cursor_width_px =
-            self.scaled(self.styles.text_input.text_input_cursor_width_px);
-        styles.text_input_selection_color = self.styles.sidebar.sidebar_item_selected_bg;
-        styles.text_input_cursor_height_ratio =
-            workspace_styles.ws_search_input_cursor_height_ratio;
-        styles.text_input_cursor_height_adjust_px =
-            workspace_styles.ws_search_input_cursor_height_adjust_px;
-        styles
+        self.styles
+            .input_styles(crate::style::InputRole::WorkspaceSearch, self.ui_scale)
     }
 
     /// Standalone column to the right of the sidebar, with its own trailing
     /// hairline so it reads as a separate panel.
     pub(crate) fn render_workspace_search_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let ss = &self.styles.sidebar;
-        div()
+        crate::ui::panel::panel(ss.panel())
             .id("workspace-search-column")
             .w(px(self.workspace_search_panel_width()))
-            .h_full()
             .flex_none()
-            .flex()
-            .flex_col()
-            .bg(ss.sidebar_bg)
-            .border_r(px(ss.sidebar_resize_indicator_width_px))
-            .border_color(ss.sidebar_resize_indicator_color)
             .child(self.render_workspace_search(cx))
             .into_any_element()
     }
@@ -1100,7 +1066,6 @@ impl EditorView {
         let icon_top = (input_height - icon_size).max(0.0) / 2.0;
         let button_radius = self.scaled(4.0);
         let button_hover_bg = workspace_styles.ws_search_btn_hover_bg;
-        let button_active_bg = workspace_styles.ws_search_btn_active_bg;
         let button_icon_color = workspace_styles.ws_search_btn_icon_color;
         let button_active_icon_color = workspace_styles.ws_search_btn_active_icon_color;
         let input_icon_color = workspace_styles.ws_search_input_icon_color;
@@ -1117,7 +1082,6 @@ impl EditorView {
         } else {
             workspace_styles.ws_search_input_hover_bg
         };
-        let result_selected_bg = self.styles.sidebar.sidebar_item_selected_bg;
         let filters_active = self.workspace_search_filters_visible
             || !self.workspace_search_include.trim().is_empty()
             || !self.workspace_search_exclude.trim().is_empty();
@@ -1151,10 +1115,16 @@ impl EditorView {
             div()
                 .w_full()
                 .px(px(self.scaled(workspace_styles.ws_search_padding_px)))
-                .pt(px(self.scaled(2.0)))
-                .pb(px(self.scaled(2.0)))
+                .pt(px(self.scaled(
+                    self.styles.ui.space(crate::style::SpaceStep::Half),
+                )))
+                .pb(px(self.scaled(
+                    self.styles.ui.space(crate::style::SpaceStep::Half),
+                )))
                 .flex()
-                .gap(px(self.scaled(4.0)))
+                .gap(px(
+                    self.scaled(self.styles.ui.space(crate::style::SpaceStep::One))
+                ))
                 .child(filter_field(
                     self.workspace_search_include_editor.clone(),
                     !self.workspace_search_include.trim().is_empty(),
@@ -1169,7 +1139,9 @@ impl EditorView {
             .w_full()
             .px(px(self.scaled(workspace_styles.ws_search_padding_px)))
             .pt(px(self.scaled(workspace_styles.ws_search_padding_px)))
-            .pb(px(self.scaled(2.0)))
+            .pb(px(self.scaled(
+                self.styles.ui.space(crate::style::SpaceStep::Half),
+            )))
             .child(
                 div()
                     .w_full()
@@ -1215,43 +1187,34 @@ impl EditorView {
                             .gap(px(button_gap))
                             .child(
                                 self.with_search_tooltip(
-                                    div()
-                                        .id("workspace-search-case-btn")
-                                        .w(px(button_size))
-                                        .h(px(button_size))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(button_radius))
-                                        .cursor(CursorStyle::Arrow)
-                                        .when(
-                                            self.workspace_search_case_sensitive,
-                                            |this: gpui::Stateful<gpui::Div>| {
-                                                this.bg(button_active_bg)
-                                            },
-                                        )
-                                        .hover(move |style| style.bg(button_hover_bg))
-                                        .child(
-                                            svg()
-                                                .path(SEARCH_CASE_ICON_SVG_PATH)
-                                                .size(px(button_icon_size))
-                                                .text_color(
-                                                    if self.workspace_search_case_sensitive {
-                                                        button_active_icon_color
-                                                    } else {
-                                                        button_icon_color
-                                                    },
-                                                ),
-                                        )
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _, cx| {
-                                                cx.stop_propagation();
-                                                this.workspace_search_case_sensitive =
-                                                    !this.workspace_search_case_sensitive;
-                                                this.run_workspace_search(cx);
+                                    crate::ui::button::icon_button(
+                                        "workspace-search-case-btn",
+                                        self.styles.workspace_toggle(),
+                                        crate::style::ControlState {
+                                            selected: self.workspace_search_case_sensitive,
+                                            ..Default::default()
+                                        },
+                                        self.ui_scale,
+                                    )
+                                    .child(
+                                        svg()
+                                            .path(SEARCH_CASE_ICON_SVG_PATH)
+                                            .size(px(button_icon_size))
+                                            .text_color(if self.workspace_search_case_sensitive {
+                                                button_active_icon_color
+                                            } else {
+                                                button_icon_color
                                             }),
-                                        ),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.workspace_search_case_sensitive =
+                                                !this.workspace_search_case_sensitive;
+                                            this.run_workspace_search(cx);
+                                        }),
+                                    ),
                                     "case",
                                     Some(crate::editor::shortcut::hint("secondary-alt-c")),
                                     cx,
@@ -1259,41 +1222,34 @@ impl EditorView {
                             )
                             .child(
                                 self.with_search_tooltip(
-                                    div()
-                                        .id("workspace-search-word-btn")
-                                        .w(px(button_size))
-                                        .h(px(button_size))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(button_radius))
-                                        .cursor(CursorStyle::Arrow)
-                                        .when(
-                                            self.workspace_search_whole_word,
-                                            |this: gpui::Stateful<gpui::Div>| {
-                                                this.bg(button_active_bg)
-                                            },
-                                        )
-                                        .hover(move |style| style.bg(button_hover_bg))
-                                        .child(
-                                            svg()
-                                                .path(SEARCH_WHOLE_WORD_ICON_SVG_PATH)
-                                                .size(px(button_icon_size))
-                                                .text_color(if self.workspace_search_whole_word {
-                                                    button_active_icon_color
-                                                } else {
-                                                    button_icon_color
-                                                }),
-                                        )
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _, cx| {
-                                                cx.stop_propagation();
-                                                this.workspace_search_whole_word =
-                                                    !this.workspace_search_whole_word;
-                                                this.run_workspace_search(cx);
+                                    crate::ui::button::icon_button(
+                                        "workspace-search-word-btn",
+                                        self.styles.workspace_toggle(),
+                                        crate::style::ControlState {
+                                            selected: self.workspace_search_whole_word,
+                                            ..Default::default()
+                                        },
+                                        self.ui_scale,
+                                    )
+                                    .child(
+                                        svg()
+                                            .path(SEARCH_WHOLE_WORD_ICON_SVG_PATH)
+                                            .size(px(button_icon_size))
+                                            .text_color(if self.workspace_search_whole_word {
+                                                button_active_icon_color
+                                            } else {
+                                                button_icon_color
                                             }),
-                                        ),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.workspace_search_whole_word =
+                                                !this.workspace_search_whole_word;
+                                            this.run_workspace_search(cx);
+                                        }),
+                                    ),
                                     "word",
                                     Some(crate::editor::shortcut::hint("secondary-alt-w")),
                                     cx,
@@ -1301,41 +1257,34 @@ impl EditorView {
                             )
                             .child(
                                 self.with_search_tooltip(
-                                    div()
-                                        .id("workspace-search-regex-btn")
-                                        .w(px(button_size))
-                                        .h(px(button_size))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(button_radius))
-                                        .cursor(CursorStyle::Arrow)
-                                        .when(
-                                            self.workspace_search_use_regex,
-                                            |this: gpui::Stateful<gpui::Div>| {
-                                                this.bg(button_active_bg)
-                                            },
-                                        )
-                                        .hover(move |style| style.bg(button_hover_bg))
-                                        .child(
-                                            svg()
-                                                .path(SEARCH_REGEX_ICON_SVG_PATH)
-                                                .size(px(button_icon_size))
-                                                .text_color(if self.workspace_search_use_regex {
-                                                    button_active_icon_color
-                                                } else {
-                                                    button_icon_color
-                                                }),
-                                        )
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _, cx| {
-                                                cx.stop_propagation();
-                                                this.workspace_search_use_regex =
-                                                    !this.workspace_search_use_regex;
-                                                this.run_workspace_search(cx);
+                                    crate::ui::button::icon_button(
+                                        "workspace-search-regex-btn",
+                                        self.styles.workspace_toggle(),
+                                        crate::style::ControlState {
+                                            selected: self.workspace_search_use_regex,
+                                            ..Default::default()
+                                        },
+                                        self.ui_scale,
+                                    )
+                                    .child(
+                                        svg()
+                                            .path(SEARCH_REGEX_ICON_SVG_PATH)
+                                            .size(px(button_icon_size))
+                                            .text_color(if self.workspace_search_use_regex {
+                                                button_active_icon_color
+                                            } else {
+                                                button_icon_color
                                             }),
-                                        ),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.workspace_search_use_regex =
+                                                !this.workspace_search_use_regex;
+                                            this.run_workspace_search(cx);
+                                        }),
+                                    ),
                                     "regex",
                                     Some(crate::editor::shortcut::hint("secondary-alt-r")),
                                     cx,
@@ -1343,36 +1292,32 @@ impl EditorView {
                             )
                             .child(
                                 self.with_search_tooltip(
-                                    div()
-                                        .id("workspace-search-filters-btn")
-                                        .w(px(button_size))
-                                        .h(px(button_size))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(button_radius))
-                                        .cursor(CursorStyle::Arrow)
-                                        .when(filters_active, |this: gpui::Stateful<gpui::Div>| {
-                                            this.bg(button_active_bg)
-                                        })
-                                        .hover(move |style| style.bg(button_hover_bg))
-                                        .child(
-                                            svg()
-                                                .path(SEARCH_FILTER_ICON_SVG_PATH)
-                                                .size(px(button_icon_size))
-                                                .text_color(if filters_active {
-                                                    button_active_icon_color
-                                                } else {
-                                                    button_icon_color
-                                                }),
-                                        )
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, window, cx| {
-                                                cx.stop_propagation();
-                                                this.toggle_workspace_search_filters(window, cx);
+                                    crate::ui::button::icon_button(
+                                        "workspace-search-filters-btn",
+                                        self.styles.workspace_toggle(),
+                                        crate::style::ControlState {
+                                            selected: self.workspace_search_filters_visible,
+                                            ..Default::default()
+                                        },
+                                        self.ui_scale,
+                                    )
+                                    .child(
+                                        svg()
+                                            .path(SEARCH_FILTER_ICON_SVG_PATH)
+                                            .size(px(button_icon_size))
+                                            .text_color(if filters_active {
+                                                button_active_icon_color
+                                            } else {
+                                                button_icon_color
                                             }),
-                                        ),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.toggle_workspace_search_filters(window, cx);
+                                        }),
+                                    ),
                                     "filters",
                                     None,
                                     cx,
@@ -1546,7 +1491,9 @@ impl EditorView {
                         .px(px(self.scaled(workspace_styles.ws_search_padding_px)))
                         .flex()
                         .items_center()
-                        .gap(px(self.scaled(4.0)))
+                        .gap(px(
+                            self.scaled(self.styles.ui.space(crate::style::SpaceStep::One))
+                        ))
                         .bg(workspace_styles.ws_search_file_header_bg)
                         .relative()
                         .border_t(file_header_border_width)
@@ -1677,84 +1624,79 @@ impl EditorView {
                     );
 
                     result_children.push(
-                        div()
-                            .id(gpui::SharedString::from(format!(
-                                "ws-match-{}-{}-{}",
-                                result.path.display(),
-                                line_num,
-                                start
-                            )))
-                            .w_full()
-                            .h(px(self.scaled(workspace_styles.ws_search_match_height_px)))
-                            .px(px(
-                                self.scaled(workspace_styles.ws_search_match_padding_x_px)
-                            ))
-                            .flex()
-                            .items_center()
-                            .gap(px(self.scaled(4.0)))
-                            .cursor(CursorStyle::Arrow)
-                            .when(is_selected, |this| this.bg(result_selected_bg))
-                            .hover(move |style| style.bg(hover_bg))
-                            .child(
-                                div()
-                                    .min_w(px(self.scaled(28.0)))
-                                    .text_size(px(
-                                        self.scaled(workspace_styles.ws_search_match_font_size_px)
-                                    ))
-                                    .text_color(workspace_styles.ws_search_match_line_number_color)
-                                    .opacity(0.4)
-                                    .child(format!("{line_num}")),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .text_size(px(
-                                        self.scaled(workspace_styles.ws_search_match_font_size_px)
-                                    ))
-                                    .text_color(workspace_styles.ws_search_match_text_color)
-                                    .flex()
-                                    .child(before)
-                                    .child(div().bg(hl_bg).text_color(hl_color).child(matched))
-                                    .child(after),
-                            )
-                            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                                let is_double_click = event.click_count() >= 2;
-                                cx.stop_propagation();
-                                if is_double_click {
-                                    this.preview_workspace_search_match_at(
-                                        current_match_index,
-                                        true,
-                                        true,
+                        crate::ui::list::list_item(
+                            self.styles.workspace_match_row(),
+                            crate::style::ControlState {
+                                selected: is_selected,
+                                ..Default::default()
+                            },
+                            self.ui_scale,
+                        )
+                        .id(gpui::SharedString::from(format!(
+                            "ws-match-{}-{}-{}",
+                            result.path.display(),
+                            line_num,
+                            start
+                        )))
+                        .child(
+                            div()
+                                .min_w(px(self.scaled(28.0)))
+                                .text_size(px(
+                                    self.scaled(workspace_styles.ws_search_match_font_size_px)
+                                ))
+                                .text_color(workspace_styles.ws_search_match_line_number_color)
+                                .opacity(0.4)
+                                .child(format!("{line_num}")),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_size(px(
+                                    self.scaled(workspace_styles.ws_search_match_font_size_px)
+                                ))
+                                .text_color(workspace_styles.ws_search_match_text_color)
+                                .flex()
+                                .child(before)
+                                .child(div().bg(hl_bg).text_color(hl_color).child(matched))
+                                .child(after),
+                        )
+                        .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                            let is_double_click = event.click_count() >= 2;
+                            cx.stop_propagation();
+                            if is_double_click {
+                                this.preview_workspace_search_match_at(
+                                    current_match_index,
+                                    true,
+                                    true,
+                                    cx,
+                                );
+                            } else {
+                                this.workspace_search_selected_match = Some(current_match_index);
+                                if this.switch_to_existing_editor_tab_for_path(
+                                    &path_for_click,
+                                    true,
+                                    cx,
+                                ) {
+                                    this.reveal_workspace_search_match(
+                                        path_for_click.clone(),
+                                        search_match_for_click.clone(),
                                         cx,
                                     );
                                 } else {
-                                    this.workspace_search_selected_match =
-                                        Some(current_match_index);
-                                    if this.switch_to_existing_editor_tab_for_path(
-                                        &path_for_click,
-                                        true,
+                                    this.show_workspace_search_match(
+                                        path_for_click.clone(),
+                                        search_match_for_click.clone(),
+                                        false,
+                                        false,
                                         cx,
-                                    ) {
-                                        this.reveal_workspace_search_match(
-                                            path_for_click.clone(),
-                                            search_match_for_click.clone(),
-                                            cx,
-                                        );
-                                    } else {
-                                        this.show_workspace_search_match(
-                                            path_for_click.clone(),
-                                            search_match_for_click.clone(),
-                                            false,
-                                            false,
-                                            cx,
-                                        );
-                                    }
+                                    );
                                 }
-                            }))
-                            .into_any_element(),
+                            }
+                        }))
+                        .into_any_element(),
                     );
                     remaining_rows = remaining_rows.saturating_sub(1);
                 }
@@ -1803,7 +1745,7 @@ impl EditorView {
             &self.workspace_search_scroll_handle,
             f32::from(self.workspace_search_scroll_handle.bounds().size.height),
             0.0,
-            self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
+            self.scaled(self.styles.self_drawn.scrollbar.right_margin_px),
             cx,
         );
         div()

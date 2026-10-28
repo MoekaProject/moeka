@@ -12,13 +12,11 @@ pub(super) fn handles_visible(read_only: bool, hovered: bool, selected: bool) ->
 
 pub(super) fn top_padding(
     decoration: Option<&crate::markdown::LineDecoration>,
-    diff: bool,
     thickness: f32,
 ) -> f32 {
-    if !diff
-        && decoration
-            .and_then(|decoration| decoration.table_info.as_ref())
-            .is_some_and(|table| table.is_header && !table.is_front_matter)
+    if decoration
+        .and_then(|decoration| decoration.table_info.as_ref())
+        .is_some_and(|table| table.is_header && !table.is_front_matter)
     {
         thickness
     } else {
@@ -471,7 +469,7 @@ impl EditorView {
             self.cancel_table_handle_press(cx);
             return true;
         }
-        let threshold = self.scaled(self.styles.table.table_border_drag_threshold_px);
+        let threshold = self.scaled(self.styles.self_drawn.table_border_drag_threshold_px);
         self.table_handles.press.as_mut().unwrap().update(
             event.position,
             threshold,
@@ -496,7 +494,7 @@ impl EditorView {
             self.cancel_table_handle_press(cx);
             return true;
         }
-        let threshold = self.scaled(self.styles.table.table_border_drag_threshold_px);
+        let threshold = self.scaled(self.styles.self_drawn.table_border_drag_threshold_px);
         self.table_handles.press.as_mut().unwrap().update(
             event.position,
             threshold,

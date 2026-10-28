@@ -193,10 +193,6 @@ impl EditorView {
     }
 
     pub(crate) fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_undo(cx);
-            return;
-        }
         self.pending_typing_scroll_guard = None;
         if !self.begin_content_edit(cx) {
             return;
@@ -219,10 +215,6 @@ impl EditorView {
         if self.cancel_line_drag(cx) {
             return;
         }
-        if self.active_tab_is_whiteboard() && self.whiteboard_escape() {
-            cx.notify();
-            return;
-        }
         if self.preview_overlay.is_some() {
             self.close_preview_overlay();
             cx.notify();
@@ -242,14 +234,6 @@ impl EditorView {
         }
         if self.language_picker_visible {
             self.close_language_picker(window, cx);
-            return;
-        }
-        if self.branch_picker_visible {
-            self.close_branch_picker(window, cx);
-            return;
-        }
-        if self.git_remote_input_visible {
-            self.close_git_remote_input(cx);
             return;
         }
         if self.workspace_search_visible {
@@ -282,10 +266,6 @@ impl EditorView {
             return;
         }
         if self.selected_handle.take().is_some() || self.table_drag.take().is_some() {
-            cx.notify();
-            return;
-        }
-        if self.clear_phantom_selection() {
             cx.notify();
             return;
         }
@@ -334,10 +314,6 @@ impl EditorView {
     }
 
     pub(crate) fn on_redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_redo(cx);
-            return;
-        }
         self.pending_typing_scroll_guard = None;
         if !self.begin_content_edit(cx) {
             return;
@@ -475,10 +451,6 @@ impl EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_delete_selected(cx);
-            return;
-        }
         if !self.begin_content_edit(cx) {
             return;
         }
@@ -727,10 +699,6 @@ impl EditorView {
     }
 
     pub(crate) fn on_delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_delete_selected(cx);
-            return;
-        }
         if self.focused_sidebar_path.is_some() {
             self.sidebar_delete_focused(cx);
             return;
@@ -882,11 +850,6 @@ impl EditorView {
     }
 
     pub(crate) fn on_left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_nudge(-whiteboard_geometry::GRID, 0.0, cx);
-            return;
-        }
-        self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_left(cx);
             return;
@@ -954,11 +917,6 @@ impl EditorView {
     }
 
     pub(crate) fn on_right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_nudge(whiteboard_geometry::GRID, 0.0, cx);
-            return;
-        }
-        self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_right(cx);
             return;
@@ -1010,13 +968,8 @@ impl EditorView {
     }
 
     pub(crate) fn on_up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_nudge(0.0, -whiteboard_geometry::GRID, cx);
-            return;
-        }
         self.table_handles.selection = None;
         self.table_cell_selection = None;
-        self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_up(cx);
             return;
@@ -1089,13 +1042,8 @@ impl EditorView {
     }
 
     pub(crate) fn on_down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_nudge(0.0, whiteboard_geometry::GRID, cx);
-            return;
-        }
         self.table_handles.selection = None;
         self.table_cell_selection = None;
-        self.clear_phantom_selection();
         if self.focused_sidebar_path.is_some() {
             self.sidebar_nav_down(cx);
             return;
@@ -1303,10 +1251,6 @@ impl EditorView {
     }
 
     pub(crate) fn on_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_select_all(cx);
-            return;
-        }
         self.table_boundary_caret = None;
         self.cursor.select_all(&self.buffer);
         self.unfold_cursor_regions();
@@ -1314,7 +1258,6 @@ impl EditorView {
     }
 
     pub(crate) fn on_home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.clear_phantom_selection();
         if self.table_boundary_caret.is_some() {
             self.pause_blinking(cx);
             return;
@@ -1334,7 +1277,6 @@ impl EditorView {
     }
 
     pub(crate) fn on_end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        self.clear_phantom_selection();
         if self.table_boundary_caret.is_some() {
             self.pause_blinking(cx);
             return;
@@ -1592,16 +1534,20 @@ impl EditorView {
             }
             BlockType::TaskList(_) => {
                 let prefix_len = task_prefix_len(trimmed);
-                if prefix_len > 0 && self.cursor.offset >= line_start + leading_ws + prefix_len {
+                if prefix_len > 0
+                    && self.cursor.offset >= line_start + leading_ws + prefix_len
+                    && let Some((marker, ordered_number)) = task_list_continuation(trimmed)
+                {
                     let text_after_marker = &line_content[leading_ws + prefix_len..];
-                    if text_after_marker.trim().is_empty() {
+                    let empty = text_after_marker.trim().is_empty();
+                    if empty {
                         if !self.outdent_empty_list_item(
                             line_start,
                             line_end,
                             &line_content,
                             quote_prefix_len,
                             body_indent,
-                            2,
+                            if ordered_number.is_some() { 3 } else { 2 },
                         ) {
                             let cleared = quote_prefix.to_string();
                             self.queue_non_markdown_line_display_transfer(
@@ -1614,19 +1560,24 @@ impl EditorView {
                             self.cursor.insert(&mut self.buffer, "\n");
                         }
                     } else {
-                        let bullet = if trimmed.starts_with("- ") {
-                            "- "
-                        } else if trimmed.starts_with("* ") {
-                            "* "
-                        } else {
-                            "+ "
-                        };
-                        let continuation = format!("\n{}{}[ ] ", ws_str, bullet);
+                        let continuation = format!("\n{}{}", ws_str, marker);
                         let insert_range = self.cursor.selection_range();
                         self.queue_non_markdown_line_display_transfer(&insert_range, &continuation);
                         self.cursor.insert(&mut self.buffer, &continuation);
                     }
                     self.reparse();
+                    if let Some(number) = ordered_number {
+                        if empty {
+                            self.normalize_ordered_list_near_line(cursor_line, false);
+                        } else {
+                            self.renumber_ordered_list_after(
+                                cursor_line + 2,
+                                number.saturating_add(2),
+                                leading_ws,
+                            );
+                        }
+                        self.reparse();
+                    }
                     if !cursor_had_inline_headroom {
                         self.scroll_to_cursor();
                     }
@@ -1851,10 +1802,6 @@ impl EditorView {
     }
 
     pub(crate) fn on_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_copy(cx);
-            return;
-        }
         if let Some(text) = self.copy_table_cell_selection() {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
             return;
@@ -1873,10 +1820,6 @@ impl EditorView {
     }
 
     pub(crate) fn on_cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_cut(cx);
-            return;
-        }
         if self.table_cell_selection.is_some() {
             self.cut_table_cell_selection(cx);
             return;
@@ -1902,10 +1845,6 @@ impl EditorView {
     }
 
     pub(crate) fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_paste(cx);
-            return;
-        }
         self.paste_from_clipboard(cx);
     }
 
@@ -1915,7 +1854,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_whiteboard() || !self.begin_content_edit(cx) {
+        if !self.begin_content_edit(cx) {
             return;
         }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
@@ -1949,7 +1888,6 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.clear_phantom_selection();
         if self.table_boundary_caret.is_some() {
             let _ = self.move_table_cursor_horizontal(false);
             self.finish_horizontal_cursor_move(cx);
@@ -1978,7 +1916,6 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.clear_phantom_selection();
         if self.table_boundary_caret.is_some() {
             let _ = self.move_table_cursor_horizontal(true);
             self.finish_horizontal_cursor_move(cx);
@@ -2008,7 +1945,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let previous = self.all_cursors_snapshot();
-        self.clear_phantom_selection();
         self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
         let current = self.cursor.offset;
@@ -2034,7 +1970,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let previous = self.all_cursors_snapshot();
-        self.clear_phantom_selection();
         self.table_boundary_caret = None;
         self.reset_cursor_visual_targeting();
         let current = self.cursor.offset;
@@ -2060,7 +1995,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let previous = self.all_cursors_snapshot();
-        self.clear_phantom_selection();
         self.table_boundary_caret = None;
         self.cursor.move_to(0, &self.buffer);
         for cursor in &mut self.extra_cursors {
@@ -2079,7 +2013,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let previous = self.all_cursors_snapshot();
-        self.clear_phantom_selection();
         self.table_boundary_caret = None;
         let end = self.buffer.len();
         self.cursor.move_to(end, &self.buffer);
@@ -2099,7 +2032,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let previous = self.all_cursors_snapshot();
-        self.clear_phantom_selection();
         self.table_boundary_caret = None;
         self.cursor.select_to(0, &self.buffer);
         for cursor in &mut self.extra_cursors {
@@ -2118,7 +2050,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let previous = self.all_cursors_snapshot();
-        self.clear_phantom_selection();
         self.table_boundary_caret = None;
         let end = self.buffer.len();
         self.cursor.select_to(end, &self.buffer);
@@ -2181,7 +2112,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_yank(&mut self, _: &Yank, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() || !self.begin_content_edit(cx) {
+        if !self.begin_content_edit(cx) {
             return;
         }
         let Some(text) = self.kill_ring.clone() else {
@@ -2198,7 +2129,7 @@ impl EditorView {
 
     /// Inserts a line break after the cursor without moving it (emacs ctrl-o).
     pub(crate) fn on_open_line(&mut self, _: &OpenLine, _: &mut Window, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() || !self.begin_content_edit(cx) {
+        if !self.begin_content_edit(cx) {
             return;
         }
         self.skip_folded_anchor_for_line_break();
@@ -2226,7 +2157,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_whiteboard() || !self.begin_content_edit(cx) {
+        if !self.begin_content_edit(cx) {
             return;
         }
         if self.table_boundary_caret.is_some() || self.table_cursor_cell().is_some() {
@@ -2274,9 +2205,6 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_whiteboard() {
-            return;
-        }
         let line_height = (self.base_font_size()
             * self.styles.editor.editor_paragraph_line_height_factor)
             .max(1.0);
@@ -2783,15 +2711,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.toggle_info_panel(cx);
-    }
-
-    pub(crate) fn on_toggle_git_history(
-        &mut self,
-        _: &ToggleGitHistory,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_git_history_panel(cx);
     }
 
     pub(crate) fn on_toggle_theme(
@@ -3340,14 +3259,6 @@ impl EditorView {
         let Some(index) = self.active_tab_index() else {
             return;
         };
-        if self.tabs[index]
-            .file_kind
-            .as_ref()
-            .is_some_and(FileKind::is_whiteboard)
-        {
-            self.save_active_whiteboard(cx);
-            return;
-        }
         self.commit_history_transaction();
         let before_normalize = self.buffer.text().to_string();
         if self.active_tab_is_markdown() || !self.buffer.text().ends_with('\n') {
@@ -3460,33 +3371,14 @@ impl EditorView {
         };
         let tab_id = self.tabs[index].id.clone();
         let original_path = self.tabs[index].path.clone();
-        let is_whiteboard = self.tabs[index]
-            .file_kind
-            .as_ref()
-            .is_some_and(FileKind::is_whiteboard);
-        let (contents, default_name) = if is_whiteboard {
-            let Some(contents) = self.tabs[index]
-                .whiteboard
-                .as_ref()
-                .map(|state| state.document.to_json_string())
-            else {
-                return;
-            };
-            (
-                contents,
-                format!("{}.{}", self.tabs[index].title, WHITEBOARD_EXTENSION),
-            )
-        } else {
-            let contents = self.normalize_text_for_save();
-            let default_name = self.tabs[index]
-                .path
-                .as_deref()
-                .and_then(std::path::Path::file_name)
-                .and_then(|name| name.to_str())
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("{}.md", self.tabs[index].title));
-            (contents, default_name)
-        };
+        let contents = self.normalize_text_for_save();
+        let default_name = self.tabs[index]
+            .path
+            .as_deref()
+            .and_then(std::path::Path::file_name)
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{}.md", self.tabs[index].title));
         let snapshot = self.current_snapshot();
         #[cfg(target_os = "macos")]
         let dialog_directory = self.tabs[index]
@@ -3545,11 +3437,7 @@ impl EditorView {
                     if editor.tabs[index].path != original_path {
                         return;
                     }
-                    let unchanged = if is_whiteboard {
-                        editor.tabs[index].whiteboard.as_ref().is_some_and(|state| {
-                            state.document.to_json_string() == contents_for_kind
-                        })
-                    } else if editor.active_tab_id.as_deref() == Some(&tab_id) {
+                    let unchanged = if editor.active_tab_id.as_deref() == Some(&tab_id) {
                         editor.buffer.text() == contents_for_kind
                     } else {
                         editor.tabs[index].snapshot.text == contents_for_kind
@@ -3588,136 +3476,6 @@ impl EditorView {
         .detach();
     }
 
-    fn save_active_whiteboard(&mut self, cx: &mut Context<Self>) {
-        let Some(index) = self.active_tab_index() else {
-            return;
-        };
-        let Some(json) = self.tabs[index]
-            .whiteboard
-            .as_ref()
-            .map(|state| state.document.to_json_string())
-        else {
-            return;
-        };
-        let tab_id = self.tabs[index].id.clone();
-        if let Some(path) = self.tabs[index].path.clone() {
-            let save = file_ops::DocumentSave::new(path.clone());
-            let token = save.clone();
-            cx.spawn(async move |this, cx| {
-                let write_json = json.clone();
-                let result =
-                    crate::platform::fs_task::run("save whiteboard", path.clone(), move || {
-                        save.write(write_json.as_bytes())
-                    })
-                    .await;
-                token.observe_result(&result);
-                if !token.is_latest() || matches!(result, Ok(false)) {
-                    return;
-                }
-                this.update(cx, |editor, cx| {
-                    editor.finish_whiteboard_save(&tab_id, path, json, result.map(|_| ()), cx)
-                })
-                .ok();
-            })
-            .detach();
-        } else {
-            let default_name = format!("{}.{}", self.tabs[index].title, WHITEBOARD_EXTENSION);
-            #[cfg(not(target_os = "macos"))]
-            let title = self.t(crate::i18n::TextKey::SaveFileDialog).to_string();
-            cx.spawn(async move |this, cx| {
-                #[cfg(target_os = "macos")]
-                let maybe_path = match this.update(cx, |_, cx| {
-                    cx.prompt_for_new_path(
-                        &std::env::home_dir().unwrap_or_default(),
-                        Some(&default_name),
-                    )
-                }) {
-                    Ok(receiver) => receiver.await.ok().and_then(Result::ok).flatten(),
-                    Err(_) => None,
-                };
-                #[cfg(not(target_os = "macos"))]
-                let maybe_path = cx
-                    .background_executor()
-                    .spawn(async move { helpers::save_file_blocking(&default_name, &title) })
-                    .await;
-                let Some(path) = maybe_path else {
-                    return;
-                };
-                let save = this.update(cx, |_, _| file_ops::DocumentSave::new(path.clone()));
-                let Ok(save) = save else { return };
-                let token = save.clone();
-                let write_json = json.clone();
-                let result =
-                    crate::platform::fs_task::run("save whiteboard", path.clone(), move || {
-                        save.write(write_json.as_bytes())
-                    })
-                    .await;
-                token.observe_result(&result);
-                if !token.is_latest() || matches!(result, Ok(false)) {
-                    return;
-                }
-                if let Err(error) = result {
-                    this.update(cx, |editor, cx| {
-                        editor.notify_document_save_failed(&tab_id, &path, &error, cx);
-                    })
-                    .ok();
-                    return;
-                }
-                this.update(cx, |editor, cx| {
-                    editor.finish_whiteboard_save(&tab_id, path, json, Ok(()), cx)
-                })
-                .ok();
-            })
-            .detach();
-        }
-    }
-
-    fn finish_whiteboard_save(
-        &mut self,
-        tab_id: &str,
-        path: PathBuf,
-        saved_json: String,
-        result: std::io::Result<()>,
-        cx: &mut Context<Self>,
-    ) {
-        if let Err(error) = result {
-            self.notify_document_save_failed(tab_id, &path, &error, cx);
-            return;
-        }
-        let Some(owner) = self.pane_id_for_tab(tab_id) else {
-            return;
-        };
-        self.with_pane(owner, |editor| {
-            let Some(index) = editor.tabs.iter().position(|tab| tab.id == tab_id) else {
-                return;
-            };
-            if editor.tabs[index].path.is_none() {
-                editor.tabs[index].path = Some(path.clone());
-                editor.tabs[index].title = EditorView::title_for_path(&path);
-            }
-            if editor.tabs[index].path.as_ref() != Some(&path) {
-                return;
-            }
-            let unchanged = editor.tabs[index]
-                .whiteboard
-                .as_ref()
-                .is_some_and(|state| state.document.to_json_string() == saved_json);
-            editor.tabs[index].history.saved_text = Some(saved_json.clone());
-            if unchanged {
-                editor.tabs[index].is_dirty = false;
-                editor.clear_temp_file_for_tab(tab_id);
-            } else {
-                editor.tabs[index].recovery.source_content_hash =
-                    Some(file_ops::content_hash(saved_json.as_bytes()));
-            }
-            if editor.active_tab_id.as_deref() == Some(tab_id) {
-                editor.current_file_path = Some(path);
-            }
-        });
-        session_store::persist_session(self);
-        cx.notify();
-    }
-
     pub(crate) fn on_new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) {
         self.create_scratch_tab(cx);
     }
@@ -3729,80 +3487,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         self.create_scratch_tab(cx);
-    }
-
-    pub(crate) fn on_new_whiteboard(
-        &mut self,
-        _: &NewWhiteboard,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Keep references alive while creation is temporarily disabled.
-        let _ = self.t(crate::i18n::TextKey::NewWhiteboard);
-        if false {
-            let parent = self.sidebar_root.clone();
-            self.create_new_whiteboard(parent, cx);
-        }
-    }
-
-    fn set_whiteboard_tool_from_action(&mut self, tool: WhiteboardTool, cx: &mut Context<Self>) {
-        if self.active_tab_is_whiteboard() && self.whiteboard_text_editor.is_none() {
-            self.whiteboard_set_tool(tool, cx);
-        }
-    }
-
-    pub(crate) fn on_whiteboard_select_tool(
-        &mut self,
-        _: &WhiteboardSelectTool,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.set_whiteboard_tool_from_action(WhiteboardTool::Select, cx);
-    }
-
-    pub(crate) fn on_whiteboard_rectangle_tool(
-        &mut self,
-        _: &WhiteboardRectangleTool,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.set_whiteboard_tool_from_action(WhiteboardTool::Rectangle, cx);
-    }
-
-    pub(crate) fn on_whiteboard_ellipse_tool(
-        &mut self,
-        _: &WhiteboardEllipseTool,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.set_whiteboard_tool_from_action(WhiteboardTool::Ellipse, cx);
-    }
-
-    pub(crate) fn on_whiteboard_arrow_tool(
-        &mut self,
-        _: &WhiteboardArrowTool,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.set_whiteboard_tool_from_action(WhiteboardTool::Arrow, cx);
-    }
-
-    pub(crate) fn on_whiteboard_line_tool(
-        &mut self,
-        _: &WhiteboardLineTool,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.set_whiteboard_tool_from_action(WhiteboardTool::Line, cx);
-    }
-
-    pub(crate) fn on_whiteboard_text_tool(
-        &mut self,
-        _: &WhiteboardTextTool,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.set_whiteboard_tool_from_action(WhiteboardTool::Text, cx);
     }
 
     fn sidebar_action_parent(&self) -> std::path::PathBuf {

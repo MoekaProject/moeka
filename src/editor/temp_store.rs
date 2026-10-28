@@ -70,23 +70,85 @@ impl EditorView {
         } else {
             self.tabs[index].snapshot.clone()
         };
-        self.tabs[index].snapshot = snapshot.clone();
-        self.tabs[index].recovery.text = Some(
-            self.tabs[index]
-                .whiteboard
-                .as_ref()
-                .map(|state| state.document.to_json_string())
-                .unwrap_or(snapshot.text),
-        );
-        self.tabs[index].recovery.source_path = self.tabs[index].path.clone();
-        self.tabs[index].recovery.source_content_hash = self.tabs[index]
+        update_tab_recovery(&mut self.tabs[index], snapshot);
+        session_store::persist_session(self);
+    }
+}
+
+fn update_tab_recovery(tab: &mut OpenTab, snapshot: EditorSnapshot) {
+    tab.recovery.text = Some(snapshot.text.clone());
+    tab.snapshot = snapshot;
+    // A detached recovery draft still needs its original source identity.
+    if tab.path.is_some() {
+        let same_source = tab.recovery.source_path == tab.path;
+        tab.recovery.source_path = tab.path.clone();
+        tab.recovery.source_content_hash = tab
             .history
             .saved_text
             .as_ref()
-            .map(|text| file_ops::content_hash(text.as_bytes()));
-        session_store::persist_session(self);
+            .map(|text| file_ops::content_hash(text.as_bytes()))
+            .or_else(|| {
+                same_source
+                    .then(|| tab.recovery.source_content_hash.clone())
+                    .flatten()
+            });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detached_recovery_edits_keep_source_identity_and_unverified_baseline() {
+        let mut tab = builtin_welcome_tab(crate::i18n::UiLanguage::English);
+        tab.path = None;
+        tab.recovery.source_path = Some(PathBuf::from("original.moeka"));
+        tab.recovery.source_content_hash = Some("old source hash".into());
+        let mut snapshot = tab.snapshot.clone();
+        snapshot.text = "edited recovery".into();
+        update_tab_recovery(&mut tab, snapshot);
+        assert_eq!(tab.recovery.text.as_deref(), Some("edited recovery"));
+        assert_eq!(
+            tab.recovery.source_path,
+            Some(PathBuf::from("original.moeka"))
+        );
+        assert_eq!(
+            tab.recovery.source_content_hash.as_deref(),
+            Some("old source hash")
+        );
+        assert!(tab.path.is_none());
     }
 
+    #[test]
+    fn bound_recovery_keeps_verified_hash_until_a_new_saved_baseline_exists() {
+        let mut tab = builtin_welcome_tab(crate::i18n::UiLanguage::English);
+        tab.path = Some(PathBuf::from("original.moeka"));
+        tab.recovery.source_path = tab.path.clone();
+        tab.recovery.source_content_hash = Some("verified source hash".into());
+        tab.history.saved_text = None;
+        let snapshot = tab.snapshot.clone();
+        update_tab_recovery(&mut tab, snapshot);
+        assert_eq!(
+            tab.recovery.source_content_hash.as_deref(),
+            Some("verified source hash")
+        );
+        tab.history.saved_text = Some("new saved text".into());
+        let snapshot = tab.snapshot.clone();
+        update_tab_recovery(&mut tab, snapshot);
+        assert_eq!(
+            tab.recovery.source_content_hash,
+            Some(file_ops::content_hash(b"new saved text"))
+        );
+        tab.path = Some(PathBuf::from("another.moeka"));
+        tab.history.saved_text = None;
+        let snapshot = tab.snapshot.clone();
+        update_tab_recovery(&mut tab, snapshot);
+        assert!(tab.recovery.source_content_hash.is_none());
+    }
+}
+
+impl EditorView {
     pub(crate) fn clear_temp_file_for_tab(&mut self, tab_id: &str) {
         self.cancel_auto_save_for_tab(tab_id);
         self.clear_temp_recovery_for_tab(tab_id);

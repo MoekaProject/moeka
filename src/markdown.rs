@@ -293,7 +293,7 @@ fn custom_inline_excluded_ranges(decoration: &LineDecoration) -> Vec<Range<usize
     merge_byte_ranges(excluded)
 }
 
-fn unordered_list_prefix_len(content: &str) -> usize {
+pub(crate) fn unordered_list_prefix_len(content: &str) -> usize {
     let bytes = content.as_bytes();
     let Some((&marker, rest)) = bytes.split_first() else {
         return 0;
@@ -315,7 +315,10 @@ fn unordered_list_prefix_len(content: &str) -> usize {
 
 fn empty_unordered_list_item_prefix_len(content: &str) -> Option<(usize, usize)> {
     let (marker_start, prefix_len) = physical_unordered_list_prefix(content)?;
-    (content[marker_start + prefix_len..].is_empty()).then_some((marker_start, prefix_len))
+    (content[marker_start + prefix_len..]
+        .trim_end_matches('\r')
+        .is_empty())
+    .then_some((marker_start, prefix_len))
 }
 
 fn physical_unordered_list_prefix(content: &str) -> Option<(usize, usize)> {
@@ -605,8 +608,6 @@ pub struct LineDecorationPayload {
     pub inline_spans: Vec<InlineSpan>,
     pub inline_math_spans: Vec<Range<usize>>,
     pub protected_ranges: Vec<Range<usize>>,
-    pub diff_added_spans: Vec<Range<usize>>,
-    pub diff_removed_spans: Vec<Range<usize>>,
     pub syntax_ranges: Vec<SyntaxRange>,
     pub display_replacements: Vec<DisplayReplacement>,
     pub(crate) table_cell_fragments: Vec<TableCellFragment>,
@@ -632,8 +633,6 @@ impl LineDecorationPayload {
             && self.inline_spans.is_empty()
             && self.inline_math_spans.is_empty()
             && self.protected_ranges.is_empty()
-            && self.diff_added_spans.is_empty()
-            && self.diff_removed_spans.is_empty()
             && self.syntax_ranges.is_empty()
             && self.display_replacements.is_empty()
             && self.table_cell_fragments.is_empty()
@@ -1535,8 +1534,6 @@ fn parse_decorations_with_options(
             Event::TaskListMarker(checked) => {
                 let line = offset_to_line(source_range.start);
                 if line < decorations.len() {
-                    decorations[line].block_type = BlockType::TaskList(checked);
-                    // Add checkbox marker ([ ] or [x]) to syntax ranges
                     let line_start = line_starts[line];
                     let line_end_offset = line_starts.get(line + 1).copied().unwrap_or(text.len());
                     let line_content = &text[line_start..line_end_offset];
@@ -1544,6 +1541,15 @@ fn parse_decorations_with_options(
                     let after_quote = &line_content[quote_prefix_len..];
                     let leading_ws = quote_prefix_len
                         + (after_quote.len() - after_quote.trim_start_matches([' ', '\t']).len());
+                    let marker = &line_content[leading_ws..];
+                    let marker_len =
+                        unordered_list_prefix_len(marker).max(ordered_list_prefix_len(marker));
+                    if marker_len == 0 || line_start + leading_ws + marker_len != source_range.start
+                    {
+                        continue;
+                    }
+                    decorations[line].block_type = BlockType::TaskList(checked);
+                    // Add checkbox marker ([ ] or [x]) to syntax ranges.
                     let mut col_end = source_range.end.saturating_sub(line_start);
                     // Include trailing space after ] if present
                     if col_end < line_content.len() && line_content.as_bytes()[col_end] == b' ' {
@@ -1663,6 +1669,10 @@ fn parse_decorations_with_options(
         let trimmed = &line_len[leading_ws..];
         let prefix_len = ordered_list_prefix_len(trimmed);
         if prefix_len > 0
+            && matches!(
+                decoration.block_type,
+                BlockType::Normal | BlockType::OrderedList | BlockType::UnorderedList
+            )
             && !lazy_paragraph_continuation[line]
             && (leading_ws <= 3
                 || matches!(
@@ -1730,16 +1740,26 @@ fn parse_decorations_with_options(
             continue;
         };
 
-        decorations[line].block_type = BlockType::UnorderedList;
-        if !decorations[line]
-            .syntax_ranges
-            .iter()
-            .any(|range| range.range == (first_marker_start..first_marker_start + first_prefix_len))
+        let explicit_heading = decorations[line].syntax_ranges.iter().any(|range| {
+            content
+                .get(range.range.start..)
+                .and_then(|source| source.strip_prefix("##"))
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t', '\r']))
+        });
+        if matches!(
+            decorations[line].block_type,
+            BlockType::Normal | BlockType::UnorderedList
+        ) || (decorations[line].block_type == BlockType::Heading(2) && !explicit_heading)
         {
-            decorations[line].syntax_ranges.push(SyntaxRange {
-                range: first_marker_start..first_marker_start + first_prefix_len,
-                trigger_range: first_marker_start..first_marker_start + first_prefix_len,
-            });
+            decorations[line].block_type = BlockType::UnorderedList;
+            if !decorations[line].syntax_ranges.iter().any(|range| {
+                range.range == (first_marker_start..first_marker_start + first_prefix_len)
+            }) {
+                decorations[line].syntax_ranges.push(SyntaxRange {
+                    range: first_marker_start..first_marker_start + first_prefix_len,
+                    trigger_range: first_marker_start..first_marker_start + first_prefix_len,
+                });
+            }
         }
         decorations[next_line].block_type = BlockType::UnorderedList;
         decorations[next_line].syntax_ranges.clear();
@@ -2150,14 +2170,9 @@ fn detect_front_matter(decorations: &mut [LineDecoration], text: &str, line_star
     for (row_index, line) in (table_start..table_end).enumerate() {
         let content = get_line_content(text, line_starts, line, line_count);
         let (cells, cell_ranges, is_separator) = &parsed_rows[row_index];
-        // Markdown has already parsed these rows. YAML owns their presentation,
-        // but diff annotations remain independent of the syntax being displayed.
+        // Markdown has already parsed these rows; YAML owns their presentation.
         if let Some(payload) = decorations[line].payload_mut() {
-            *payload = LineDecorationPayload {
-                diff_added_spans: std::mem::take(&mut payload.diff_added_spans),
-                diff_removed_spans: std::mem::take(&mut payload.diff_removed_spans),
-                ..LineDecorationPayload::default()
-            };
+            *payload = LineDecorationPayload::default();
         }
         decorations[line].block_type = BlockType::Table;
         decorations[line].front_matter = if *is_separator {
@@ -5230,37 +5245,6 @@ mod tests {
     }
 
     #[test]
-    fn front_matter_conversion_preserves_diff_metadata_only() {
-        let text = "---\nimage: '![literal](image.png)'\n---\n\nBody\n";
-        let mut decorations = super::parse_decorations_fragment(text);
-        assert_eq!(decorations[1].image_path.as_deref(), Some("image.png"));
-        for decoration in &mut decorations[..3] {
-            decoration.diff_added_spans = vec![0..1];
-            decoration.diff_removed_spans = vec![1..2];
-        }
-        let line_starts = std::iter::once(0)
-            .chain(text.match_indices('\n').map(|(offset, _)| offset + 1))
-            .collect::<Vec<_>>();
-        super::detect_front_matter(&mut decorations, text, &line_starts);
-        for (source, decoration) in text.lines().zip(&decorations).take(3) {
-            let expected = super::LineDecorationPayload {
-                table_info: decoration.table_info.clone(),
-                front_matter: decoration.front_matter.clone(),
-                syntax_ranges: vec![super::SyntaxRange {
-                    range: 0..source.len(),
-                    trigger_range: 0..source.len(),
-                }],
-                protected_ranges: vec![0..source.len()],
-                diff_added_spans: vec![0..1],
-                diff_removed_spans: vec![1..2],
-                ..super::LineDecorationPayload::default()
-            };
-            assert_eq!(decoration.block_type, BlockType::Table);
-            assert_eq!(&**decoration, &expected);
-        }
-    }
-
-    #[test]
     fn multiline_raw_html_blocks_are_opaque() {
         let text = "<pre>\n==literal==\n++literal++ :rocket:\n</pre>\n";
         let decorations = parse_decorations(text);
@@ -5752,6 +5736,199 @@ mod tests {
     }
 
     #[test]
+    fn task_items_keep_their_markers_when_followed_by_empty_list_items() {
+        for checked in [false, true] {
+            for marker in ["-", "+", "*"] {
+                for quote in ["", "> "] {
+                    for indent in ["", "  "] {
+                        let checkbox = if checked { "[x]" } else { "[ ]" };
+                        let text = format!(
+                            "{quote}{indent}{marker} first\n{quote}{indent}{marker} {checkbox} **task**\n{quote}{indent}{marker} "
+                        );
+                        let decorations = parse_decorations(&text);
+                        assert_eq!(
+                            decorations[1].block_type,
+                            BlockType::TaskList(checked),
+                            "{text:?}"
+                        );
+                        let start = quote.len() + indent.len();
+                        assert!(
+                            decorations[1].syntax_ranges.iter().any(|range| {
+                                range.range
+                                    == (start..start + marker.len() + 1 + checkbox.len() + 1)
+                            }),
+                            "{text:?}: {:?}",
+                            decorations[1].syntax_ranges
+                        );
+                        assert!(
+                            decorations[1]
+                                .inline_spans
+                                .iter()
+                                .any(|span| span.kind == InlineKind::Bold),
+                            "{text:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordered_task_items_retain_checkbox_semantics() {
+        for text in [
+            "1. [x] done\n2. next\n",
+            "1. [ ] todo\n2. \n",
+            "> 1. [x] done\n> 2. \n",
+        ] {
+            let expected = BlockType::TaskList(text.contains("[x]"));
+            let decorations = parse_decorations(text);
+            assert_eq!(decorations[0].block_type, expected, "{text:?}");
+            let checkbox_end = text.find(']').unwrap() + 2;
+            assert!(
+                decorations[0]
+                    .syntax_ranges
+                    .iter()
+                    .any(|range| range.range.end == checkbox_end),
+                "{text:?}: {:?}",
+                decorations[0].syntax_ranges
+            );
+        }
+    }
+
+    #[test]
+    fn task_recovery_preserves_nested_quotes_and_crlf() {
+        for (text, index, checked, following) in [
+            (
+                "- parent\n  - [X] child\n    - ",
+                1,
+                true,
+                BlockType::UnorderedList,
+            ),
+            (
+                "> - parent\n>   - [ ] child\n>     + ",
+                1,
+                false,
+                BlockType::UnorderedList,
+            ),
+            (
+                "- first\r\n- [x] **done**\r\n- \r\n",
+                1,
+                true,
+                BlockType::UnorderedList,
+            ),
+            ("1. [ ] task\r\n2. \r\n", 0, false, BlockType::OrderedList),
+        ] {
+            let decorations = parse_decorations(text);
+            assert_eq!(
+                decorations[index].block_type,
+                BlockType::TaskList(checked),
+                "{text:?}"
+            );
+            assert_eq!(decorations[index + 1].block_type, following, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn empty_list_recovery_does_not_change_other_block_types() {
+        for (before, suffix, checked_lines) in [
+            ("# Heading", "\n- ", &[0][..]),
+            ("A heading\n---", "\n- ", &[0][..]),
+            ("> quoted", "\n- ", &[0][..]),
+            ("```rust\n- [x] code\n```", "\n- ", &[0, 1, 2][..]),
+            ("    - [x] code", "\n    - ", &[0][..]),
+            (
+                "| A | B |\n| --- | --- |\n| **bold** | text |",
+                "\n- ",
+                &[0, 1, 2][..],
+            ),
+            ("\\- [x] literal", "\n- ", &[0][..]),
+        ] {
+            let original = parse_decorations(before);
+            let extended = parse_decorations(&format!("{before}{suffix}"));
+            for &line in checked_lines {
+                assert_eq!(
+                    original[line].block_type, extended[line].block_type,
+                    "{before:?} + {suffix:?}, line {line}"
+                );
+                assert_eq!(
+                    original[line].inline_spans, extended[line].inline_spans,
+                    "{before:?} + {suffix:?}, line {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn adding_empty_list_item_preserves_previous_line_inline_syntax() {
+        for first in [
+            "- **bold**",
+            "- *italic*",
+            "- ~~strike~~",
+            "- `code`",
+            "- ==highlight==",
+            "- [[wiki]]",
+            "- [link](https://example.com)",
+            "- $x$",
+            "- [x] **done**",
+            "- [ ] [link](https://example.com)",
+            "- # heading",
+            "- ## heading",
+            "- 1. ## heading",
+            "- ---",
+        ] {
+            let before = parse_decorations(first);
+            let after = parse_decorations(&format!("{first}\n- "));
+            assert_eq!(before[0].block_type, after[0].block_type, "{first}");
+            assert_eq!(before[0].syntax_ranges, after[0].syntax_ranges, "{first}");
+            assert_eq!(before[0].inline_spans, after[0].inline_spans, "{first}");
+            assert_eq!(
+                before[0].highlight_spans, after[0].highlight_spans,
+                "{first}"
+            );
+            assert_eq!(before[0].wiki_links, after[0].wiki_links, "{first}");
+            assert_eq!(
+                before[0].inline_math_spans, after[0].inline_math_spans,
+                "{first}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordered_list_recovery_does_not_override_nested_headings_or_rules() {
+        for (text, expected) in [
+            ("1. # heading", BlockType::Heading(1)),
+            ("1. ---", BlockType::HorizontalRule),
+        ] {
+            let decorations = parse_decorations(text);
+            assert_eq!(decorations[0].block_type, expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn adjacent_ordered_and_unordered_items_preserve_nested_block_syntax() {
+        for first in [
+            "1. # heading",
+            "1. ## heading",
+            "1. ---",
+            "1. [x] **done**",
+            "1. [ ] [[notes]]",
+        ] {
+            let before = parse_decorations(first);
+            for following in ["2. ", "- ", "* "] {
+                let after = parse_decorations(&format!("{first}\n{following}"));
+                assert_eq!(
+                    before[0].block_type, after[0].block_type,
+                    "{first:?} -> {following:?}"
+                );
+                assert_eq!(
+                    before[0].inline_spans, after[0].inline_spans,
+                    "{first:?} -> {following:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ordinary_setext_heading_still_parses() {
         let decorations = parse_decorations("Title\n---\n");
 
@@ -6217,6 +6394,18 @@ mod tests {
                 vec![leading_ws..leading_ws + 2],
                 "{source}"
             );
+        }
+    }
+
+    #[test]
+    fn nested_task_on_the_same_line_keeps_the_outer_list_marker() {
+        for (text, expected) in [
+            ("- 1. [x] nested\n- ", BlockType::UnorderedList),
+            ("1. - [ ] nested\n2. ", BlockType::OrderedList),
+        ] {
+            let decorations = parse_decorations(text);
+            assert_eq!(decorations[0].block_type, expected, "{text:?}");
+            assert!(!matches!(decorations[0].block_type, BlockType::TaskList(_)));
         }
     }
 

@@ -33,4 +33,4 @@ digests. Only `publish-homebrew` commits and pushes the public tap. The helper
 preserves the existing cask's other settings, including `livecheck`; the local
 `moeka.rb` is a reference snapshot, not a template that overwrites the tap.
 
-See [release safety and retries](../../docs/releasing.md#homebrew-distribution).
+See [release safety and retries](../../AGENTS.md#homebrew).

@@ -71,7 +71,7 @@ LINUX_BUNDLED_LIBS := \
 	libxkbcommon-x11.so.0
 
 # Mac App Store channel. Universal, sandboxed, and built with `--features mas`,
-# which drops the terminal, git and self-update capabilities.
+# which drops the terminal and self-update capabilities.
 MAS_TARGETS := aarch64-apple-darwin x86_64-apple-darwin
 MAS_BUILD_DIR := target/macos/mas
 MAS_APP_DIR := $(MAS_BUILD_DIR)/$(APP_DISPLAY_NAME).app
@@ -127,7 +127,7 @@ windows-one:
 	@mkdir -p "$(DIST_DIR)"
 	@chmod +x $(XWIN_SHIMS)/*
 	PATH="$(CURDIR)/$(XWIN_SHIMS):$$PATH" \
-		CARGO_INCREMENTAL=0 cargo xwin build --release --target "$(WINDOWS_TARGET)"
+		CARGO_INCREMENTAL=0 cargo xwin build --release --locked --target "$(WINDOWS_TARGET)"
 	@set -euo pipefail; \
 	zip_path="$(CURDIR)/$(DIST_DIR)/$(APP_DISPLAY_NAME)-windows-$(WINDOWS_SUFFIX).zip"; \
 	stage="$$(mktemp -d)"; \
@@ -173,7 +173,7 @@ linux-one:
 	@set -euo pipefail; \
 	case "$(HOST_TARGET)" in \
 		"$(LINUX_TARGET)") \
-			CARGO_INCREMENTAL=0 cargo build --release --target "$(LINUX_TARGET)"; \
+			CARGO_INCREMENTAL=0 cargo build --release --locked --target "$(LINUX_TARGET)"; \
 			library_dir="$$(dirname "$$(ldconfig -p | awk '/libxkbcommon-x11\.so\.0 / { print $$NF; exit }')")"; \
 			;; \
 		*-apple-darwin) \
@@ -184,7 +184,7 @@ linux-one:
 			python3 "$(LINUX_SYSROOT_SCRIPT)" "$(LINUX_SUFFIX)" "$$sysroot"; \
 			library_dir="$$sysroot/usr/lib/$(LINUX_TRIPLET)"; \
 			RUSTFLAGS="$${RUSTFLAGS:+$$RUSTFLAGS }-L native=$$library_dir" \
-				CARGO_INCREMENTAL=0 cargo zigbuild --release \
+				CARGO_INCREMENTAL=0 cargo zigbuild --release --locked \
 				--target "$(LINUX_TARGET).$(LINUX_GLIBC_VERSION)"; \
 			;; \
 		*) \
@@ -287,11 +287,11 @@ check-targets:
 	for target in $(WINDOWS_TARGETS); do \
 		echo "==> checking $$target"; \
 		PATH="$(CURDIR)/$(XWIN_SHIMS):$$PATH" CARGO_INCREMENTAL=0 \
-			cargo xwin check --release --target "$$target"; \
+			cargo xwin check --release --locked --target "$$target"; \
 	done; \
 	for target in $(LINUX_TARGETS); do \
 		echo "==> checking $$target"; \
-		CARGO_INCREMENTAL=0 cargo-zigbuild check --release \
+		CARGO_INCREMENTAL=0 cargo-zigbuild check --release --locked \
 			--target "$$target.$(LINUX_GLIBC_VERSION)"; \
 	done; \
 	echo "All cross targets compile."
@@ -409,14 +409,14 @@ $(APP_DIR): build-release $(INFO_PLIST_TEMPLATE) $(ICON_FILE)
 
 build-release:
 	@if [[ "$(TARGET)" != "$(HOST_TARGET)" ]]; then rustup target add "$(TARGET)"; fi
-	@CARGO_INCREMENTAL=0 cargo build --release $(CARGO_TARGET_ARG)
+	@CARGO_INCREMENTAL=0 cargo build --release --locked $(CARGO_TARGET_ARG)
 
 # Unsigned universal App Store bundle. Signing is a separate step so the guard
 # below fails the build before any certificate is involved.
 mas-app: $(ICON_FILE) $(INFO_PLIST_TEMPLATE) $(MAS_ENTITLEMENTS)
 	@rustup target add $(MAS_TARGETS)
 	@for target in $(MAS_TARGETS); do \
-		CARGO_INCREMENTAL=0 cargo build --release --features mas --target "$$target" || exit 1; \
+		CARGO_INCREMENTAL=0 cargo build --release --locked --features mas --target "$$target" || exit 1; \
 	done
 	@set -euo pipefail; \
 	for target in $(MAS_TARGETS); do \

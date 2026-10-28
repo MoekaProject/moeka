@@ -525,7 +525,6 @@ impl EditorView {
                                 }
                                 if editor.current_file_path.as_ref() != Some(&path)
                                     || !editor.active_tab_supports_text_buffer()
-                                    || editor.active_tab_is_diff()
                                 {
                                     return editor.active_tab_id == waiting_tab_id;
                                 }

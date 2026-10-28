@@ -321,57 +321,6 @@ impl EditorView {
         self.begin_sidebar_rename(path, true, window, cx);
     }
 
-    /// Create a new empty `.moeka` whiteboard in `parent`, then open it. Falls
-    /// back to the current directory when no workspace folder is set.
-    pub(crate) fn create_new_whiteboard(&mut self, parent: PathBuf, cx: &mut Context<Self>) {
-        let json = WhiteboardDocument::default().to_json_string();
-        cx.spawn(async move |this, cx| {
-            let error_path = if parent.as_os_str().is_empty() {
-                PathBuf::from(".")
-            } else {
-                parent.clone()
-            };
-            let result = fs_task::run("create whiteboard", error_path.clone(), move || {
-                let parent = if parent.as_os_str().is_empty() {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                } else {
-                    parent
-                };
-                let mut name = "Whiteboard.moeka".to_string();
-                let mut index = 1;
-                while !Self::sidebar_destination_missing(&parent.join(&name))? {
-                    index += 1;
-                    name = format!("Whiteboard {index}.moeka");
-                }
-                let path = parent.join(name);
-                file_ops::atomic_write(&path, json.as_bytes()).map(|()| path)
-            })
-            .await;
-            this.update(cx, |editor, cx| {
-                let path = match result {
-                    Ok(path) => path,
-                    Err(error) => {
-                        let message = format!(
-                            "{} ({}): {error}",
-                            editor.t(crate::i18n::TextKey::FileOperationFailed),
-                            error_path.display()
-                        );
-                        editor.notify_error(message, cx);
-                        return;
-                    }
-                };
-                if let Some(parent) = path.parent() {
-                    editor.expanded_dirs.insert(parent.to_path_buf());
-                }
-                editor.invalidate_sidebar_items_cache();
-                editor.open_path_in_permanent_tab(path, true, cx);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     pub(crate) fn start_create_file(
         &mut self,
         parent: PathBuf,
@@ -1156,9 +1105,6 @@ impl EditorView {
             .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         self.file_list_scroll_handle
             .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
-        self.sidebar_git_statuses.clear();
-        self.sidebar_git_statuses_task = None;
-        self.invalidate_sidebar_git_statuses();
         self.context_menu = None;
         self.start_watching(cx);
         self.sync_sidebar_width_animation(cx);
@@ -1183,10 +1129,6 @@ impl EditorView {
             self.sidebar_selection_anchor = None;
             self.sidebar_error = None;
             self.invalidate_sidebar_items_cache();
-            self.sidebar_git_statuses.clear();
-            self.sidebar_git_statuses_dirty = false;
-            self.sidebar_git_statuses_scanned_at = None;
-            self.sidebar_git_statuses_task = None;
             self.context_menu = None;
             self.start_watching(cx);
             // Collapse the panel to width 0; without this the sidebar keeps

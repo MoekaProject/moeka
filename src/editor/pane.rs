@@ -381,12 +381,6 @@ pane_state! {
     (generated_preview_rerender_pending, bool, false),
     (last_viewport_height, f32, 0.0),
     (last_viewport_width, f32, 800.0),
-    // ── Whiteboard canvas interaction ──
-    (whiteboard_canvas_bounds, Option<Bounds<Pixels>>, None),
-    (whiteboard_drag, Option<WhiteboardDrag>, None),
-    (whiteboard_pointer, Option<Point<Pixels>>, None),
-    (whiteboard_bind_targets, Vec<String>, Vec::new()),
-    (whiteboard_text_editor, Option<whiteboard_input::WhiteboardTextEditor>, None),
     // ── IME ──
     (marked_range, Option<Range<usize>>, None),
     (extra_marked_ranges, Vec<Range<usize>>, Vec::new()),
@@ -557,21 +551,6 @@ pane_state! {
     (wiki_link_search_results, Vec<QuickOpenResult>, Vec::new()),
     (wiki_link_recent_task, Option<Task<()>>, None),
     (wiki_link_search_task, Option<Task<()>>, None),
-    // ── Inline diff ──
-    (inline_diff_dirty, bool, false),
-    (inline_diff_base_dirty, bool, false),
-    (inline_diff_epoch, u64, 0),
-    (inline_diff_gutter_areas, Vec<(gpui::Bounds<gpui::Pixels>, usize)>, Vec::new()),
-    (hovering_inline_diff_gutter_hunk, Option<usize>, None),
-    (inline_diff_hunk_areas, Vec<(gpui::Bounds<gpui::Pixels>, usize)>, Vec::new()),
-    (inline_diff_revert_areas, Vec<(gpui::Bounds<gpui::Pixels>, usize)>, Vec::new()),
-    (hovering_inline_diff_hunk, Option<usize>, None),
-    (hovering_inline_diff_revert_hunk, Option<usize>, None),
-    (inline_diff_phantom_height_above, HashMap<usize, f32>, HashMap::new()),
-    (inline_diff_phantom_height_below, HashMap<usize, f32>, HashMap::new()),
-    (phantom_row_hits, Vec<PhantomRowHit>, Vec::new()),
-    (phantom_selection, Option<PhantomSelection>, None),
-    (phantom_selecting, bool, false),
     // ── In-buffer search ──
     (search_visible, bool, false),
     (search_query, String, String::new()),
@@ -774,7 +753,6 @@ impl EditorView {
         self.invalidate_active_file_panel_caches();
         self.outline_headings_cache_dirty.set(true);
         self.invalidate_outline_layout_cache();
-        self.mark_inline_diff_dirty(false);
         if let Some(path) = self.current_file_path.clone() {
             self.sync_path_in_sidebar_state(path, cx);
         }
@@ -979,12 +957,12 @@ impl EditorView {
         let new_id = self.next_pane_id;
         self.next_pane_id += 1;
         let mut pane = Pane::new(new_id);
-        pane.state.editor_scrollbar_opacity = self.styles.editor.editor_scrollbar_idle_opacity;
+        pane.state.editor_scrollbar_opacity = self.styles.self_drawn.scrollbar.idle_opacity;
         pane.state.editor_scrollbar_opacity_target = pane.state.editor_scrollbar_opacity;
-        pane.state.editor_scrollbar_width = self.styles.editor.editor_scrollbar_width_px;
+        pane.state.editor_scrollbar_width = self.styles.self_drawn.scrollbar.width_px;
         pane.state.editor_scrollbar_width_target = pane.state.editor_scrollbar_width;
         pane.state.code_block_horizontal_scrollbar_thickness =
-            self.styles.editor.editor_scrollbar_width_px;
+            self.styles.self_drawn.scrollbar.width_px;
         pane.state.code_block_horizontal_scrollbar_thickness_target =
             pane.state.code_block_horizontal_scrollbar_thickness;
         pane.state.tabs.push(taken.tab);

@@ -236,10 +236,8 @@ pub enum ThemeColorField {
     ListMarker,
     CheckboxChecked,
     GutterHeading,
-    GitStatusAdded,
-    GitStatusModified,
-    DiffAddedBg,
-    DiffRemovedBg,
+    StatusSuccess,
+    StatusWarning,
 }
 
 impl ThemeColorField {
@@ -269,7 +267,7 @@ impl ThemeColorField {
         Self::WindowBorder,
     ];
 
-    pub const EDITOR_FIELDS: [Self; 22] = [
+    pub const EDITOR_FIELDS: [Self; 20] = [
         Self::BgCode,
         Self::BgCodeInline,
         Self::BorderCodeBlock,
@@ -288,10 +286,8 @@ impl ThemeColorField {
         Self::ListMarker,
         Self::CheckboxChecked,
         Self::GutterHeading,
-        Self::GitStatusAdded,
-        Self::GitStatusModified,
-        Self::DiffAddedBg,
-        Self::DiffRemovedBg,
+        Self::StatusSuccess,
+        Self::StatusWarning,
     ];
 
     pub fn label(self) -> &'static str {
@@ -337,10 +333,8 @@ impl ThemeColorField {
             Self::ListMarker => "list_marker",
             Self::CheckboxChecked => "checkbox_checked",
             Self::GutterHeading => "gutter_heading",
-            Self::GitStatusAdded => "git_status_added",
-            Self::GitStatusModified => "git_status_modified",
-            Self::DiffAddedBg => "diff_added_bg",
-            Self::DiffRemovedBg => "diff_removed_bg",
+            Self::StatusSuccess => "status_success",
+            Self::StatusWarning => "status_warning",
         }
     }
 }
@@ -995,11 +989,11 @@ struct CuratedThemeSpec {
 const PORCELAIN_MIST: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#F5FAFB",
-    surface: "#E4EEF0",
+    surface: "#E8F1F2",
     elevated: "#FBFEFE",
-    hover: "#D7E5E8",
-    selected: "#CCDDE4",
-    border: "#A5BFC5",
+    hover: "#E0EBEE",
+    selected: "#D8E5EB",
+    border: "#C6D8DB",
     text: "#253B42",
     muted: "#4C6169",
     bright: "#122B34",
@@ -1008,19 +1002,19 @@ const PORCELAIN_MIST: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#BE3746",
     warning: "#935C01",
     success: "#27764E",
-    code_background: "#E9F2F4",
-    inline_background: "#DCE9ED",
+    code_background: "#EDF4F6",
+    inline_background: "#E5EFF2",
     code_palette: CodeSyntaxPalette::GITHUB_LIGHT,
 };
 
 const LINEN_PAPER: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#F7EBD9",
-    surface: "#EAD7B9",
+    surface: "#F1E1CA",
     elevated: "#FFF7E9",
-    hover: "#E0CAA6",
-    selected: "#DBD7B8",
-    border: "#B19A73",
+    hover: "#ECDBC1",
+    selected: "#DDD8BA",
+    border: "#D8C7AC",
     text: "#49382A",
     muted: "#63523D",
     bright: "#2D2016",
@@ -1029,19 +1023,19 @@ const LINEN_PAPER: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#A9332C",
     warning: "#7E5506",
     success: "#43662C",
-    code_background: "#F0E1CB",
-    inline_background: "#E5D0AE",
+    code_background: "#F2E5D0",
+    inline_background: "#EFDFC7",
     code_palette: CodeSyntaxPalette::GRUVBOX_LIGHT,
 };
 
 const STUDIO_DAYLIGHT: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#FFFFFF",
-    surface: "#EDF1F8",
+    surface: "#F3F5FA",
     elevated: "#FFFFFF",
-    hover: "#DEE5F1",
-    selected: "#CEDCF1",
-    border: "#A5B6D4",
+    hover: "#EBEFF7",
+    selected: "#E1E9F7",
+    border: "#D2DAEA",
     text: "#26344B",
     muted: "#4D5D78",
     bright: "#12233D",
@@ -1050,19 +1044,19 @@ const STUDIO_DAYLIGHT: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#C02D3D",
     warning: "#8C5D08",
     success: "#247446",
-    code_background: "#F3F5FB",
-    inline_background: "#E6ECF7",
+    code_background: "#F7F8FC",
+    inline_background: "#F0F3FA",
     code_palette: CodeSyntaxPalette::XCODE_LIGHT,
 };
 
 const ROSE_DAWN: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#FFF0F0",
-    surface: "#F6DCDC",
+    surface: "#FAE5E5",
     elevated: "#FFF9F9",
-    hover: "#EDCDCD",
-    selected: "#EBCED1",
-    border: "#CDA4A5",
+    hover: "#F6DEDE",
+    selected: "#F1D7DA",
+    border: "#E5C9C9",
     text: "#522F35",
     muted: "#794C53",
     bright: "#35191F",
@@ -1071,19 +1065,19 @@ const ROSE_DAWN: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#A53A4E",
     warning: "#855501",
     success: "#306957",
-    code_background: "#F9E4E4",
-    inline_background: "#EFD0D2",
+    code_background: "#FCE9E9",
+    inline_background: "#F8E3E3",
     code_palette: CodeSyntaxPalette::ROSE_PINE_DAWN,
 };
 
 const VANILLA_LATTE: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#FFF4E8",
-    surface: "#F1E0CB",
+    surface: "#F8E9D9",
     elevated: "#FFFAF2",
-    hover: "#E7D2B8",
-    selected: "#E8D2C4",
-    border: "#BCA184",
+    hover: "#F3E4D1",
+    selected: "#EFDCCF",
+    border: "#E1CEBB",
     text: "#513A2A",
     muted: "#6F5540",
     bright: "#332010",
@@ -1092,19 +1086,19 @@ const VANILLA_LATTE: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#C50A34",
     warning: "#8E560A",
     success: "#24721A",
-    code_background: "#F6E6D4",
-    inline_background: "#E9CFAB",
+    code_background: "#FBEDDF",
+    inline_background: "#F8E7D3",
     code_palette: CodeSyntaxPalette::CATPPUCCIN_LATTE,
 };
 
 const SAGE_GARDEN: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#E7F2EA",
-    surface: "#D4E5D8",
+    surface: "#DBE9DE",
     elevated: "#F3FBF5",
-    hover: "#C7DBCD",
-    selected: "#BCD7C5",
-    border: "#93B29D",
+    hover: "#D4E4D9",
+    selected: "#CADFD1",
+    border: "#BCD1C3",
     text: "#2B4433",
     muted: "#445D4A",
     bright: "#15311F",
@@ -1113,19 +1107,19 @@ const SAGE_GARDEN: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#A83E3C",
     warning: "#805B03",
     success: "#486B2E",
-    code_background: "#DDECE1",
-    inline_background: "#C9E0D0",
+    code_background: "#DEEDE2",
+    inline_background: "#D7E8DC",
     code_palette: CodeSyntaxPalette::EVERFOREST_LIGHT,
 };
 
 const NORDIC_SNOW: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#EBF1FC",
-    surface: "#D8E3F4",
+    surface: "#DEE7F7",
     elevated: "#F7FAFF",
-    hover: "#CCD9EE",
-    selected: "#BED1EB",
-    border: "#96ACCD",
+    hover: "#D8E2F3",
+    selected: "#CEDCF1",
+    border: "#C0CEE5",
     text: "#293A57",
     muted: "#425877",
     bright: "#16294A",
@@ -1134,19 +1128,19 @@ const NORDIC_SNOW: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#A93E4C",
     warning: "#815C03",
     success: "#4B6A42",
-    code_background: "#E0E9F8",
-    inline_background: "#CEDDF1",
+    code_background: "#E3EBF9",
+    inline_background: "#DBE6F6",
     code_palette: CodeSyntaxPalette::NORD_LIGHT,
 };
 
 const SOLARIZED_LIGHT_THEME: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#F4EACD",
-    surface: "#E7D9B2",
+    surface: "#EDE0BE",
     elevated: "#FDF6DE",
-    hover: "#DACC9E",
-    selected: "#D4D8AE",
-    border: "#AD9C70",
+    hover: "#E7DBB6",
+    selected: "#D5D8AF",
+    border: "#D4C7A3",
     text: "#3A4C4B",
     muted: "#4C5846",
     bright: "#223B3B",
@@ -1155,19 +1149,19 @@ const SOLARIZED_LIGHT_THEME: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#AC302D",
     warning: "#7A5706",
     success: "#52640A",
-    code_background: "#EBDDB9",
-    inline_background: "#E0CEA1",
+    code_background: "#F0E3C3",
+    inline_background: "#ECDEBB",
     code_palette: CodeSyntaxPalette::SOLARIZED_LIGHT,
 };
 
 const SUNLIT_CANVAS: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#FFF6CB",
-    surface: "#F2E1A5",
+    surface: "#F9EBB8",
     elevated: "#FFFBE5",
-    hover: "#E9D28E",
-    selected: "#E9D8AA",
-    border: "#BBA05F",
+    hover: "#F5E5AF",
+    selected: "#EEDEB1",
+    border: "#E2D09C",
     text: "#51421D",
     muted: "#6B572A",
     bright: "#35280D",
@@ -1176,19 +1170,19 @@ const SUNLIT_CANVAS: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#B3333D",
     warning: "#845A07",
     success: "#436D25",
-    code_background: "#F7E9BA",
-    inline_background: "#E9D393",
+    code_background: "#FBEFC3",
+    inline_background: "#F7E9B7",
     code_palette: CodeSyntaxPalette::AYU_LIGHT,
 };
 
 const PAPER_WHITE: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#FFFFFF",
-    surface: "#F3F4F5",
+    surface: "#F4F5F6",
     elevated: "#FFFFFF",
-    hover: "#E7EAED",
-    selected: "#DAE1E8",
-    border: "#ABB2BA",
+    hover: "#EDEFF2",
+    selected: "#E4E9EF",
+    border: "#D7DADE",
     text: "#303236",
     muted: "#5C6168",
     bright: "#1D2025",
@@ -1197,19 +1191,19 @@ const PAPER_WHITE: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#A84A4B",
     warning: "#826303",
     success: "#397353",
-    code_background: "#F5F6F7",
-    inline_background: "#E8EBEF",
+    code_background: "#F8F8F9",
+    inline_background: "#F1F3F6",
     code_palette: CodeSyntaxPalette::TOKYO_NIGHT_LIGHT,
 };
 
 const PEARL_MORNING: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#F4F0FC",
-    surface: "#E5DDF3",
+    surface: "#ECE5F7",
     elevated: "#FCF9FF",
-    hover: "#D8CDEC",
-    selected: "#D3C8EB",
-    border: "#B3A0CD",
+    hover: "#E7DFF5",
+    selected: "#E1D8F2",
+    border: "#D5C9E6",
     text: "#443553",
     muted: "#614E71",
     bright: "#2D1C3D",
@@ -1218,19 +1212,19 @@ const PEARL_MORNING: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#B03445",
     warning: "#835A01",
     success: "#316D49",
-    code_background: "#EAE1F6",
-    inline_background: "#DBCDEA",
+    code_background: "#F0E9F9",
+    inline_background: "#EBE3F6",
     code_palette: CodeSyntaxPalette::ONE_LIGHT,
 };
 
 const WILLOW_MIST: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#EFF2D6",
-    surface: "#E0E5BD",
+    surface: "#E5E9C6",
     elevated: "#FAFCE8",
-    hover: "#D1D9A5",
-    selected: "#CDD6A3",
-    border: "#A2AF72",
+    hover: "#DEE4BB",
+    selected: "#D7DEB3",
+    border: "#C8D0A4",
     text: "#434B29",
     muted: "#525C33",
     bright: "#2C3415",
@@ -1239,19 +1233,19 @@ const WILLOW_MIST: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#A83F3F",
     warning: "#7E5D03",
     success: "#4D6A33",
-    code_background: "#E7ECCB",
-    inline_background: "#D8DFAF",
+    code_background: "#E8ECCC",
+    inline_background: "#E2E7C0",
     code_palette: CodeSyntaxPalette::WILLOW_LIGHT,
 };
 
 const COASTAL_FOG: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#E5F5F3",
-    surface: "#CCE8E4",
+    surface: "#D5EDEA",
     elevated: "#F3FCFA",
-    hover: "#BDDBD8",
-    selected: "#B1D7D5",
-    border: "#88ADA9",
+    hover: "#D0E7E5",
+    selected: "#C4E2E0",
+    border: "#BAD3D0",
     text: "#23474A",
     muted: "#385D5D",
     bright: "#103438",
@@ -1260,19 +1254,19 @@ const COASTAL_FOG: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#AA3D4B",
     warning: "#835B0A",
     success: "#406B56",
-    code_background: "#D7EEEB",
-    inline_background: "#BFE0DC",
+    code_background: "#DBF0EE",
+    inline_background: "#D3EBE8",
     code_palette: CodeSyntaxPalette::COASTAL_LIGHT,
 };
 
 const LAVENDER_HAZE: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#EEECFB",
-    surface: "#DDD9F3",
+    surface: "#E5E1F7",
     elevated: "#F8F7FF",
-    hover: "#D0C9E9",
-    selected: "#C9C3EC",
-    border: "#A89BCB",
+    hover: "#E0DBF3",
+    selected: "#D9D5F3",
+    border: "#CDC6E5",
     text: "#403159",
     muted: "#5C487A",
     bright: "#271741",
@@ -1281,19 +1275,19 @@ const LAVENDER_HAZE: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#A93347",
     warning: "#805708",
     success: "#406846",
-    code_background: "#E3DEF5",
-    inline_background: "#D3C9EC",
+    code_background: "#E9E5F8",
+    inline_background: "#E4DFF6",
     code_palette: CodeSyntaxPalette::LAVENDER_LIGHT,
 };
 
 const APRICOT_BLOOM: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#FFEEE2",
-    surface: "#F3D9C5",
+    surface: "#F9E3D3",
     elevated: "#FFF7F0",
-    hover: "#E9C8AD",
-    selected: "#EBD1BD",
-    border: "#BE9472",
+    hover: "#F6DDCB",
+    selected: "#EFD7C5",
+    border: "#E4C8B3",
     text: "#583727",
     muted: "#734D37",
     bright: "#381D10",
@@ -1302,19 +1296,19 @@ const APRICOT_BLOOM: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#B12D39",
     warning: "#835607",
     success: "#516723",
-    code_background: "#F7DFCA",
-    inline_background: "#EAC5A7",
+    code_background: "#FCE7D8",
+    inline_background: "#F9E1D0",
     code_palette: CodeSyntaxPalette::APRICOT_LIGHT,
 };
 
 const SILVER_MORNING: CuratedThemeSpec = CuratedThemeSpec {
     dark: false,
     background: "#ECEFF1",
-    surface: "#D9DFE3",
+    surface: "#E1E5E9",
     elevated: "#F7F9FA",
-    hover: "#CBD4DA",
-    selected: "#C4D2DC",
-    border: "#9AAAB5",
+    hover: "#DAE0E5",
+    selected: "#D0DAE2",
+    border: "#C3CCD3",
     text: "#303D45",
     muted: "#475A66",
     bright: "#192C37",
@@ -1323,8 +1317,8 @@ const SILVER_MORNING: CuratedThemeSpec = CuratedThemeSpec {
     danger: "#A83947",
     warning: "#7D5A09",
     success: "#4D673C",
-    code_background: "#E0E7EB",
-    inline_background: "#CCD9E1",
+    code_background: "#E4E9ED",
+    inline_background: "#DDE4E9",
     code_palette: CodeSyntaxPalette::SILVER_LIGHT,
 };
 
@@ -1723,10 +1717,8 @@ pub struct Theme {
     pub list_marker: Hsla,
     pub checkbox_checked: Hsla,
     pub gutter_heading: Hsla,
-    pub git_status_added: Hsla,
-    pub git_status_modified: Hsla,
-    pub diff_added_bg: Hsla,
-    pub diff_removed_bg: Hsla,
+    pub status_success: Hsla,
+    pub status_warning: Hsla,
 
     // ── Code block syntax highlighting ──────────────────────
     /// Token palette for code block / mermaid syntax highlighting.
@@ -1734,7 +1726,253 @@ pub struct Theme {
     pub code_palette: CodeSyntaxPalette,
 }
 
+/// Native application semantic slots. Default values follow the existing
+/// debugger fields; `UiColorOverrides` gives each slot independent ownership
+/// without mutating Markdown/editor colors. Resolve sidebar defaults against
+/// the sidebar theme, never the document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiColor {
+    Background,
+    Foreground,
+    Card,
+    CardForeground,
+    Popover,
+    PopoverForeground,
+    Primary,
+    PrimaryForeground,
+    Secondary,
+    SecondaryForeground,
+    Muted,
+    MutedForeground,
+    Accent,
+    AccentForeground,
+    Destructive,
+    DestructiveForeground,
+    Border,
+    Input,
+    Ring,
+    Sidebar,
+    SidebarForeground,
+    SidebarPrimary,
+    SidebarPrimaryForeground,
+    SidebarAccent,
+    SidebarAccentForeground,
+    SidebarBorder,
+    SidebarRing,
+    Success,
+    Warning,
+    Info,
+    // Reserved color slots only; Moeka has no application chart component.
+    Chart1,
+    Chart2,
+    Chart3,
+    Chart4,
+    Chart5,
+}
+
+impl UiColor {
+    pub const ALL: [Self; 35] = [
+        Self::Background,
+        Self::Foreground,
+        Self::Card,
+        Self::CardForeground,
+        Self::Popover,
+        Self::PopoverForeground,
+        Self::Primary,
+        Self::PrimaryForeground,
+        Self::Secondary,
+        Self::SecondaryForeground,
+        Self::Muted,
+        Self::MutedForeground,
+        Self::Accent,
+        Self::AccentForeground,
+        Self::Destructive,
+        Self::DestructiveForeground,
+        Self::Border,
+        Self::Input,
+        Self::Ring,
+        Self::Sidebar,
+        Self::SidebarForeground,
+        Self::SidebarPrimary,
+        Self::SidebarPrimaryForeground,
+        Self::SidebarAccent,
+        Self::SidebarAccentForeground,
+        Self::SidebarBorder,
+        Self::SidebarRing,
+        Self::Success,
+        Self::Warning,
+        Self::Info,
+        Self::Chart1,
+        Self::Chart2,
+        Self::Chart3,
+        Self::Chart4,
+        Self::Chart5,
+    ];
+
+    pub fn source(self) -> ThemeColorField {
+        use ThemeColorField as F;
+        match self {
+            Self::Background | Self::Sidebar => F::BgPrimary,
+            Self::Foreground
+            | Self::CardForeground
+            | Self::SecondaryForeground
+            | Self::SidebarForeground => F::TextPrimary,
+            Self::Card => F::BgElevated,
+            Self::Popover => F::BgPrimary,
+            Self::PopoverForeground | Self::AccentForeground | Self::SidebarAccentForeground => {
+                F::TextBright
+            }
+            Self::Primary | Self::SidebarPrimary => F::TextPrimary,
+            Self::PrimaryForeground | Self::SidebarPrimaryForeground => F::BgPrimary,
+            Self::Secondary | Self::Muted => F::BgSecondary,
+            Self::MutedForeground => F::TextSecondary,
+            Self::Accent | Self::SidebarAccent => F::BgSelected,
+            Self::Destructive => F::TextDanger,
+            Self::DestructiveForeground => F::TextOnAccent,
+            Self::Border | Self::Input | Self::SidebarBorder => F::BorderPrimary,
+            Self::Ring | Self::SidebarRing | Self::Info | Self::Chart1 => F::TextAccent,
+            Self::Success | Self::Chart2 => F::StatusSuccess,
+            Self::Warning | Self::Chart3 => F::TextWarning,
+            Self::Chart4 => F::TextDanger,
+            Self::Chart5 => F::TextBright,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TerminalPalette {
+    pub foreground: Hsla,
+    pub bright_foreground: Hsla,
+    pub dim_foreground: Hsla,
+    pub black: Hsla,
+    pub red: Hsla,
+    pub green: Hsla,
+    pub yellow: Hsla,
+    pub blue: Hsla,
+    pub magenta: Hsla,
+    pub cyan: Hsla,
+    pub white: Hsla,
+    pub bright_black: Hsla,
+    pub bright_red: Hsla,
+    pub bright_green: Hsla,
+    pub bright_yellow: Hsla,
+    pub bright_blue: Hsla,
+    pub bright_magenta: Hsla,
+    pub bright_cyan: Hsla,
+    pub bright_white: Hsla,
+    pub dim_black: Hsla,
+    pub dim_red: Hsla,
+    pub dim_green: Hsla,
+    pub dim_yellow: Hsla,
+    pub dim_blue: Hsla,
+    pub dim_magenta: Hsla,
+    pub dim_cyan: Hsla,
+    pub dim_white: Hsla,
+}
+
+/// Terminal colors are intentionally independent from the editor theme. These
+/// are Zed's One Dark/Light terminal palettes; only the terminal background is
+/// supplied by the active Moeka theme.
+pub(crate) fn terminal_palette(panel_bg: Hsla) -> TerminalPalette {
+    if panel_bg.l < 0.5 {
+        TerminalPalette {
+            foreground: crate::hex_hsla!("#ABB2BF"),
+            bright_foreground: crate::hex_hsla!("#DCE0E5"),
+            dim_foreground: crate::hex_hsla!("#636D83"),
+            black: crate::hex_hsla!("#282C34"),
+            red: crate::hex_hsla!("#E06C75"),
+            green: crate::hex_hsla!("#98C379"),
+            yellow: crate::hex_hsla!("#E5C07B"),
+            blue: crate::hex_hsla!("#61AFEF"),
+            magenta: crate::hex_hsla!("#C678DD"),
+            cyan: crate::hex_hsla!("#56B6C2"),
+            white: crate::hex_hsla!("#ABB2BF"),
+            bright_black: crate::hex_hsla!("#636D83"),
+            bright_red: crate::hex_hsla!("#EA858B"),
+            bright_green: crate::hex_hsla!("#AAD581"),
+            bright_yellow: crate::hex_hsla!("#FFD885"),
+            bright_blue: crate::hex_hsla!("#85C1FF"),
+            bright_magenta: crate::hex_hsla!("#D398EB"),
+            bright_cyan: crate::hex_hsla!("#6ED5DE"),
+            bright_white: crate::hex_hsla!("#FAFAFA"),
+            dim_black: crate::hex_hsla!("#3B3F4A"),
+            dim_red: crate::hex_hsla!("#A7545A"),
+            dim_green: crate::hex_hsla!("#6D8F59"),
+            dim_yellow: crate::hex_hsla!("#B8985B"),
+            dim_blue: crate::hex_hsla!("#457CAD"),
+            dim_magenta: crate::hex_hsla!("#8D54A0"),
+            dim_cyan: crate::hex_hsla!("#3C818A"),
+            dim_white: crate::hex_hsla!("#8F969B"),
+        }
+    } else {
+        TerminalPalette {
+            foreground: crate::hex_hsla!("#2A2C33"),
+            bright_foreground: crate::hex_hsla!("#2A2C33"),
+            dim_foreground: crate::hex_hsla!("#BBBBBB"),
+            black: crate::hex_hsla!("#000000"),
+            red: crate::hex_hsla!("#DE3E35"),
+            green: crate::hex_hsla!("#3F953A"),
+            yellow: crate::hex_hsla!("#D2B67C"),
+            blue: crate::hex_hsla!("#2F5AF3"),
+            magenta: crate::hex_hsla!("#950095"),
+            cyan: crate::hex_hsla!("#0997B3"),
+            white: crate::hex_hsla!("#BBBBBB"),
+            bright_black: crate::hex_hsla!("#000000"),
+            bright_red: crate::hex_hsla!("#DE3E35"),
+            bright_green: crate::hex_hsla!("#3F953A"),
+            bright_yellow: crate::hex_hsla!("#D2B67C"),
+            bright_blue: crate::hex_hsla!("#2F5AF3"),
+            bright_magenta: crate::hex_hsla!("#A00095"),
+            bright_cyan: crate::hex_hsla!("#0BBCD6"),
+            bright_white: crate::hex_hsla!("#FFFFFF"),
+            dim_black: crate::hex_hsla!("#555555"),
+            dim_red: crate::hex_hsla!("#9C2B26"),
+            dim_green: crate::hex_hsla!("#2B6927"),
+            dim_yellow: crate::hex_hsla!("#A48C5A"),
+            dim_blue: crate::hex_hsla!("#2140AB"),
+            dim_magenta: crate::hex_hsla!("#6A006A"),
+            dim_cyan: crate::hex_hsla!("#0A7B92"),
+            dim_white: crate::hex_hsla!("#888888"),
+        }
+    }
+}
+
+pub(crate) fn ui_shadow_color(opacity: f32) -> Hsla {
+    gpui::hsla(0.0, 0.0, 0.0, opacity)
+}
+
 impl Theme {
+    pub fn ui_color(&self, slot: UiColor) -> Hsla {
+        self.color(slot.source())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct SwitchPalette {
+    pub checked_background: Hsla,
+    pub checked_hover_background: Hsla,
+    pub unchecked_background: Hsla,
+    pub unchecked_hover_background: Hsla,
+    pub unchecked_border: Hsla,
+    pub thumb: Hsla,
+    pub unchecked_thumb: Hsla,
+    pub description: Hsla,
+}
+
+impl Theme {
+    pub fn switch_palette(&self, interface: &Self) -> SwitchPalette {
+        SwitchPalette {
+            checked_background: self.text_primary,
+            checked_hover_background: self.text_bright,
+            unchecked_background: interface.bg_secondary,
+            unchecked_hover_background: interface.bg_hover,
+            unchecked_border: interface.border_primary,
+            thumb: self.bg_primary,
+            unchecked_thumb: self.bg_primary,
+            description: interface.text_secondary,
+        }
+    }
+
     fn curated(spec: CuratedThemeSpec) -> Self {
         let color = hex_to_hsla;
         let markdown = markdown_syntax_for(spec.code_palette);
@@ -1752,7 +1990,6 @@ impl Theme {
         let danger = color(spec.danger);
         let warning = color(spec.warning);
         let success = color(spec.success);
-        let semantic_alpha = if spec.dark { 0.34 } else { 0.2 };
 
         Self {
             text_primary: text,
@@ -1805,10 +2042,8 @@ impl Theme {
             list_marker: packed_rgb_to_hsla(markdown.list_marker),
             checkbox_checked: success,
             gutter_heading: with_alpha(text, if spec.dark { 0.28 } else { 0.22 }),
-            git_status_added: success,
-            git_status_modified: warning,
-            diff_added_bg: with_alpha(success, semantic_alpha),
-            diff_removed_bg: with_alpha(danger, semantic_alpha),
+            status_success: success,
+            status_warning: warning,
             code_palette: spec.code_palette,
         }
     }
@@ -1856,10 +2091,8 @@ impl Theme {
             ThemeColorField::ListMarker => self.list_marker,
             ThemeColorField::CheckboxChecked => self.checkbox_checked,
             ThemeColorField::GutterHeading => self.gutter_heading,
-            ThemeColorField::GitStatusAdded => self.git_status_added,
-            ThemeColorField::GitStatusModified => self.git_status_modified,
-            ThemeColorField::DiffAddedBg => self.diff_added_bg,
-            ThemeColorField::DiffRemovedBg => self.diff_removed_bg,
+            ThemeColorField::StatusSuccess => self.status_success,
+            ThemeColorField::StatusWarning => self.status_warning,
         }
     }
 
@@ -1906,10 +2139,8 @@ impl Theme {
             ThemeColorField::ListMarker => self.list_marker = color,
             ThemeColorField::CheckboxChecked => self.checkbox_checked = color,
             ThemeColorField::GutterHeading => self.gutter_heading = color,
-            ThemeColorField::GitStatusAdded => self.git_status_added = color,
-            ThemeColorField::GitStatusModified => self.git_status_modified = color,
-            ThemeColorField::DiffAddedBg => self.diff_added_bg = color,
-            ThemeColorField::DiffRemovedBg => self.diff_removed_bg = color,
+            ThemeColorField::StatusSuccess => self.status_success = color,
+            ThemeColorField::StatusWarning => self.status_warning = color,
         }
     }
 }
@@ -2029,10 +2260,8 @@ impl Theme {
         theme.list_marker = palette.accent;
         theme.checkbox_checked = palette.secondary_accent;
         theme.gutter_heading = with_alpha(foreground, 0.3);
-        theme.git_status_added = palette.secondary_accent;
-        theme.git_status_modified = palette.accent;
-        theme.diff_added_bg = with_alpha(palette.secondary_accent, if dark { 0.42 } else { 0.22 });
-        theme.diff_removed_bg = with_alpha(palette.accent, if dark { 0.42 } else { 0.22 });
+        theme.status_success = palette.secondary_accent;
+        theme.status_warning = palette.accent;
         theme
     }
 
@@ -2167,10 +2396,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#E06C75"),
             checkbox_checked: crate::hex_hsla!("#3778AE"),
             gutter_heading: with_alpha(crate::hex_hsla!("#ABB2BF"), 0.2),
-            git_status_added: crate::hex_hsla!("#88C796"),
-            git_status_modified: crate::hex_hsla!("#DDC194"),
-            diff_added_bg: crate::hex_hsla!("#1b5e42"),
-            diff_removed_bg: crate::hex_hsla!("#7a2738"),
+            status_success: crate::hex_hsla!("#88C796"),
+            status_warning: crate::hex_hsla!("#DDC194"),
             code_palette: CodeSyntaxPalette::ONE_DARK,
         }
     }
@@ -2222,10 +2449,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#C74440"),
             checkbox_checked: crate::hex_hsla!("#2383E2"),
             gutter_heading: with_alpha(crate::hex_hsla!("#37352F"), 0.2),
-            git_status_added: crate::hex_hsla!("#88C796"),
-            git_status_modified: crate::hex_hsla!("#DDC194"),
-            diff_added_bg: crate::hex_hsla!("#217a4b"),
-            diff_removed_bg: crate::hex_hsla!("#a44040"),
+            status_success: crate::hex_hsla!("#88C796"),
+            status_warning: crate::hex_hsla!("#DDC194"),
             code_palette: CodeSyntaxPalette::ONE_LIGHT,
         }
     }
@@ -2277,10 +2502,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#676767D1"),
             checkbox_checked: crate::hex_hsla!("#676767D1"),
             gutter_heading: with_alpha(crate::hex_hsla!("#323232"), 1.0),
-            git_status_added: crate::hex_hsla!("#88C796"),
-            git_status_modified: crate::hex_hsla!("#DDC194"),
-            diff_added_bg: crate::hex_hsla!("#1d6f46"),
-            diff_removed_bg: crate::hex_hsla!("#a33b3b"),
+            status_success: crate::hex_hsla!("#88C796"),
+            status_warning: crate::hex_hsla!("#DDC194"),
             code_palette: CodeSyntaxPalette::ONE_LIGHT,
         }
     }
@@ -2332,10 +2555,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#e06c75"),
             checkbox_checked: crate::hex_hsla!("#3778ae"),
             gutter_heading: with_alpha(crate::hex_hsla!("#abb2bf"), 0.2),
-            git_status_added: crate::hex_hsla!("#88C796"),
-            git_status_modified: crate::hex_hsla!("#DDC194"),
-            diff_added_bg: crate::hex_hsla!("#1a5e40"),
-            diff_removed_bg: crate::hex_hsla!("#7a2a37"),
+            status_success: crate::hex_hsla!("#88C796"),
+            status_warning: crate::hex_hsla!("#DDC194"),
             code_palette: CodeSyntaxPalette::ONE_DARK,
         }
     }
@@ -2387,10 +2608,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#FF79C6"),
             checkbox_checked: crate::hex_hsla!("#BD93F9"),
             gutter_heading: with_alpha(crate::hex_hsla!("#F8F8F2"), 0.2),
-            git_status_added: crate::hex_hsla!("#50FA7B"),
-            git_status_modified: crate::hex_hsla!("#F1FA8C"),
-            diff_added_bg: crate::hex_hsla!("#1b5e42"),
-            diff_removed_bg: crate::hex_hsla!("#7a2738"),
+            status_success: crate::hex_hsla!("#50FA7B"),
+            status_warning: crate::hex_hsla!("#F1FA8C"),
             code_palette: CodeSyntaxPalette::DRACULA,
         }
     }
@@ -2442,10 +2661,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#81A1C1"),
             checkbox_checked: crate::hex_hsla!("#A3BE8C"),
             gutter_heading: with_alpha(crate::hex_hsla!("#D8DEE9"), 0.2),
-            git_status_added: crate::hex_hsla!("#A3BE8C"),
-            git_status_modified: crate::hex_hsla!("#EBCB8B"),
-            diff_added_bg: crate::hex_hsla!("#1b5e42"),
-            diff_removed_bg: crate::hex_hsla!("#7a2738"),
+            status_success: crate::hex_hsla!("#A3BE8C"),
+            status_warning: crate::hex_hsla!("#EBCB8B"),
             code_palette: CodeSyntaxPalette::NORD,
         }
     }
@@ -2497,10 +2714,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#7AA2F7"),
             checkbox_checked: crate::hex_hsla!("#9ECE6A"),
             gutter_heading: with_alpha(crate::hex_hsla!("#C0CAF5"), 0.2),
-            git_status_added: crate::hex_hsla!("#9ECE6A"),
-            git_status_modified: crate::hex_hsla!("#E0AF68"),
-            diff_added_bg: crate::hex_hsla!("#1b5e42"),
-            diff_removed_bg: crate::hex_hsla!("#7a2738"),
+            status_success: crate::hex_hsla!("#9ECE6A"),
+            status_warning: crate::hex_hsla!("#E0AF68"),
             code_palette: CodeSyntaxPalette::TOKYO_NIGHT,
         }
     }
@@ -2552,10 +2767,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#CBA6F7"),
             checkbox_checked: crate::hex_hsla!("#89B4FA"),
             gutter_heading: with_alpha(crate::hex_hsla!("#CDD6F4"), 0.2),
-            git_status_added: crate::hex_hsla!("#A6E3A1"),
-            git_status_modified: crate::hex_hsla!("#F9E2AF"),
-            diff_added_bg: crate::hex_hsla!("#1b5e42"),
-            diff_removed_bg: crate::hex_hsla!("#7a2738"),
+            status_success: crate::hex_hsla!("#A6E3A1"),
+            status_warning: crate::hex_hsla!("#F9E2AF"),
             code_palette: CodeSyntaxPalette::CATPPUCCIN_MOCHA,
         }
     }
@@ -2607,10 +2820,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#79C0FF"),
             checkbox_checked: crate::hex_hsla!("#3FB950"),
             gutter_heading: with_alpha(crate::hex_hsla!("#E6EDF3"), 0.2),
-            git_status_added: crate::hex_hsla!("#3FB950"),
-            git_status_modified: crate::hex_hsla!("#D29922"),
-            diff_added_bg: crate::hex_hsla!("#1b5e42"),
-            diff_removed_bg: crate::hex_hsla!("#7a2738"),
+            status_success: crate::hex_hsla!("#3FB950"),
+            status_warning: crate::hex_hsla!("#D29922"),
             code_palette: CodeSyntaxPalette::GITHUB_DARK,
         }
     }
@@ -2662,10 +2873,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#CB4B16"),
             checkbox_checked: crate::hex_hsla!("#859900"),
             gutter_heading: with_alpha(crate::hex_hsla!("#839496"), 0.25),
-            git_status_added: crate::hex_hsla!("#859900"),
-            git_status_modified: crate::hex_hsla!("#B58900"),
-            diff_added_bg: crate::hex_hsla!("#1b5e42"),
-            diff_removed_bg: crate::hex_hsla!("#7a2738"),
+            status_success: crate::hex_hsla!("#859900"),
+            status_warning: crate::hex_hsla!("#B58900"),
             code_palette: CodeSyntaxPalette::SOLARIZED_DARK,
         }
     }
@@ -2717,10 +2926,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#FE8019"),
             checkbox_checked: crate::hex_hsla!("#B8BB26"),
             gutter_heading: with_alpha(crate::hex_hsla!("#EBDBB2"), 0.2),
-            git_status_added: crate::hex_hsla!("#B8BB26"),
-            git_status_modified: crate::hex_hsla!("#FABD2F"),
-            diff_added_bg: crate::hex_hsla!("#1b5e42"),
-            diff_removed_bg: crate::hex_hsla!("#7a2738"),
+            status_success: crate::hex_hsla!("#B8BB26"),
+            status_warning: crate::hex_hsla!("#FABD2F"),
             code_palette: CodeSyntaxPalette::GRUVBOX_DARK,
         }
     }
@@ -2772,10 +2979,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#EB6F92"),
             checkbox_checked: crate::hex_hsla!("#31748F"),
             gutter_heading: with_alpha(crate::hex_hsla!("#E0DEF4"), 0.2),
-            git_status_added: crate::hex_hsla!("#9CCFD8"),
-            git_status_modified: crate::hex_hsla!("#F6C177"),
-            diff_added_bg: crate::hex_hsla!("#1b5e42"),
-            diff_removed_bg: crate::hex_hsla!("#7a2738"),
+            status_success: crate::hex_hsla!("#9CCFD8"),
+            status_warning: crate::hex_hsla!("#F6C177"),
             code_palette: CodeSyntaxPalette::ROSE_PINE,
         }
     }
@@ -2827,10 +3032,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#0550AE"),
             checkbox_checked: crate::hex_hsla!("#1A7F37"),
             gutter_heading: with_alpha(crate::hex_hsla!("#1F2328"), 0.25),
-            git_status_added: crate::hex_hsla!("#1A7F37"),
-            git_status_modified: crate::hex_hsla!("#9A6700"),
-            diff_added_bg: crate::hex_hsla!("#1d6f46"),
-            diff_removed_bg: crate::hex_hsla!("#a33b3b"),
+            status_success: crate::hex_hsla!("#1A7F37"),
+            status_warning: crate::hex_hsla!("#9A6700"),
             code_palette: CodeSyntaxPalette::GITHUB_LIGHT,
         }
     }
@@ -2882,10 +3085,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#CB4B16"),
             checkbox_checked: crate::hex_hsla!("#859900"),
             gutter_heading: with_alpha(crate::hex_hsla!("#657B83"), 0.25),
-            git_status_added: crate::hex_hsla!("#859900"),
-            git_status_modified: crate::hex_hsla!("#B58900"),
-            diff_added_bg: crate::hex_hsla!("#1d6f46"),
-            diff_removed_bg: crate::hex_hsla!("#a33b3b"),
+            status_success: crate::hex_hsla!("#859900"),
+            status_warning: crate::hex_hsla!("#B58900"),
             code_palette: CodeSyntaxPalette::SOLARIZED_LIGHT,
         }
     }
@@ -2937,10 +3138,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#8839EF"),
             checkbox_checked: crate::hex_hsla!("#40A02B"),
             gutter_heading: with_alpha(crate::hex_hsla!("#4C4F69"), 0.25),
-            git_status_added: crate::hex_hsla!("#40A02B"),
-            git_status_modified: crate::hex_hsla!("#DF8E1D"),
-            diff_added_bg: crate::hex_hsla!("#1d6f46"),
-            diff_removed_bg: crate::hex_hsla!("#a33b3b"),
+            status_success: crate::hex_hsla!("#40A02B"),
+            status_warning: crate::hex_hsla!("#DF8E1D"),
             code_palette: CodeSyntaxPalette::CATPPUCCIN_LATTE,
         }
     }
@@ -2992,10 +3191,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#B4637A"),
             checkbox_checked: crate::hex_hsla!("#286983"),
             gutter_heading: with_alpha(crate::hex_hsla!("#575279"), 0.25),
-            git_status_added: crate::hex_hsla!("#56949F"),
-            git_status_modified: crate::hex_hsla!("#EA9D34"),
-            diff_added_bg: crate::hex_hsla!("#1d6f46"),
-            diff_removed_bg: crate::hex_hsla!("#a33b3b"),
+            status_success: crate::hex_hsla!("#56949F"),
+            status_warning: crate::hex_hsla!("#EA9D34"),
             code_palette: CodeSyntaxPalette::ROSE_PINE_DAWN,
         }
     }
@@ -3047,10 +3244,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#AF3A03"),
             checkbox_checked: crate::hex_hsla!("#79740E"),
             gutter_heading: with_alpha(crate::hex_hsla!("#3C3836"), 0.25),
-            git_status_added: crate::hex_hsla!("#79740E"),
-            git_status_modified: crate::hex_hsla!("#B57614"),
-            diff_added_bg: crate::hex_hsla!("#1d6f46"),
-            diff_removed_bg: crate::hex_hsla!("#a33b3b"),
+            status_success: crate::hex_hsla!("#79740E"),
+            status_warning: crate::hex_hsla!("#B57614"),
             code_palette: CodeSyntaxPalette::GRUVBOX_LIGHT,
         }
     }
@@ -3102,10 +3297,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#F85552"),
             checkbox_checked: crate::hex_hsla!("#8DA101"),
             gutter_heading: with_alpha(crate::hex_hsla!("#5C6A72"), 0.25),
-            git_status_added: crate::hex_hsla!("#8DA101"),
-            git_status_modified: crate::hex_hsla!("#DFA000"),
-            diff_added_bg: crate::hex_hsla!("#1d6f46"),
-            diff_removed_bg: crate::hex_hsla!("#a33b3b"),
+            status_success: crate::hex_hsla!("#8DA101"),
+            status_warning: crate::hex_hsla!("#DFA000"),
             code_palette: CodeSyntaxPalette::EVERFOREST_LIGHT,
         }
     }
@@ -3157,10 +3350,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#34548A"),
             checkbox_checked: crate::hex_hsla!("#485E30"),
             gutter_heading: with_alpha(crate::hex_hsla!("#343B58"), 0.25),
-            git_status_added: crate::hex_hsla!("#485E30"),
-            git_status_modified: crate::hex_hsla!("#8F5E15"),
-            diff_added_bg: crate::hex_hsla!("#1d6f46"),
-            diff_removed_bg: crate::hex_hsla!("#a33b3b"),
+            status_success: crate::hex_hsla!("#485E30"),
+            status_warning: crate::hex_hsla!("#8F5E15"),
             code_palette: CodeSyntaxPalette::TOKYO_NIGHT_LIGHT,
         }
     }
@@ -3212,10 +3403,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#5E81AC"),
             checkbox_checked: crate::hex_hsla!("#6C8A55"),
             gutter_heading: with_alpha(crate::hex_hsla!("#2E3440"), 0.25),
-            git_status_added: crate::hex_hsla!("#6C8A55"),
-            git_status_modified: crate::hex_hsla!("#B08800"),
-            diff_added_bg: crate::hex_hsla!("#1d6f46"),
-            diff_removed_bg: crate::hex_hsla!("#a33b3b"),
+            status_success: crate::hex_hsla!("#6C8A55"),
+            status_warning: crate::hex_hsla!("#B08800"),
             code_palette: CodeSyntaxPalette::NORD_LIGHT,
         }
     }
@@ -3267,10 +3456,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#E67E80"),
             checkbox_checked: crate::hex_hsla!("#A7C080"),
             gutter_heading: with_alpha(crate::hex_hsla!("#D3C6AA"), 0.2),
-            git_status_added: crate::hex_hsla!("#A7C080"),
-            git_status_modified: crate::hex_hsla!("#DBBC7F"),
-            diff_added_bg: crate::hex_hsla!("#1b5e42"),
-            diff_removed_bg: crate::hex_hsla!("#7a2738"),
+            status_success: crate::hex_hsla!("#A7C080"),
+            status_warning: crate::hex_hsla!("#DBBC7F"),
             code_palette: CodeSyntaxPalette::EVERFOREST_DARK,
         }
     }
@@ -3322,10 +3509,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#FF6188"),
             checkbox_checked: crate::hex_hsla!("#A9DC76"),
             gutter_heading: with_alpha(crate::hex_hsla!("#FCFCFA"), 0.2),
-            git_status_added: crate::hex_hsla!("#A9DC76"),
-            git_status_modified: crate::hex_hsla!("#FFD866"),
-            diff_added_bg: crate::hex_hsla!("#1b5e42"),
-            diff_removed_bg: crate::hex_hsla!("#7a2738"),
+            status_success: crate::hex_hsla!("#A9DC76"),
+            status_warning: crate::hex_hsla!("#FFD866"),
             code_palette: CodeSyntaxPalette::MONOKAI_PRO,
         }
     }
@@ -3377,10 +3562,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#FA8D3E"),
             checkbox_checked: crate::hex_hsla!("#86B300"),
             gutter_heading: with_alpha(crate::hex_hsla!("#5C6166"), 0.25),
-            git_status_added: crate::hex_hsla!("#6CBF43"),
-            git_status_modified: crate::hex_hsla!("#F2AE49"),
-            diff_added_bg: crate::hex_hsla!("#1d6f46"),
-            diff_removed_bg: crate::hex_hsla!("#a33b3b"),
+            status_success: crate::hex_hsla!("#6CBF43"),
+            status_warning: crate::hex_hsla!("#F2AE49"),
             code_palette: CodeSyntaxPalette::AYU_LIGHT,
         }
     }
@@ -3432,10 +3615,8 @@ impl Theme {
             list_marker: crate::hex_hsla!("#9B2393"),
             checkbox_checked: crate::hex_hsla!("#28A745"),
             gutter_heading: with_alpha(crate::hex_hsla!("#262626"), 0.25),
-            git_status_added: crate::hex_hsla!("#28A745"),
-            git_status_modified: crate::hex_hsla!("#B58900"),
-            diff_added_bg: crate::hex_hsla!("#1d6f46"),
-            diff_removed_bg: crate::hex_hsla!("#a33b3b"),
+            status_success: crate::hex_hsla!("#28A745"),
+            status_warning: crate::hex_hsla!("#B58900"),
             code_palette: CodeSyntaxPalette::XCODE_LIGHT,
         }
     }
@@ -3530,11 +3711,13 @@ impl Theme {
         if self.bg_primary.l < 0.5 {
             return self.clone();
         }
-        let border_primary = cap_lightness(self.border_primary, 0.72);
+        // Curated light borders are stored as soft hairlines; only legacy
+        // translucent hairlines are lifted to the primary border weight.
+        let border_primary = self.border_primary;
         Self {
             text_secondary: cap_lightness(self.text_secondary, 0.42),
-            git_status_added: cap_lightness(self.git_status_added, 0.38),
-            git_status_modified: cap_lightness(self.git_status_modified, 0.42),
+            status_success: cap_lightness(self.status_success, 0.38),
+            status_warning: cap_lightness(self.status_warning, 0.42),
             border_primary,
             // The tab bar, tab items, path bar and workspace bar draw their
             // hairline from `border_secondary`, which light palettes often ship
@@ -3542,7 +3725,7 @@ impl Theme {
             // around it instead.
             border_secondary: Hsla {
                 a: self.border_secondary.a.max(border_primary.a),
-                ..cap_lightness(self.border_secondary, 0.72)
+                ..self.border_secondary
             },
             border_tertiary: cap_lightness(self.border_tertiary, 0.68),
             border_decorative: cap_lightness(self.border_decorative, 0.74),
@@ -3915,8 +4098,8 @@ mod tests {
             for (role, foreground) in [
                 ("danger", theme.text_danger),
                 ("warning", theme.text_warning),
-                ("added", theme.git_status_added),
-                ("modified", theme.git_status_modified),
+                ("added", theme.status_success),
+                ("modified", theme.status_warning),
             ] {
                 for background in [theme.bg_primary, theme.bg_secondary] {
                     let ratio = contrast_ratio(foreground, background);
@@ -4204,3 +4387,139 @@ const fn rgb_to_hsla(r: f32, g: f32, b: f32, a: f32) -> Hsla {
         a,
     }
 }
+
+/// App-only colors projected from the active editor palette, before contrast
+/// adjustments. This preserves the legacy chrome/preview/debugger boundary.
+#[derive(Clone, Copy)]
+pub struct ApplicationUiPalette {
+    pub caption_close_hover_background: Hsla,
+    pub caption_close_hover_foreground: Hsla,
+    pub status_background: Hsla,
+    pub status_title: Hsla,
+    pub status_value: Hsla,
+    pub status_hover: Hsla,
+    pub danger: Hsla,
+    pub success: Hsla,
+    pub warning: Hsla,
+    pub accent: Hsla,
+}
+impl Theme {
+    pub fn application_ui_palette(&self) -> ApplicationUiPalette {
+        let light = self.bg_primary.l >= 0.5;
+        ApplicationUiPalette {
+            caption_close_hover_background: gpui::rgb(0x00c42b1c).into(),
+            caption_close_hover_foreground: gpui::white(),
+            status_background: if light { self.bg_bar } else { self.bg_elevated },
+            status_title: if light {
+                with_alpha(self.text_primary, 0.86)
+            } else {
+                self.text_secondary
+            },
+            status_value: if light {
+                with_alpha(self.text_primary, 0.78)
+            } else {
+                with_alpha(self.text_secondary, 0.62)
+            },
+            status_hover: with_alpha(self.text_primary, 0.08),
+            danger: self.text_danger,
+            success: self.status_success,
+            warning: self.status_warning,
+            accent: self.text_accent,
+        }
+    }
+}
+
+/// Application self-drawn controls, independent of document text styling.
+#[derive(Clone, Copy)]
+pub struct SelfDrawnPalette {
+    pub editor_scrollbar_thumb_color: Hsla,
+    pub code_block_copy_button_bg: Hsla,
+    pub code_block_copy_button_text_color: Hsla,
+    pub code_block_copy_button_border_color: Hsla,
+    pub code_block_copy_button_hover_bg: Hsla,
+    pub code_block_copy_button_hover_text_color: Hsla,
+    pub code_block_copy_button_hover_border_color: Hsla,
+    pub code_block_copy_button_copied_bg: Hsla,
+    pub code_block_copy_button_copied_text_color: Hsla,
+    pub code_block_copy_button_copied_border_color: Hsla,
+    pub generated_preview_action_border_color: Hsla,
+    pub gutter_fold_folded_color: Hsla,
+    pub gutter_fold_hover_color: Hsla,
+    pub image_edit_icon_color: Hsla,
+    pub sidebar_scrollbar_thumb_color: Hsla,
+    pub table_handle_neutral: Hsla,
+    pub table_handle_indicator: Hsla,
+    pub front_matter_type: Hsla,
+    pub front_matter_type_hover: Hsla,
+    pub front_matter_delete: Hsla,
+    pub table_handle_active: Hsla,
+    pub pane_divider: Hsla,
+    pub pane_divider_active: Hsla,
+    pub drop_overlay: Hsla,
+}
+impl SelfDrawnPalette {
+    pub fn new(theme: &Theme, sidebar_theme: &Theme) -> Self {
+        Self {
+            editor_scrollbar_thumb_color: with_alpha(theme.text_primary, 1.0),
+            code_block_copy_button_bg: with_alpha(theme.bg_elevated, 0.92),
+            code_block_copy_button_text_color: theme.text_secondary,
+            code_block_copy_button_border_color: with_alpha(theme.border_primary, 0.85),
+            code_block_copy_button_hover_bg: theme.bg_hover,
+            code_block_copy_button_hover_text_color: theme.text_bright,
+            code_block_copy_button_hover_border_color: with_alpha(theme.text_accent, 0.35),
+            code_block_copy_button_copied_bg: with_alpha(theme.text_accent, 0.14),
+            code_block_copy_button_copied_text_color: theme.text_bright,
+            code_block_copy_button_copied_border_color: with_alpha(theme.text_accent, 0.45),
+            generated_preview_action_border_color: with_alpha(theme.border_primary, 0.38),
+            gutter_fold_folded_color: theme.text_bright,
+            gutter_fold_hover_color: theme.text_secondary,
+            image_edit_icon_color: theme.text_secondary,
+            sidebar_scrollbar_thumb_color: with_alpha(sidebar_theme.text_primary, 1.0),
+            table_handle_neutral: with_alpha(theme.border_decorative, 0.25),
+            table_handle_indicator: theme.cursor,
+            front_matter_type: theme.text_secondary,
+            front_matter_type_hover: theme.text_accent,
+            front_matter_delete: theme.text_secondary,
+            table_handle_active: with_alpha(theme.cursor, 0.3),
+            pane_divider: theme.border_secondary,
+            pane_divider_active: sidebar_theme.text_accent,
+            drop_overlay: with_alpha(theme.text_accent, 0.2),
+        }
+    }
+}
+
+/// Optional application-only overrides. A missing value follows the existing
+/// debugger source; setting one slot never mutates another slot or the document.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiColorOverrides {
+    values: [Option<Hsla>; 35],
+}
+impl Default for UiColorOverrides {
+    fn default() -> Self {
+        Self { values: [None; 35] }
+    }
+}
+impl UiColorOverrides {
+    pub fn get(&self, slot: UiColor) -> Option<Hsla> {
+        self.values[slot as usize]
+    }
+    #[cfg(test)]
+    pub fn set(&mut self, slot: UiColor, color: Hsla) {
+        self.values[slot as usize] = Some(color);
+    }
+    #[cfg(test)]
+    pub fn clear(&mut self, slot: UiColor) {
+        self.values[slot as usize] = None;
+    }
+    pub fn resolve(&self, theme: &Theme, slot: UiColor) -> Hsla {
+        self.get(slot).unwrap_or_else(|| theme.ui_color(slot))
+    }
+    pub fn iter(&self) -> impl Iterator<Item = (UiColor, Hsla)> + '_ {
+        UiColor::ALL
+            .into_iter()
+            .filter_map(|slot| self.get(slot).map(|color| (slot, color)))
+    }
+}
+
+/// Picker handles use an invariant light edge against arbitrary sampled colors.
+pub const COLOR_PICKER_HANDLE: Hsla = hex_to_hsla("#FFFFFFFF");

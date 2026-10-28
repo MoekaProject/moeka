@@ -46,7 +46,6 @@ platform_key!(TOGGLE_TERMINAL_PANEL, "cmd-ctrl-t", "ctrl-alt-t");
 platform_key!(CHARACTER_PALETTE, "cmd-ctrl-space", "ctrl-alt-space");
 
 // Control+Shift+G is Find Previous once Command maps to Control.
-platform_key!(TOGGLE_GIT_HISTORY, "ctrl-shift-g", "ctrl-alt-g");
 
 platform_key!(SIDEBAR_DELETE, "cmd-backspace", "delete");
 

@@ -50,8 +50,8 @@ const translations = {
         description: '文件属性，双向链接，表格编辑，上下标与脚注，公式与图表',
       },
       {
-        title: '实时 Git 与 Diff 预览集成',
-        description: '支持文件历史回滚，外部改动实时 Diff 与预览',
+        title: '多标签与分栏写作',
+        description: '并排查看文档，在多个文件之间切换与编辑',
       },
       {
         title: '原生 AI Agent CLI 集成',
@@ -62,8 +62,8 @@ const translations = {
         description: '支持代码文本编辑，图片预览，文件粘贴与拖拽',
       },
       {
-        title: '集成手绘风格的绘图工具',
-        description: '手绘风格绘图工具，连线文本与样式定制',
+        title: '文档导出',
+        description: '将文稿导出为 Markdown、HTML 或 PDF',
       },
     ],
   },
@@ -100,8 +100,8 @@ const translations = {
         description: '檔案屬性、雙向連結、表格編輯、上下標與腳註、公式與圖表',
       },
       {
-        title: '即時 Git 與 Diff 預覽整合',
-        description: '支援檔案歷史回滾、外部改動即時 Diff 與預覽',
+        title: '多分頁與分割窗格寫作',
+        description: '並排查看文件，在多個檔案之間切換與編輯',
       },
       {
         title: '原生 AI Agent CLI 整合',
@@ -112,8 +112,8 @@ const translations = {
         description: '支援程式碼文字編輯、圖片預覽、檔案貼上與拖放',
       },
       {
-        title: '整合手繪風格的繪圖工具',
-        description: '手繪風格繪圖工具，支援連線文字與樣式自訂',
+        title: '文件匯出',
+        description: '將文稿匯出為 Markdown、HTML 或 PDF',
       },
     ],
   },
@@ -150,8 +150,8 @@ const translations = {
         description: '属性、リンク、表、脚注、数式、図表',
       },
       {
-        title: 'Git / Diff プレビュー',
-        description: '履歴復元と外部変更の差分を即確認',
+        title: 'タブと分割ペイン',
+        description: '文書を並べて表示し、ファイルを切り替えて編集',
       },
       {
         title: 'AI Agent CLI 連携',
@@ -162,8 +162,8 @@ const translations = {
         description: 'テキスト編集、画像表示、貼り付け、ドラッグ',
       },
       {
-        title: '手描き作図ツール',
-        description: '線の文字とスタイルを調整',
+        title: '文書のエクスポート',
+        description: 'Markdown、HTML、PDF 形式で出力',
       },
     ],
   },
@@ -200,8 +200,8 @@ const translations = {
         description: '속성, 백링크, 표, 각주, 수식, 차트',
       },
       {
-        title: 'Git / Diff 미리보기',
-        description: '기록 복원과 외부 변경 Diff를 즉시 확인',
+        title: '탭과 분할 창',
+        description: '문서를 나란히 보고 파일을 전환하며 편집',
       },
       {
         title: 'AI Agent CLI 연동',
@@ -212,8 +212,8 @@ const translations = {
         description: '텍스트 편집, 이미지 보기, 붙여넣기, 드래그',
       },
       {
-        title: '손그림 다이어그램',
-        description: '연결선 텍스트와 스타일 조정',
+        title: '문서 내보내기',
+        description: 'Markdown, HTML, PDF 형식으로 내보내기',
       },
     ],
   },
@@ -250,8 +250,8 @@ const translations = {
         description: 'Properties, backlinks, tables, footnotes, formulas, charts',
       },
       {
-        title: 'Git / Diff previews',
-        description: 'Roll back history and inspect outside changes live',
+        title: 'Tabs and split panes',
+        description: 'View documents side by side and switch between files',
       },
       {
         title: 'AI Agent CLI',
@@ -262,8 +262,8 @@ const translations = {
         description: 'Edit text, preview images, paste and drag files',
       },
       {
-        title: 'Hand-drawn diagrams',
-        description: 'Tune connector text and styles',
+        title: 'Document export',
+        description: 'Export your writing as Markdown, HTML or PDF',
       },
     ],
   },

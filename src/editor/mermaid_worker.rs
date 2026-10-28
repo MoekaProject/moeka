@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui::{Context, RenderImage, Task};
 
-use super::{EditorView, InlineDiffState, PaneState, helpers};
+use super::{EditorView, PaneState, helpers};
 use crate::markdown::{BlockPreviewKind, LineDecoration};
 use crate::theme::{Theme, ThemeColorField};
 
@@ -733,7 +733,6 @@ impl MermaidJob {
         identity: &JobIdentity,
         decorations: &[LineDecoration],
         (visible_start, visible_end): (usize, usize),
-        inline_diff: Option<&InlineDiffState>,
     ) -> bool {
         let matches = |decoration: &LineDecoration| {
             decoration.block_preview.as_ref().is_some_and(|preview| {
@@ -748,17 +747,6 @@ impl MermaidJob {
             .min(decorations.len())
             .max(start);
         decorations[start..end].iter().any(matches)
-            || inline_diff.is_some_and(|diff| {
-                diff.hunks.iter().any(|hunk| {
-                    let anchor = hunk.buffer_start.min(decorations.len().saturating_sub(1));
-                    hunk.expanded
-                        && (visible_start..=visible_end).contains(&anchor)
-                        && hunk
-                            .removed_lines
-                            .iter()
-                            .any(|removed| matches(&removed.decoration))
-                })
-            })
     }
 }
 
@@ -1034,23 +1022,6 @@ impl EditorView {
             return;
         }
         let (start, end) = self.generated_preview_priority_line_range();
-        // Removed diff previews are not ranked by the existing trimmer. Do not
-        // let it immediately discard a visible result from an expanded hunk.
-        if self.active_inline_diff().is_some_and(|diff| {
-            diff.hunks.iter().any(|hunk| {
-                let anchor = hunk
-                    .buffer_start
-                    .min(self.decorations.len().saturating_sub(1));
-                hunk.expanded
-                    && (start..=end).contains(&anchor)
-                    && hunk
-                        .removed_lines
-                        .iter()
-                        .any(|line| line.decoration.block_preview.is_some())
-            })
-        }) {
-            return;
-        }
         let mut visible_keys = std::collections::HashSet::new();
         let slice_start = start.min(self.decorations.len());
         let slice_end = end
@@ -1157,7 +1128,6 @@ impl EditorView {
                             id,
                             &self.decorations,
                             self.generated_preview_priority_line_range(),
-                            self.active_inline_diff(),
                         )),
                 frozen: scheduling::preview_is_frozen(
                     &id.cache_key,
@@ -1184,11 +1154,6 @@ impl EditorView {
             .zip(state.visible_line_geometry.last())
             .map(|(first, last)| (first.0, last.0))
             .unwrap_or(job.priority_range);
-        let inline_diff = state
-            .tabs
-            .iter()
-            .find(|tab| state.active_tab_id.as_ref() == Some(&tab.id))
-            .and_then(|tab| tab.inline_diff.as_ref());
         id.is_relevant(&scheduling::Relevance {
             epoch: self.mermaid_preview_worker.schedule.epoch,
             pane_id: id.pane_id,
@@ -1204,7 +1169,7 @@ impl EditorView {
             visible: !state.source_mode
                 && (!check_visibility
                     || (state.scroll_offset == job.scroll_offset
-                        && job.is_visible_in(id, &state.decorations, visible_range, inline_diff))),
+                        && job.is_visible_in(id, &state.decorations, visible_range))),
             frozen: scheduling::preview_is_frozen(
                 &id.cache_key,
                 state.code_mode_preview_key.as_deref(),

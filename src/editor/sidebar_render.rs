@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, Context, CursorStyle, DragMoveEvent, ExternalPaths, FontWeight, MouseButton,
-    MouseDownEvent, SharedString, Transformation, div, prelude::*, px, radians, svg,
+    AnyElement, Context, CursorStyle, DragMoveEvent, ExternalPaths, MouseButton, MouseDownEvent,
+    SharedString, Transformation, div, prelude::*, px, radians,
 };
 
 use super::*;
@@ -11,48 +11,16 @@ use super::*;
 const FILETREE_FILE_SVG_PATH: &str = "assets/icons/filetree/file.svg";
 
 impl EditorView {
-    fn sidebar_git_status_marker(
-        status: Option<SidebarGitStatus>,
-        is_dir: bool,
-    ) -> Option<&'static str> {
-        if is_dir {
-            return None;
-        }
-
-        match status {
-            Some(SidebarGitStatus::Added) => Some("A"),
-            Some(SidebarGitStatus::Modified) => Some("M"),
-            None => None,
-        }
-    }
-
     fn render_sidebar_name_label(&self, name: &str, color: gpui::Hsla) -> AnyElement {
         let ss = &self.styles.sidebar;
         let (base, suffix) = split_file_name_for_display(name);
-        div()
-            .flex_1()
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .flex()
-            .gap(px(0.0))
-            .items_center()
-            .text_size(px(self.scaled(ss.sidebar_item_font_size_px)))
-            .text_color(color)
-            .child(
-                div()
-                    .whitespace_nowrap()
-                    .text_color(color)
-                    .child(base.to_string()),
-            )
+        crate::ui::decoration::file_name(self.styles.sidebar_name(color), self.ui_scale)
+            .child(crate::ui::decoration::file_name_base(base.to_string()))
             .when_some(suffix, |this, suffix| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .text_color(color)
-                        .opacity(ss.sidebar_item_suffix_opacity)
-                        .child(suffix.to_string()),
-                )
+                this.child(crate::ui::decoration::suffix(
+                    ss.sidebar_item_suffix_opacity,
+                    suffix.to_string(),
+                ))
             })
             .into_any_element()
     }
@@ -76,22 +44,13 @@ impl EditorView {
         right_margin_px: f32,
     ) -> AnyElement {
         let ss = &self.styles.sidebar;
-        div()
-            .flex_none()
+        crate::ui::typography::badge(self.styles.sidebar_count_badge(), self.ui_scale)
             .when(left_margin, |this| {
                 this.ml(px(self.scaled(ss.sidebar_count_badge_margin_left_px)))
             })
             .when(right_margin_px > 0.0, |this| this.mr(px(right_margin_px)))
             .min_w(px(self.scaled(ss.sidebar_count_badge_min_width_px)))
             .h(px(self.scaled(ss.sidebar_count_badge_height_px)))
-            .px(px(self.scaled(ss.sidebar_count_badge_padding_x_px)))
-            .rounded(px(self.scaled(ss.sidebar_count_badge_radius_px)))
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(ss.sidebar_count_badge_bg)
-            .text_size(px(self.scaled(ss.sidebar_count_badge_font_size_px)))
-            .text_color(ss.sidebar_count_badge_text_color)
             .child(count.to_string())
             .into_any_element()
     }
@@ -104,40 +63,40 @@ impl EditorView {
     ) -> AnyElement {
         let ss = &self.styles.sidebar;
         if is_dir {
-            return svg()
-                .path(FOLDER_CLOSED_SVG_PATH)
-                .size(px(self.scaled(ss.sidebar_item_icon_size_px)))
-                .text_color(color)
-                .into_any_element();
+            return crate::ui::decoration::icon(
+                crate::style::IconStyle::new(
+                    f32::from(px(self.scaled(ss.sidebar_item_icon_size_px))),
+                    color,
+                ),
+                FOLDER_CLOSED_SVG_PATH,
+            )
+            .into_any_element();
         }
 
         if let Some(label) = file_kind_badge_text_for_name(name) {
-            return div()
-                .min_w(px(self.scaled(ss.sidebar_item_badge_min_width_px)))
-                .h(px(self.scaled(ss.sidebar_item_badge_height_px)))
-                .px(px(self.scaled(ss.sidebar_item_badge_padding_x_px)))
-                .rounded(px(self.scaled(ss.sidebar_item_badge_radius_px)))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(ss.sidebar_item_badge_bg)
-                .text_size(px(self.scaled(ss.sidebar_item_badge_font_size_px)))
-                .text_color(ss.sidebar_item_badge_text_color)
-                .font_weight(FontWeight::EXTRA_BOLD)
-                .child(label)
-                .into_any_element();
+            return crate::ui::typography::badge(
+                self.styles.sidebar_kind_badge(false),
+                self.ui_scale,
+            )
+            .min_w(px(self.scaled(ss.sidebar_item_badge_min_width_px)))
+            .h(px(self.scaled(ss.sidebar_item_badge_height_px)))
+            .child(label)
+            .into_any_element();
         }
 
-        svg()
-            .path(if file_kind_has_indicator_for_name(name) {
+        crate::ui::decoration::icon(
+            crate::style::IconStyle::new(
+                f32::from(px(self.scaled(ss.sidebar_item_icon_size_px + 4.0))),
+                color,
+            ),
+            if file_kind_has_indicator_for_name(name) {
                 MARKDOWN_SVG_PATH
             } else {
                 FILETREE_FILE_SVG_PATH
-            })
-            .size(px(self.scaled(ss.sidebar_item_icon_size_px + 4.0)))
-            .flex_none()
-            .text_color(color)
-            .into_any_element()
+            },
+        )
+        .flex_none()
+        .into_any_element()
     }
 
     pub(super) fn render_sidebar_header_action_button(
@@ -150,31 +109,26 @@ impl EditorView {
         handler: impl Fn(&mut Self, &MouseDownEvent, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
         let ss = &self.styles.sidebar;
-        let hover_opacity = ss.sidebar_header_action_hover_opacity;
-        let button = div()
-            .id(id)
-            .w(px(self.scaled(ss.sidebar_header_action_btn_size_px)))
-            .h(px(self.scaled(ss.sidebar_header_action_btn_size_px)))
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .cursor(CursorStyle::Arrow)
-            .opacity(ss.sidebar_header_action_opacity)
-            .hover(move |style| style.opacity(hover_opacity))
-            .child(
-                svg()
-                    .path(icon_path)
-                    .size(px(self.scaled(ss.sidebar_header_action_icon_size_px)))
-                    .text_color(ss.sidebar_header_icon_color),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    handler(this, event, window, cx);
-                }),
-            );
+        let button = crate::ui::button::icon_button(
+            id,
+            self.styles.sidebar_header_action(),
+            Default::default(),
+            self.ui_scale,
+        )
+        .child(crate::ui::decoration::icon(
+            crate::style::IconStyle::new(
+                f32::from(px(self.scaled(ss.sidebar_header_action_icon_size_px))),
+                ss.sidebar_header_icon_color,
+            ),
+            icon_path,
+        ))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                handler(this, event, window, cx);
+            }),
+        );
         tooltip::with_tooltip(button, cx.entity().clone(), tooltip_title, shortcut)
     }
 
@@ -194,28 +148,27 @@ impl EditorView {
         } else {
             ss.sidebar_top_button_inactive_color
         };
-        let button = div()
-            .id(id)
-            .w(px(self.scaled(ss.sidebar_top_button_width_px)))
-            .h(px(self.scaled(ss.sidebar_top_button_height_px)))
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .cursor(CursorStyle::Arrow)
-            .child(
-                svg()
-                    .path(icon_path)
-                    .size(px(self.scaled(ss.sidebar_top_button_icon_size_px)))
-                    .text_color(icon_color),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    handler(this, event, window, cx);
-                }),
-            );
+        let button = crate::ui::button::icon_button(
+            id,
+            self.styles.sidebar_top_action(is_active),
+            Default::default(),
+            self.ui_scale,
+        )
+        .w(px(self.scaled(ss.sidebar_top_button_width_px)))
+        .child(crate::ui::decoration::icon(
+            crate::style::IconStyle::new(
+                f32::from(px(self.scaled(ss.sidebar_top_button_icon_size_px))),
+                icon_color,
+            ),
+            icon_path,
+        ))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                handler(this, event, window, cx);
+            }),
+        );
         tooltip::with_tooltip(button, cx.entity().clone(), tooltip_title, shortcut)
     }
 
@@ -232,182 +185,169 @@ impl EditorView {
             .flatten()
             .filter(|count| *count > 0);
         let is_selected = self.is_sidebar_item_selected(&self.sidebar_root);
-        let header_hover_bg = ss.sidebar_header_hover_bg;
         let header_drag_over_bg = ss.sidebar_item_selected_bg;
         let root_drag_over = self
             .sidebar_drag_hover_target
             .as_ref()
             .is_some_and(|target| target == &self.sidebar_root);
-        div()
-            .w_full()
-            .h(px(self.scaled(ss.sidebar_header_height_px)))
-            .bg(if root_drag_over {
-                header_drag_over_bg
-            } else if is_selected {
-                ss.sidebar_item_selected_bg
-            } else {
-                ss.sidebar_header_bg
-            })
-            .px(px(self.scaled(ss.sidebar_header_padding_right_px)))
-            .pl(px(self.scaled(ss.sidebar_header_padding_left_px)))
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(ss.sidebar_header_gap_px)))
-            .flex_none()
-            .hover(move |s| s.bg(header_hover_bg))
-            .child(
-                svg()
-                    .path(ROOT_SVG_PATH)
-                    .size(px(self.scaled(ss.sidebar_header_root_icon_size_px)))
-                    .text_color(ss.sidebar_header_icon_color),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
-                    .text_color(if is_selected {
+        crate::ui::chrome::navigation_header(
+            self.styles
+                .navigation_header(false, is_selected, root_drag_over),
+            self.ui_scale,
+        )
+        .child(crate::ui::decoration::icon(
+            crate::style::IconStyle::new(
+                f32::from(px(self.scaled(ss.sidebar_header_root_icon_size_px))),
+                ss.sidebar_header_icon_color,
+            ),
+            ROOT_SVG_PATH,
+        ))
+        .child(
+            crate::ui::typography::label(
+                crate::style::TextStyle::new(
+                    f32::from(px(self.scaled(ss.sidebar_header_font_size_px))),
+                    if is_selected {
                         ss.sidebar_item_selected_text_color
                     } else {
                         ss.sidebar_header_text_color
-                    })
-                    .overflow_hidden()
-                    .truncate()
-                    .child(root_name),
-            )
-            .when_some(root_file_count, |this, count| {
-                this.child(self.render_sidebar_count_badge(count, false, 0.0))
-            })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(self.scaled(ss.sidebar_header_action_gap_px)))
-                    .child(self.render_sidebar_header_action_button(
-                        "sidebar-header-search",
-                        FILETREE_SEARCH_SVG_PATH,
-                        crate::i18n::sidebar_action_label(self.ui_language, "search"),
-                        Some(crate::editor::shortcut::hint("secondary-shift-f")),
-                        cx,
-                        |this, _event, window, cx| {
-                            this.toggle_workspace_search(window, cx);
-                        },
-                    ))
-                    .child(self.render_sidebar_header_action_button(
-                        "sidebar-header-sort",
-                        FILETREE_SORT_SVG_PATH,
-                        crate::i18n::sidebar_action_label(self.ui_language, "sort"),
-                        None,
-                        cx,
-                        |this, event, _window, cx| {
-                            this.open_sidebar_sort_menu(event.position, cx);
-                        },
-                    ))
-                    .child(self.render_sidebar_header_action_button(
-                        "sidebar-header-create",
-                        FILETREE_ADD_SVG_PATH,
-                        crate::i18n::sidebar_action_label(self.ui_language, "create"),
-                        None,
-                        cx,
-                        |this, event, _window, cx| {
-                            this.open_sidebar_create_menu(event.position, cx);
-                        },
-                    )),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    let root = this.sidebar_root.clone();
-                    this.sidebar_select_item(&root, false, false);
-                    this.focused_sidebar_path = Some(root.clone());
-                    this.set_file_list_dir_for_entry(&root, true, cx);
-                    cx.notify();
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.open_sidebar_context_menu(
-                        this.sidebar_root.clone(),
-                        true,
-                        event.position,
-                        cx,
-                    );
-                }),
-            )
-            .drag_over::<DraggedSidebarItems>({
-                let root = self.sidebar_root.clone();
-                move |style, dragged, _, _| {
-                    if Self::sidebar_drop_would_move(&dragged.paths, &root) {
-                        style.bg(header_drag_over_bg)
-                    } else {
-                        style
-                    }
-                }
-            })
-            .drag_over::<ExternalPaths>({
-                let root = self.sidebar_root.clone();
-                move |style, dragged, _, _| {
-                    if Self::sidebar_drop_would_copy(dragged.paths(), &root) {
-                        style.bg(header_drag_over_bg)
-                    } else {
-                        style
-                    }
-                }
-            })
-            .on_drop({
-                let root = self.sidebar_root.clone();
-                cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
-                    let paths = dragged.paths.clone();
-                    this.clear_sidebar_drag_state(cx);
-                    this.move_sidebar_items(paths, root.clone(), cx);
-                })
-            })
-            .on_drop({
-                let root = self.sidebar_root.clone();
-                cx.listener(move |this, dragged: &ExternalPaths, _, cx| {
-                    let paths = dragged.paths().to_vec();
-                    this.clear_sidebar_drag_state(cx);
-                    this.copy_external_paths_into_dir(&paths, root.clone(), cx);
-                })
-            })
-            .on_drag_move({
-                let root = self.sidebar_root.clone();
-                cx.listener(
-                    move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
-                        if event.bounds.contains(&event.event.position) {
-                            this.update_sidebar_drag_autoscroll(event.event.position, cx);
-                            let dragged = event.drag(cx);
-                            let valid_move = Self::sidebar_drop_would_move(&dragged.paths, &root);
-                            if valid_move {
-                                this.update_sidebar_drag_expand_hover_dir(None, cx);
-                                this.update_sidebar_drag_target(Some(root.clone()), cx);
-                            } else {
-                                this.clear_sidebar_drag_hover(cx);
-                            }
-                        }
                     },
-                )
+                ),
+                1.0,
+            )
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .truncate()
+            .child(root_name),
+        )
+        .when_some(root_file_count, |this, count| {
+            this.child(self.render_sidebar_count_badge(count, false, 0.0))
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(self.scaled(ss.sidebar_header_action_gap_px)))
+                .child(self.render_sidebar_header_action_button(
+                    "sidebar-header-search",
+                    FILETREE_SEARCH_SVG_PATH,
+                    crate::i18n::sidebar_action_label(self.ui_language, "search"),
+                    Some(crate::editor::shortcut::hint("secondary-shift-f")),
+                    cx,
+                    |this, _event, window, cx| {
+                        this.toggle_workspace_search(window, cx);
+                    },
+                ))
+                .child(self.render_sidebar_header_action_button(
+                    "sidebar-header-sort",
+                    FILETREE_SORT_SVG_PATH,
+                    crate::i18n::sidebar_action_label(self.ui_language, "sort"),
+                    None,
+                    cx,
+                    |this, event, _window, cx| {
+                        this.open_sidebar_sort_menu(event.position, cx);
+                    },
+                ))
+                .child(self.render_sidebar_header_action_button(
+                    "sidebar-header-create",
+                    FILETREE_ADD_SVG_PATH,
+                    crate::i18n::sidebar_action_label(self.ui_language, "create"),
+                    None,
+                    cx,
+                    |this, event, _window, cx| {
+                        this.open_sidebar_create_menu(event.position, cx);
+                    },
+                )),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                let root = this.sidebar_root.clone();
+                this.sidebar_select_item(&root, false, false);
+                this.focused_sidebar_path = Some(root.clone());
+                this.set_file_list_dir_for_entry(&root, true, cx);
+                cx.notify();
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.open_sidebar_context_menu(this.sidebar_root.clone(), true, event.position, cx);
+            }),
+        )
+        .drag_over::<DraggedSidebarItems>({
+            let root = self.sidebar_root.clone();
+            move |style, dragged, _, _| {
+                if Self::sidebar_drop_would_move(&dragged.paths, &root) {
+                    style.bg(header_drag_over_bg)
+                } else {
+                    style
+                }
+            }
+        })
+        .drag_over::<ExternalPaths>({
+            let root = self.sidebar_root.clone();
+            move |style, dragged, _, _| {
+                if Self::sidebar_drop_would_copy(dragged.paths(), &root) {
+                    style.bg(header_drag_over_bg)
+                } else {
+                    style
+                }
+            }
+        })
+        .on_drop({
+            let root = self.sidebar_root.clone();
+            cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
+                let paths = dragged.paths.clone();
+                this.clear_sidebar_drag_state(cx);
+                this.move_sidebar_items(paths, root.clone(), cx);
             })
-            .on_drag_move({
-                let root = self.sidebar_root.clone();
-                cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+        })
+        .on_drop({
+            let root = self.sidebar_root.clone();
+            cx.listener(move |this, dragged: &ExternalPaths, _, cx| {
+                let paths = dragged.paths().to_vec();
+                this.clear_sidebar_drag_state(cx);
+                this.copy_external_paths_into_dir(&paths, root.clone(), cx);
+            })
+        })
+        .on_drag_move({
+            let root = self.sidebar_root.clone();
+            cx.listener(
+                move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
                     if event.bounds.contains(&event.event.position) {
                         this.update_sidebar_drag_autoscroll(event.event.position, cx);
                         let dragged = event.drag(cx);
-                        let valid_copy = Self::sidebar_drop_would_copy(dragged.paths(), &root);
-                        if valid_copy {
+                        let valid_move = Self::sidebar_drop_would_move(&dragged.paths, &root);
+                        if valid_move {
                             this.update_sidebar_drag_expand_hover_dir(None, cx);
                             this.update_sidebar_drag_target(Some(root.clone()), cx);
                         } else {
                             this.clear_sidebar_drag_hover(cx);
                         }
                     }
-                })
+                },
+            )
+        })
+        .on_drag_move({
+            let root = self.sidebar_root.clone();
+            cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                if event.bounds.contains(&event.event.position) {
+                    this.update_sidebar_drag_autoscroll(event.event.position, cx);
+                    let dragged = event.drag(cx);
+                    let valid_copy = Self::sidebar_drop_would_copy(dragged.paths(), &root);
+                    if valid_copy {
+                        this.update_sidebar_drag_expand_hover_dir(None, cx);
+                        this.update_sidebar_drag_target(Some(root.clone()), cx);
+                    } else {
+                        this.clear_sidebar_drag_hover(cx);
+                    }
+                }
             })
-            .into_any_element()
+        })
+        .into_any_element()
     }
 
     fn render_starred_sidebar_section(
@@ -432,21 +372,26 @@ impl EditorView {
             .flex_none()
             .hover(move |style| style.bg(header_hover_bg))
             .cursor(CursorStyle::Arrow)
+            .child(crate::ui::decoration::icon(
+                crate::style::IconStyle::new(
+                    f32::from(px(self.scaled(ss.sidebar_header_star_icon_size_px))),
+                    icon_color,
+                ),
+                FILETREE_STAR_SVG_PATH,
+            ))
             .child(
-                svg()
-                    .path(FILETREE_STAR_SVG_PATH)
-                    .size(px(self.scaled(ss.sidebar_header_star_icon_size_px)))
-                    .text_color(icon_color),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
-                    .text_color(title_color)
-                    .overflow_hidden()
-                    .truncate()
-                    .child(self.t(crate::i18n::TextKey::StarredFiles)),
+                crate::ui::typography::label(
+                    crate::style::TextStyle::new(
+                        f32::from(px(self.scaled(ss.sidebar_header_font_size_px))),
+                        title_color,
+                    ),
+                    1.0,
+                )
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .truncate()
+                .child(self.t(crate::i18n::TextKey::StarredFiles)),
             )
             .when(is_collapsed && !starred_files.is_empty(), |this| {
                 this.child(self.render_sidebar_count_badge(
@@ -496,26 +441,16 @@ impl EditorView {
         let is_selected = self.is_sidebar_item_selected(&path);
         let is_focused = self.focused_sidebar_path.as_deref() == Some(path.as_path());
         let normalized_path = Self::normalize_sidebar_path(&path);
-        let git_status = self.sidebar_git_statuses.get(&normalized_path).copied();
-        let git_status_color = self.sidebar_git_status_color(git_status);
-        let row_bg = if is_selected {
-            ss.sidebar_item_selected_bg
-        } else {
-            gpui::transparent_black()
-        };
-        let item_hover_bg = ss.sidebar_item_hover_bg;
         let icon_color = if is_selected {
             ss.sidebar_item_selected_icon_color
         } else {
             ss.sidebar_item_icon_color
         };
-        let label_color = git_status_color.unwrap_or(if is_selected {
+        let label_color = if is_selected {
             ss.sidebar_item_selected_text_color
         } else {
             ss.sidebar_item_text_color
-        });
-        let focus_border_color = ss.sidebar_item_focus_border_color;
-        let active_border_color = ss.sidebar_item_active_border_color;
+        };
         let name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -537,136 +472,122 @@ impl EditorView {
             None::<&'static str>,
         );
 
-        div()
-            .id(SharedString::from(format!(
-                "sidebar-starred-{}",
-                path.display()
-            )))
-            .group("sidebar-starred-item")
-            .w_full()
-            .h(px(self.scaled(ss.sidebar_item_height_px)))
-            .flex_none()
-            .flex()
-            .items_center()
-            .bg(row_bg)
-            .border(px(self.ui_border_width(1.0)))
-            .border_color(if is_selected {
-                active_border_color
-            } else if is_focused {
-                focus_border_color
-            } else {
-                gpui::transparent_black()
-            })
-            .when(!self.sidebar_resizing, |this| {
-                this.hover(move |style| style.bg(item_hover_bg))
-            })
-            .child(
-                div()
-                    .w_full()
-                    .h_full()
-                    .pl(px(left_padding))
-                    .pr(px(self.scaled(ss.sidebar_item_padding_right_px)))
-                    .flex()
-                    .items_center()
-                    .gap(px(self.scaled(ss.sidebar_item_gap_px)))
-                    .child(
-                        div()
-                            .w(px(0.0))
-                            .h(px(self.scaled(ss.sidebar_item_fold_container_height_px)))
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_center()
-                            .child(div().w(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))),
-                    )
-                    .child(self.render_sidebar_edit_indicator(&name, false, icon_color))
-                    .child(name_label)
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "sidebar-starred-remove-{}",
-                                path.display()
-                            )))
-                            .w(px(self.scaled(ss.sidebar_header_action_btn_size_px)))
-                            .h(px(self.scaled(ss.sidebar_header_action_btn_size_px)))
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_center()
-                            .cursor(CursorStyle::Arrow)
-                            .opacity(0.0)
-                            .group_hover("sidebar-starred-item", move |style| {
-                                style.opacity(ss.sidebar_header_action_opacity)
-                            })
-                            .hover(move |style| {
-                                style.opacity(action_hover_opacity).bg(close_hover_bg)
-                            })
-                            .child(
-                                svg()
-                                    .path(FILETREE_CLOSE_SVG_PATH)
-                                    .size(px(
-                                        self.scaled(ss.sidebar_starred_item_close_icon_size_px)
-                                    ))
-                                    .text_color(ss.sidebar_header_icon_color),
-                            )
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    let normalized =
-                                        Self::normalize_sidebar_path(&remove_star_path);
-                                    if this.app_settings.remove_starred_file(&normalized) {
-                                        this.save_sidebar_settings(cx);
-                                    }
-                                    cx.notify();
-                                }),
+        crate::ui::list::tree_row(
+            self.styles.sidebar_tree_row(),
+            crate::style::TreeRowState {
+                selected: is_selected,
+                focused: is_focused,
+                resizing: self.sidebar_resizing,
+                ..Default::default()
+            },
+            self.ui_scale,
+        )
+        .id(SharedString::from(format!(
+            "sidebar-starred-{}",
+            path.display()
+        )))
+        .group("sidebar-starred-item")
+        .child(
+            div()
+                .w_full()
+                .h_full()
+                .pl(px(left_padding))
+                .pr(px(self.scaled(ss.sidebar_item_padding_right_px)))
+                .flex()
+                .items_center()
+                .gap(px(self.scaled(ss.sidebar_item_gap_px)))
+                .child(
+                    div()
+                        .w(px(0.0))
+                        .h(px(self.scaled(ss.sidebar_item_fold_container_height_px)))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .child(div().w(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))),
+                )
+                .child(self.render_sidebar_edit_indicator(&name, false, icon_color))
+                .child(name_label)
+                .child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "sidebar-starred-remove-{}",
+                            path.display()
+                        )))
+                        .w(px(self.scaled(ss.sidebar_header_action_btn_size_px)))
+                        .h(px(self.scaled(ss.sidebar_header_action_btn_size_px)))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .cursor(CursorStyle::Arrow)
+                        .opacity(0.0)
+                        .group_hover("sidebar-starred-item", move |style| {
+                            style.opacity(ss.sidebar_header_action_opacity)
+                        })
+                        .hover(move |style| style.opacity(action_hover_opacity).bg(close_hover_bg))
+                        .child(crate::ui::decoration::icon(
+                            crate::style::IconStyle::new(
+                                f32::from(px(
+                                    self.scaled(ss.sidebar_starred_item_close_icon_size_px)
+                                )),
+                                ss.sidebar_header_icon_color,
                             ),
-                    ),
-            )
-            .on_click({
-                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    cx.stop_propagation();
-                    let mods = event.modifiers();
-                    let secondary = mods.secondary();
-                    let has_modifier = secondary || mods.shift;
-                    this.sidebar_select_item(&click_path, mods.shift, secondary);
-                    if !has_modifier {
-                        this.set_file_list_dir_for_entry(&click_path, false, cx);
-                        this.suppress_next_sidebar_sync_path = Some(click_path.clone());
-                        if event.click_count() >= 2 {
-                            this.focused_sidebar_path = None;
-                            this.open_path_in_permanent_tab(click_path.clone(), true, cx);
-                            this.move_cursor_to_first_line_end();
-                            this.request_editor_focus(cx);
-                        } else if !this.switch_to_existing_editor_tab_for_path(
-                            &click_path,
-                            false,
-                            cx,
-                        ) {
-                            this.open_path_in_preview_tab(click_path.clone(), false, cx);
-                        }
+                            FILETREE_CLOSE_SVG_PATH,
+                        ))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                let normalized = Self::normalize_sidebar_path(&remove_star_path);
+                                if this.app_settings.remove_starred_file(&normalized) {
+                                    this.save_sidebar_settings(cx);
+                                }
+                                cx.notify();
+                            }),
+                        ),
+                ),
+        )
+        .on_click({
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                cx.stop_propagation();
+                let mods = event.modifiers();
+                let secondary = mods.secondary();
+                let has_modifier = secondary || mods.shift;
+                this.sidebar_select_item(&click_path, mods.shift, secondary);
+                if !has_modifier {
+                    this.set_file_list_dir_for_entry(&click_path, false, cx);
+                    this.suppress_next_sidebar_sync_path = Some(click_path.clone());
+                    if event.click_count() >= 2 {
+                        this.focused_sidebar_path = None;
+                        this.open_path_in_permanent_tab(click_path.clone(), true, cx);
+                        this.move_cursor_to_first_line_end();
+                        this.request_editor_focus(cx);
+                    } else if !this.switch_to_existing_editor_tab_for_path(&click_path, false, cx) {
+                        this.open_path_in_preview_tab(click_path.clone(), false, cx);
                     }
-                    window.prevent_default();
-                    cx.notify();
-                })
+                }
+                window.prevent_default();
+                cx.notify();
             })
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    if !this.selected_sidebar_paths.contains(&context_menu_path) {
-                        this.sidebar_select_item(&context_menu_path, false, false);
-                    }
-                    this.focused_sidebar_path = Some(context_menu_path.clone());
-                    this.open_starred_sidebar_context_menu(
-                        context_menu_path.clone(),
-                        event.position,
-                        cx,
-                    );
-                }),
-            )
-            .into_any_element()
+        })
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                if !this.selected_sidebar_paths.contains(&context_menu_path) {
+                    this.sidebar_select_item(&context_menu_path, false, false);
+                }
+                this.focused_sidebar_path = Some(context_menu_path.clone());
+                this.open_starred_sidebar_context_menu(
+                    context_menu_path.clone(),
+                    event.position,
+                    cx,
+                );
+            }),
+        )
+        .into_any_element()
     }
 
     pub(crate) fn render_sidebar_edit_row(
@@ -729,11 +650,16 @@ impl EditorView {
                             .items_center()
                             .justify_center()
                             .child(if show_fold_icon {
-                                svg()
-                                    .path(FILETREE_FOLD_SVG_PATH)
-                                    .size(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))
-                                    .text_color(ss.sidebar_item_fold_icon_color)
-                                    .into_any_element()
+                                crate::ui::decoration::icon(
+                                    crate::style::IconStyle::new(
+                                        f32::from(px(
+                                            self.scaled(ss.sidebar_item_fold_icon_size_px)
+                                        )),
+                                        ss.sidebar_item_fold_icon_color,
+                                    ),
+                                    FILETREE_FOLD_SVG_PATH,
+                                )
+                                .into_any_element()
                             } else {
                                 div()
                                     .w(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))
@@ -772,9 +698,6 @@ impl EditorView {
         let is_dir = item.is_dir;
         let ss = &self.styles.sidebar;
         let normalized_path = Self::normalize_sidebar_path(&path);
-        let git_status = self.sidebar_git_statuses.get(&normalized_path).copied();
-        let git_status_color = self.sidebar_git_status_color(git_status);
-        let git_status_marker = Self::sidebar_git_status_marker(git_status, is_dir);
         let shift = ss.sidebar_item_left_shift_px;
         let is_root_level = item.depth == 0;
         let left_padding = if is_root_level {
@@ -793,11 +716,6 @@ impl EditorView {
         } else {
             0.0
         };
-        let row_bg = if is_selected {
-            ss.sidebar_item_selected_bg
-        } else {
-            gpui::transparent_black()
-        };
         let is_cut_item = self.file_clipboard.as_ref().is_some_and(|clipboard| {
             clipboard.is_cut
                 && clipboard.paths.iter().any(|cut_path| {
@@ -810,15 +728,12 @@ impl EditorView {
         } else {
             ss.sidebar_item_icon_color
         };
-        let label_color = git_status_color.unwrap_or(if is_selected {
+        let label_color = if is_selected {
             ss.sidebar_item_selected_text_color
         } else {
             ss.sidebar_item_text_color
-        });
+        };
         let is_focused = self.focused_sidebar_path.as_deref() == Some(path.as_path());
-        let focus_border_color = ss.sidebar_item_focus_border_color;
-        let active_border_color = ss.sidebar_item_active_border_color;
-        let item_hover_bg = ss.sidebar_item_hover_bg;
 
         let guide_color = ss.sidebar_indent_guide_color;
         let guide_width = ss.sidebar_indent_guide_width_px;
@@ -840,13 +755,7 @@ impl EditorView {
                 (0..count).map(move |i| {
                     let y = i as f32 * segment_step;
                     let h = dash_len.min(item_height - y);
-                    div()
-                        .absolute()
-                        .left(px(guide_x))
-                        .top(px(y))
-                        .w(px(guide_width))
-                        .h(px(h))
-                        .bg(guide_color)
+                    crate::ui::decoration::guide_segment(guide_x, y, guide_width, h, guide_color)
                         .into_any_element()
                 })
             })
@@ -884,291 +793,259 @@ impl EditorView {
             None
         };
         let indicator = if item.is_dir {
-            svg()
-                .path(if item.is_expanded {
+            crate::ui::decoration::icon(
+                crate::style::IconStyle::new(
+                    f32::from(px(self.scaled(ss.sidebar_dir_icon_size_px))),
+                    icon_color,
+                ),
+                if item.is_expanded {
                     FOLDER_OPEN_SVG_PATH
                 } else {
                     FOLDER_CLOSED_SVG_PATH
-                })
-                .size(px(self.scaled(ss.sidebar_dir_icon_size_px)))
-                .text_color(icon_color)
-                .into_any_element()
+                },
+            )
+            .into_any_element()
         } else if let Some(label) = file_kind_badge_text(&item.path) {
-            let badge_bg = if is_selected || is_focused {
-                ss.sidebar_item_selected_icon_color
-            } else {
-                ss.sidebar_item_badge_bg
-            };
-            let badge_text_color = if is_selected || is_focused {
-                ss.sidebar_item_selected_bg
-            } else {
-                ss.sidebar_item_badge_text_color
-            };
-            div()
-                .min_w(px(self.scaled(ss.sidebar_item_badge_min_width_px)))
-                .h(px(self.scaled(ss.sidebar_item_badge_height_px)))
-                .px(px(self.scaled(ss.sidebar_item_badge_padding_x_px)))
-                .rounded(px(self.scaled(ss.sidebar_item_badge_radius_px)))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(badge_bg)
-                .text_size(px(self.scaled(ss.sidebar_item_badge_font_size_px)))
-                .text_color(badge_text_color)
-                .font_weight(FontWeight::EXTRA_BOLD)
-                .child(label)
-                .into_any_element()
+            crate::ui::typography::badge(
+                self.styles.sidebar_kind_badge(is_selected || is_focused),
+                self.ui_scale,
+            )
+            .min_w(px(self.scaled(ss.sidebar_item_badge_min_width_px)))
+            .h(px(self.scaled(ss.sidebar_item_badge_height_px)))
+            .child(label)
+            .into_any_element()
         } else {
             // Keep generic and Markdown icons in the same non-shrinking column.
-            svg()
-                .path(if file_kind_has_indicator(&item.path) {
+            crate::ui::decoration::icon(
+                crate::style::IconStyle::new(
+                    f32::from(px(self.scaled(ss.sidebar_item_icon_size_px + 4.0))),
+                    icon_color,
+                ),
+                if file_kind_has_indicator(&item.path) {
                     MARKDOWN_SVG_PATH
                 } else {
                     FILETREE_FILE_SVG_PATH
-                })
-                .size(px(self.scaled(ss.sidebar_item_icon_size_px + 4.0)))
-                .flex_none()
-                .text_color(icon_color)
-                .into_any_element()
+                },
+            )
+            .flex_none()
+            .into_any_element()
         };
 
-        div()
-            .id(SharedString::from(format!("sidebar-{}", path.display())))
-            .w_full()
-            .h(px(item_height))
-            .flex_none()
-            .relative()
-            .flex()
-            .items_center()
-            .opacity(if is_cut_item { 0.48 } else { 1.0 })
-            .bg(if is_drag_over { drag_over_bg } else { row_bg })
-            .border(px(self.ui_border_width(1.0)))
-            .border_color(if is_selected {
-                active_border_color
-            } else if is_focused {
-                focus_border_color
-            } else {
-                gpui::transparent_black()
-            })
-            .when(!self.sidebar_resizing, |this| {
-                this.hover(move |style| style.bg(item_hover_bg))
-            })
-            .children(guides)
-            .child(
-                div()
-                    .w_full()
-                    .h_full()
-                    .pl(px(left_padding))
-                    .pr(px(self.scaled(ss.sidebar_item_padding_right_px)))
-                    .flex()
-                    .items_center()
-                    .gap(px(self.scaled(ss.sidebar_item_gap_px)))
-                    .child(
-                        div()
-                            .w(px(fold_slot_width))
-                            .h(px(self.scaled(ss.sidebar_item_fold_container_height_px)))
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_center()
-                            .child(if show_fold_icon {
-                                svg()
-                                    .path(FILETREE_FOLD_SVG_PATH)
-                                    .size(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))
-                                    .text_color(ss.sidebar_item_fold_icon_color)
-                                    .when(item.is_expanded, |s| {
-                                        s.with_transformation(Transformation::rotate(radians(
-                                            std::f32::consts::FRAC_PI_2,
-                                        )))
-                                    })
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .w(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))
-                                    .into_any_element()
-                            }),
-                    )
-                    .child(indicator)
-                    .child(self.render_sidebar_name_label(&item.name, label_color))
-                    .when_some(git_status_marker, |this, marker| {
-                        this.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(self.scaled(ss.sidebar_item_font_size_px)))
-                                .text_color(label_color)
-                                .font_weight(FontWeight::EXTRA_BOLD)
-                                .child(marker),
-                        )
-                    })
-                    .when_some(dir_file_count, |this, count| {
-                        this.child(self.render_sidebar_count_badge(count, true, 0.0))
-                    }),
-            )
-            .on_click({
-                let path = path.clone();
-                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    let mods = event.modifiers();
-                    let secondary = mods.secondary();
-                    let has_modifier = secondary || mods.shift;
-                    this.sidebar_select_item(&path, mods.shift, secondary);
-                    if !has_modifier {
-                        this.set_file_list_dir_for_entry(&path, is_dir, cx);
-                        if is_dir {
-                            this.toggle_sidebar_directory(path.clone(), cx);
+        crate::ui::list::tree_row(
+            self.styles.sidebar_tree_row(),
+            crate::style::TreeRowState {
+                selected: is_selected,
+                focused: is_focused,
+                drag_over: is_drag_over,
+                cut: is_cut_item,
+                resizing: self.sidebar_resizing,
+            },
+            self.ui_scale,
+        )
+        .id(SharedString::from(format!("sidebar-{}", path.display())))
+        .children(guides)
+        .child(
+            div()
+                .w_full()
+                .h_full()
+                .pl(px(left_padding))
+                .pr(px(self.scaled(ss.sidebar_item_padding_right_px)))
+                .flex()
+                .items_center()
+                .gap(px(self.scaled(ss.sidebar_item_gap_px)))
+                .child(
+                    div()
+                        .w(px(fold_slot_width))
+                        .h(px(self.scaled(ss.sidebar_item_fold_container_height_px)))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .child(if show_fold_icon {
+                            crate::ui::decoration::icon(
+                                crate::style::IconStyle::new(
+                                    f32::from(px(self.scaled(ss.sidebar_item_fold_icon_size_px))),
+                                    ss.sidebar_item_fold_icon_color,
+                                ),
+                                FILETREE_FOLD_SVG_PATH,
+                            )
+                            .when(item.is_expanded, |s| {
+                                s.with_transformation(Transformation::rotate(radians(
+                                    std::f32::consts::FRAC_PI_2,
+                                )))
+                            })
+                            .into_any_element()
                         } else {
-                            this.suppress_next_sidebar_sync_path = Some(path.clone());
-                            if event.click_count() >= 2 {
-                                this.focused_sidebar_path = None;
-                                this.open_path_in_permanent_tab(path.clone(), true, cx);
-                                this.move_cursor_to_first_line_end();
-                                this.request_editor_focus(cx);
-                            } else if !this.switch_to_existing_editor_tab_for_path(&path, false, cx)
-                            {
-                                this.open_path_in_preview_tab(path.clone(), false, cx);
-                            }
+                            div()
+                                .w(px(self.scaled(ss.sidebar_item_fold_icon_size_px)))
+                                .into_any_element()
+                        }),
+                )
+                .child(indicator)
+                .child(self.render_sidebar_name_label(&item.name, label_color))
+                .when_some(dir_file_count, |this, count| {
+                    this.child(self.render_sidebar_count_badge(count, true, 0.0))
+                }),
+        )
+        .on_click({
+            let path = path.clone();
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                let mods = event.modifiers();
+                let secondary = mods.secondary();
+                let has_modifier = secondary || mods.shift;
+                this.sidebar_select_item(&path, mods.shift, secondary);
+                if !has_modifier {
+                    this.set_file_list_dir_for_entry(&path, is_dir, cx);
+                    if is_dir {
+                        this.toggle_sidebar_directory(path.clone(), cx);
+                    } else {
+                        this.suppress_next_sidebar_sync_path = Some(path.clone());
+                        if event.click_count() >= 2 {
+                            this.focused_sidebar_path = None;
+                            this.open_path_in_permanent_tab(path.clone(), true, cx);
+                            this.move_cursor_to_first_line_end();
+                            this.request_editor_focus(cx);
+                        } else if !this.switch_to_existing_editor_tab_for_path(&path, false, cx) {
+                            this.open_path_in_preview_tab(path.clone(), false, cx);
                         }
                     }
-                    window.prevent_default();
+                }
+                window.prevent_default();
+                cx.notify();
+            })
+        })
+        .when(!self.sidebar_resizing, |el| {
+            el.on_drag(DraggedSidebarItems { paths: drag_paths }, {
+                let label = drag_label;
+                let count = drag_count;
+                let ghost_style = self.styles.drag_preview(false, self.ui_scale);
+                move |_dragged, offset, _window, cx| {
+                    cx.new(|_cx| DraggedSidebarItemsView {
+                        label: label.clone(),
+                        count,
+                        style: ghost_style.clone(),
+                        cursor_offset: offset,
+                    })
+                }
+            })
+        })
+        .drag_over::<DraggedSidebarItems>({
+            let drop_path = item_drop_target.clone();
+            move |style, dragged, _, _| {
+                if Self::sidebar_drop_would_move(&dragged.paths, &drop_path) {
+                    style.bg(drag_over_bg)
+                } else {
+                    style
+                }
+            }
+        })
+        .drag_over::<ExternalPaths>({
+            let drop_path = item_drop_target.clone();
+            move |style, dragged, _, _| {
+                if Self::sidebar_drop_would_copy(dragged.paths(), &drop_path) {
+                    style.bg(drag_over_bg)
+                } else {
+                    style
+                }
+            }
+        })
+        .on_drop({
+            let drop_path = item_drop_target.clone();
+            cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
+                let paths = dragged.paths.clone();
+                this.clear_sidebar_drag_state(cx);
+                this.move_sidebar_items(paths, drop_path.clone(), cx);
+            })
+        })
+        .on_drop({
+            let drop_path = item_drop_target.clone();
+            cx.listener(move |this, dragged: &ExternalPaths, _, cx| {
+                let paths = dragged.paths().to_vec();
+                this.clear_sidebar_drag_state(cx);
+                this.copy_external_paths_into_dir(&paths, drop_path.clone(), cx);
+            })
+        })
+        .on_drag_move(cx.listener({
+            let path = path.clone();
+            let drop_path = item_drop_target.clone();
+            move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
+                if !event.bounds.contains(&event.event.position) {
+                    return;
+                }
+
+                cx.stop_propagation();
+                this.sidebar_drag_child_hover_position =
+                    Some(Self::sidebar_drag_position_key(event.event.position));
+                this.update_sidebar_drag_autoscroll(event.event.position, cx);
+
+                let dragged = event.drag(cx);
+                let valid_move = Self::sidebar_drop_would_move(&dragged.paths, &drop_path);
+                let desired_expand_hover = is_dir.then(|| path.clone());
+
+                this.update_sidebar_drag_expand_hover_dir(desired_expand_hover, cx);
+
+                if !valid_move {
+                    this.update_sidebar_drag_target(None, cx);
+                    return;
+                }
+
+                let new_target = Some(drop_path.clone());
+                if this.sidebar_drag_hover_target != new_target {
+                    this.update_sidebar_drag_target(new_target, cx);
                     cx.notify();
-                })
-            })
-            .when(!self.sidebar_resizing, |el| {
-                el.on_drag(DraggedSidebarItems { paths: drag_paths }, {
-                    let label = drag_label;
-                    let count = drag_count;
-                    let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
-                    let ghost_background_color = self.styles.tooltip.tooltip_bg;
-                    let ghost_text_color = self.styles.tooltip.tooltip_title_text_color;
-                    move |_dragged, offset, _window, cx| {
-                        cx.new(|_cx| DraggedSidebarItemsView {
-                            label: label.clone(),
-                            count,
-                            font_size_px: ghost_font_size_px,
-                            background_color: ghost_background_color,
-                            text_color: ghost_text_color,
-                            cursor_offset: offset,
-                        })
-                    }
-                })
-            })
-            .drag_over::<DraggedSidebarItems>({
-                let drop_path = item_drop_target.clone();
-                move |style, dragged, _, _| {
-                    if Self::sidebar_drop_would_move(&dragged.paths, &drop_path) {
-                        style.bg(drag_over_bg)
-                    } else {
-                        style
-                    }
                 }
-            })
-            .drag_over::<ExternalPaths>({
-                let drop_path = item_drop_target.clone();
-                move |style, dragged, _, _| {
-                    if Self::sidebar_drop_would_copy(dragged.paths(), &drop_path) {
-                        style.bg(drag_over_bg)
-                    } else {
-                        style
-                    }
+            }
+        }))
+        .on_drag_move(cx.listener({
+            let path = path.clone();
+            let drop_path = item_drop_target.clone();
+            move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                if !event.bounds.contains(&event.event.position) {
+                    return;
                 }
-            })
-            .on_drop({
-                let drop_path = item_drop_target.clone();
-                cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
-                    let paths = dragged.paths.clone();
-                    this.clear_sidebar_drag_state(cx);
-                    this.move_sidebar_items(paths, drop_path.clone(), cx);
-                })
-            })
-            .on_drop({
-                let drop_path = item_drop_target.clone();
-                cx.listener(move |this, dragged: &ExternalPaths, _, cx| {
-                    let paths = dragged.paths().to_vec();
-                    this.clear_sidebar_drag_state(cx);
-                    this.copy_external_paths_into_dir(&paths, drop_path.clone(), cx);
-                })
-            })
-            .on_drag_move(cx.listener({
-                let path = path.clone();
-                let drop_path = item_drop_target.clone();
-                move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
-                    if !event.bounds.contains(&event.event.position) {
-                        return;
-                    }
 
-                    cx.stop_propagation();
-                    this.sidebar_drag_child_hover_position =
-                        Some(Self::sidebar_drag_position_key(event.event.position));
-                    this.update_sidebar_drag_autoscroll(event.event.position, cx);
+                cx.stop_propagation();
+                this.sidebar_drag_child_hover_position =
+                    Some(Self::sidebar_drag_position_key(event.event.position));
+                this.update_sidebar_drag_autoscroll(event.event.position, cx);
 
-                    let dragged = event.drag(cx);
-                    let valid_move = Self::sidebar_drop_would_move(&dragged.paths, &drop_path);
-                    let desired_expand_hover = is_dir.then(|| path.clone());
+                let dragged = event.drag(cx);
+                let valid_copy = Self::sidebar_drop_would_copy(dragged.paths(), &drop_path);
+                let desired_expand_hover = is_dir.then(|| path.clone());
 
-                    this.update_sidebar_drag_expand_hover_dir(desired_expand_hover, cx);
+                this.update_sidebar_drag_expand_hover_dir(desired_expand_hover, cx);
 
-                    if !valid_move {
-                        this.update_sidebar_drag_target(None, cx);
-                        return;
-                    }
-
-                    let new_target = Some(drop_path.clone());
-                    if this.sidebar_drag_hover_target != new_target {
-                        this.update_sidebar_drag_target(new_target, cx);
-                        cx.notify();
-                    }
+                if !valid_copy {
+                    this.update_sidebar_drag_target(None, cx);
+                    return;
                 }
-            }))
-            .on_drag_move(cx.listener({
-                let path = path.clone();
-                let drop_path = item_drop_target.clone();
-                move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                    if !event.bounds.contains(&event.event.position) {
-                        return;
-                    }
 
-                    cx.stop_propagation();
-                    this.sidebar_drag_child_hover_position =
-                        Some(Self::sidebar_drag_position_key(event.event.position));
-                    this.update_sidebar_drag_autoscroll(event.event.position, cx);
-
-                    let dragged = event.drag(cx);
-                    let valid_copy = Self::sidebar_drop_would_copy(dragged.paths(), &drop_path);
-                    let desired_expand_hover = is_dir.then(|| path.clone());
-
-                    this.update_sidebar_drag_expand_hover_dir(desired_expand_hover, cx);
-
-                    if !valid_copy {
-                        this.update_sidebar_drag_target(None, cx);
-                        return;
-                    }
-
-                    let new_target = Some(drop_path.clone());
-                    if this.sidebar_drag_hover_target != new_target {
-                        this.update_sidebar_drag_target(new_target, cx);
-                        cx.notify();
-                    }
+                let new_target = Some(drop_path.clone());
+                if this.sidebar_drag_hover_target != new_target {
+                    this.update_sidebar_drag_target(new_target, cx);
+                    cx.notify();
                 }
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    if !this.selected_sidebar_paths.contains(&path) {
-                        this.sidebar_select_item(&path, false, false);
-                    }
-                    this.focused_sidebar_path = Some(path.clone());
-                    this.open_sidebar_context_menu(path.clone(), is_dir, event.position, cx);
-                }),
-            )
-            .into_any_element()
+            }
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                if !this.selected_sidebar_paths.contains(&path) {
+                    this.sidebar_select_item(&path, false, false);
+                }
+                this.focused_sidebar_path = Some(path.clone());
+                this.open_sidebar_context_menu(path.clone(), is_dir, event.position, cx);
+            }),
+        )
+        .into_any_element()
     }
 
     pub(crate) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let has_root = !self.sidebar_root.as_os_str().is_empty();
         if has_root {
             self.refresh_sidebar_directories_if_needed(cx);
-            self.refresh_sidebar_git_statuses_if_needed(cx);
             if self.expanded_dirs.contains(&self.sidebar_root)
                 && !self
                     .sidebar_directory_children
@@ -1310,14 +1187,18 @@ impl EditorView {
 
         if let Some(error) = &self.sidebar_error {
             tree_items.push(
-                div()
-                    .w_full()
-                    .px(px(self.scaled(ss.sidebar_error_padding_x_px)))
-                    .py(px(self.scaled(ss.sidebar_error_padding_y_px)))
-                    .text_size(px(self.scaled(ss.sidebar_error_font_size_px)))
-                    .text_color(ss.sidebar_error_text_color)
-                    .child(error.clone())
-                    .into_any_element(),
+                crate::ui::typography::label(
+                    crate::style::TextStyle::new(
+                        f32::from(px(self.scaled(ss.sidebar_error_font_size_px))),
+                        ss.sidebar_error_text_color,
+                    ),
+                    1.0,
+                )
+                .w_full()
+                .px(px(self.scaled(ss.sidebar_error_padding_x_px)))
+                .py(px(self.scaled(ss.sidebar_error_padding_y_px)))
+                .child(error.clone())
+                .into_any_element(),
             );
         }
         if !has_root {
@@ -1332,24 +1213,28 @@ impl EditorView {
                     .justify_center()
                     .px(px(self.scaled(ss.sidebar_empty_padding_x_px)))
                     .child(
-                        div()
-                            .px(px(self.scaled(ss.sidebar_empty_btn_padding_x_px)))
-                            .py(px(self.scaled(ss.sidebar_empty_btn_padding_y_px)))
-                            .rounded_full()
-                            .border(px(ss.sidebar_empty_btn_border_width_px))
-                            .border_dashed()
-                            .border_color(ss.sidebar_empty_btn_border_color)
-                            .text_size(px(self.scaled(ss.sidebar_empty_btn_font_size_px)))
-                            .text_color(ss.sidebar_empty_btn_text_color)
-                            .hover(move |s| s.bg(empty_hover_bg))
-                            .cursor(CursorStyle::Arrow)
-                            .child(self.t(crate::i18n::TextKey::OpenFolder))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.pick_workspace_folder(cx);
-                                }),
+                        crate::ui::typography::label(
+                            crate::style::TextStyle::new(
+                                f32::from(px(self.scaled(ss.sidebar_empty_btn_font_size_px))),
+                                ss.sidebar_empty_btn_text_color,
                             ),
+                            1.0,
+                        )
+                        .px(px(self.scaled(ss.sidebar_empty_btn_padding_x_px)))
+                        .py(px(self.scaled(ss.sidebar_empty_btn_padding_y_px)))
+                        .rounded_full()
+                        .border(px(ss.sidebar_empty_btn_border_width_px))
+                        .border_dashed()
+                        .border_color(ss.sidebar_empty_btn_border_color)
+                        .hover(move |s| s.bg(empty_hover_bg))
+                        .cursor(CursorStyle::Arrow)
+                        .child(self.t(crate::i18n::TextKey::OpenFolder))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.pick_workspace_folder(cx);
+                            }),
+                        ),
                     )
                     .into_any_element(),
             );
@@ -1535,7 +1420,7 @@ impl EditorView {
             &self.sidebar_scroll_handle,
             self.sidebar_scrollbar_track_height(),
             0.0,
-            self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
+            self.scaled(self.styles.self_drawn.scrollbar.right_margin_px),
             cx,
         );
 
@@ -1710,21 +1595,26 @@ impl EditorView {
             .border_color(wss.ws_bar_border_color)
             .cursor(CursorStyle::Arrow)
             .hover(move |s| s.bg(hover_bg))
+            .child(crate::ui::decoration::icon(
+                crate::style::IconStyle::new(
+                    f32::from(px(self.scaled(ss.sidebar_header_root_icon_size_px))),
+                    ss.sidebar_header_icon_color,
+                ),
+                WORKSPACE_EXPAND_SVG_PATH,
+            ))
             .child(
-                svg()
-                    .path(WORKSPACE_EXPAND_SVG_PATH)
-                    .size(px(self.scaled(ss.sidebar_header_root_icon_size_px)))
-                    .text_color(ss.sidebar_header_icon_color),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .text_size(px(self.scaled(ss.sidebar_header_font_size_px)))
-                    .text_color(ss.sidebar_header_text_color)
-                    .truncate()
-                    .child(ws_name),
+                crate::ui::typography::label(
+                    crate::style::TextStyle::new(
+                        f32::from(px(self.scaled(ss.sidebar_header_font_size_px))),
+                        ss.sidebar_header_text_color,
+                    ),
+                    1.0,
+                )
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .truncate()
+                .child(ws_name),
             )
             .on_mouse_down(
                 MouseButton::Left,

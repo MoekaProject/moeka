@@ -68,8 +68,8 @@ fn ime_bounds_use_actual_row_height_after_tall_wrapped_rows() {
     );
 }
 
-fn uses_table_ime_geometry(active_tab_is_diff: bool, table_info: &TableLineInfo) -> bool {
-    !active_tab_is_diff && !table_info.is_separator && !table_info.is_front_matter
+fn uses_table_ime_geometry(table_info: &TableLineInfo) -> bool {
+    !table_info.is_separator && !table_info.is_front_matter
 }
 
 #[cfg(test)]
@@ -110,9 +110,8 @@ fn front_matter_uses_inline_ime_geometry() {
     let table = crate::markdown::parse_decorations("| Key | Value |\n| --- | --- |\n| A | B |");
     let table_info = table[0].table_info.as_ref().unwrap();
 
-    assert!(!uses_table_ime_geometry(false, front_matter_info));
-    assert!(uses_table_ime_geometry(false, table_info));
-    assert!(!uses_table_ime_geometry(true, table_info));
+    assert!(!uses_table_ime_geometry(front_matter_info));
+    assert!(uses_table_ime_geometry(table_info));
 }
 
 #[cfg(test)]
@@ -713,7 +712,6 @@ impl EntityInputHandler for EditorView {
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
         // Typing into the buffer dismisses any read-only phantom-row selection.
-        self.clear_phantom_selection();
         if self.source_mode
             && self.active_file_kind().is_some_and(FileKind::is_markdown)
             && range_utf16.is_none()
@@ -1051,7 +1049,6 @@ impl EntityInputHandler for EditorView {
         let cursor_line_before = self.cursor_line();
         let cursor_had_inline_headroom = self.primary_cursor_has_inline_edit_headroom();
         self.capture_typing_scroll_guard();
-        self.clear_phantom_selection();
         if ime_debug_enabled() {
             ime_debug_log(format!(
                 "replace_and_mark_text_in_range start range_utf16={:?} new_text={:?} new_selected_range_utf16={:?} marked_before={:?} selection_before={:?}",
@@ -1229,7 +1226,7 @@ impl EntityInputHandler for EditorView {
             .decorations
             .get(line)
             .and_then(|decoration| decoration.table_info.as_ref())
-            && uses_table_ime_geometry(self.active_tab_is_diff(), table_info)
+            && uses_table_ime_geometry(table_info)
         {
             let bounds = self.table_row_bounds_for_offset(
                 window,

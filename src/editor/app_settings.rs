@@ -34,6 +34,10 @@ impl ThemeMode {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AppSettings {
+    #[serde(default)]
+    pub ui_corners: crate::style::UiCorners,
+    #[serde(default)]
+    pub ui_elevation: bool,
     #[serde(default = "default_theme")]
     pub theme: String,
     /// `auto` follows the system appearance; `light`/`dark` pin it.
@@ -277,6 +281,8 @@ fn default_sidebar_always_dark() -> bool {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            ui_corners: crate::style::UiCorners::default(),
+            ui_elevation: false,
             theme: default_theme(),
             theme_mode: ThemeMode::Auto.as_str().to_string(),
             dark_theme: default_dark_theme(),
@@ -326,6 +332,16 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    pub(crate) fn ui_style_spec(&self) -> crate::style::UiStyleSpec {
+        crate::style::UiStyleSpec {
+            appearance: crate::style::UiAppearance {
+                corners: self.ui_corners,
+                elevation: self.ui_elevation,
+            },
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn effective_editor_font_size(&self) -> f32 {
         (self.font_size - 1.0).clamp(9.0, 29.0)
     }
@@ -586,6 +602,49 @@ mod tests {
     use crate::editor::attachments::{AttachmentLinkSyntax, AttachmentPathStyle};
     use crate::editor::{ChatAgentCli, TerminalCursorShape};
     use crate::theme::{EditorThemeMode, ThemeKind};
+
+    #[test]
+    fn interface_appearance_defaults_and_roundtrips_without_changing_document_settings() {
+        use crate::style::UiCorners;
+        let legacy: AppSettings = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(legacy.ui_corners, UiCorners::Half);
+        assert!(!legacy.ui_elevation);
+        assert_eq!(
+            legacy.ui_style_spec().appearance,
+            crate::style::UiAppearance::default()
+        );
+        for corners in UiCorners::ALL {
+            for elevation in [false, true] {
+                let settings = AppSettings {
+                    ui_corners: corners,
+                    ui_elevation: elevation,
+                    ..legacy.clone()
+                };
+                let encoded = serde_yaml::to_string(&settings).unwrap();
+                let restored: AppSettings = serde_yaml::from_str(&encoded).unwrap();
+                assert_eq!(restored, settings);
+                assert_eq!(restored.ui_style_spec().appearance.corners, corners);
+                assert_eq!(restored.ui_style_spec().appearance.elevation, elevation);
+                assert_eq!(restored.font_size, legacy.font_size);
+                assert_eq!(restored.editor_theme_mode, legacy.editor_theme_mode);
+            }
+        }
+        // Configs written while the removed preset existed keep loading.
+        let removed: AppSettings = serde_yaml::from_str("ui_style: shadcn").unwrap();
+        assert_eq!(removed, legacy);
+        let removed_paper: AppSettings = serde_yaml::from_str("ui_look: paper_shell").unwrap();
+        assert_eq!(removed_paper, legacy);
+        for (old, expected) in [
+            ("small", UiCorners::Half),
+            ("standard", UiCorners::Half),
+            ("large", UiCorners::Full),
+        ] {
+            let restored: AppSettings =
+                serde_yaml::from_str(&format!("ui_corners: {old}")).unwrap();
+            assert_eq!(restored.ui_corners, expected);
+        }
+        assert!(serde_yaml::from_str::<AppSettings>("ui_corners: round").is_err());
+    }
 
     #[test]
     fn starred_pruning_preserves_unknown_offline_paths_and_only_removes_duplicates() {

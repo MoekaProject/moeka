@@ -662,7 +662,6 @@ impl EditorView {
         self.close_preview_overlay();
         self.reset_table_handles();
         self.clear_extra_cursors();
-        self.clear_phantom_selection();
         self.is_selecting = false;
         self.selection_drag_has_moved = false;
         self.suppress_fold_for_empty_selection_drag = false;
@@ -776,7 +775,6 @@ impl EditorView {
             .move_to(range.start + replacement.len(), &self.buffer);
         self.clear_extra_cursors();
         self.clear_marked_ranges();
-        self.clear_phantom_selection();
         self.selected_handle = None;
         self.reset_cursor_visual_targeting();
         self.reparse();
@@ -820,7 +818,6 @@ impl EditorView {
         self.cursor.move_to(cursor_offset, &self.buffer);
         self.clear_extra_cursors();
         self.clear_marked_ranges();
-        self.clear_phantom_selection();
         self.selected_handle = None;
         self.reset_cursor_visual_targeting();
         self.reparse();
@@ -832,27 +829,13 @@ impl EditorView {
     }
 
     pub(crate) fn search_query_text_input_styles(&self) -> crate::style::TextInputStyles {
-        let mut styles = self.styles.text_input.clone();
-        styles.text_input_height_px = self.scaled(self.styles.search.search_input_height_px);
-        styles.text_input_padding_left_px =
-            self.scaled(self.styles.search.search_input_left_inset_px);
-        styles.text_input_padding_right_px =
-            self.scaled(self.styles.search.search_input_right_inset_px);
-        styles.text_input_font_size_px = self.scaled(self.styles.search.search_input_font_size_px);
-        styles.text_input_radius_px = self.scaled(self.styles.text_input.text_input_radius_px);
-        styles.text_input_cursor_width_px =
-            self.scaled(self.styles.text_input.text_input_cursor_width_px);
-        styles.text_input_bg = gpui::transparent_black();
-        styles.text_input_focus_bg = self.styles.search.search_input_focus_bg;
-        styles.text_input_text_color = self.styles.search.search_match_text_color;
-        styles.text_input_placeholder_color = self.styles.search.search_counter_text_color;
-        styles.text_input_cursor_color = self.styles.search.search_option_btn_active_icon_color;
-        styles.text_input_cursor_height_ratio = self.styles.search.search_input_cursor_height_ratio;
-        styles
+        self.styles
+            .input_styles(crate::style::InputRole::Search, self.ui_scale)
     }
 
     pub(crate) fn search_replace_text_input_styles(&self) -> crate::style::TextInputStyles {
-        self.search_query_text_input_styles()
+        self.styles
+            .input_styles(crate::style::InputRole::Replace, self.ui_scale)
     }
 
     pub(crate) fn render_search_bar(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -897,9 +880,7 @@ impl EditorView {
         };
 
         let input_height = self.scaled(search_styles.search_input_height_px);
-        let button_size = self.scaled(search_styles.search_option_btn_size_px);
         let button_icon_size = self.scaled(search_styles.search_option_btn_icon_size_px);
-        let button_radius = self.scaled(search_styles.search_option_btn_radius_px);
         let button_gap = self.scaled(search_styles.search_input_icon_gap_px);
         let icon_size = self.scaled(search_styles.search_input_icon_size_px);
         let input_left_inset = self.scaled(search_styles.search_input_left_inset_px);
@@ -910,15 +891,10 @@ impl EditorView {
         let fold_button_left = (input_left_inset - fold_button_size).max(0.0) / 2.0;
         let fold_button_top = (input_height - fold_button_size).max(0.0) / 2.0;
 
-        let button_active_bg = search_styles.search_option_btn_active_bg;
-        let button_hover_bg = search_styles.search_option_btn_hover_bg;
         let button_icon_color = search_styles.search_option_btn_icon_color;
         let button_active_icon_color = search_styles.search_option_btn_active_icon_color;
-        let nav_btn_size = self.scaled(search_styles.search_nav_btn_size_px);
         let nav_btn_icon_size = self.scaled(search_styles.search_nav_btn_icon_size_px);
         let nav_icon_color = search_styles.search_nav_btn_icon_color;
-        let nav_hover_bg = search_styles.search_nav_btn_hover_bg;
-        let close_hover_bg = search_styles.search_close_btn_hover_bg;
         let bar_width = self.scaled(search_styles.search_bar_width_px).min(
             (self.last_viewport_width
                 - self.scaled(search_styles.search_bar_offset_right_px) * 2.0)
@@ -940,7 +916,8 @@ impl EditorView {
                         .min((bar_width - self.scaled(16.0)).max(0.0))))
                     .h(px(input_height))
                     .when(regex_error.is_some(), |this| {
-                        this.border_b(px(1.0)).border_color(self.theme.text_danger)
+                        this.border_b(px(1.0))
+                            .border_color(self.styles.ui.colors.danger)
                     })
                     .when_some(self.search_query_editor.clone(), |this, editor| {
                         this.child(editor)
@@ -963,40 +940,38 @@ impl EditorView {
                     })
                     .when(can_replace, |this| {
                         this.child(tooltip::with_tooltip(
-                            div()
-                                .id("search-toggle-replace")
-                                .absolute()
-                                .left(px(fold_button_left))
-                                .top(px(fold_button_top))
-                                .size(px(fold_button_size))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(self.scaled(3.0)))
-                                .hover(move |style| style.bg(button_hover_bg))
-                                .cursor(gpui::CursorStyle::Arrow)
-                                .child(
-                                    svg()
-                                        .path(if replace_visible {
-                                            FOLD_EXPANDED_SVG_PATH
-                                        } else {
-                                            FOLD_SVG_PATH
-                                        })
-                                        .size(px(fold_icon_size))
-                                        .text_color(if replace_visible {
-                                            button_active_icon_color
-                                        } else {
-                                            button_icon_color
-                                        }),
-                                )
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, window, cx| {
-                                        window.prevent_default();
-                                        cx.stop_propagation();
-                                        this.on_toggle_replace(&ToggleReplace, window, cx);
+                            crate::ui::button::icon_button(
+                                "search-toggle-replace",
+                                self.styles
+                                    .search_fold_button(fold_button_size, self.ui_scale),
+                                Default::default(),
+                                self.ui_scale,
+                            )
+                            .absolute()
+                            .left(px(fold_button_left))
+                            .top(px(fold_button_top))
+                            .child(
+                                svg()
+                                    .path(if replace_visible {
+                                        FOLD_EXPANDED_SVG_PATH
+                                    } else {
+                                        FOLD_SVG_PATH
+                                    })
+                                    .size(px(fold_icon_size))
+                                    .text_color(if replace_visible {
+                                        button_active_icon_color
+                                    } else {
+                                        button_icon_color
                                     }),
-                                ),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    window.prevent_default();
+                                    cx.stop_propagation();
+                                    this.on_toggle_replace(&ToggleReplace, window, cx);
+                                }),
+                            ),
                             cx.entity().clone(),
                             self.t(crate::i18n::TextKey::Replace),
                             Some(crate::editor::shortcut::hint("secondary-alt-f")),
@@ -1025,38 +1000,33 @@ impl EditorView {
                     .gap(px(button_gap))
                     .child(
                         self.with_search_tooltip(
-                            div()
-                                .id("search-case-btn")
-                                .w(px(button_size))
-                                .h(px(button_size))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(button_radius))
-                                .cursor(gpui::CursorStyle::Arrow)
-                                .when(
-                                    self.search_case_sensitive,
-                                    |this: gpui::Stateful<gpui::Div>| this.bg(button_active_bg),
-                                )
-                                .hover(move |style| style.bg(button_hover_bg))
-                                .child(
-                                    svg()
-                                        .path(SEARCH_CASE_ICON_SVG_PATH)
-                                        .size(px(button_icon_size))
-                                        .text_color(if self.search_case_sensitive {
-                                            button_active_icon_color
-                                        } else {
-                                            button_icon_color
-                                        }),
-                                )
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.search_case_sensitive = !this.search_case_sensitive;
-                                        this.run_search(cx);
+                            crate::ui::button::icon_button(
+                                "search-case-btn",
+                                self.styles.search_toggle(),
+                                crate::style::ControlState {
+                                    selected: self.search_case_sensitive,
+                                    ..Default::default()
+                                },
+                                self.ui_scale,
+                            )
+                            .child(
+                                svg()
+                                    .path(SEARCH_CASE_ICON_SVG_PATH)
+                                    .size(px(button_icon_size))
+                                    .text_color(if self.search_case_sensitive {
+                                        button_active_icon_color
+                                    } else {
+                                        button_icon_color
                                     }),
-                                ),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.search_case_sensitive = !this.search_case_sensitive;
+                                    this.run_search(cx);
+                                }),
+                            ),
                             "case",
                             Some(crate::editor::shortcut::hint("secondary-alt-c")),
                             cx,
@@ -1064,37 +1034,33 @@ impl EditorView {
                     )
                     .child(
                         self.with_search_tooltip(
-                            div()
-                                .id("search-word-btn")
-                                .w(px(button_size))
-                                .h(px(button_size))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(button_radius))
-                                .cursor(gpui::CursorStyle::Arrow)
-                                .when(self.search_whole_word, |this: gpui::Stateful<gpui::Div>| {
-                                    this.bg(button_active_bg)
-                                })
-                                .hover(move |style| style.bg(button_hover_bg))
-                                .child(
-                                    svg()
-                                        .path(SEARCH_WHOLE_WORD_ICON_SVG_PATH)
-                                        .size(px(button_icon_size))
-                                        .text_color(if self.search_whole_word {
-                                            button_active_icon_color
-                                        } else {
-                                            button_icon_color
-                                        }),
-                                )
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.search_whole_word = !this.search_whole_word;
-                                        this.run_search(cx);
+                            crate::ui::button::icon_button(
+                                "search-word-btn",
+                                self.styles.search_toggle(),
+                                crate::style::ControlState {
+                                    selected: self.search_whole_word,
+                                    ..Default::default()
+                                },
+                                self.ui_scale,
+                            )
+                            .child(
+                                svg()
+                                    .path(SEARCH_WHOLE_WORD_ICON_SVG_PATH)
+                                    .size(px(button_icon_size))
+                                    .text_color(if self.search_whole_word {
+                                        button_active_icon_color
+                                    } else {
+                                        button_icon_color
                                     }),
-                                ),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.search_whole_word = !this.search_whole_word;
+                                    this.run_search(cx);
+                                }),
+                            ),
                             "word",
                             Some(crate::editor::shortcut::hint("secondary-alt-w")),
                             cx,
@@ -1102,37 +1068,33 @@ impl EditorView {
                     )
                     .child(
                         self.with_search_tooltip(
-                            div()
-                                .id("search-regex-btn")
-                                .w(px(button_size))
-                                .h(px(button_size))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(button_radius))
-                                .cursor(gpui::CursorStyle::Arrow)
-                                .when(self.search_use_regex, |this: gpui::Stateful<gpui::Div>| {
-                                    this.bg(button_active_bg)
-                                })
-                                .hover(move |style| style.bg(button_hover_bg))
-                                .child(
-                                    svg()
-                                        .path(SEARCH_REGEX_ICON_SVG_PATH)
-                                        .size(px(button_icon_size))
-                                        .text_color(if self.search_use_regex {
-                                            button_active_icon_color
-                                        } else {
-                                            button_icon_color
-                                        }),
-                                )
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.search_use_regex = !this.search_use_regex;
-                                        this.run_search(cx);
+                            crate::ui::button::icon_button(
+                                "search-regex-btn",
+                                self.styles.search_toggle(),
+                                crate::style::ControlState {
+                                    selected: self.search_use_regex,
+                                    ..Default::default()
+                                },
+                                self.ui_scale,
+                            )
+                            .child(
+                                svg()
+                                    .path(SEARCH_REGEX_ICON_SVG_PATH)
+                                    .size(px(button_icon_size))
+                                    .text_color(if self.search_use_regex {
+                                        button_active_icon_color
+                                    } else {
+                                        button_icon_color
                                     }),
-                                ),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.search_use_regex = !this.search_use_regex;
+                                    this.run_search(cx);
+                                }),
+                            ),
                             "regex",
                             Some(crate::editor::shortcut::hint("secondary-alt-r")),
                             cx,
@@ -1141,34 +1103,29 @@ impl EditorView {
             )
             .child(
                 self.with_search_tooltip(
-                    div()
-                        .id("search-prev-btn")
-                        .flex_none()
-                        .w(px(nav_btn_size))
-                        .h(px(nav_btn_size))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(button_radius))
-                        .cursor(gpui::CursorStyle::Arrow)
-                        .opacity(if match_count > 0 { 1.0 } else { 0.35 })
-                        .when(match_count > 0, |this| {
-                            this.hover(move |style| style.bg(nav_hover_bg))
-                        })
-                        .child(
-                            svg()
-                                .path("assets/icons/navigation/arrow-up.svg")
-                                .size(px(nav_btn_icon_size))
-                                .text_color(nav_icon_color),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                window.prevent_default();
-                                cx.stop_propagation();
-                                this.search_navigate(false, cx);
-                            }),
-                        ),
+                    crate::ui::button::icon_button(
+                        "search-prev-btn",
+                        self.styles.search_navigation(false),
+                        crate::style::ControlState {
+                            disabled: match_count == 0,
+                            ..Default::default()
+                        },
+                        self.ui_scale,
+                    )
+                    .child(
+                        svg()
+                            .path("assets/icons/navigation/arrow-up.svg")
+                            .size(px(nav_btn_icon_size))
+                            .text_color(nav_icon_color),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.search_navigate(false, cx);
+                        }),
+                    ),
                     "previous",
                     Some(crate::editor::shortcut::hint("secondary-shift-g")),
                     cx,
@@ -1176,34 +1133,29 @@ impl EditorView {
             )
             .child(
                 self.with_search_tooltip(
-                    div()
-                        .id("search-next-btn")
-                        .flex_none()
-                        .w(px(nav_btn_size))
-                        .h(px(nav_btn_size))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(button_radius))
-                        .cursor(gpui::CursorStyle::Arrow)
-                        .opacity(if match_count > 0 { 1.0 } else { 0.35 })
-                        .when(match_count > 0, |this| {
-                            this.hover(move |style| style.bg(nav_hover_bg))
-                        })
-                        .child(
-                            svg()
-                                .path("assets/icons/navigation/arrow-down.svg")
-                                .size(px(nav_btn_icon_size))
-                                .text_color(nav_icon_color),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                window.prevent_default();
-                                cx.stop_propagation();
-                                this.search_navigate(true, cx);
-                            }),
-                        ),
+                    crate::ui::button::icon_button(
+                        "search-next-btn",
+                        self.styles.search_navigation(false),
+                        crate::style::ControlState {
+                            disabled: match_count == 0,
+                            ..Default::default()
+                        },
+                        self.ui_scale,
+                    )
+                    .child(
+                        svg()
+                            .path("assets/icons/navigation/arrow-down.svg")
+                            .size(px(nav_btn_icon_size))
+                            .text_color(nav_icon_color),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.search_navigate(true, cx);
+                        }),
+                    ),
                     "next",
                     Some(crate::editor::shortcut::hint("secondary-g")),
                     cx,
@@ -1211,106 +1163,91 @@ impl EditorView {
             )
             .child(
                 self.with_search_tooltip(
-                    div()
-                        .id("search-close-btn")
-                        .flex_none()
-                        .w(px(self.scaled(search_styles.search_close_btn_size_px)))
-                        .h(px(self.scaled(search_styles.search_close_btn_size_px)))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(button_radius))
-                        .cursor(gpui::CursorStyle::Arrow)
-                        .hover(move |style| style.bg(close_hover_bg))
-                        .child(
-                            svg()
-                                .path(SEARCH_CLOSE_ICON_SVG_PATH)
-                                .size(px(button_icon_size))
-                                .text_color(search_styles.search_close_btn_icon_color),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.dismiss_search(window, cx);
-                            }),
-                        ),
+                    crate::ui::button::icon_button(
+                        "search-close-btn",
+                        self.styles.search_navigation(true),
+                        Default::default(),
+                        self.ui_scale,
+                    )
+                    .child(
+                        svg()
+                            .path(SEARCH_CLOSE_ICON_SVG_PATH)
+                            .size(px(button_icon_size))
+                            .text_color(search_styles.search_close_btn_icon_color),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.dismiss_search(window, cx);
+                        }),
+                    ),
                     "close",
                     None,
                     cx,
                 ),
             );
 
-        let mut container = div()
-            .id("search-bar")
-            .key_context("SearchBar EditorSearchBar")
-            .on_action(cx.listener(Self::switch_search_input))
-            .occlude()
-            .absolute()
-            .top(px(self.scaled(search_styles.search_bar_offset_top_px)))
-            .right(px(self.scaled(search_styles.search_bar_offset_right_px)))
-            .w(px(bar_width))
-            .max_w_full()
-            .bg(search_styles.search_bar_bg)
-            .border(px(search_styles.search_bar_border_width_px))
-            .border_color(search_styles.search_bar_border_color)
-            .rounded(px(self.scaled(search_styles.search_bar_radius_px)))
-            .when(search_styles.search_bar_shadow, |this| this.shadow_md())
-            .p(px(self.scaled(search_styles.search_bar_padding_px)))
-            .flex()
-            .flex_col()
-            .gap(px(self.scaled(search_styles.search_bar_gap_px)))
-            .child(query_row);
+        let mut container =
+            crate::ui::surface::surface(&self.styles.search_surface(), self.ui_scale)
+                .id("search-bar")
+                .key_context("SearchBar EditorSearchBar")
+                .on_action(cx.listener(Self::switch_search_input))
+                .occlude()
+                .absolute()
+                .top(px(self.scaled(search_styles.search_bar_offset_top_px)))
+                .right(px(self.scaled(search_styles.search_bar_offset_right_px)))
+                .w(px(bar_width))
+                .max_w_full()
+                .p(px(self.scaled(search_styles.search_bar_padding_px)))
+                .flex()
+                .flex_col()
+                .gap(px(self.scaled(search_styles.search_bar_gap_px)))
+                .child(query_row);
 
         if replace_visible {
-            let replace_btn_hover = search_styles.search_replace_btn_hover_bg;
             let replace_btn_color = search_styles.search_replace_btn_text_color;
-            let replace_btn_size = self.scaled(18.0);
-            let replace_icon_size = self.scaled(12.0);
+            let replace_icon_size = self.scaled(self.styles.search_replace_button().icon_size_px);
 
             let replace_button = |all: bool, cx: &mut Context<Self>| {
                 tooltip::with_tooltip(
-                    div()
-                        .id(if all {
+                    crate::ui::button::icon_button(
+                        if all {
                             "search-replace-all-btn"
                         } else {
                             "search-replace-btn"
-                        })
-                        .size(px(replace_btn_size))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(button_radius))
-                        .cursor(gpui::CursorStyle::Arrow)
-                        .opacity(if can_apply_replace { 1.0 } else { 0.35 })
-                        .when(can_apply_replace, |this| {
-                            this.hover(move |style| style.bg(replace_btn_hover))
-                        })
-                        .child(
-                            svg()
-                                .path(if all {
-                                    "assets/icons/search/replace-all.svg"
+                        },
+                        self.styles.search_replace_button(),
+                        crate::style::ControlState {
+                            disabled: !can_apply_replace,
+                            ..Default::default()
+                        },
+                        self.ui_scale,
+                    )
+                    .child(
+                        svg()
+                            .path(if all {
+                                "assets/icons/search/replace-all.svg"
+                            } else {
+                                "assets/icons/search/replace.svg"
+                            })
+                            .size(px(replace_icon_size))
+                            .text_color(replace_btn_color),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            if can_apply_replace {
+                                if all {
+                                    this.replace_all_matches(cx);
                                 } else {
-                                    "assets/icons/search/replace.svg"
-                                })
-                                .size(px(replace_icon_size))
-                                .text_color(replace_btn_color),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| {
-                                window.prevent_default();
-                                cx.stop_propagation();
-                                if can_apply_replace {
-                                    if all {
-                                        this.replace_all_matches(cx);
-                                    } else {
-                                        this.replace_current_match(cx);
-                                    }
+                                    this.replace_current_match(cx);
                                 }
-                            }),
-                        ),
+                            }
+                        }),
+                    ),
                     cx.entity().clone(),
                     self.t(if all {
                         crate::i18n::TextKey::ReplaceAll
@@ -1363,9 +1300,11 @@ impl EditorView {
             container = container.child(tooltip::with_tooltip(
                 div()
                     .w_full()
-                    .px(px(self.scaled(4.0)))
+                    .px(px(
+                        self.scaled(self.styles.ui.space(crate::style::SpaceStep::One))
+                    ))
                     .text_size(px(self.scaled(search_styles.search_counter_font_size_px)))
-                    .text_color(self.theme.text_danger)
+                    .text_color(self.styles.ui.colors.danger)
                     .whitespace_normal()
                     .child(crate::i18n::search_option_label(
                         self.ui_language,

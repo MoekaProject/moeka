@@ -8,9 +8,9 @@ use std::time::SystemTime;
 
 use chrono::{Datelike, Timelike};
 use gpui::{
-    AnyElement, App, Bounds, ContentMask, Context, Corners, CursorStyle, Element, ElementId,
-    FontWeight, GlobalElementId, LayoutId, MouseButton, MouseDownEvent, Pixels, RenderImage,
-    SharedString, Style, Window, div, prelude::*, px, relative,
+    AnyElement, App, Bounds, ContentMask, Context, Corners, Element, ElementId, GlobalElementId,
+    LayoutId, MouseButton, MouseDownEvent, Pixels, RenderImage, SharedString, Style, Window, div,
+    prelude::*, px, relative,
 };
 use image::{Frame, RgbaImage};
 
@@ -1047,72 +1047,69 @@ impl EditorView {
         };
         let create_parent = dir.to_path_buf();
 
-        div()
-            .w_full()
-            .h(px(self.scaled(ss.file_list_header_height_px)))
-            .pl(px(self.scaled(ss.file_list_header_padding_left_px)))
-            .pr(px(self.scaled(ss.file_list_header_padding_right_px)))
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(ss.file_list_header_gap_px)))
-            .flex_none()
-            .border_b(px(ss.file_list_header_border_width_px))
-            .border_color(ss.file_list_header_border_color)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
-                    if event.click_count >= 2 {
-                        crate::platform::window_chrome::toggle_maximize(window);
-                    } else {
-                        crate::platform::window_chrome::start_drag(window);
-                    }
-                }),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .text_size(px(self.scaled(ss.file_list_header_font_size_px)))
-                            .text_color(ss.file_list_header_text_color)
-                            .overflow_hidden()
-                            .truncate()
-                            .child(name),
+        crate::ui::chrome::navigation_header(
+            self.styles.navigation_header(true, false, false),
+            self.ui_scale,
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
+                if event.click_count >= 2 {
+                    crate::platform::window_chrome::toggle_maximize(window);
+                } else {
+                    crate::platform::window_chrome::start_drag(window);
+                }
+            }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .items_center()
+                .child(
+                    crate::ui::typography::label(
+                        crate::style::TextStyle::new(
+                            f32::from(px(self.scaled(ss.file_list_header_font_size_px))),
+                            ss.file_list_header_text_color,
+                        ),
+                        1.0,
                     )
-                    .child(self.render_sidebar_count_badge(self.file_list_items.len(), true, 0.0)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(self.scaled(ss.sidebar_header_action_gap_px)))
-                    .child(self.render_sidebar_header_action_button(
-                        "file-list-header-sort",
-                        FILETREE_SORT_SVG_PATH,
-                        crate::i18n::sidebar_action_label(self.ui_language, "sort"),
-                        None,
-                        cx,
-                        |this, event, _window, cx| {
-                            this.open_sidebar_sort_menu(event.position, cx);
-                        },
-                    ))
-                    .child(self.render_sidebar_header_action_button(
-                        "file-list-header-create",
-                        FILETREE_ADD_SVG_PATH,
-                        crate::i18n::sidebar_action_label(self.ui_language, "create"),
-                        None,
-                        cx,
-                        move |this, _event, window, cx| {
-                            this.file_list_menu_origin = true;
-                            this.start_create_file(create_parent.clone(), window, cx);
-                        },
-                    )),
-            )
-            .into_any_element()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .truncate()
+                    .child(name),
+                )
+                .child(self.render_sidebar_count_badge(self.file_list_items.len(), true, 0.0)),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(self.scaled(ss.sidebar_header_action_gap_px)))
+                .child(self.render_sidebar_header_action_button(
+                    "file-list-header-sort",
+                    FILETREE_SORT_SVG_PATH,
+                    crate::i18n::sidebar_action_label(self.ui_language, "sort"),
+                    None,
+                    cx,
+                    |this, event, _window, cx| {
+                        this.open_sidebar_sort_menu(event.position, cx);
+                    },
+                ))
+                .child(self.render_sidebar_header_action_button(
+                    "file-list-header-create",
+                    FILETREE_ADD_SVG_PATH,
+                    crate::i18n::sidebar_action_label(self.ui_language, "create"),
+                    None,
+                    cx,
+                    move |this, _event, window, cx| {
+                        this.file_list_menu_origin = true;
+                        this.start_create_file(create_parent.clone(), window, cx);
+                    },
+                )),
+        )
+        .into_any_element()
     }
 
     fn render_file_list_edit_row(
@@ -1149,23 +1146,19 @@ impl EditorView {
             let cache_key = file_list_image_cache_key(&item.path, image_path);
             match self.image_cache.get(&cache_key) {
                 Some(Some(image)) => {
-                    let ss = &self.styles.sidebar;
                     let image_size = self.scaled(self.file_list_item_content_height_px());
-                    let image_radius = self.scaled(ss.file_list_item_thumbnail_radius_px);
+                    let image_radius = self.scaled(self.styles.file_thumbnail().radius_px);
                     return Some(
-                        div()
-                            .w(px(image_size))
-                            .h(px(image_size))
-                            .flex_none()
-                            .overflow_hidden()
-                            .rounded(px(image_radius))
-                            .border(px(ss.file_list_item_thumbnail_border_width_px))
-                            .border_color(ss.file_list_item_thumbnail_border_color)
-                            .child(FileListImageElement {
-                                image: image.clone(),
-                                radius: px(image_radius),
-                            })
-                            .into_any_element(),
+                        crate::ui::decoration::thumbnail(
+                            self.styles.file_thumbnail(),
+                            image_size,
+                            self.ui_scale,
+                        )
+                        .child(FileListImageElement {
+                            image: image.clone(),
+                            radius: px(image_radius),
+                        })
+                        .into_any_element(),
                     );
                 }
                 Some(None) => continue,
@@ -1253,12 +1246,6 @@ impl EditorView {
         let path = item.path.clone();
         let is_selected = self.is_sidebar_item_selected(&path);
         let is_active = self.current_file_path.as_deref() == Some(path.as_path());
-        let row_bg = if is_selected || is_active {
-            ss.file_list_item_selected_bg
-        } else {
-            ss.file_list_item_bg
-        };
-        let hover_bg = ss.file_list_item_hover_bg;
         let title_color = if is_selected || is_active {
             ss.file_list_item_selected_title_color
         } else {
@@ -1307,191 +1294,149 @@ impl EditorView {
         let drag_count = drag_paths.len();
         let drag_label = item.name.clone();
 
-        div()
-            .id(SharedString::from(format!("file-list-{}", path.display())))
-            .w_full()
-            .h(px(self.file_list_item_height_px()))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .gap(px(self.scaled(ss.file_list_item_gap_px)))
-            .px(px(self.scaled(ss.file_list_item_padding_x_px)))
-            .py(px(self.scaled(ss.file_list_item_padding_y_px)))
-            // Uniform dashed separator on every row (selection never changes
-            // the border, so selecting an item cannot shift the layout).
-            .border_b(px(ss.file_list_item_separator_width_px))
-            .border_dashed()
-            .border_color(ss.file_list_item_separator_color)
-            .bg(row_bg)
-            .cursor(CursorStyle::Arrow)
-            .when(!self.sidebar_resizing && !self.file_list_resizing, |this| {
-                this.hover(move |style| style.bg(hover_bg))
-            })
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_start()
-                    .gap(px(self.scaled(ss.file_list_item_thumbnail_gap_px)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(self.scaled(ss.file_list_item_gap_px)))
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(px(self.scaled(ss.file_list_item_title_line_height_px)))
-                                    .flex_none()
+        crate::ui::list::file_row(
+            ss.file_row(),
+            self.file_list_item_height_px(),
+            is_selected || is_active,
+            self.sidebar_resizing || self.file_list_resizing,
+            self.ui_scale,
+        )
+        .id(SharedString::from(format!("file-list-{}", path.display())))
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .items_start()
+                .gap(px(self.scaled(ss.file_list_item_thumbnail_gap_px)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(self.scaled(ss.file_list_item_gap_px)))
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(self.scaled(ss.file_list_item_title_line_height_px)))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .min_w(px(0.0))
+                                .child(
+                                    crate::ui::typography::label(
+                                        ss.file_title(title_color),
+                                        self.ui_scale,
+                                    )
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
                                     .flex()
                                     .items_center()
-                                    .min_w(px(0.0))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w(px(0.0))
-                                            .overflow_hidden()
-                                            .flex()
-                                            .items_center()
-                                            .text_size(px(
-                                                self.scaled(ss.file_list_item_title_font_size_px)
+                                    .child(crate::ui::decoration::file_name_base(title))
+                                    .when_some(
+                                        title_suffix,
+                                        |this, suffix| {
+                                            this.child(crate::ui::decoration::suffix(
+                                                ss.sidebar_item_suffix_opacity,
+                                                suffix,
                                             ))
-                                            .line_height(px(
-                                                self.scaled(ss.file_list_item_title_line_height_px)
-                                            ))
-                                            .text_color(title_color)
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(
-                                                div()
-                                                    .overflow_hidden()
-                                                    .truncate()
-                                                    .whitespace_nowrap()
-                                                    .child(title),
-                                            )
-                                            .when_some(title_suffix, |this, suffix| {
-                                                this.child(
-                                                    div()
-                                                        .flex_none()
-                                                        .whitespace_nowrap()
-                                                        .opacity(ss.sidebar_item_suffix_opacity)
-                                                        .child(suffix),
-                                                )
-                                            }),
+                                        },
                                     ),
+                                ),
+                        )
+                        .when(preview_line_count > 0, |this| {
+                            this.child(
+                                crate::ui::typography::label(ss.file_preview(), self.ui_scale)
+                                    .w_full()
+                                    .h(px(preview_height))
+                                    .overflow_hidden()
+                                    .line_clamp(ss.file_list_item_preview_max_lines)
+                                    .child(preview.clone()),
                             )
-                            .when(preview_line_count > 0, |this| {
-                                this.child(
-                                    div()
-                                        .w_full()
-                                        .h(px(preview_height))
-                                        .overflow_hidden()
-                                        .text_size(px(
-                                            self.scaled(ss.file_list_item_preview_font_size_px)
-                                        ))
-                                        .line_height(px(
-                                            self.scaled(ss.file_list_item_preview_line_height_px)
-                                        ))
-                                        .text_color(ss.file_list_item_preview_color)
-                                        .whitespace_normal()
-                                        .line_clamp(ss.file_list_item_preview_max_lines)
-                                        .child(preview.clone()),
-                                )
-                            }),
-                    )
-                    .when_some(thumbnail, |this, thumbnail| this.child(thumbnail)),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .h(px(self.scaled(ss.file_list_item_time_line_height_px)))
-                    .flex()
-                    .items_center()
-                    .text_size(px(self.scaled(ss.file_list_item_time_font_size_px)))
-                    .line_height(px(self.scaled(ss.file_list_item_time_line_height_px)))
-                    .text_color(ss.file_list_item_time_color)
-                    .whitespace_nowrap()
-                    .child(tooltip::with_tooltip(
-                        div()
-                            .flex_none()
-                            .whitespace_nowrap()
-                            .child(modified_time_label),
-                        cx.entity().clone(),
-                        modified_tooltip,
-                        None::<&'static str>,
-                    ))
-                    .child(div().flex_1().min_w(px(0.0)))
-                    .child(tooltip::with_tooltip(
-                        div()
-                            .flex_none()
-                            .whitespace_nowrap()
-                            .child(created_time_label),
-                        cx.entity().clone(),
-                        created_tooltip,
-                        None::<&'static str>,
-                    )),
-            )
-            .on_click(
-                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    cx.stop_propagation();
-                    let mods = event.modifiers();
-                    let secondary = mods.secondary();
-                    let has_modifier = secondary || mods.shift;
-                    this.sidebar_select_item(&click_path, mods.shift, secondary);
-                    if !has_modifier {
-                        // Unlike FileTree clicks this does not suppress the
-                        // sidebar sync: activating the tab should reveal the
-                        // file in the FileTree so the two panes stay linked.
-                        if event.click_count() >= 2 {
-                            this.focused_sidebar_path = None;
-                            this.open_path_in_permanent_tab(click_path.clone(), true, cx);
-                            this.move_cursor_to_first_line_end();
-                            this.request_editor_focus(cx);
-                        } else if !this.switch_to_existing_editor_tab_for_path(
-                            &click_path,
-                            false,
-                            cx,
-                        ) {
-                            this.open_path_in_preview_tab(click_path.clone(), false, cx);
-                        }
-                    }
-                    window.prevent_default();
-                    cx.notify();
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    if !this.selected_sidebar_paths.contains(&context_menu_path) {
-                        this.sidebar_select_item(&context_menu_path, false, false);
-                    }
-                    this.focused_sidebar_path = Some(context_menu_path.clone());
-                    this.open_file_list_context_menu(context_menu_path.clone(), event.position, cx);
-                    this.file_list_menu_origin = true;
-                }),
-            )
-            .when(!self.sidebar_resizing && !self.file_list_resizing, |this| {
-                let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
-                let ghost_background_color = self.styles.tooltip.tooltip_bg;
-                let ghost_text_color = self.styles.tooltip.tooltip_title_text_color;
-                this.on_drag(
-                    DraggedSidebarItems { paths: drag_paths },
-                    move |_dragged, offset, _window, cx| {
-                        cx.new(|_cx| DraggedSidebarItemsView {
-                            label: drag_label.clone(),
-                            count: drag_count,
-                            font_size_px: ghost_font_size_px,
-                            background_color: ghost_background_color,
-                            text_color: ghost_text_color,
-                            cursor_offset: offset,
-                        })
-                    },
+                        }),
                 )
-            })
-            .into_any_element()
+                .when_some(thumbnail, |this, thumbnail| this.child(thumbnail)),
+        )
+        .child(
+            crate::ui::typography::label(ss.file_time(), self.ui_scale)
+                .w_full()
+                .h(px(self.scaled(ss.file_list_item_time_line_height_px)))
+                .flex()
+                .items_center()
+                .whitespace_nowrap()
+                .child(tooltip::with_tooltip(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .child(modified_time_label),
+                    cx.entity().clone(),
+                    modified_tooltip,
+                    None::<&'static str>,
+                ))
+                .child(div().flex_1().min_w(px(0.0)))
+                .child(tooltip::with_tooltip(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .child(created_time_label),
+                    cx.entity().clone(),
+                    created_tooltip,
+                    None::<&'static str>,
+                )),
+        )
+        .on_click(
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                cx.stop_propagation();
+                let mods = event.modifiers();
+                let secondary = mods.secondary();
+                let has_modifier = secondary || mods.shift;
+                this.sidebar_select_item(&click_path, mods.shift, secondary);
+                if !has_modifier {
+                    // Unlike FileTree clicks this does not suppress the
+                    // sidebar sync: activating the tab should reveal the
+                    // file in the FileTree so the two panes stay linked.
+                    if event.click_count() >= 2 {
+                        this.focused_sidebar_path = None;
+                        this.open_path_in_permanent_tab(click_path.clone(), true, cx);
+                        this.move_cursor_to_first_line_end();
+                        this.request_editor_focus(cx);
+                    } else if !this.switch_to_existing_editor_tab_for_path(&click_path, false, cx) {
+                        this.open_path_in_preview_tab(click_path.clone(), false, cx);
+                    }
+                }
+                window.prevent_default();
+                cx.notify();
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                if !this.selected_sidebar_paths.contains(&context_menu_path) {
+                    this.sidebar_select_item(&context_menu_path, false, false);
+                }
+                this.focused_sidebar_path = Some(context_menu_path.clone());
+                this.open_file_list_context_menu(context_menu_path.clone(), event.position, cx);
+                this.file_list_menu_origin = true;
+            }),
+        )
+        .when(!self.sidebar_resizing && !self.file_list_resizing, |this| {
+            let ghost_style = self.styles.drag_preview(false, self.ui_scale);
+            this.on_drag(
+                DraggedSidebarItems { paths: drag_paths },
+                move |_dragged, offset, _window, cx| {
+                    cx.new(|_cx| DraggedSidebarItemsView {
+                        label: drag_label.clone(),
+                        count: drag_count,
+                        style: ghost_style.clone(),
+                        cursor_offset: offset,
+                    })
+                },
+            )
+        })
+        .into_any_element()
     }
 
     pub(crate) fn render_file_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1602,7 +1547,7 @@ impl EditorView {
             &self.file_list_scroll_handle,
             self.last_window_height,
             0.0,
-            self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
+            self.scaled(self.styles.self_drawn.scrollbar.right_margin_px),
             cx,
         );
         let refresh_ready = !self.file_list_dirty
@@ -1625,29 +1570,28 @@ impl EditorView {
             .child(self.render_file_list_header(&dir, cx))
             .child(if is_empty {
                 let menu_dir = dir.clone();
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(self.scaled(ss.file_list_empty_font_size_px)))
-                    .text_color(ss.file_list_empty_text_color)
-                    .child(self.t(crate::i18n::TextKey::FileListEmpty))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                            this.open_sidebar_context_menu(
-                                menu_dir.clone(),
-                                true,
-                                event.position,
-                                cx,
-                            );
-                            this.file_list_menu_origin = true;
-                        }),
-                    )
-                    .into_any_element()
+                crate::ui::typography::label(
+                    crate::style::TextStyle::new(
+                        f32::from(px(self.scaled(ss.file_list_empty_font_size_px))),
+                        ss.file_list_empty_text_color,
+                    ),
+                    1.0,
+                )
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(self.t(crate::i18n::TextKey::FileListEmpty))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.open_sidebar_context_menu(menu_dir.clone(), true, event.position, cx);
+                        this.file_list_menu_origin = true;
+                    }),
+                )
+                .into_any_element()
             } else {
                 let menu_dir = dir.clone();
                 div()

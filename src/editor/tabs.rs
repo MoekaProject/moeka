@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, Context, CursorStyle, DragMoveEvent, FontWeight, MouseButton, MouseDownEvent,
-    MouseMoveEvent, SharedString, Window, div, prelude::*, px, svg,
+    AnyElement, Context, CursorStyle, DragMoveEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    SharedString, Window, div, prelude::*, px,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -263,17 +263,6 @@ impl EditorView {
             .is_some_and(|tab| tab.kind == TabKind::Settings)
     }
 
-    pub(crate) fn active_git_diff_state(&self) -> Option<&GitDiffState> {
-        self.active_tab_id
-            .as_ref()
-            .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
-            .and_then(|tab| tab.git_diff.as_ref())
-    }
-
-    pub(crate) fn active_git_diff_progress(&self) -> Option<(usize, usize)> {
-        self.active_git_diff_block_progress()
-    }
-
     pub(crate) fn request_editor_focus(&mut self, cx: &mut Context<Self>) {
         self.focused_sidebar_path = None;
         self.pending_editor_focus = true;
@@ -507,9 +496,6 @@ impl EditorView {
             source_word_wrap: closed_tab.source_word_wrap,
             snapshot: closed_tab.snapshot,
             image_view: closed_tab.image_view,
-            whiteboard: closed_tab.whiteboard,
-            git_diff: None,
-            inline_diff: None,
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -657,13 +643,6 @@ impl EditorView {
         default_left_align: bool,
     ) -> OpenTab {
         let (snapshot, file_kind) = Self::load_editor_tab_state_for_bytes(path, bytes);
-        let whiteboard = if matches!(file_kind, FileKind::Whiteboard) {
-            Some(WhiteboardTabState::new(
-                WhiteboardDocument::from_json_bytes(bytes),
-            ))
-        } else {
-            None
-        };
         let mut history = history_store::load_tab_history(&id, Some(path), &snapshot);
         history.saved_text = Some(snapshot.text.clone());
         let initial_left_aligned = matches!(file_kind, FileKind::Markdown) && default_left_align;
@@ -679,9 +658,6 @@ impl EditorView {
             source_word_wrap: true,
             snapshot,
             image_view: ImageViewState::default(),
-            whiteboard,
-            git_diff: None,
-            inline_diff: None,
             is_preview,
             is_dirty: false,
             is_deleted: false,
@@ -901,7 +877,7 @@ impl EditorView {
     pub(crate) fn persist_active_tab_state(&mut self) {
         self.commit_history_transaction();
         if let Some(index) = self.active_tab_index() {
-            if matches!(self.tabs[index].kind, TabKind::Editor | TabKind::Diff) {
+            if matches!(self.tabs[index].kind, TabKind::Editor) {
                 if self.tabs[index]
                     .file_kind
                     .as_ref()
@@ -976,14 +952,13 @@ impl EditorView {
         self.source_mode = tab_source_mode;
         self.source_word_wrap = tab_source_word_wrap;
         if switching_tabs {
-            self.clear_inline_diff_phantom_layout_cache();
             self.restore_generated_preview_cache_for_tab(&tab_id);
         }
         if tab_kind.is_terminal() {
             self.hide_right_panels_for_terminal(cx);
             self.pending_terminal_focus = Some(tab_id.clone());
         }
-        if matches!(tab_kind, TabKind::Editor | TabKind::Diff) {
+        if matches!(tab_kind, TabKind::Editor) {
             if tab_file_kind
                 .as_ref()
                 .is_some_and(FileKind::supports_text_buffer)
@@ -1033,7 +1008,6 @@ impl EditorView {
             }
         }
         self.record_active_tab_navigation_target();
-        self.mark_inline_diff_dirty(true);
         if self.search_visible {
             self.run_search(cx);
         }
@@ -1442,9 +1416,6 @@ impl EditorView {
                 extra_cursors: Vec::new(),
             },
             image_view: ImageViewState::default(),
-            whiteboard: None,
-            git_diff: None,
-            inline_diff: None,
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -1545,9 +1516,6 @@ impl EditorView {
                 extra_cursors: Vec::new(),
             },
             image_view: ImageViewState::default(),
-            whiteboard: None,
-            git_diff: None,
-            inline_diff: None,
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -1576,13 +1544,6 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ts = &self.styles.tab_bar;
-        let text_color = if is_deleted {
-            ts.tab_item_deleted_text_color
-        } else if is_active {
-            ts.tab_item_active_text_color
-        } else {
-            ts.tab_item_text_color
-        };
         let display_title = tab
             .path
             .as_ref()
@@ -1602,28 +1563,10 @@ impl EditorView {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| tab.title.clone());
 
-        let label = div()
-            .flex_1()
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .flex()
-            .gap(px(0.0))
-            .items_center()
-            .text_size(px(self.scaled(ts.tab_item_font_size_px)))
-            .text_color(text_color)
-            .when(is_preview && !is_active, |this| this.opacity(0.72))
-            .when(is_preview, |this| {
-                this.font_family(crate::platform::fonts::PROPORTIONAL)
-                    .italic()
-            })
-            .font_weight(if is_preview {
-                FontWeight::NORMAL
-            } else if is_active {
-                FontWeight::MEDIUM
-            } else {
-                FontWeight::NORMAL
-            })
-            .when(is_deleted, |this| this.line_through());
+        let label = crate::ui::decoration::file_name(
+            self.styles.tab_name(is_active, is_preview, is_deleted),
+            self.ui_scale,
+        );
         let label = if let Some(display_title_end) = display_title_end {
             label
                 .child(
@@ -1644,7 +1587,7 @@ impl EditorView {
         } else {
             let (base, suffix) = split_file_name_for_display(&display_title_start);
             label
-                .child(div().whitespace_nowrap().child(base.to_string()))
+                .child(crate::ui::decoration::file_name_base(base.to_string()))
                 .when_some(suffix.filter(|_| tab.path.is_some()), |this, suffix| {
                     this.child(
                         div()
@@ -1663,393 +1606,6 @@ impl EditorView {
         )
     }
 
-    fn active_tab_breadcrumb_items(&self) -> Vec<(String, Option<PathBuf>)> {
-        let Some(tab) = self
-            .active_tab_index()
-            .and_then(|index| self.tabs.get(index))
-        else {
-            return Vec::new();
-        };
-
-        let Some(path) = tab.path.as_ref() else {
-            return vec![(tab.title.clone(), None)];
-        };
-
-        let Some(root) = self.workspace_root_for_path(path) else {
-            return vec![(tab.title.clone(), Some(path.clone()))];
-        };
-
-        let root_name = root
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| root.display().to_string());
-
-        let mut segments = vec![(root_name, Some(root.clone()))];
-        let mut segment_path = root.clone();
-        if let Ok(relative_path) = path.strip_prefix(&root) {
-            for component in relative_path.components() {
-                if let std::path::Component::Normal(name) = component {
-                    let segment = name.to_string_lossy().into_owned();
-                    if !segment.is_empty() {
-                        segment_path.push(&segment);
-                        segments.push((segment, Some(segment_path.clone())));
-                    }
-                }
-            }
-        }
-
-        if segments.len() == 1 {
-            segments.push((tab.title.clone(), Some(path.clone())));
-        }
-
-        segments
-    }
-
-    fn diff_path_bar_navigation_labels(&self) -> (&'static str, &'static str, &'static str) {
-        let show_only_changes = self.active_git_diff_show_only_changes();
-        (
-            crate::i18n::diff_nav_label(
-                self.ui_language,
-                if show_only_changes {
-                    "expand"
-                } else {
-                    "collapse"
-                },
-            ),
-            crate::i18n::diff_nav_label(self.ui_language, "previous"),
-            crate::i18n::diff_nav_label(self.ui_language, "next"),
-        )
-    }
-
-    pub(crate) fn render_active_tab_path_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let es = &self.styles.editor;
-        let gap = self.scaled(es.editor_path_bar_gap_px);
-        let separator_size = self.scaled(es.editor_path_bar_separator_size_px);
-        let action_gap = self.scaled(es.editor_path_bar_action_gap_px);
-        let action_size = self.scaled(es.editor_path_bar_action_btn_size_px);
-        let action_icon_size = self.scaled(es.editor_path_bar_action_icon_size_px);
-        let action_hover_opacity = es.editor_path_bar_action_hover_opacity;
-        let item_padding_x = self.scaled(es.editor_path_bar_item_padding_x_px);
-        let item_padding_y = self.scaled(es.editor_path_bar_item_padding_y_px);
-        let item_radius = self.scaled(es.editor_path_bar_item_radius_px);
-        let item_hover_text_color = es.editor_path_bar_item_hover_text_color;
-        let item_opacity = es.editor_path_bar_item_opacity;
-        let diff_group_gap = self.scaled(es.editor_path_bar_diff_group_gap_px);
-        let diff_button_label_gap = self.scaled(es.editor_path_bar_diff_button_label_gap_px);
-        let diff_navigation_labels = self.diff_path_bar_navigation_labels();
-        let diff_label = self
-            .active_git_diff_state()
-            .map(|diff| (diff.source_label.clone(), diff.target_label.clone()));
-        let mut breadcrumb = div()
-            .id("editor-path-bar-content")
-            .flex_1()
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .flex()
-            .items_center()
-            .gap(px(gap));
-        let segments = self.active_tab_breadcrumb_items();
-
-        for (index, (segment, segment_path)) in segments.iter().enumerate() {
-            if index > 0 {
-                breadcrumb = breadcrumb.child(
-                    svg()
-                        .path("assets/icons/navigation/right.svg")
-                        .size(px(separator_size))
-                        .flex_none()
-                        .text_color(es.editor_path_bar_separator_color),
-                );
-            }
-
-            let is_last = index + 1 == segments.len();
-            let segment_path = segment_path.clone();
-            if is_last {
-                let (base, suffix) = split_file_name_for_display(segment);
-                let mut current = div()
-                    .cursor(CursorStyle::Arrow)
-                    .when_some(segment_path.clone(), |this, reveal_path| {
-                        this.on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.reveal_path_in_sidebar(reveal_path.clone(), cx);
-                            }),
-                        )
-                    })
-                    .flex()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .overflow_hidden();
-                current = current.child(
-                    div()
-                        .px(px(item_padding_x))
-                        .py(px(item_padding_y))
-                        .rounded(px(item_radius))
-                        .text_color(item_hover_text_color)
-                        .opacity(item_opacity)
-                        .hover(move |style| style.opacity(1.0))
-                        .flex()
-                        .min_w(px(0.0))
-                        .overflow_hidden()
-                        .items_center()
-                        .whitespace_nowrap()
-                        .child(div().whitespace_nowrap().child(base.to_string()))
-                        .when_some(suffix.clone(), |this, suffix| {
-                            this.child(
-                                div()
-                                    .flex_none()
-                                    .whitespace_nowrap()
-                                    .opacity(es.editor_path_bar_suffix_opacity)
-                                    .child(suffix.to_string()),
-                            )
-                        }),
-                );
-                breadcrumb = breadcrumb.child(current);
-            } else {
-                breadcrumb = breadcrumb.child(
-                    div()
-                        .cursor(CursorStyle::Arrow)
-                        .when_some(segment_path, |this, reveal_path| {
-                            this.on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.reveal_path_in_sidebar(reveal_path.clone(), cx);
-                                }),
-                            )
-                        })
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .child(
-                            div()
-                                .px(px(item_padding_x))
-                                .py(px(item_padding_y))
-                                .rounded(px(item_radius))
-                                .text_color(item_hover_text_color)
-                                .opacity(item_opacity)
-                                .hover(move |style| style.opacity(1.0))
-                                .whitespace_nowrap()
-                                .child(segment.clone()),
-                        ),
-                );
-            }
-        }
-
-        div()
-            .id("editor-path-bar")
-            .w_full()
-            .h(px(self.scaled(es.editor_path_bar_height_px)))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px(px(self.scaled(es.editor_path_bar_padding_x_px)))
-            .bg(es.editor_path_bar_bg)
-            .border_b(px(self.scaled(es.editor_path_bar_border_width_px)))
-            .border_color(es.editor_path_bar_border_color)
-            .text_size(px(self.scaled(es.editor_path_bar_font_size_px)))
-            .text_color(es.editor_path_bar_text_color)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event, window, cx| {
-                    this.on_mouse_down(event, window, cx);
-                }),
-            )
-            .child(breadcrumb)
-            .when_some(diff_label, |this, (source_label, target_label)| {
-                let (toggle_label, previous_label, next_label) = diff_navigation_labels;
-                let diff_progress = self.active_git_diff_progress();
-                let diff_button =
-                    |icon_path: &'static str,
-                     label: &'static str,
-                     enabled: bool,
-                     handler: fn(&mut Self, &mut Context<Self>)| {
-                        let mut button = div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap(px(gap))
-                            .whitespace_nowrap()
-                            .cursor(CursorStyle::Arrow)
-                            .opacity(if enabled {
-                                item_opacity
-                            } else {
-                                item_opacity * 0.55
-                            })
-                            .child(
-                                svg()
-                                    .path(icon_path)
-                                    .size(px(action_icon_size))
-                                    .flex_none()
-                                    .text_color(es.editor_path_bar_text_color),
-                            )
-                            .child(label);
-
-                        if enabled {
-                            button = button.hover(move |style| style.opacity(1.0)).on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    handler(this, cx);
-                                }),
-                            );
-                        }
-
-                        button
-                    };
-
-                this.child(
-                    div()
-                        .pl(px(action_gap))
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .text_color(es.editor_path_bar_text_color)
-                        .child(
-                            div()
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .gap(px(diff_group_gap))
-                                .mr(px(diff_button_label_gap))
-                                .when_some(diff_progress, |this, (current, total)| {
-                                    this.child(
-                                        div()
-                                            .flex_none()
-                                            .whitespace_nowrap()
-                                            .opacity(item_opacity)
-                                            .child(format!("[{current}/{total}]")),
-                                    )
-                                })
-                                .when_some(
-                                    self.active_git_diff_added_removed_stats(),
-                                    |this, (added, removed)| {
-                                        this.child(
-                                            div()
-                                                .flex()
-                                                .flex_none()
-                                                .items_center()
-                                                .gap(px(gap))
-                                                .whitespace_nowrap()
-                                                .child(
-                                                    div()
-                                                        .flex_none()
-                                                        .text_color(self.theme.git_status_added)
-                                                        .child(format!("+{added}")),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_none()
-                                                        .text_color(self.theme.text_danger)
-                                                        .child(format!("-{removed}")),
-                                                ),
-                                        )
-                                    },
-                                )
-                                .child(diff_button(
-                                    "assets/icons/navigation/expand.svg",
-                                    toggle_label,
-                                    true,
-                                    Self::toggle_git_diff_show_only_changes,
-                                ))
-                                .child(diff_button(
-                                    "assets/icons/navigation/arrow-up-circle.svg",
-                                    previous_label,
-                                    self.can_navigate_previous_git_diff_row(),
-                                    Self::navigate_previous_git_diff_row,
-                                ))
-                                .child(diff_button(
-                                    "assets/icons/navigation/arrow-down-circle.svg",
-                                    next_label,
-                                    self.can_navigate_next_git_diff_row(),
-                                    Self::navigate_next_git_diff_row,
-                                ))
-                                .when(self.active_git_diff_supports_hunk_revert(), |this| {
-                                    this.child(diff_button(
-                                        BACK_SVG_PATH,
-                                        self.t(crate::i18n::TextKey::InlineDiffRevert),
-                                        self.can_revert_current_git_diff_hunk(),
-                                        Self::revert_current_git_diff_hunk,
-                                    ))
-                                }),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .gap(px(self.scaled(es.editor_path_bar_diff_label_arrow_gap_px)))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .whitespace_nowrap()
-                                        .opacity(item_opacity)
-                                        .child(source_label),
-                                )
-                                .child(
-                                    svg()
-                                        .path("assets/icons/navigation/right.svg")
-                                        .size(px(separator_size))
-                                        .flex_none()
-                                        .text_color(es.editor_path_bar_separator_color),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .whitespace_nowrap()
-                                        .opacity(item_opacity)
-                                        .child(target_label),
-                                ),
-                        ),
-                )
-            })
-            .when(self.active_tab_supports_text_search(), |this| {
-                this.child(
-                    div()
-                        .pl(px(if self.active_git_diff_state().is_some() {
-                            self.scaled(es.editor_path_bar_diff_search_gap_px)
-                        } else {
-                            action_gap
-                        }))
-                        .pr(px(self.scaled(es.editor_path_bar_action_padding_right_px)))
-                        .flex()
-                        .items_center()
-                        .child(
-                            div()
-                                .id("editor-path-bar-search")
-                                .w(px(action_size))
-                                .h(px(action_size))
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .justify_center()
-                                .cursor(CursorStyle::Arrow)
-                                .opacity(es.editor_path_bar_action_opacity)
-                                .hover(move |style| style.opacity(action_hover_opacity))
-                                .child(
-                                    svg()
-                                        .path(FILETREE_SEARCH_SVG_PATH)
-                                        .size(px(action_icon_size))
-                                        .text_color(es.editor_path_bar_text_color),
-                                )
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        if this.search_visible {
-                                            this.dismiss_search(window, cx);
-                                        } else {
-                                            this.open_search(false, window, cx);
-                                        }
-                                    }),
-                                ),
-                        ),
-                )
-            })
-            .into_any_element()
-    }
-
     fn render_tab_file_indicator(&self, tab: &OpenTab, is_active: bool) -> AnyElement {
         let ts = &self.styles.tab_bar;
         let opacity = if is_active {
@@ -2059,46 +1615,24 @@ impl EditorView {
         };
         let icon_size = px(self.scaled(ts.tab_item_icon_size_px));
 
-        if tab.kind == TabKind::Diff {
-            return div()
-                .min_w(px(self.scaled(ts.tab_item_badge_min_width_px)))
-                .h(px(self.scaled(ts.tab_item_badge_height_px)))
-                .px(px(self.scaled(ts.tab_item_badge_padding_x_px)))
-                .rounded(px(self.scaled(ts.tab_item_badge_radius_px)))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(ts.tab_item_badge_bg)
-                .text_size(px(self.scaled(ts.tab_item_badge_font_size_px)))
-                .text_color(ts.tab_item_badge_text_color)
-                .opacity(opacity)
-                .child("DIFF")
-                .into_any_element();
-        }
-
         if tab.is_pinned {
-            return svg()
-                .path("assets/icons/format/pin.svg")
-                .size(px(self.scaled(ts.tab_pin_icon_size_px)))
-                .text_color(ts.tab_pin_icon_color)
-                .opacity(opacity)
-                .into_any_element();
+            return crate::ui::decoration::icon(
+                crate::style::IconStyle::new(
+                    f32::from(px(self.scaled(ts.tab_pin_icon_size_px))),
+                    ts.tab_pin_icon_color,
+                ),
+                "assets/icons/format/pin.svg",
+            )
+            .opacity(opacity)
+            .into_any_element();
         }
 
         if let Some(path) = tab.path.as_ref()
             && let Some(label) = file_kind_badge_text(path)
         {
-            return div()
+            return crate::ui::typography::badge(self.styles.tab_badge(), self.ui_scale)
                 .min_w(px(self.scaled(ts.tab_item_badge_min_width_px)))
                 .h(px(self.scaled(ts.tab_item_badge_height_px)))
-                .px(px(self.scaled(ts.tab_item_badge_padding_x_px)))
-                .rounded(px(self.scaled(ts.tab_item_badge_radius_px)))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(ts.tab_item_badge_bg)
-                .text_size(px(self.scaled(ts.tab_item_badge_font_size_px)))
-                .text_color(ts.tab_item_badge_text_color)
                 .opacity(opacity)
                 .child(label)
                 .into_any_element();
@@ -2116,12 +1650,12 @@ impl EditorView {
                 .into_any_element();
         }
 
-        svg()
-            .path(MARKDOWN_SVG_PATH)
-            .size(icon_size)
-            .text_color(ts.tab_item_icon_color)
-            .opacity(opacity)
-            .into_any_element()
+        crate::ui::decoration::icon(
+            crate::style::IconStyle::new(f32::from(icon_size), ts.tab_item_icon_color),
+            MARKDOWN_SVG_PATH,
+        )
+        .opacity(opacity)
+        .into_any_element()
     }
 
     pub(crate) fn render_tab(
@@ -2150,17 +1684,11 @@ impl EditorView {
         let drop_tab_id = tab.id.clone();
         let drag_title = tab.title.clone();
         let ts = &self.styles.tab_bar;
-        let tab_hover_bg = ts.tab_item_hover_bg;
-        let close_hover_bg = ts.tab_item_close_hover_bg;
+        let tab_surface_style = self.styles.tab_surface();
         let drop_indicator_color = ts.tab_drop_indicator_color;
         let drop_indicator_width = ts.tab_drop_indicator_width_px;
         let source_opacity = ts.tab_drag_source_opacity;
         let tab_surface_height = self.tab_bar_height();
-        let tab_bg = if is_active {
-            ts.tab_item_active_bg
-        } else {
-            ts.tab_item_bg
-        };
         let is_being_dragged = self.tab_dragging_id.as_deref() == Some(tab.id.as_str());
         let current_tab_ids: Vec<String> = self
             .tabs
@@ -2287,112 +1815,92 @@ impl EditorView {
                 });
             }))
             .child(
-                div()
-                    .relative()
-                    .h(px(tab_surface_height))
-                    .pl(px(self.scaled(ts.tab_item_padding_left_px)))
-                    .pr(px(self.scaled(ts.tab_item_padding_right_px)))
-                    .flex()
-                    .items_center()
-                    .gap(px(self.scaled(ts.tab_item_gap_px)))
-                    .bg(tab_bg)
-                    .border_r(px(ts.tab_item_border_width_px))
-                    .border_color(ts.tab_item_border_color)
-                    .when(!is_active, |this| {
-                        this.hover(move |style| style.bg(tab_hover_bg))
+                crate::ui::chrome::tab_surface(
+                    tab_surface_style,
+                    self.ui_scale,
+                    tab_surface_height,
+                    is_active,
+                )
+                .when(true, |this| {
+                    this.when(tab_kind == TabKind::Editor, |this| {
+                        this.child(self.render_tab_file_indicator(tab, is_active))
                     })
-                    .when(true, |this| {
-                        this.when(tab_kind == TabKind::Editor, |this| {
-                            this.child(self.render_tab_file_indicator(tab, is_active))
-                        })
-                        .when(tab_kind == TabKind::Diff, |this| {
-                            this.child(self.render_tab_file_indicator(tab, is_active))
-                        })
-                        .when_some(tab_kind.terminal_agent(), |this, agent_cli| {
-                            this.child(
-                                svg()
-                                    .path(agent_cli.icon_path())
-                                    .size(px(self.scaled(ts.tab_item_icon_size_px)))
-                                    .text_color(ts.tab_item_icon_color)
-                                    .opacity(if is_active {
-                                        ts.tab_item_icon_active_opacity
-                                    } else {
-                                        ts.tab_item_icon_inactive_opacity
-                                    }),
-                            )
-                        })
-                        .when(tab_kind == TabKind::Settings, |this| {
-                            this.child(
-                                svg()
-                                    .path("assets/icons/appearance/setting.svg")
-                                    .size(px(self.scaled(ts.tab_item_icon_size_px)))
-                                    .text_color(ts.tab_item_icon_color)
-                                    .opacity(if is_active {
-                                        ts.tab_item_icon_active_opacity
-                                    } else {
-                                        ts.tab_item_icon_inactive_opacity
-                                    }),
-                            )
-                        })
-                        .child(
-                            self.render_tab_title_label(tab, is_active, is_preview, is_deleted, cx),
-                        )
-                        .child(tooltip::with_tooltip(
-                            div()
-                                .id(SharedString::from(format!("close-{}", tab.id)))
-                                .w(px(self.scaled(ts.tab_item_close_size_px)))
-                                .h(px(self.scaled(ts.tab_item_close_size_px)))
-                                .rounded_full()
-                                .flex()
-                                .flex_none()
-                                .justify_center()
-                                .items_center()
-                                .when(is_dirty, |this| {
-                                    this.child(
-                                        div()
-                                            .w(px(self.scaled(ts.tab_item_dirty_dot_size_px)))
-                                            .h(px(self.scaled(ts.tab_item_dirty_dot_size_px)))
-                                            .rounded_full()
-                                            .bg(ts.tab_item_dirty_dot_color),
-                                    )
-                                })
-                                .when(!is_dirty, |this| {
-                                    this.text_size(px(self.scaled(ts.tab_item_close_font_size_px)))
-                                        .text_color(ts.tab_item_close_text_color)
-                                        .opacity(if is_active {
-                                            ts.tab_item_close_active_opacity
-                                        } else {
-                                            ts.tab_item_close_inactive_opacity
-                                        })
-                                        .group_hover("tab-item", |style| {
-                                            style.opacity(ts.tab_item_close_active_opacity)
-                                        })
-                                        .hover(move |style| style.bg(close_hover_bg))
-                                        .child("✕")
-                                })
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.request_close_tab(&close_id, cx);
-                                    }),
-                                ),
-                            cx.entity().clone(),
-                            self.t(crate::i18n::TextKey::Close),
-                            Some(crate::editor::shortcut::hint("secondary-w")),
-                        ))
-                    })
-                    .when(!is_active, |this| {
+                    .when_some(tab_kind.terminal_agent(), |this, agent_cli| {
                         this.child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .bottom_0()
-                                .h(px(ts.tab_bar_border_width_px))
-                                .bg(ts.tab_bar_border_color),
+                            crate::ui::decoration::icon(
+                                crate::style::IconStyle::new(
+                                    f32::from(px(self.scaled(ts.tab_item_icon_size_px))),
+                                    ts.tab_item_icon_color,
+                                ),
+                                agent_cli.icon_path(),
+                            )
+                            .opacity(if is_active {
+                                ts.tab_item_icon_active_opacity
+                            } else {
+                                ts.tab_item_icon_inactive_opacity
+                            }),
                         )
-                    }),
+                    })
+                    .when(tab_kind == TabKind::Settings, |this| {
+                        this.child(
+                            crate::ui::decoration::icon(
+                                crate::style::IconStyle::new(
+                                    f32::from(px(self.scaled(ts.tab_item_icon_size_px))),
+                                    ts.tab_item_icon_color,
+                                ),
+                                "assets/icons/appearance/setting.svg",
+                            )
+                            .opacity(if is_active {
+                                ts.tab_item_icon_active_opacity
+                            } else {
+                                ts.tab_item_icon_inactive_opacity
+                            }),
+                        )
+                    })
+                    .child(self.render_tab_title_label(tab, is_active, is_preview, is_deleted, cx))
+                    .child(tooltip::with_tooltip(
+                        crate::ui::button::button(
+                            SharedString::from(format!("close-{}", tab.id)),
+                            self.styles.tab_close(is_active, is_dirty),
+                            Default::default(),
+                            self.ui_scale,
+                        )
+                        .w(px(self.scaled(ts.tab_item_close_size_px)))
+                        .when(is_dirty, |this| {
+                            this.child(crate::ui::decoration::swatch(
+                                self.styles.tab_dirty_dot(),
+                                self.ui_scale,
+                            ))
+                        })
+                        .when(!is_dirty, |this| {
+                            this.group_hover("tab-item", |style| {
+                                style.opacity(ts.tab_item_close_active_opacity)
+                            })
+                            .child("✕")
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.request_close_tab(&close_id, cx);
+                            }),
+                        ),
+                        cx.entity().clone(),
+                        self.t(crate::i18n::TextKey::Close),
+                        Some(crate::editor::shortcut::hint("secondary-w")),
+                    ))
+                })
+                .when(!is_active, |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .h(px(ts.tab_bar_border_width_px))
+                            .bg(ts.tab_bar_border_color),
+                    )
+                }),
             )
             // Drag initiation: create ghost element
             .on_drag(
@@ -2403,15 +1911,11 @@ impl EditorView {
                     source_pane_id: pane_id,
                 },
                 {
-                    let ghost_font_size_px = self.scaled(self.styles.ui_font_size_px);
-                    let ghost_background_color = self.styles.tooltip.tooltip_bg;
-                    let ghost_text_color = self.styles.tooltip.tooltip_title_text_color;
+                    let ghost_style = self.styles.drag_preview(true, self.ui_scale);
                     move |dragged, offset, _window, cx| {
                         cx.new(|_cx| DraggedTabView {
                             title: dragged.title.clone(),
-                            font_size_px: ghost_font_size_px,
-                            background_color: ghost_background_color,
-                            text_color: ghost_text_color,
+                            style: ghost_style.clone(),
                             cursor_offset: offset,
                         })
                     }
@@ -2529,43 +2033,21 @@ impl EditorView {
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
-        let ts = &self.styles.tab_bar;
-        let button_height = (self.tab_bar_height() - self.scaled(6.0)).max(18.0);
-        let icon_size = self.scaled(match id {
-            "tab-bar-outline-toggle" => ts.tab_action_emphasis_icon_size_px - 1.0,
-            "tab-bar-theme-toggle" => ts.tab_action_emphasis_icon_size_px,
-            _ => ts.tab_item_icon_size_px,
-        });
-        let button_padding_x = self.scaled(ts.tab_action_button_padding_x_px);
-        let button_opacity = if is_active {
-            ts.tab_item_icon_active_opacity
-        } else {
-            ts.tab_item_icon_inactive_opacity
-        };
-        let icon_color = if is_active {
-            ts.tab_item_active_text_color
-        } else {
-            ts.tab_item_icon_color
-        };
-        let button = div()
-            .id(id)
-            .w(px(icon_size + button_padding_x * 2.0))
-            .h(px(button_height))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .opacity(button_opacity)
-            .when(is_enabled, |this| {
-                this.hover(move |style| style.opacity(ts.tab_item_icon_active_opacity))
-            })
-            .cursor(CursorStyle::Arrow)
-            .child(
-                svg()
-                    .path(icon_path)
-                    .size(px(icon_size))
-                    .text_color(icon_color),
-            )
+        let style = self
+            .styles
+            .tab_action(id, is_active, self.tab_bar_height(), self.ui_scale);
+        let icon_size = self.scaled(style.icon_size_px);
+        let icon_color = style.normal.foreground;
+        let mut style = style;
+        if !is_enabled {
+            style.hover = style.normal;
+            style.pressed = style.normal;
+        }
+        let button = crate::ui::button::button(id, style, Default::default(), self.ui_scale)
+            .child(crate::ui::decoration::icon(
+                crate::style::IconStyle::new(f32::from(px(icon_size)), icon_color),
+                icon_path,
+            ))
             .when(is_enabled, |this| {
                 this.on_mouse_down(
                     MouseButton::Left,
@@ -2601,11 +2083,10 @@ impl EditorView {
         let ts = &self.styles.tab_bar;
         let height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
         // Fluent caption buttons are 46x32dp regardless of the surrounding UI.
-        let width = self.scaled(crate::style::WINDOW_CAPTION_BUTTON_WIDTH_PX);
-        let icon_size = self.scaled(13.0);
+        let icon_size = self.scaled(self.styles.ui.spec.application.caption_icon_size_px);
         let icon_color = ts.tab_item_icon_color;
-        let hover_bg = ts.tab_item_hover_bg;
         let is_maximized = self.window_is_maximized;
+        let close_foreground = self.styles.ui.colors.caption_close_hover_foreground;
 
         let button = |id: &'static str,
                       icon: &'static str,
@@ -2614,44 +2095,35 @@ impl EditorView {
                       cx: &mut Context<Self>,
                       action: fn(&mut Window)| {
             let group = SharedString::from(id);
-            div()
-                .id(id)
-                .group(group.clone())
-                .relative()
-                .w(px(width))
-                .h(px(height))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor(CursorStyle::Arrow)
-                .hover(move |style| {
-                    style.bg(if danger {
-                        gpui::rgb(0x00c42b1c).into()
-                    } else {
-                        hover_bg
-                    })
-                })
-                .child(
-                    svg()
-                        .path(icon)
-                        .size(px(icon_size))
-                        .text_color(icon_color)
-                        // The red close hover needs a light glyph to stay legible.
-                        .when(danger, |this| {
-                            this.group_hover(group, |style| style.text_color(gpui::white()))
-                        }),
+            crate::ui::button::button(
+                id,
+                self.styles
+                    .caption_button(true, danger, height, self.ui_scale),
+                Default::default(),
+                self.ui_scale,
+            )
+            .group(group.clone())
+            .relative()
+            .child(
+                crate::ui::decoration::icon(
+                    crate::style::IconStyle::new(f32::from(px(icon_size)), icon_color),
+                    icon,
                 )
-                .window_control_area(area)
-                // Windows routes these through the non-client area, so this only
-                // runs where that path does not exist.
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |_, _, window, cx| {
-                        cx.stop_propagation();
-                        action(window);
-                    }),
-                )
+                // The red close hover needs a light glyph to stay legible.
+                .when(danger, |this| {
+                    this.group_hover(group, move |style| style.text_color(close_foreground))
+                }),
+            )
+            .window_control_area(area)
+            // Windows routes these through the non-client area, so this only
+            // runs where that path does not exist.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, _, window, cx| {
+                    cx.stop_propagation();
+                    action(window);
+                }),
+            )
         };
 
         div()
@@ -2698,38 +2170,34 @@ impl EditorView {
     pub(super) fn render_window_caption_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
         let ts = &self.styles.tab_bar;
         let height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
-        let button_size = self.scaled(20.0);
-        let icon_size = self.scaled(12.0);
-        let gap = self.scaled(12.0);
-        let padding = self.scaled(12.0);
+        let icon_size = self.scaled(self.styles.ui.spec.application.linux_caption_icon_size_px);
+        let gap = self.scaled(self.styles.ui.spec.application.linux_caption_gap_px);
+        let padding = self.scaled(self.styles.ui.spec.application.linux_caption_padding_px);
         let icon_color = ts.tab_item_icon_color;
-        let hover_bg = ts.tab_item_hover_bg;
         let is_maximized = self.window_is_maximized;
 
         let button = |id: &'static str,
                       icon: &'static str,
                       cx: &mut Context<Self>,
                       action: fn(&mut Window)| {
-            div()
-                .id(id)
-                .w(px(button_size))
-                .h(px(button_size))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .cursor(CursorStyle::Arrow)
-                .hover(move |style| style.bg(hover_bg))
-                .active(move |style| style.bg(hover_bg))
-                .child(svg().path(icon).size(px(icon_size)).text_color(icon_color))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |_, _, window, cx| {
-                        cx.stop_propagation();
-                        action(window);
-                    }),
-                )
+            crate::ui::button::button(
+                id,
+                self.styles
+                    .caption_button(false, false, height, self.ui_scale),
+                Default::default(),
+                self.ui_scale,
+            )
+            .child(crate::ui::decoration::icon(
+                crate::style::IconStyle::new(f32::from(px(icon_size)), icon_color),
+                icon,
+            ))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, _, window, cx| {
+                    cx.stop_propagation();
+                    action(window);
+                }),
+            )
         };
 
         div()
@@ -2785,41 +2253,43 @@ impl EditorView {
         let opacity = ts.tab_update_button_opacity;
         let hover_opacity = ts.tab_update_button_hover_opacity;
 
-        div()
-            .id("tab-bar-update-ready")
-            .h(px(button_height))
-            .px(px(padding_x))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(gap))
-            .rounded(px(self.scaled(ts.tab_update_button_radius_px)))
-            .opacity(opacity)
-            .text_size(px(self.scaled(ts.tab_update_button_font_size_px)))
-            .text_color(text_color)
-            .cursor(CursorStyle::Arrow)
-            .hover(move |style| style.opacity(hover_opacity).text_color(hover_text_color))
-            .child(
-                svg()
-                    .path(SITE_SVG_PATH)
-                    .size(px(icon_size))
-                    .text_color(icon_color),
-            )
-            .child(
-                self.prepared_update()
-                    .map(|update| {
-                        crate::i18n::update_available_label(self.ui_language, Some(&update.version))
-                    })
-                    .unwrap_or_else(|| crate::i18n::update_available_label(self.ui_language, None)),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.show_prepared_update_dialog(cx);
-                }),
-            )
-            .into_any_element()
+        crate::ui::typography::label(
+            crate::style::TextStyle::new(
+                f32::from(px(self.scaled(ts.tab_update_button_font_size_px))),
+                text_color,
+            ),
+            1.0,
+        )
+        .id("tab-bar-update-ready")
+        .h(px(button_height))
+        .px(px(padding_x))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(gap))
+        .rounded(px(self.scaled(ts.tab_update_button_radius_px)))
+        .opacity(opacity)
+        .cursor(CursorStyle::Arrow)
+        .hover(move |style| style.opacity(hover_opacity).text_color(hover_text_color))
+        .child(crate::ui::decoration::icon(
+            crate::style::IconStyle::new(f32::from(px(icon_size)), icon_color),
+            SITE_SVG_PATH,
+        ))
+        .child(
+            self.prepared_update()
+                .map(|update| {
+                    crate::i18n::update_available_label(self.ui_language, Some(&update.version))
+                })
+                .unwrap_or_else(|| crate::i18n::update_available_label(self.ui_language, None)),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.show_prepared_update_dialog(cx);
+            }),
+        )
+        .into_any_element()
     }
 
     pub(crate) fn render_tab_bar_toggle_actions(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2895,7 +2365,9 @@ impl EditorView {
                         div()
                             .w(px(self.scaled(1.0)))
                             .h(px(self.scaled(14.0)))
-                            .mx(px(self.scaled(5.0)))
+                            .mx(px(self.scaled(
+                                self.styles.ui.space(crate::style::SpaceStep::OneAndQuarter),
+                            )))
                             .flex_none()
                             .bg(ts.tab_bar_border_color),
                     )
@@ -2943,21 +2415,6 @@ impl EditorView {
                 cx,
                 |this, cx| this.toggle_info_panel(cx),
             ))
-            .when(crate::platform::capabilities::CHILD_PROCESSES, |this| {
-                this.child(self.render_tab_bar_action_button(
-                    "tab-bar-git-toggle",
-                    GIT_HISTORY_SVG_PATH,
-                    self.is_utility_panel_active(RightUtilityPanel::GitHistory),
-                    true,
-                    None,
-                    self.t(crate::i18n::TextKey::GitPanelTitle),
-                    Some(crate::editor::shortcut::hint(
-                        crate::platform::keys::TOGGLE_GIT_HISTORY,
-                    )),
-                    cx,
-                    |this, cx| this.toggle_git_history_panel(cx),
-                ))
-            })
             .into_any_element()
     }
 
@@ -3040,39 +2497,43 @@ impl EditorView {
             .into_any_element();
 
         let new_tab_button = tooltip::with_tooltip(
-            div()
-                .h(px(inner_height))
-                .w(px(self.scaled(ts.tab_new_width_px)))
-                .flex_none()
-                .flex()
-                .justify_center()
-                .items_center()
-                .border_r(px(ts.tab_item_border_width_px))
-                .border_color(gpui::transparent_black())
-                .text_size(px(self.scaled(ts.tab_new_font_size_px)))
-                .text_color(ts.tab_new_text_color)
-                .hover(move |style| {
-                    style
-                        .text_color(new_hover_color)
-                        .bg(new_hover_bg)
-                        .border_color(ts.tab_item_border_color)
-                })
-                .child("+")
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.create_scratch_tab(cx);
-                    }),
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                        this.open_terminal_tab_create_context_menu(event.position, cx);
-                    }),
+            crate::ui::typography::label(
+                crate::style::TextStyle::new(
+                    f32::from(px(self.scaled(ts.tab_new_font_size_px))),
+                    ts.tab_new_text_color,
                 ),
+                1.0,
+            )
+            .h(px(inner_height))
+            .w(px(self.scaled(ts.tab_new_width_px)))
+            .flex_none()
+            .flex()
+            .justify_center()
+            .items_center()
+            .border_r(px(ts.tab_item_border_width_px))
+            .border_color(gpui::transparent_black())
+            .hover(move |style| {
+                style
+                    .text_color(new_hover_color)
+                    .bg(new_hover_bg)
+                    .border_color(ts.tab_item_border_color)
+            })
+            .child("+")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.create_scratch_tab(cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.open_terminal_tab_create_context_menu(event.position, cx);
+                }),
+            ),
             cx.entity().clone(),
             self.t(crate::i18n::TextKey::NewFile),
             Some(crate::editor::shortcut::hint("secondary-t")),
@@ -3166,13 +2627,16 @@ impl EditorView {
                     .cursor(CursorStyle::Arrow)
                     .when(enabled, |this| {
                         this.child(
-                            svg()
-                                .path(icon_path)
-                                .size(px(history_icon_size))
-                                .text_color(ts.tab_history_btn_icon_color)
-                                .group_hover("tab-history-button", move |style| {
-                                    style.text_color(ts.tab_history_btn_hover_icon_color)
-                                }),
+                            crate::ui::decoration::icon(
+                                crate::style::IconStyle::new(
+                                    f32::from(px(history_icon_size)),
+                                    ts.tab_history_btn_icon_color,
+                                ),
+                                icon_path,
+                            )
+                            .group_hover("tab-history-button", move |style| {
+                                style.text_color(ts.tab_history_btn_hover_icon_color)
+                            }),
                         )
                         .on_mouse_down(
                             MouseButton::Left,
@@ -3183,12 +2647,13 @@ impl EditorView {
                         )
                     })
                     .when(!enabled, |this| {
-                        this.child(
-                            svg()
-                                .path(icon_path)
-                                .size(px(history_icon_size))
-                                .text_color(ts.tab_history_btn_icon_disabled_color),
-                        )
+                        this.child(crate::ui::decoration::icon(
+                            crate::style::IconStyle::new(
+                                f32::from(px(history_icon_size)),
+                                ts.tab_history_btn_icon_disabled_color,
+                            ),
+                            icon_path,
+                        ))
                     })
             };
         let sidebar_tooltip = if self.workspaces.is_empty() {
@@ -3209,13 +2674,16 @@ impl EditorView {
                 .bg(ts.tab_history_btn_bg)
                 .cursor(CursorStyle::Arrow)
                 .child(
-                    svg()
-                        .path("assets/icons/workspace/file-tree-toggle.svg")
-                        .size(px(self.scaled(ts.tab_item_icon_size_px)))
-                        .text_color(ts.tab_history_btn_icon_color)
-                        .group_hover("tab-history-button", move |style| {
-                            style.text_color(ts.tab_history_btn_hover_icon_color)
-                        }),
+                    crate::ui::decoration::icon(
+                        crate::style::IconStyle::new(
+                            f32::from(px(self.scaled(ts.tab_item_icon_size_px))),
+                            ts.tab_history_btn_icon_color,
+                        ),
+                        "assets/icons/workspace/file-tree-toggle.svg",
+                    )
+                    .group_hover("tab-history-button", move |style| {
+                        style.text_color(ts.tab_history_btn_hover_icon_color)
+                    }),
                 )
                 .on_mouse_down(
                     MouseButton::Left,
@@ -3613,9 +3081,6 @@ mod tests {
                 ..Default::default()
             },
             image_view: ImageViewState::default(),
-            whiteboard: None,
-            git_diff: None,
-            inline_diff: None,
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -3640,6 +3105,28 @@ mod tests {
             tab.history.saved_text.as_deref(),
             Some(tab.snapshot.text.as_str())
         );
+    }
+
+    #[test]
+    fn legacy_moeka_files_open_as_exact_plain_text_without_json_parsing() {
+        for text in [
+            "",
+            "{ \"elements\": [], \"extra\": \"保留\" }\r\n",
+            "{ invalid JSON, still editable text",
+        ] {
+            let tab = EditorView::build_file_tab(
+                "test-tab".into(),
+                Path::new("legacy.moeka"),
+                text.as_bytes(),
+                false,
+                false,
+            );
+            assert_eq!(tab.file_kind, Some(FileKind::Text));
+            assert_eq!(tab.snapshot.text, text);
+            assert_eq!(tab.history.saved_text.as_deref(), Some(text));
+            assert!(!tab.is_dirty);
+            assert!(tab.recovery.text.is_none());
+        }
     }
 
     #[test]

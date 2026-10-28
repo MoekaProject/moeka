@@ -7,71 +7,40 @@
 //! enqueueing deferred draws while processing the deferred prepaint queue.
 //! The retired floating selection toolbar must not be restored.
 
+pub(crate) use crate::ui::self_drawn::LineFormatToolbarGeometry;
+
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Element, ElementId, Entity,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseMoveEvent, Pixels, Point,
-    Position, Size, Style, Window, point, px, relative, size,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseMoveEvent, Pixels, Position,
+    Style, Window, px, relative, size,
 };
 
 use super::{EditorView, PaneId};
 
+#[cfg(test)]
 pub(super) const FORMAT_TRIGGER_HOVER_OPACITY: f32 = 0.9;
 
-#[derive(Clone, Debug)]
-pub(crate) struct LineFormatToolbarGeometry {
-    pub(crate) line: usize,
-    pub(crate) viewport: Bounds<Pixels>,
-    pub(crate) content_left: Pixels,
-    pub(crate) trigger_bounds: Bounds<Pixels>,
-}
-
-impl LineFormatToolbarGeometry {
-    fn toolbar_origin(
-        &self,
-        measured: Size<Pixels>,
-        margin: Pixels,
-        gap: Pixels,
-    ) -> Option<Point<Pixels>> {
-        if !positive_bounds(Bounds::new(point(px(0.0), px(0.0)), measured))
-            || measured.width + margin * 2.0 > self.viewport.size.width
-            || measured.height + margin * 2.0 > self.viewport.size.height
-        {
-            return None;
-        }
-        let left = self.viewport.left() + margin;
-        let right = self.viewport.right() - margin - measured.width;
-        let x = self.content_left.clamp(left, right);
-        let above = self.trigger_bounds.top() - gap - measured.height;
-        let below = self.trigger_bounds.bottom() + gap;
-        let y = if above >= self.viewport.top() + margin {
-            above
-        } else if below + measured.height <= self.viewport.bottom() - margin {
-            below
-        } else {
-            return None;
-        };
-        Some(point(x, y))
-    }
-}
-
-fn positive_bounds(bounds: Bounds<Pixels>) -> bool {
-    f32::from(bounds.origin.x).is_finite()
-        && f32::from(bounds.origin.y).is_finite()
-        && f32::from(bounds.size.width).is_finite()
-        && f32::from(bounds.size.height).is_finite()
-        && bounds.size.width > px(0.0)
-        && bounds.size.height > px(0.0)
-}
-
 impl EditorView {
+    pub(super) fn sync_line_control_style_metrics(&mut self) {
+        self.format_trigger_animation_epoch = self.format_trigger_animation_epoch.wrapping_add(1);
+        self.line_format_toolbar_animation_epoch =
+            self.line_format_toolbar_animation_epoch.wrapping_add(1);
+        self.format_trigger_animation_task = None;
+        self.line_format_toolbar_animation_task = None;
+        self.format_trigger_opacity = self.desired_format_trigger_opacity();
+        self.format_trigger_opacity_target = self.format_trigger_opacity;
+        self.line_format_toolbar_opacity = self.desired_line_format_toolbar_opacity();
+        self.line_format_toolbar_opacity_target = self.line_format_toolbar_opacity;
+    }
+
     fn desired_format_trigger_opacity(&self) -> f32 {
         if self.hovering_format_trigger_line.is_some()
             || self.line_format_toolbar_hovered
             || self.format_toolbar_owns_hover_menu()
         {
-            FORMAT_TRIGGER_HOVER_OPACITY
+            self.styles.self_drawn.format_trigger_hover_opacity
         } else if self.hovering_format_line.is_some() {
-            0.34
+            self.styles.self_drawn.format_trigger_line_opacity
         } else {
             0.0
         }
@@ -86,6 +55,7 @@ impl EditorView {
         self.format_trigger_animation_epoch = self.format_trigger_animation_epoch.wrapping_add(1);
         let epoch = self.format_trigger_animation_epoch;
         let pane_id = self.current_pane_id();
+        let frame_ms = self.styles.self_drawn.format_trigger_animation_frame_ms;
         self.format_trigger_animation_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 let done = this
@@ -105,7 +75,8 @@ impl EditorView {
                                 cx.notify();
                                 return true;
                             }
-                            this.format_trigger_opacity += difference * 0.22;
+                            this.format_trigger_opacity +=
+                                difference * this.styles.self_drawn.format_trigger_animation_step;
                             cx.notify();
                             false
                         })
@@ -116,7 +87,7 @@ impl EditorView {
                     break;
                 }
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(16))
+                    .timer(std::time::Duration::from_millis(frame_ms))
                     .await;
             }
         }));
@@ -144,6 +115,7 @@ impl EditorView {
             self.line_format_toolbar_animation_epoch.wrapping_add(1);
         let epoch = self.line_format_toolbar_animation_epoch;
         let pane_id = self.current_pane_id();
+        let frame_ms = self.styles.self_drawn.format_trigger_animation_frame_ms;
         self.line_format_toolbar_animation_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 let done = this
@@ -165,7 +137,8 @@ impl EditorView {
                                 cx.notify();
                                 return true;
                             }
-                            this.line_format_toolbar_opacity += difference * 0.22;
+                            this.line_format_toolbar_opacity +=
+                                difference * this.styles.self_drawn.format_trigger_animation_step;
                             cx.notify();
                             false
                         })
@@ -176,7 +149,7 @@ impl EditorView {
                     break;
                 }
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(16))
+                    .timer(std::time::Duration::from_millis(frame_ms))
                     .await;
             }
         }));
@@ -337,8 +310,9 @@ impl Element for LineFormatToolbarElement {
                 .iter()
                 .find(|geometry| geometry.line == line)
                 .cloned()?;
-            let margin = px(editor.scaled(6.0));
-            let gap = px(0.0);
+            let margin =
+                px(editor.scaled(editor.styles.self_drawn.line_toolbar_viewport_margin_px));
+            let gap = px(editor.scaled(editor.styles.self_drawn.line_toolbar_trigger_gap_px));
             let available_width = geometry.viewport.size.width - margin * 2.0;
             if available_width <= px(0.0) {
                 return None;
@@ -453,6 +427,7 @@ impl Element for LineFormatToolbarElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::point;
 
     fn rect(x: f32, y: f32, width: f32, height: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(x), px(y)), size(px(width), px(height)))

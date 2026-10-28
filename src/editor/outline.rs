@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, SharedString, div, prelude::*,
-    px, svg,
+    px,
 };
 use std::cell::Ref;
 
@@ -1535,13 +1535,7 @@ fn outline_dashed_guide_segments(
             let top = start_y + index as f32 * step;
             let segment_height = dash_length.min(end_y - top);
             (segment_height > 0.0).then(|| {
-                div()
-                    .absolute()
-                    .left(px(x))
-                    .top(px(top))
-                    .w(px(width))
-                    .h(px(segment_height))
-                    .bg(color)
+                crate::ui::decoration::guide_segment(x, top, width, segment_height, color)
                     .into_any_element()
             })
         })
@@ -2074,13 +2068,14 @@ impl EditorView {
         let os = &self.styles.outline;
         let right_margin = self.scaled(os.outline_rail_right_margin_px);
         let scrollbar_hit_left_from_right = self.scaled(
-            self.styles.editor.editor_scrollbar_right_margin_px
+            self.styles.self_drawn.scrollbar.right_margin_px
                 + self
                     .styles
-                    .editor
-                    .editor_scrollbar_hit_width_px
-                    .max(self.styles.editor.editor_scrollbar_width_px)
-                    .max(self.styles.editor.editor_scrollbar_hover_width_px),
+                    .self_drawn
+                    .scrollbar
+                    .hit_width_px
+                    .max(self.styles.self_drawn.scrollbar.width_px)
+                    .max(self.styles.self_drawn.scrollbar.hover_width_px),
         );
         let track_right = scrollbar_hit_left_from_right.min(right_margin);
         let track_extra_right_padding = (right_margin - track_right).max(0.0);
@@ -2213,14 +2208,14 @@ impl EditorView {
                             .flex()
                             .justify_end()
                             .child(
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "outline-rail-tick-{slot_index}"
-                                    )))
-                                    .w(px(animated_tick_width))
-                                    .h(px(tick_thickness))
-                                    .rounded_full()
-                                    .bg(base_tick_color),
+                                crate::ui::decoration::outline_tick(
+                                    animated_tick_width,
+                                    tick_thickness,
+                                    base_tick_color,
+                                )
+                                .id(SharedString::from(format!(
+                                    "outline-rail-tick-{slot_index}"
+                                ))),
                             ),
                     )
                     .on_mouse_down(
@@ -2327,10 +2322,8 @@ impl EditorView {
         let bottom_spacer = self.scaled(ups.utility_panel_bottom_spacer_height_px);
         let header_height = self.scaled(ups.utility_panel_header_height_px);
         let header_padding_x = self.scaled(ups.utility_panel_header_padding_x_px);
-        let header_font_size = self.scaled(ups.utility_panel_header_font_size_px);
         let section_gap = self.scaled(ups.utility_panel_section_gap_px);
         let section_padding_x = self.scaled(ups.utility_panel_section_padding_x_px);
-        let empty_font_size = self.scaled(ups.utility_panel_empty_font_size_px);
         let item_min_height = self.scaled(os.outline_rail_label_item_height_px).max(22.0);
         let item_padding_y = self.scaled(os.outline_rail_label_item_padding_y_px);
         let line_height = self.scaled(os.outline_rail_label_line_height_px);
@@ -2348,10 +2341,11 @@ impl EditorView {
         let panel_width = self.utility_panel_layout_width().max(self.scaled(10.0));
         let scrollbar_reserve = self.scaled(
             self.styles
-                .editor
-                .editor_scrollbar_hit_width_px
-                .max(self.styles.editor.editor_scrollbar_width_px)
-                + self.styles.editor.editor_scrollbar_right_margin_px,
+                .self_drawn
+                .scrollbar
+                .hit_width_px
+                .max(self.styles.self_drawn.scrollbar.width_px)
+                + self.styles.self_drawn.scrollbar.right_margin_px,
         );
         let outline_row_height = |_: &OutlineHeading, _: usize| {
             (item_padding_y * 2.0 + line_height).max(item_min_height)
@@ -2381,29 +2375,19 @@ impl EditorView {
 
         let mut children: Vec<AnyElement> = vec![
             div().h(px(top_spacer)).flex_shrink_0().into_any_element(),
-            div()
-                .h(px(header_height))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .px(px(header_padding_x))
-                .text_size(px(header_font_size))
-                .text_color(ups.utility_panel_header_text_color)
+            crate::ui::panel::header(ups.header(), self.ui_scale)
                 .child(crate::i18n::outline_title(self.ui_language))
                 .into_any_element(),
         ];
 
         if headings.is_empty() {
             children.push(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(empty_font_size))
-                    .text_color(ups.utility_panel_empty_text_color)
-                    .child(crate::i18n::outline_empty(self.ui_language))
-                    .into_any_element(),
+                crate::ui::panel::empty(
+                    ups.empty_text(),
+                    crate::i18n::outline_empty(self.ui_language),
+                    self.ui_scale,
+                )
+                .into_any_element(),
             );
         } else {
             children.push(div().h(px(section_gap)).flex_shrink_0().into_any_element());
@@ -2425,7 +2409,6 @@ impl EditorView {
                         .into_any_element(),
                 );
             }
-            let active_bg = ups.utility_panel_button_hover_bg;
             let fold_icon_hover_color = os.outline_rail_label_hover_color;
             let render_start = list_window.render.start;
             for (visible_offset, (heading_index, depth)) in visible_heading_indices
@@ -2487,78 +2470,63 @@ impl EditorView {
                 };
 
                 children.push(
-                    div()
-                        .w_full()
-                        .max_w_full()
-                        .overflow_hidden()
-                        .min_h(px(row_height))
-                        .flex_shrink_0()
-                        .relative()
-                        .pl(px(inner_padding_left))
-                        .pr(px(section_padding_x))
-                        .py(px(item_padding_y))
-                        .flex()
-                        .items_center()
-                        .gap(px(fold_icon_gap))
-                        .text_size(px(font_size))
-                        .text_color(color)
-                        .line_height(px(line_height))
-                        .cursor(CursorStyle::Arrow)
-                        .when(is_active, |this| this.bg(active_bg))
-                        .hover(move |style| style.bg(active_bg))
-                        .children(guide_segments)
-                        .when(has_children, |this| {
-                            this.child(
-                                div()
-                                    .w(px(fold_icon_hit_size))
-                                    .h(px(fold_icon_hit_size))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(color)
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                            cx.stop_propagation();
-                                            this.toggle_outline_rail_heading_collapsed(
-                                                target_line,
-                                                cx,
-                                            );
-                                        }),
+                    crate::ui::list::outline_row(
+                        self.styles.outline_row(is_active),
+                        row_height,
+                        inner_padding_left,
+                        is_active,
+                        self.ui_scale,
+                    )
+                    .children(guide_segments)
+                    .when(has_children, |this| {
+                        this.child(
+                            crate::ui::typography::fragment(color)
+                                .w(px(fold_icon_hit_size))
+                                .h(px(fold_icon_hit_size))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_outline_rail_heading_collapsed(target_line, cx);
+                                    }),
+                                )
+                                .child(
+                                    crate::ui::decoration::icon(
+                                        crate::style::IconStyle::new(
+                                            f32::from(px(fold_icon_size)),
+                                            color,
+                                        ),
+                                        icon_path,
                                     )
-                                    .child(
-                                        svg()
-                                            .path(icon_path)
-                                            .size(px(fold_icon_size))
-                                            .text_color(color)
-                                            .hover(move |style| {
-                                                style.text_color(fold_icon_hover_color)
-                                            }),
-                                    ),
-                            )
-                        })
-                        .when(!has_children, |this| {
-                            this.child(div().w(px(fold_icon_hit_size)).flex_none())
-                        })
-                        .child(
-                            div()
-                                .w(px(0.0))
-                                .min_w(px(0.0))
-                                .flex_1()
-                                .truncate()
-                                .child(heading.text.clone()),
+                                    .hover(move |style| style.text_color(fold_icon_hover_color)),
+                                ),
                         )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.outline_rail_clicked_active_line = Some(target_line);
-                                this.scroll_to_line(target_line, cx);
-                                this.flash_outline_heading_line(target_line, cx);
-                            }),
-                        )
-                        .into_any_element(),
+                    })
+                    .when(!has_children, |this| {
+                        this.child(div().w(px(fold_icon_hit_size)).flex_none())
+                    })
+                    .child(
+                        div()
+                            .w(px(0.0))
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
+                            .child(heading.text.clone()),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.outline_rail_clicked_active_line = Some(target_line);
+                            this.scroll_to_line(target_line, cx);
+                            this.flash_outline_heading_line(target_line, cx);
+                        }),
+                    )
+                    .into_any_element(),
                 );
             }
             if list_window.bottom_spacer_px > 0.0 {
@@ -2582,20 +2550,13 @@ impl EditorView {
             &self.outline_panel_scroll_handle,
             f32::from(self.outline_panel_scroll_handle.bounds().size.height),
             0.0,
-            self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
+            self.scaled(self.styles.self_drawn.scrollbar.right_margin_px),
             cx,
         );
 
-        div()
+        crate::ui::panel::panel(ups.panel())
             .id("outline-panel")
-            .h_full()
-            .w_full()
             .min_w(px(0.0))
-            .bg(ups.utility_panel_bg)
-            .relative()
-            .overflow_hidden()
-            .border_l(px(ups.utility_panel_border_width_px))
-            .border_color(ups.utility_panel_border_color)
             .child(
                 div()
                     .id("outline-panel-scroll")

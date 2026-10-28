@@ -351,7 +351,6 @@ impl EditorView {
                     Ok(()) => {
                         this.clear_sidebar_fs_error("Read sidebar directory", &path);
                         this.invalidate_sidebar_flattened_items();
-                        this.invalidate_sidebar_git_statuses();
                     }
                     Err(error) => {
                         this.report_sidebar_fs_error("Read sidebar directory", &path, error, cx);
@@ -362,12 +361,6 @@ impl EditorView {
             .ok();
         })
         .detach();
-    }
-
-    pub(crate) fn invalidate_sidebar_git_statuses(&mut self) {
-        self.sidebar_git_statuses_dirty = true;
-        self.sidebar_git_statuses_refresh_epoch =
-            self.sidebar_git_statuses_refresh_epoch.wrapping_add(1);
     }
 
     pub(crate) fn toggle_sidebar_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) {

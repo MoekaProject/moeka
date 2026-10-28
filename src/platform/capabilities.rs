@@ -7,7 +7,7 @@
 
 /// Whether the app may spawn helper processes.
 ///
-/// Gates the terminal, the agent CLIs and every `git` invocation.
+/// Gates the terminal, agent CLIs and other helper processes.
 pub(crate) const CHILD_PROCESSES: bool = !cfg!(feature = "mas");
 
 /// Whether the app ships its own updater.

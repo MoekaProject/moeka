@@ -13,6 +13,7 @@ pub(crate) mod keys;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 pub(crate) mod paths;
+#[cfg(windows)]
 pub(crate) mod process;
 pub(crate) mod security_scope;
 pub(crate) mod shell;

@@ -682,8 +682,6 @@ mod tests {
             3,
             16.0,
             &theme,
-            crate::theme::with_alpha(theme.git_status_added, 0.24),
-            crate::theme::with_alpha(theme.text_danger, 0.28),
             theme.link,
             FontWeight::NORMAL,
             theme.list_marker,

@@ -1,6 +1,6 @@
 # Mermaid 图表画廊
 
-这是一份供 Moeka 实际预览的图表样例集，包含常见图表语法、C4 子类型和复杂连线示例。直接在编辑或阅读模式打开本文件即可，不需要网络或外部图片。
+本文件是 `mermaid_gallery_diagrams_render_in_light_and_dark_themes` 的 42 个图表测试夹具，也可在 Moeka 中用于原生预览检查。维护要点见 [AGENTS.md](../../AGENTS.md#rendering-and-themes)。
 
 ## 如何查看
 

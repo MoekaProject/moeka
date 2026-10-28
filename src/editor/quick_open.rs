@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use gpui::{AnyElement, Context, CursorStyle, MouseButton, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, MouseButton, Window, div, prelude::*, px};
 use pinyin::ToPinyin;
 
 use super::*;
@@ -17,16 +17,22 @@ impl EditorView {
             div()
                 .flex()
                 .items_center()
-                .gap(px(self.scaled(4.0)))
+                .gap(px(
+                    self.scaled(self.styles.ui.space(crate::style::SpaceStep::One))
+                ))
                 .child(
                     div()
                         .h(px(self.scaled(16.0)))
                         .min_w(px(self.scaled(20.0)))
-                        .px(px(self.scaled(4.0)))
+                        .px(px(
+                            self.scaled(self.styles.ui.space(crate::style::SpaceStep::One))
+                        ))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(self.scaled(4.0)))
+                        .rounded(px(
+                            self.scaled(self.styles.ui.spec.appearance.corners.factor() * 4.0)
+                        ))
                         .bg(key_bg)
                         .border(px(self.ui_border_width(self.scaled(1.0))))
                         .border_color(key_border)
@@ -40,10 +46,14 @@ impl EditorView {
             .w_full()
             .h(px(self.scaled(28.0)))
             .flex_none()
-            .px(px(self.scaled(8.0)))
+            .px(px(
+                self.scaled(self.styles.ui.space(crate::style::SpaceStep::Two))
+            ))
             .flex()
             .items_center()
-            .gap(px(self.scaled(12.0)))
+            .gap(px(self.scaled(
+                self.styles.ui.space(crate::style::SpaceStep::Three),
+            )))
             .border_t(px(self.ui_border_width(1.0)))
             .border_color(styles.quick_open_panel_border_color)
             .text_size(px(font_size))
@@ -101,22 +111,8 @@ impl EditorView {
     }
 
     pub(crate) fn quick_open_text_input_styles(&self) -> crate::style::TextInputStyles {
-        let mut styles = self.styles.text_input.clone();
-        styles.text_input_padding_left_px =
-            self.styles.quick_open.quick_open_input_text_padding_left_px;
-        styles.text_input_height_px = self.scaled(24.0);
-        styles.text_input_font_size_px =
-            self.scaled(self.styles.quick_open.quick_open_result_name_font_size_px);
-        styles.text_input_bg = self.styles.quick_open.quick_open_input_bg;
-        styles.text_input_focus_bg = self.styles.quick_open.quick_open_input_focus_bg;
-        styles.text_input_text_color = self.styles.quick_open.quick_open_input_text_color;
-        styles.text_input_cursor_height_ratio =
-            self.styles.quick_open.quick_open_input_cursor_height_ratio;
-        styles.text_input_cursor_height_adjust_px = self
-            .styles
-            .quick_open
-            .quick_open_input_cursor_height_adjust_px;
-        styles
+        self.styles
+            .input_styles(crate::style::InputRole::QuickOpen, self.ui_scale)
     }
 
     pub(crate) fn on_quick_open(
@@ -356,10 +352,7 @@ impl EditorView {
 
     pub(crate) fn render_quick_open_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
         let styles = &self.styles.quick_open;
-        let bg = styles.quick_open_panel_bg;
         let border = styles.quick_open_panel_border_color;
-        let hover_bg = styles.quick_open_result_hover_bg;
-        let selected_bg = styles.quick_open_result_selected_bg;
         let text_primary = styles.quick_open_result_text_color;
         let text_secondary = styles.quick_open_result_secondary_text_color;
         let match_color = styles.quick_open_result_match_text_color;
@@ -372,7 +365,6 @@ impl EditorView {
         let panel_left = sidebar_w + (editor_w - panel_w) / 2.0;
         let panel_top =
             (self.last_window_height / 5.0).max(self.scaled(styles.quick_open_panel_top_offset_px));
-        let row_h = self.scaled(styles.quick_open_result_row_height_px);
         let path_font = self.scaled(styles.quick_open_result_path_font_size_px);
         let name_font = self.scaled(styles.quick_open_result_name_font_size_px);
         let max_results_h = self.scaled(styles.quick_open_results_max_height_px);
@@ -389,14 +381,7 @@ impl EditorView {
                 self.t(crate::i18n::TextKey::QuickOpenNoResults)
             };
             result_children.push(
-                div()
-                    .w_full()
-                    .h(px(self.scaled(styles.quick_open_empty_height_px)))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(self.scaled(styles.quick_open_empty_font_size_px)))
-                    .text_color(styles.quick_open_empty_text_color)
+                crate::ui::list::empty(self.styles.search_menu_empty(), self.ui_scale)
                     .child(message)
                     .into_any_element(),
             );
@@ -455,45 +440,47 @@ impl EditorView {
                 );
 
                 result_children.push(
-                    div()
-                        .id(SharedString::from(format!("quick-open-{}", index)))
-                        .h(px(row_h))
-                        .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
-                        .flex()
-                        .items_center()
-                        .cursor(CursorStyle::Arrow)
-                        .when(is_selected, |this| this.bg(selected_bg))
-                        .hover(move |s| s.bg(hover_bg))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .flex()
-                                .items_center()
-                                .gap(px(self.scaled(6.0)))
-                                .child(div().flex_none().child(file_name_el))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(0.0))
-                                        .overflow_hidden()
-                                        .child(path_el),
-                                ),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                if let Some(pos) = this
-                                    .quick_open_results
-                                    .iter()
-                                    .position(|candidate| candidate.path == path)
-                                {
-                                    this.quick_open_selected_index = pos;
-                                }
-                                this.confirm_quick_open(cx);
-                            }),
-                        )
-                        .into_any_element(),
+                    crate::ui::list::list_item(
+                        self.styles.command_item(),
+                        crate::style::ControlState {
+                            selected: is_selected,
+                            ..Default::default()
+                        },
+                        self.ui_scale,
+                    )
+                    .id(SharedString::from(format!("quick-open-{}", index)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(self.scaled(
+                                self.styles.ui.space(crate::style::SpaceStep::OneAndHalf),
+                            )))
+                            .child(div().flex_none().child(file_name_el))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .child(path_el),
+                            ),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            if let Some(pos) = this
+                                .quick_open_results
+                                .iter()
+                                .position(|candidate| candidate.path == path)
+                            {
+                                this.quick_open_selected_index = pos;
+                            }
+                            this.confirm_quick_open(cx);
+                        }),
+                    )
+                    .into_any_element(),
                 );
             }
         }
@@ -522,17 +509,12 @@ impl EditorView {
                     ),
             )
             .child(
-                div()
+                crate::ui::surface::surface(&self.styles.command_surface(), self.ui_scale)
                     .id("quick-open-overlay")
                     .absolute()
                     .top(px(panel_top))
                     .left(px(panel_left.max(0.0)))
                     .w(px(panel_w))
-                    .bg(bg)
-                    .border(px(self.ui_border_width(1.0)))
-                    .border_color(border)
-                    .rounded(px(self.scaled(styles.quick_open_panel_radius_px)))
-                    .shadow_md()
                     .overflow_hidden()
                     .on_mouse_down(
                         MouseButton::Left,

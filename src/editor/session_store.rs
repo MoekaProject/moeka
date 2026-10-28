@@ -134,7 +134,6 @@ pub(crate) fn persist_session(editor: &EditorView) {
         tabs: editor
             .tabs
             .iter()
-            .filter(|tab| tab.kind != TabKind::Diff)
             .map(|tab| session_tab_to_record(editor, tab))
             .collect(),
         pane_layout: Some(pane_layout_to_record(editor, &editor.pane_layout)),
@@ -216,10 +215,7 @@ fn persist_workspace_bookmarks(workspaces: &config_store::WorkspaceConfig) {
 }
 
 fn is_default_welcome_session(editor: &EditorView) -> bool {
-    let tabs = editor
-        .all_tabs()
-        .filter(|tab| tab.kind != TabKind::Diff)
-        .collect::<Vec<_>>();
+    let tabs = editor.all_tabs().collect::<Vec<_>>();
     tabs.len() == 1 && is_placeholder_welcome_tab(tabs[0])
 }
 
@@ -265,7 +261,6 @@ fn pane_layout_to_record(editor: &EditorView, layout: &PaneLayout) -> PaneLayout
             PaneLayoutRecord::Leaf {
                 tabs: tabs
                     .iter()
-                    .filter(|tab| tab.kind != TabKind::Diff)
                     .map(|tab| session_tab_to_record(editor, tab))
                     .collect(),
                 active_tab_id: active_tab_id.clone(),
@@ -1061,7 +1056,9 @@ fn restore_tab_metadata(record: &TabSessionRecord, ui_language: UiLanguage) -> O
     let saved_kind = record.file_kind.as_deref().and_then(deserialize_file_kind);
     // Until the source is verified, no save/autosave/watcher path may target it.
     // Recovery drafts remain editable; unknown source contents are non-text placeholders.
-    let file_kind = if record.path.is_some() && record.recovery.text.is_none() {
+    let file_kind = if record.recovery.text.is_none()
+        && (record.path.is_some() || record.file_kind.as_deref() == Some("whiteboard"))
+    {
         Some(FileKind::Binary)
     } else {
         saved_kind
@@ -1086,7 +1083,6 @@ fn restore_tab_metadata(record: &TabSessionRecord, ui_language: UiLanguage) -> O
         record.history.undo_log_path.clone(),
     );
     let path = None;
-    let whiteboard = None;
 
     Some(OpenTab {
         id: record.id.clone(),
@@ -1100,9 +1096,6 @@ fn restore_tab_metadata(record: &TabSessionRecord, ui_language: UiLanguage) -> O
         source_word_wrap: record.view.source_word_wrap,
         snapshot,
         image_view: ImageViewState::default(),
-        whiteboard,
-        git_diff: None,
-        inline_diff: None,
         is_preview: record.is_preview,
         is_dirty,
         is_deleted: false,
@@ -1145,7 +1138,6 @@ struct RestoredTabData {
     path: Option<PathBuf>,
     snapshot: EditorSnapshot,
     file_kind: FileKind,
-    whiteboard: Option<WhiteboardTabState>,
     history: history_store::TabHistory,
     is_dirty: bool,
     recovery: TabRecoveryState,
@@ -1155,6 +1147,17 @@ fn load_restored_tab(
     record: &TabSessionRecord,
     ui_language: UiLanguage,
 ) -> io::Result<RestoredTabData> {
+    // Old canvas sessions did not store their document in the text snapshot.
+    // Without a source or recovery text, an empty buffer is not recovered data.
+    if record.file_kind.as_deref() == Some("whiteboard")
+        && record.path.is_none()
+        && record.recovery.text.is_none()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "session tab has no recoverable contents",
+        ));
+    }
     let saved_kind = record.file_kind.as_deref().and_then(deserialize_file_kind);
     let bytes = record.path.as_deref().map(fs::read).transpose()?;
     let mut file_kind = bytes
@@ -1177,13 +1180,6 @@ fn load_restored_tab(
             .filter(FileKind::supports_text_buffer)
             .unwrap_or(FileKind::Markdown);
     }
-    let whiteboard = if matches!(file_kind, FileKind::Whiteboard) {
-        bytes
-            .as_deref()
-            .map(|bytes| WhiteboardTabState::new(WhiteboardDocument::from_json_bytes(bytes)))
-    } else {
-        None
-    };
     let mut history = history_store::load_tab_history_from_path(
         &record.id,
         path.as_deref(),
@@ -1209,7 +1205,6 @@ fn load_restored_tab(
         path,
         snapshot,
         file_kind,
-        whiteboard,
         history,
         is_dirty,
         recovery,
@@ -1227,7 +1222,6 @@ fn apply_restored_tab(tab: &mut OpenTab, loaded: RestoredTabData) {
     tab.path = loaded.path;
     tab.snapshot = loaded.snapshot;
     tab.file_kind = Some(loaded.file_kind);
-    tab.whiteboard = loaded.whiteboard;
     tab.history = loaded.history;
     tab.is_dirty = loaded.is_dirty;
     tab.recovery = loaded.recovery;
@@ -1373,7 +1367,6 @@ fn load_file_snapshot(path: &Path, bytes: &[u8]) -> (EditorSnapshot, FileKind) {
 fn serialize_tab_kind(kind: TabKind) -> String {
     match kind {
         TabKind::Editor => "editor",
-        TabKind::Diff => "diff",
         TabKind::Settings => "settings",
         TabKind::Terminal(_) => "terminal",
     }
@@ -1383,10 +1376,17 @@ fn serialize_tab_kind(kind: TabKind) -> String {
 fn deserialize_tab_kind(value: &str) -> Option<TabKind> {
     match value {
         "editor" => Some(TabKind::Editor),
-        "diff" => Some(TabKind::Diff),
         "settings" => Some(TabKind::Settings),
         _ => None,
     }
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_diff_tabs_do_not_restore_as_editable_documents() {
+    assert_eq!(deserialize_tab_kind("diff"), None);
+    assert_eq!(deserialize_tab_kind("editor"), Some(TabKind::Editor));
+    assert_eq!(deserialize_tab_kind("settings"), Some(TabKind::Settings));
 }
 
 fn serialize_agent_cli(agent_cli: ChatAgentCli) -> String {
@@ -1432,9 +1432,6 @@ fn terminal_tab(record: &TabSessionRecord, agent_cli: ChatAgentCli) -> OpenTab {
             extra_cursors: Vec::new(),
         },
         image_view: ImageViewState::default(),
-        whiteboard: None,
-        git_diff: None,
-        inline_diff: None,
         is_preview: false,
         is_dirty: false,
         is_deleted: false,
@@ -1450,7 +1447,6 @@ fn serialize_file_kind(kind: &FileKind) -> String {
         FileKind::Text => "text".to_string(),
         FileKind::Image => "image".to_string(),
         FileKind::Binary => "binary".to_string(),
-        FileKind::Whiteboard => "whiteboard".to_string(),
         FileKind::Code { language } => format!("code:{language}"),
     }
 }
@@ -1461,7 +1457,7 @@ fn deserialize_file_kind(value: &str) -> Option<FileKind> {
         "text" => Some(FileKind::Text),
         "image" => Some(FileKind::Image),
         "binary" => Some(FileKind::Binary),
-        "whiteboard" => Some(FileKind::Whiteboard),
+        "whiteboard" => Some(FileKind::Text),
         _ => value.strip_prefix("code:").map(|language| FileKind::Code {
             language: language.to_string(),
         }),
@@ -1491,9 +1487,6 @@ fn settings_tab(id: String) -> OpenTab {
             extra_cursors: Vec::new(),
         },
         image_view: ImageViewState::default(),
-        whiteboard: None,
-        git_diff: None,
-        inline_diff: None,
         is_preview: false,
         is_dirty: false,
         is_deleted: false,
@@ -1900,15 +1893,195 @@ mod tests {
     }
 
     #[test]
-    fn whiteboard_restore_uses_loaded_bytes() {
+    fn legacy_whiteboard_restore_keeps_exact_text_and_roundtrips_as_text() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("board.moeka");
-        fs::write(&path, WhiteboardDocument::default().to_json_string()).unwrap();
-        let mut record = text_tab_record(Some(path), None);
+        let text = "{ \"elements\": [], \"unknown\": \"保留\" }\r\n";
+        fs::write(&path, text).unwrap();
+        let mut record = text_tab_record(Some(path.clone()), None);
         record.file_kind = Some("whiteboard".into());
-        let loaded = load_restored_tab(&record, UiLanguage::English).unwrap();
-        assert!(loaded.whiteboard.is_some());
-        assert_eq!(loaded.file_kind, FileKind::Whiteboard);
+        record.is_pinned = true;
+        let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
+        assert_eq!(restored.file_kind, Some(FileKind::Text));
+        assert_eq!(restored.snapshot.text, text);
+        assert_eq!(restored.path, Some(path.clone()));
+        assert!(!restored.is_dirty);
+        assert!(restored.is_pinned);
+        assert_eq!(restored.id, record.id);
+        assert_eq!(restored.history.saved_text.as_deref(), Some(text));
+        let saved = tab_to_record(&restored);
+        assert_eq!(saved.file_kind.as_deref(), Some("text"));
+        let encoded = serde_yaml::to_string(&saved).unwrap();
+        let decoded = serde_yaml::from_str(&encoded).unwrap();
+        let reopened = restore_tab_from_record(&decoded, UiLanguage::English).unwrap();
+        assert_eq!(reopened.snapshot.text, text);
+        assert_eq!(reopened.file_kind, Some(FileKind::Text));
+        assert_eq!(fs::read(&path).unwrap(), text.as_bytes());
+    }
+
+    #[test]
+    fn legacy_whiteboard_recovery_requires_a_verified_source_hash() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("board.moeka");
+        let disk = "{ \"elements\": [] }";
+        let draft = "unsaved raw text, not necessarily JSON";
+        fs::write(&path, disk).unwrap();
+        for hash in [
+            None,
+            Some(file_ops::content_hash(b"old source")),
+            Some(file_ops::content_hash(disk.as_bytes())),
+        ] {
+            let verified =
+                hash.as_deref() == Some(file_ops::content_hash(disk.as_bytes()).as_str());
+            let mut record = text_tab_record(Some(path.clone()), Some(draft));
+            record.file_kind = Some("whiteboard".into());
+            record.recovery.source_content_hash = hash;
+            let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
+            assert_eq!(restored.file_kind, Some(FileKind::Text));
+            assert_eq!(restored.snapshot.text, draft);
+            assert_eq!(restored.path, verified.then(|| path.clone()));
+            assert!(restored.is_dirty);
+            assert_eq!(restored.recovery, record.recovery);
+            let saved = tab_to_record(&restored);
+            assert_eq!(saved.file_kind.as_deref(), Some("text"));
+            let reopened = restore_tab_from_record(&saved, UiLanguage::English).unwrap();
+            assert_eq!(reopened.snapshot.text, draft);
+            assert_eq!(reopened.path, restored.path);
+            assert!(reopened.is_dirty);
+            assert_eq!(fs::read_to_string(&path).unwrap(), disk);
+        }
+    }
+
+    #[test]
+    fn legacy_whiteboard_unavailable_sources_preserve_recovery_and_pending_identity() {
+        let dir = tempdir().unwrap();
+        // Reading a directory fails on every supported platform, even as root.
+        for path in [dir.path().join("missing.moeka"), dir.path().to_path_buf()] {
+            for recovery in [None, Some("unsaved canvas JSON")] {
+                let mut record = text_tab_record(Some(path.clone()), recovery);
+                record.file_kind = Some("whiteboard".into());
+                record.is_pinned = true;
+                let metadata = restore_tab_metadata(&record, UiLanguage::English).unwrap();
+                assert!(metadata.path.is_none());
+                assert_eq!(metadata.is_dirty, recovery.is_some());
+                assert_eq!(
+                    metadata.file_kind.as_ref().unwrap().supports_text_buffer(),
+                    recovery.is_some()
+                );
+                let pending = PendingTabRestore {
+                    record: record.clone(),
+                    initial_text: recovery.unwrap_or_default().into(),
+                    loading: false,
+                };
+                assert_eq!(pending_tab_to_record(&metadata, &pending), record);
+                assert!(load_restored_tab(&record, UiLanguage::English).is_err());
+                let restored = restore_tab_from_record(&record, UiLanguage::English);
+                if let Some(draft) = recovery {
+                    let restored = restored.unwrap();
+                    assert_eq!(restored.snapshot.text, draft);
+                    assert_eq!(restored.recovery.source_path.as_ref(), Some(&path));
+                    assert_eq!(restored.file_kind, Some(FileKind::Text));
+                } else {
+                    assert!(restored.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_whiteboard_without_a_source_needs_actual_recovery_text() {
+        for recovery in [None, Some(""), Some("{\"elements\":[\"draft\"]}")] {
+            let mut record = text_tab_record(None, recovery);
+            record.file_kind = Some("whiteboard".into());
+            let restored = restore_tab_from_record(&record, UiLanguage::English);
+            if let Some(text) = recovery {
+                let restored = restored.unwrap();
+                assert_eq!(restored.snapshot.text, text);
+                assert_eq!(restored.file_kind, Some(FileKind::Text));
+                assert!(restored.path.is_none());
+                assert!(restored.is_dirty);
+                let saved = tab_to_record(&restored);
+                assert_eq!(saved.file_kind.as_deref(), Some("text"));
+                assert_eq!(saved.recovery.text.as_deref(), Some(text));
+            } else {
+                assert!(restored.is_none());
+                assert_eq!(
+                    restore_tab_metadata(&record, UiLanguage::English)
+                        .unwrap()
+                        .file_kind,
+                    Some(FileKind::Binary)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_whiteboard_binary_sources_are_not_empty_text_documents() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("board.moeka");
+        let bytes = [0, 0xff, 1, 0xfe];
+        fs::write(&path, bytes).unwrap();
+        for recovery in [None, Some("unsaved text")] {
+            let mut record = text_tab_record(Some(path.clone()), recovery);
+            record.file_kind = Some("whiteboard".into());
+            let restored = restore_tab_from_record(&record, UiLanguage::English).unwrap();
+            if let Some(text) = recovery {
+                assert_eq!(restored.snapshot.text, text);
+                assert_eq!(restored.file_kind, Some(FileKind::Text));
+                assert!(restored.path.is_none());
+                assert!(restored.is_dirty);
+            } else {
+                assert_eq!(restored.file_kind, Some(FileKind::Binary));
+                assert_eq!(restored.path, Some(path.clone()));
+                assert!(!restored.is_dirty);
+            }
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn legacy_whiteboard_split_panes_preserve_tab_order_and_view_state() {
+        let mut first = text_tab_record(None, Some("first draft"));
+        first.file_kind = Some("whiteboard".into());
+        first.is_pinned = true;
+        let mut second = first.clone();
+        second.id = "tab-2".into();
+        second.is_pinned = false;
+        second.recovery.text = Some("second draft".into());
+        let mut third = second.clone();
+        third.id = "tab-3".into();
+        let layout = PaneLayoutRecord::Split {
+            axis: "horizontal".into(),
+            flexes: vec![1.0, 2.0],
+            children: vec![
+                PaneLayoutRecord::Leaf {
+                    active_tab_id: Some(second.id.clone()),
+                    tabs: vec![first.clone(), second.clone()],
+                },
+                PaneLayoutRecord::Leaf {
+                    active_tab_id: Some(third.id.clone()),
+                    tabs: vec![third.clone()],
+                },
+            ],
+        };
+        let mut panes = Vec::new();
+        let built = build_pane_layout(UiLanguage::English, &layout, &mut panes).unwrap();
+        assert_eq!(built.leaf_ids(), vec![0, 1]);
+        assert_eq!(panes[0].state.active_tab_id.as_deref(), Some("tab-2"));
+        assert_eq!(panes[1].state.active_tab_id.as_deref(), Some("tab-3"));
+        for (tab, record) in panes
+            .iter()
+            .flat_map(|pane| &pane.state.tabs)
+            .zip([first, second, third])
+        {
+            assert_eq!(tab.id, record.id);
+            assert_eq!(tab.is_pinned, record.is_pinned);
+            assert!(tab.is_dirty);
+            assert_eq!(tab.file_kind, Some(FileKind::Text));
+            assert_eq!(tab.snapshot.text, record.recovery.text.clone().unwrap());
+            assert_eq!(tab.snapshot.scroll_offset, record.view.scroll_offset);
+            assert_eq!(tab.recovery, record.recovery);
+        }
     }
 
     #[test]
@@ -2064,9 +2237,6 @@ mod tests {
                     extra_cursors: Vec::new(),
                 },
                 image_view: ImageViewState::default(),
-                whiteboard: None,
-                git_diff: None,
-                inline_diff: None,
                 is_preview: false,
                 is_dirty: false,
                 is_deleted: false,

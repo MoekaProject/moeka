@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use gpui::{AnyElement, Context, CursorStyle, Focusable, MouseButton, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Focusable, MouseButton, Window, div, prelude::*, px};
 
 use super::{
     EditorView,
@@ -225,11 +225,8 @@ impl EditorView {
         let panel_left = sidebar_width + (editor_width - panel_width) / 2.0;
         let panel_top =
             (self.last_window_height / 5.0).max(self.scaled(styles.quick_open_panel_top_offset_px));
-        let row_height = self.scaled(styles.quick_open_result_row_height_px);
         let title_size = self.scaled(styles.quick_open_result_name_font_size_px);
         let description_size = self.scaled(styles.quick_open_result_path_font_size_px);
-        let selected_bg = styles.quick_open_result_selected_bg;
-        let hover_bg = styles.quick_open_result_hover_bg;
         let shortcut_style = ShortcutRenderStyle {
             font_size_px: description_size,
             font_family: self.styles.ui_font_family,
@@ -249,49 +246,50 @@ impl EditorView {
                 let selected = index == self.command_palette_selected_index;
                 let name = Self::workspace_display_name(&root);
                 let detail = root.display().to_string();
-                div()
-                    .id(("command-palette-workspace", offset))
-                    .h(px(row_height))
-                    .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
-                    .flex()
-                    .items_center()
-                    .gap(px(self.scaled(8.0)))
-                    .cursor(CursorStyle::Arrow)
-                    .when(selected, |this| this.bg(selected_bg))
-                    .hover(move |style| style.bg(hover_bg))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(self.scaled(6.0)))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .truncate()
-                                    .text_size(px(title_size))
-                                    .text_color(styles.quick_open_result_text_color)
-                                    .child(format!("{workspace_label}: {name}")),
-                            )
-                            .child(
-                                div()
-                                    .min_w(px(0.0))
-                                    .truncate()
-                                    .text_size(px(description_size))
-                                    .text_color(styles.quick_open_result_secondary_text_color)
-                                    .child(detail),
-                            ),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.command_palette_visible = false;
-                            this.reset_command_palette_state(cx);
-                            this.switch_workspace(root.clone(), cx);
-                            cx.notify();
-                        }),
-                    )
+                crate::ui::list::list_item(
+                    self.styles.command_item(),
+                    crate::style::ControlState {
+                        selected,
+                        ..Default::default()
+                    },
+                    self.ui_scale,
+                )
+                .id(("command-palette-workspace", offset))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(self.scaled(
+                            self.styles.ui.space(crate::style::SpaceStep::OneAndHalf),
+                        )))
+                        .child(
+                            div()
+                                .flex_none()
+                                .truncate()
+                                .text_size(px(title_size))
+                                .text_color(styles.quick_open_result_text_color)
+                                .child(format!("{workspace_label}: {name}")),
+                        )
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .truncate()
+                                .text_size(px(description_size))
+                                .text_color(styles.quick_open_result_secondary_text_color)
+                                .child(detail),
+                        ),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.command_palette_visible = false;
+                        this.reset_command_palette_state(cx);
+                        this.switch_workspace(root.clone(), cx);
+                        cx.notify();
+                    }),
+                )
             })
             .collect::<Vec<_>>();
 
@@ -310,66 +308,73 @@ impl EditorView {
                         .map(super::shortcut::display_shortcut_from_keystroke)
                         .collect(),
                 };
-            div()
-                .id(("command-palette", index))
-                .h(px(row_height))
-                .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
-                .flex()
-                .items_center()
-                .gap(px(self.scaled(8.0)))
-                .cursor(CursorStyle::Arrow)
-                .when(selected, |this| this.bg(selected_bg))
-                .hover(move |style| style.bg(hover_bg))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(self.scaled(6.0)))
-                        .child(
-                            div()
-                                .flex_none()
-                                .truncate()
-                                .text_size(px(title_size))
-                                .text_color(styles.quick_open_result_text_color)
-                                .child(self.command_title(spec)),
-                        )
-                        .child(
-                            div()
-                                .min_w(px(0.0))
-                                .truncate()
-                                .text_size(px(description_size))
-                                .text_color(styles.quick_open_result_secondary_text_color)
-                                .child(spec.id.english_description()),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(self.scaled(3.0)))
-                        .children(shortcuts.into_iter().map(|shortcut| {
-                            div()
-                                .h(px(self.scaled(18.0)))
-                                .px(px(self.scaled(4.0)))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(self.scaled(4.0)))
-                                .bg(shortcut_bg)
-                                .child(render_shortcut(&shortcut, shortcut_style))
-                        })),
-                )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        this.command_palette_pending = Some(command);
-                        this.command_palette_visible = false;
-                        cx.notify();
-                    }),
-                )
+            crate::ui::list::list_item(
+                self.styles.command_item(),
+                crate::style::ControlState {
+                    selected,
+                    ..Default::default()
+                },
+                self.ui_scale,
+            )
+            .id(("command-palette", index))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(self.scaled(
+                        self.styles.ui.space(crate::style::SpaceStep::OneAndHalf),
+                    )))
+                    .child(
+                        div()
+                            .flex_none()
+                            .truncate()
+                            .text_size(px(title_size))
+                            .text_color(styles.quick_open_result_text_color)
+                            .child(self.command_title(spec)),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .text_size(px(description_size))
+                            .text_color(styles.quick_open_result_secondary_text_color)
+                            .child(spec.id.english_description()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(self.scaled(
+                        self.styles.ui.space(crate::style::SpaceStep::ThreeQuarters),
+                    )))
+                    .children(shortcuts.into_iter().map(|shortcut| {
+                        div()
+                            .h(px(self.scaled(18.0)))
+                            .px(px(
+                                self.scaled(self.styles.ui.space(crate::style::SpaceStep::One))
+                            ))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(
+                                self.scaled(self.styles.ui.spec.appearance.corners.factor() * 4.0)
+                            ))
+                            .bg(shortcut_bg)
+                            .child(render_shortcut(&shortcut, shortcut_style))
+                    })),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.command_palette_pending = Some(command);
+                    this.command_palette_visible = false;
+                    cx.notify();
+                }),
+            )
         });
 
         div()
@@ -394,17 +399,12 @@ impl EditorView {
                     ),
             )
             .child(
-                div()
+                crate::ui::surface::surface(&self.styles.command_surface(), self.ui_scale)
                     .id("command-palette-overlay")
                     .absolute()
                     .top(px(panel_top))
                     .left(px(panel_left.max(0.0)))
                     .w(px(panel_width))
-                    .bg(styles.quick_open_panel_bg)
-                    .border(px(self.ui_border_width(1.0)))
-                    .border_color(styles.quick_open_panel_border_color)
-                    .rounded(px(self.scaled(styles.quick_open_panel_radius_px)))
-                    .shadow_md()
                     .overflow_hidden()
                     .on_mouse_down(
                         MouseButton::Left,

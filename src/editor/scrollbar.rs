@@ -1,9 +1,10 @@
+use crate::ui::self_drawn::ScrollbarControl;
 use gpui::{
     AnyElement, Bounds, Context, CursorStyle, Hsla, MouseButton, MouseDownEvent, Pixels, Point,
     ScrollHandle, Task, canvas, div, point, prelude::*, px,
 };
 
-use crate::style::{EditorStyles, Styles};
+use crate::style::{ScrollbarStyles, Styles};
 
 use super::{EditorScrollbarDragState, EditorView};
 
@@ -43,20 +44,16 @@ pub(crate) enum PanelScrollbarKind {
     FileList,
     Info,
     Outline,
-    GitHistory,
-    GitChanges,
     ChatTerminal,
 }
 
 impl PanelScrollbarKind {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Sidebar,
         Self::WorkspaceSearch,
         Self::FileList,
         Self::Info,
         Self::Outline,
-        Self::GitHistory,
-        Self::GitChanges,
         Self::ChatTerminal,
     ];
 
@@ -67,8 +64,6 @@ impl PanelScrollbarKind {
             Self::FileList => "file-list-scrollbar",
             Self::Info => "info-scrollbar",
             Self::Outline => "outline-panel-scrollbar",
-            Self::GitHistory => "git-history-scrollbar",
-            Self::GitChanges => "git-changes-scrollbar",
             Self::ChatTerminal => "chat-terminal-scrollbar",
         }
     }
@@ -123,6 +118,17 @@ impl PanelScrollbarState {
         }
     }
 
+    fn reconcile_style(&mut self, styles: &ScrollbarStyles, can_show: bool) {
+        self.opacity_epoch = self.opacity_epoch.wrapping_add(1);
+        self.width_epoch = self.width_epoch.wrapping_add(1);
+        self.opacity_task = None;
+        self.width_task = None;
+        self.opacity = self.desired_opacity(can_show, styles);
+        self.opacity_target = self.opacity;
+        self.width = ScrollbarControl::new(*styles, 1.0).width(self.hovered || self.drag.is_some());
+        self.width_target = self.width;
+    }
+
     fn stop_drag(&mut self, position: Point<Pixels>, can_show: bool) {
         self.drag = None;
         self.hovered = can_show
@@ -134,30 +140,25 @@ impl PanelScrollbarState {
         }
     }
 
-    fn desired_opacity(&self, can_show: bool, styles: &EditorStyles) -> f32 {
-        if !can_show {
-            0.0
-        } else if self.hovered || self.drag.is_some() {
-            styles.editor_scrollbar_hover_opacity
-        } else if self.revealed {
-            styles.editor_scrollbar_opacity
-        } else {
-            styles.editor_scrollbar_idle_opacity
-        }
+    fn desired_opacity(&self, can_show: bool, styles: &ScrollbarStyles) -> f32 {
+        ScrollbarControl::new(*styles, 1.0).opacity(
+            can_show,
+            self.hovered || self.drag.is_some(),
+            self.revealed,
+        )
     }
 }
 
 fn panel_scrollbar_thumb_color(kind: PanelScrollbarKind, opacity: f32, styles: &Styles) -> Hsla {
-    // Sidebar-side panels sit on the dark chrome palette even in light
-    // mode, so their thumb must not use the (dark) editor text color.
-    let mut color = match kind {
-        PanelScrollbarKind::Sidebar
-        | PanelScrollbarKind::WorkspaceSearch
-        | PanelScrollbarKind::FileList => styles.sidebar.sidebar_scrollbar_thumb_color,
-        _ => styles.editor.editor_scrollbar_thumb_color,
-    };
-    color.a *= opacity.clamp(0.0, 1.0);
-    color
+    ScrollbarControl::new(styles.self_drawn.scrollbar, 1.0).color(
+        matches!(
+            kind,
+            PanelScrollbarKind::Sidebar
+                | PanelScrollbarKind::WorkspaceSearch
+                | PanelScrollbarKind::FileList
+        ),
+        opacity,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -201,7 +202,109 @@ struct VerticalScrollbarGeometry {
     thumb_height: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ControlStylePaneStep {
+    Enter(super::PaneId),
+    Leave(super::PaneId),
+    Refresh,
+}
+
+/// Layout-dependent scrollbar visibility must use the pane's existing view
+/// helpers. Restore the caller's routing around that traversal rather than
+/// nesting another swap or approximating visibility from stale opacity values.
+fn control_style_pane_steps(
+    focused: super::PaneId,
+    swapped: Option<super::PaneId>,
+    panes: &[super::PaneId],
+) -> Vec<ControlStylePaneStep> {
+    let mut steps = Vec::new();
+    if let Some(pane) = swapped {
+        steps.push(ControlStylePaneStep::Leave(pane));
+    }
+    for &pane in panes {
+        if pane != focused {
+            steps.push(ControlStylePaneStep::Enter(pane));
+        }
+        steps.push(ControlStylePaneStep::Refresh);
+        if pane != focused {
+            steps.push(ControlStylePaneStep::Leave(pane));
+        }
+    }
+    if let Some(pane) = swapped {
+        steps.push(ControlStylePaneStep::Enter(pane));
+    }
+    steps
+}
+
 impl EditorView {
+    /// Reconcile presentation state without rebuilding documents, losing a drag,
+    /// or allowing an old animation task to install metrics from the prior spec.
+    pub(crate) fn sync_control_style_metrics(&mut self, cx: &mut Context<Self>) {
+        let styles = self.styles.self_drawn.scrollbar;
+        for kind in PanelScrollbarKind::ALL {
+            let can_show = self.panel_scrollbar_can_show(kind);
+            let (pending_hover, pending_idle) =
+                if let Some(state) = self.panel_scrollbar_state_mut(kind) {
+                    state.reconcile_style(&styles, can_show);
+                    (state.hover_task.is_some(), state.idle_task.is_some())
+                } else {
+                    continue;
+                };
+            if pending_hover {
+                self.schedule_panel_scrollbar_hover_reveal(kind, cx);
+            }
+            if pending_idle {
+                self.schedule_panel_scrollbar_idle_fade(kind, cx);
+            }
+        }
+        for step in
+            control_style_pane_steps(self.focused_pane_id, self.swapped_pane_id, &self.pane_ids())
+        {
+            match step {
+                ControlStylePaneStep::Enter(pane) => {
+                    self.begin_pane_swap(pane);
+                }
+                ControlStylePaneStep::Leave(pane) => self.end_pane_swap(pane),
+                ControlStylePaneStep::Refresh => self.sync_current_pane_control_style_metrics(cx),
+            }
+        }
+    }
+
+    fn sync_current_pane_control_style_metrics(&mut self, cx: &mut Context<Self>) {
+        self.editor_scrollbar_opacity_epoch = self.editor_scrollbar_opacity_epoch.wrapping_add(1);
+        self.editor_scrollbar_width_epoch = self.editor_scrollbar_width_epoch.wrapping_add(1);
+        self.editor_scrollbar_opacity_task = None;
+        self.editor_scrollbar_width_task = None;
+        self.editor_scrollbar_opacity = self.desired_editor_scrollbar_opacity();
+        self.editor_scrollbar_opacity_target = self.editor_scrollbar_opacity;
+        self.editor_scrollbar_width = self.desired_editor_scrollbar_width();
+        self.editor_scrollbar_width_target = self.editor_scrollbar_width;
+        if self.editor_scrollbar_idle_task.is_some() {
+            self.schedule_editor_scrollbar_idle_fade(cx);
+        }
+        self.code_block_horizontal_scrollbar_opacity_epoch = self
+            .code_block_horizontal_scrollbar_opacity_epoch
+            .wrapping_add(1);
+        self.code_block_horizontal_scrollbar_thickness_epoch = self
+            .code_block_horizontal_scrollbar_thickness_epoch
+            .wrapping_add(1);
+        self.code_block_horizontal_scrollbar_opacity_task = None;
+        self.code_block_horizontal_scrollbar_thickness_task = None;
+        self.code_block_horizontal_scrollbar_opacity =
+            self.desired_code_block_horizontal_scrollbar_opacity();
+        self.code_block_horizontal_scrollbar_opacity_target =
+            self.code_block_horizontal_scrollbar_opacity;
+        self.code_block_horizontal_scrollbar_thickness =
+            self.desired_code_block_horizontal_scrollbar_thickness();
+        self.code_block_horizontal_scrollbar_thickness_target =
+            self.code_block_horizontal_scrollbar_thickness;
+        self.gutter_fold_reveal_epoch = self.gutter_fold_reveal_epoch.wrapping_add(1);
+        self.gutter_fold_reveal_task = None;
+        self.gutter_fold_reveal = self.gutter_fold_reveal_target;
+        self.sync_line_control_style_metrics();
+        self.clamp_preview_overlay_view();
+    }
+
     fn panel_scrollbar_state(&self, kind: PanelScrollbarKind) -> Option<&PanelScrollbarState> {
         self.panel_scrollbars.get(&kind)
     }
@@ -251,8 +354,8 @@ impl EditorView {
             self.panel_scrollbar_geometry_from_metrics(metrics, track_height_px, top_px)?;
         let state = self.panel_scrollbar_state(kind)?;
         let width = self.scaled(state.width);
-        let hit_width = self.scaled(self.styles.editor.editor_scrollbar_hit_width_px);
-        let radius = self.scaled(self.styles.editor.editor_scrollbar_radius_px);
+        let control = ScrollbarControl::new(self.styles.self_drawn.scrollbar, self.scaled(1.0));
+        let hit_width = control.hit_width();
         let thumb_color = panel_scrollbar_thumb_color(kind, state.opacity, &self.styles);
         let editor = cx.entity().clone();
 
@@ -286,22 +389,17 @@ impl EditorView {
                     .size_full(),
                 )
                 .child(
-                    div()
-                        .absolute()
+                    control
+                        .thumb(width, geometry.thumb_height, thumb_color)
                         .top(px(geometry.thumb_top))
                         .right(px(right_px))
-                        .w(px(width))
-                        .h(px(geometry.thumb_height))
-                        .cursor(CursorStyle::Arrow)
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
                                 this.start_panel_scrollbar_drag(kind, event.position, cx);
                             }),
-                        )
-                        .rounded(px(radius))
-                        .bg(thumb_color),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -347,20 +445,6 @@ impl EditorView {
                     f32::from(self.outline_panel_scroll_handle.bounds().size.height);
                 (metrics, track_height_px, 0.0)
             }
-            PanelScrollbarKind::GitHistory => {
-                let metrics =
-                    VerticalScrollbarMetrics::from_scroll_handle(&self.git_history_scroll_handle)?;
-                let track_height_px =
-                    f32::from(self.git_history_scroll_handle.bounds().size.height);
-                (metrics, track_height_px, 0.0)
-            }
-            PanelScrollbarKind::GitChanges => {
-                let metrics =
-                    VerticalScrollbarMetrics::from_scroll_handle(&self.git_changes_scroll_handle)?;
-                let track_height_px =
-                    f32::from(self.git_changes_scroll_handle.bounds().size.height);
-                (metrics, track_height_px, 0.0)
-            }
             PanelScrollbarKind::ChatTerminal => {
                 let (viewport_height, max_scroll, scroll_top) =
                     self.active_chat_terminal_scrollbar_metrics()?;
@@ -379,20 +463,21 @@ impl EditorView {
         track_height_px: f32,
         top_px: f32,
     ) -> Option<VerticalScrollbarGeometry> {
-        let top_margin = self.scaled(self.styles.editor.editor_scrollbar_top_margin_px);
-        let bottom_margin = self.scaled(self.styles.editor.editor_scrollbar_bottom_margin_px);
+        let top_margin = self.scaled(self.styles.self_drawn.scrollbar.top_margin_px);
+        let bottom_margin = self.scaled(self.styles.self_drawn.scrollbar.bottom_margin_px);
         let track_top = top_px + top_margin;
         let track_height =
             (track_height_px.max(metrics.viewport_height) - top_margin - bottom_margin).max(1.0);
-        let min_thumb_height = self.scaled(self.styles.editor.editor_scrollbar_min_thumb_height_px);
-        let thumb_height = (track_height * (metrics.viewport_height / metrics.content_height()))
-            .clamp(min_thumb_height.min(track_height), track_height);
-        let track_travel = (track_height - thumb_height).max(0.0);
-        let thumb_top = if track_travel <= 0.0 {
-            0.0
-        } else {
-            (metrics.scroll_top / metrics.max_scroll).clamp(0.0, 1.0) * track_travel
-        };
+        let (thumb_top, thumb_height, _) =
+            ScrollbarControl::new(self.styles.self_drawn.scrollbar, self.scaled(1.0))
+                .thumb_geometry(
+                    track_height,
+                    metrics.viewport_height,
+                    metrics.content_height(),
+                    metrics.scroll_top,
+                    metrics.max_scroll,
+                    true,
+                );
 
         Some(VerticalScrollbarGeometry {
             metrics,
@@ -429,8 +514,6 @@ impl EditorView {
             PanelScrollbarKind::FileList => Some(&self.file_list_scroll_handle),
             PanelScrollbarKind::Info => Some(&self.info_panel_scroll_handle),
             PanelScrollbarKind::Outline => Some(&self.outline_panel_scroll_handle),
-            PanelScrollbarKind::GitHistory => Some(&self.git_history_scroll_handle),
-            PanelScrollbarKind::GitChanges => Some(&self.git_changes_scroll_handle),
             PanelScrollbarKind::ChatTerminal => None,
         }
     }
@@ -444,29 +527,28 @@ impl EditorView {
             return 0.0;
         };
 
-        state.desired_opacity(self.panel_scrollbar_can_show(kind), &self.styles.editor)
+        state.desired_opacity(
+            self.panel_scrollbar_can_show(kind),
+            &self.styles.self_drawn.scrollbar,
+        )
     }
 
     fn desired_panel_scrollbar_width(&self, kind: PanelScrollbarKind) -> f32 {
         let Some(state) = self.panel_scrollbar_state(kind) else {
-            return self.styles.editor.editor_scrollbar_width_px;
+            return self.styles.self_drawn.scrollbar.width_px;
         };
 
         if state.hovered || state.drag.is_some() {
-            self.styles.editor.editor_scrollbar_hover_width_px
+            self.styles.self_drawn.scrollbar.hover_width_px
         } else {
-            self.styles.editor.editor_scrollbar_width_px
+            self.styles.self_drawn.scrollbar.width_px
         }
     }
 
     fn sync_panel_scrollbar_opacity(&mut self, kind: PanelScrollbarKind, cx: &mut Context<Self>) {
         let target = self.desired_panel_scrollbar_opacity(kind);
-        let duration_ms = self.styles.editor.editor_scrollbar_fade_animation_ms.max(1);
-        let step_ms = self
-            .styles
-            .editor
-            .editor_scrollbar_animation_frame_ms
-            .max(1);
+        let duration_ms = self.styles.self_drawn.scrollbar.fade_animation_ms.max(1);
+        let step_ms = self.styles.self_drawn.scrollbar.animation_frame_ms.max(1);
         let Some(state) = self.panel_scrollbar_state_mut(kind) else {
             return;
         };
@@ -511,16 +593,8 @@ impl EditorView {
 
     fn sync_panel_scrollbar_width(&mut self, kind: PanelScrollbarKind, cx: &mut Context<Self>) {
         let target = self.desired_panel_scrollbar_width(kind);
-        let duration_ms = self
-            .styles
-            .editor
-            .editor_scrollbar_width_animation_ms
-            .max(1);
-        let step_ms = self
-            .styles
-            .editor
-            .editor_scrollbar_animation_frame_ms
-            .max(1);
+        let duration_ms = self.styles.self_drawn.scrollbar.width_animation_ms.max(1);
+        let step_ms = self.styles.self_drawn.scrollbar.animation_frame_ms.max(1);
         let Some(state) = self.panel_scrollbar_state_mut(kind) else {
             return;
         };
@@ -582,7 +656,7 @@ impl EditorView {
         kind: PanelScrollbarKind,
         cx: &mut Context<Self>,
     ) {
-        const HOVER_REVEAL_DELAY_MS: u64 = 100;
+        let hover_reveal_delay_ms = self.styles.self_drawn.scrollbar.hover_reveal_delay_ms;
         let Some(state) = self.panel_scrollbar_state_mut(kind) else {
             return;
         };
@@ -591,7 +665,7 @@ impl EditorView {
         let epoch = state.hover_epoch;
         state.hover_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(std::time::Duration::from_millis(HOVER_REVEAL_DELAY_MS))
+                .timer(std::time::Duration::from_millis(hover_reveal_delay_ms))
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let Some(state) = this.panel_scrollbar_state_mut(kind) else {
@@ -615,7 +689,7 @@ impl EditorView {
         kind: PanelScrollbarKind,
         cx: &mut Context<Self>,
     ) {
-        let idle_delay_ms = self.styles.editor.editor_scrollbar_idle_delay_ms;
+        let idle_delay_ms = self.styles.self_drawn.scrollbar.idle_delay_ms;
         let Some(state) = self.panel_scrollbar_state_mut(kind) else {
             return;
         };
@@ -816,9 +890,7 @@ impl EditorView {
             | PanelScrollbarKind::WorkspaceSearch
             | PanelScrollbarKind::FileList
             | PanelScrollbarKind::Info
-            | PanelScrollbarKind::Outline
-            | PanelScrollbarKind::GitHistory
-            | PanelScrollbarKind::GitChanges => {
+            | PanelScrollbarKind::Outline => {
                 if let Some(handle) = self.panel_scrollbar_handle(kind) {
                     let max_scroll = f32::from(handle.max_offset().height);
                     let scroll_top = scroll_top.clamp(0.0, max_scroll);
@@ -886,11 +958,11 @@ mod tests {
     fn panel_scrollbars_hide_when_idle_and_show_when_hovered_revealed_or_dragged() {
         for theme in [Theme::one_light(), Theme::one_dark()] {
             let styles = Styles::from_theme(&theme, &theme);
-            assert_eq!(styles.editor.editor_scrollbar_idle_opacity, 0.0);
+            assert_eq!(styles.self_drawn.scrollbar.idle_opacity, 0.0);
             for kind in PanelScrollbarKind::ALL {
                 let mut state = PanelScrollbarState::new(
-                    styles.editor.editor_scrollbar_idle_opacity,
-                    styles.editor.editor_scrollbar_width_px,
+                    styles.self_drawn.scrollbar.idle_opacity,
+                    styles.self_drawn.scrollbar.width_px,
                 );
                 for hovered in [false, true] {
                     for revealed in [false, true] {
@@ -899,13 +971,16 @@ mod tests {
                             state.revealed = revealed;
                             state.drag = dragging.then(drag_state);
                             let expected = if hovered || dragging {
-                                styles.editor.editor_scrollbar_hover_opacity
+                                styles.self_drawn.scrollbar.hover_opacity
                             } else if revealed {
-                                styles.editor.editor_scrollbar_opacity
+                                styles.self_drawn.scrollbar.opacity
                             } else {
                                 0.0
                             };
-                            assert_eq!(state.desired_opacity(true, &styles.editor), expected);
+                            assert_eq!(
+                                state.desired_opacity(true, &styles.self_drawn.scrollbar),
+                                expected
+                            );
                             state.opacity = expected;
                             let color = panel_scrollbar_thumb_color(kind, state.opacity, &styles);
                             if hovered || revealed || dragging {
@@ -913,7 +988,10 @@ mod tests {
                             } else {
                                 assert_eq!(color.a, 0.0, "{kind:?} should be hidden at idle");
                             }
-                            assert_eq!(state.desired_opacity(false, &styles.editor), 0.0);
+                            assert_eq!(
+                                state.desired_opacity(false, &styles.self_drawn.scrollbar),
+                                0.0
+                            );
                         }
                     }
                 }
@@ -945,13 +1023,13 @@ mod tests {
                     assert_eq!(state.hovered, inside, "{kind:?}");
                     assert!(state.revealed);
                     assert_eq!(
-                        state.desired_opacity(true, &styles.editor),
+                        state.desired_opacity(true, &styles.self_drawn.scrollbar),
                         if inside { 0.3 } else { 0.2 },
                         "{kind:?}"
                     );
                     state.revealed = false;
                     assert_eq!(
-                        state.desired_opacity(true, &styles.editor),
+                        state.desired_opacity(true, &styles.self_drawn.scrollbar),
                         if inside { 0.3 } else { 0.0 },
                         "{kind:?}"
                     );
@@ -989,8 +1067,8 @@ mod tests {
             let base = match kind {
                 PanelScrollbarKind::Sidebar
                 | PanelScrollbarKind::WorkspaceSearch
-                | PanelScrollbarKind::FileList => styles.sidebar.sidebar_scrollbar_thumb_color,
-                _ => styles.editor.editor_scrollbar_thumb_color,
+                | PanelScrollbarKind::FileList => styles.self_drawn.scrollbar.sidebar_thumb_color,
+                _ => styles.self_drawn.scrollbar.thumb_color,
             };
             for opacity in [-1.0_f32, 0.0, 0.01, 0.2, 0.3, 1.0, 2.0] {
                 let mut expected = base;
@@ -1007,9 +1085,12 @@ mod tests {
     fn panel_scrollbar_respects_configured_idle_opacity() {
         let theme = Theme::one_dark();
         let mut styles = Styles::from_theme(&theme, &theme);
-        styles.editor.editor_scrollbar_idle_opacity = 0.1;
-        let state = PanelScrollbarState::new(0.1, styles.editor.editor_scrollbar_width_px);
-        assert_eq!(state.desired_opacity(true, &styles.editor), 0.1);
+        styles.self_drawn.scrollbar.idle_opacity = 0.1;
+        let state = PanelScrollbarState::new(0.1, styles.self_drawn.scrollbar.width_px);
+        assert_eq!(
+            state.desired_opacity(true, &styles.self_drawn.scrollbar),
+            0.1
+        );
     }
 
     #[test]
@@ -1022,5 +1103,80 @@ mod tests {
         assert_eq!(above.scroll_top, 0.0);
         assert_eq!(below.scroll_top, 300.0);
         assert_eq!(below.content_height(), 500.0);
+    }
+}
+
+#[cfg(test)]
+mod style_reconciliation_tests {
+    use super::*;
+    #[test]
+    fn self_drawn_reconciliation_retargets_without_losing_scrollbar_drag() {
+        let theme = crate::theme::ThemeKind::OneDark.build();
+        let mut spec = crate::style::UiStyleSpec::default();
+        spec.self_drawn.scrollbar.width_px = 10.0;
+        spec.self_drawn.scrollbar.hover_width_px = 14.0;
+        spec.self_drawn.scrollbar.hover_opacity = 0.7;
+        let styles = Styles::from_theme_with_spec(&theme, &theme, false, spec);
+        let mut state = PanelScrollbarState::new(0.1, 6.0);
+        state.drag = Some(PanelScrollbarDragState {
+            start_position_y: 12.0,
+            start_thumb_top: 15.0,
+            track_travel: 100.0,
+            max_scroll: 500.0,
+        });
+        let epoch = state.width_epoch;
+        state.reconcile_style(&styles.self_drawn.scrollbar, true);
+        assert_eq!((state.width, state.width_target), (14.0, 14.0));
+        assert_eq!((state.opacity, state.opacity_target), (0.7, 0.7));
+        assert!(state.width_epoch > epoch);
+        assert_eq!(state.drag.unwrap().start_thumb_top, 15.0);
+        let original = Styles::from_theme(&theme, &theme);
+        state.reconcile_style(&original.self_drawn.scrollbar, true);
+        assert_eq!((state.width, state.opacity), (6.0, 0.3));
+    }
+}
+
+#[cfg(test)]
+mod pane_refresh_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn self_drawn_refresh_visits_every_document_and_restores_normal_or_swapped_slots() {
+        let focused = 1;
+        let ids = [7, 1, 3];
+        for swapped in [None, Some(7), Some(3)] {
+            // The focused slot is always a hollow placeholder. In a temporary
+            // swap the selected slot parks the focused document, not itself.
+            let mut root = swapped.unwrap_or(focused);
+            let mut slots = HashMap::from([(1, 99), (7, 7), (3, 3)]);
+            if let Some(pane) = swapped {
+                slots.insert(pane, focused);
+            }
+            let original_root = root;
+            let original_slots = slots.clone();
+            let mut active_swap = swapped;
+            let mut visited = Vec::new();
+            for step in control_style_pane_steps(focused, swapped, &ids) {
+                match step {
+                    ControlStylePaneStep::Enter(pane) => {
+                        assert_eq!(active_swap, None, "a refresh must never nest pane swaps");
+                        std::mem::swap(&mut root, slots.get_mut(&pane).unwrap());
+                        active_swap = Some(pane);
+                    }
+                    ControlStylePaneStep::Leave(pane) => {
+                        assert_eq!(active_swap, Some(pane));
+                        std::mem::swap(&mut root, slots.get_mut(&pane).unwrap());
+                        active_swap = None;
+                    }
+                    ControlStylePaneStep::Refresh => visited.push(root),
+                }
+            }
+            assert_eq!(visited, ids, "each live document is refreshed exactly once");
+            assert_eq!(root, original_root);
+            assert_eq!(slots, original_slots);
+            assert_eq!(active_swap, swapped);
+            assert_eq!(slots[&focused], 99, "the hollow slot is never refreshed");
+        }
     }
 }

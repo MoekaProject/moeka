@@ -17,6 +17,7 @@ jobs:
   release-safety:
     name: Asset paths and offline release safety tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -31,6 +32,7 @@ jobs:
   secrets:
     name: Secret scan (official Gitleaks CLI)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -46,8 +48,9 @@ jobs:
         run: gitleaks git --no-banner --redact --log-opts='--all' .
 
   check:
-    name: Lint and test (${{ matrix.os }})
+    name: Build, lint and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -58,10 +61,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
+      - name: Install the pinned Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-          rustup default stable
+          rustc --version
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
 
       # gpui renders through Vulkan/Wayland/X11 on Linux and needs the
       # corresponding development headers at build time.
@@ -77,8 +82,13 @@ jobs:
             libssl-dev \
             libvulkan-dev \
             libwayland-dev \
+            libxcb-render0-dev \
             libxcb-shape0-dev \
+            libxcb-shm0-dev \
             libxcb-xfixes0-dev \
+            libxcb-xkb-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
             libxkbcommon-x11-dev \
             pkg-config
 
@@ -89,19 +99,27 @@ jobs:
 
       - name: Check formatting
         if: matrix.os == 'macos-latest'
-        run: cargo fmt --check
+        run: cargo fmt --all -- --check
 
       - name: Clippy
         run: cargo clippy --release --locked --all-targets
 
+      - name: Build application
+        run: cargo build --release --locked
+
       - name: Test
         run: cargo test --release --locked
+
+      - name: Check Mac App Store capability gates
+        if: matrix.os == 'macos-latest'
+        run: cargo check --release --locked --features mas
 
   # `make windows` cross-builds the shipped binaries; this job is the native
   # counterpart that would catch vendor/gpui drifting from upstream.
   windows-package:
     name: Windows portable package (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     if: github.event_name == 'push'
     strategy:
       fail-fast: false
@@ -117,10 +135,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
+      - name: Install the pinned Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustc --version
+          cargo --version
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -152,6 +170,7 @@ jobs:
   linux-package:
     name: Linux portable package (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     if: github.event_name == 'push'
     strategy:
       fail-fast: false
@@ -169,10 +188,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          targets: ${{ matrix.target }}
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustc --version
+          rustup target add "${{ matrix.target }}"
 
       - name: Install Linux system dependencies
         run: |

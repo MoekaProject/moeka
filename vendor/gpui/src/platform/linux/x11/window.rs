@@ -344,6 +344,36 @@ where
         .with_context(failure_context)
 }
 
+fn set_window_title_properties(
+    xcb: &XCBConnection,
+    x_window: xproto::Window,
+    atoms: &XcbAtoms,
+    title: &str,
+) -> anyhow::Result<()> {
+    super::title::write_title_properties(title, |property, bytes| match property {
+        super::title::TitleProperty::NetWmName => check_reply(
+            || "X11 ChangeProperty8 on _NET_WM_NAME failed.",
+            xcb.change_property8(
+                xproto::PropMode::REPLACE,
+                x_window,
+                atoms._NET_WM_NAME,
+                atoms.UTF8_STRING,
+                bytes,
+            ),
+        ),
+        super::title::TitleProperty::WmName => check_reply(
+            || "X11 ChangeProperty8 on WM_NAME failed.",
+            xcb.change_property8(
+                xproto::PropMode::REPLACE,
+                x_window,
+                xproto::AtomEnum::WM_NAME,
+                xproto::AtomEnum::STRING,
+                bytes,
+            ),
+        ),
+    })
+}
+
 pub(crate) fn get_reply<E, F, C, O>(
     failure_context: F,
     result: Result<Cookie<'_, C, O>, ConnectionError>,
@@ -521,16 +551,7 @@ impl X11WindowState {
             if let Some(titlebar) = params.titlebar
                 && let Some(title) = titlebar.title
             {
-                check_reply(
-                    || "X11 ChangeProperty8 on window title failed.",
-                    xcb.change_property8(
-                        xproto::PropMode::REPLACE,
-                        x_window,
-                        xproto::AtomEnum::WM_NAME,
-                        xproto::AtomEnum::STRING,
-                        title.as_bytes(),
-                    ),
-                )?;
+                set_window_title_properties(xcb, x_window, atoms, &title)?;
             }
 
             if params.kind == WindowKind::PopUp {
@@ -1324,27 +1345,11 @@ impl PlatformWindow for X11Window {
     }
 
     fn set_title(&mut self, title: &str) {
-        check_reply(
-            || "X11 ChangeProperty8 on WM_NAME failed.",
-            self.0.xcb.change_property8(
-                xproto::PropMode::REPLACE,
-                self.0.x_window,
-                xproto::AtomEnum::WM_NAME,
-                xproto::AtomEnum::STRING,
-                title.as_bytes(),
-            ),
-        )
-        .log_err();
-
-        check_reply(
-            || "X11 ChangeProperty8 on _NET_WM_NAME failed.",
-            self.0.xcb.change_property8(
-                xproto::PropMode::REPLACE,
-                self.0.x_window,
-                self.0.state.borrow().atoms._NET_WM_NAME,
-                self.0.state.borrow().atoms.UTF8_STRING,
-                title.as_bytes(),
-            ),
+        set_window_title_properties(
+            &self.0.xcb,
+            self.0.x_window,
+            &self.0.state.borrow().atoms,
+            title,
         )
         .log_err();
         xcb_flush(&self.0.xcb);

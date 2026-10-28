@@ -16,6 +16,7 @@ jobs:
   build:
     name: Unsigned macOS ${{ matrix.arch }}
     runs-on: macos-14
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -28,9 +29,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          targets: ${{ matrix.target }}
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustc --version
+          rustup target add "${{ matrix.target }}"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: candidate-${{ matrix.target }}
@@ -50,6 +52,7 @@ jobs:
   build_linux:
     name: Unsigned Linux ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -64,9 +67,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          targets: ${{ matrix.target }}
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustc --version
+          rustup target add "${{ matrix.target }}"
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update
@@ -90,6 +94,7 @@ jobs:
   build_windows:
     name: Unsigned Windows ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -102,7 +107,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Install the pinned Rust toolchain
+        run: rustc --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: candidate-windows-${{ matrix.arch }}

@@ -705,10 +705,6 @@ impl EditorView {
             self.on_preview_overlay_mouse_down(event, window, cx);
             return;
         }
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_on_mouse_down(event, window, cx);
-            return;
-        }
         self.last_mouse_down_target = None;
 
         if event.button == MouseButton::Left
@@ -910,15 +906,6 @@ impl EditorView {
             return;
         }
 
-        if let Some(&(_, hunk_index)) = self
-            .inline_diff_revert_areas
-            .iter()
-            .find(|(bounds, _)| bounds.contains(&event.position))
-        {
-            self.revert_inline_diff_hunk(hunk_index, cx);
-            return;
-        }
-
         self.selected_handle = None;
         if let Some(&(_, line_idx, is_image_fold)) = self
             .gutter_fold_areas
@@ -937,39 +924,6 @@ impl EditorView {
             } else {
                 self.toggle_fold(line_idx, cx);
             }
-            return;
-        }
-
-        if let Some(&(_, hunk_index)) = self
-            .inline_diff_gutter_areas
-            .iter()
-            .find(|(bounds, _)| bounds.contains(&event.position))
-        {
-            self.toggle_inline_diff_hunk_expanded(hunk_index, cx);
-            return;
-        }
-
-        // Read-only text selection over an expanded hunk's removed rows. Clicking
-        // a phantom row places a read-only caret there (collapsing any buffer
-        // selection); dragging extends a character-level selection that can be
-        // copied.
-        if let Some((hunk_base_start, row, offset)) =
-            self.phantom_offset_at_position(event.position)
-        {
-            self.phantom_selection = Some(PhantomSelection {
-                hunk_base_start,
-                anchor_row: row,
-                anchor_offset: offset,
-                head_row: row,
-                head_offset: offset,
-            });
-            self.phantom_selecting = true;
-            self.cursor.anchor = self.cursor.offset;
-            self.clear_extra_cursors();
-            self.is_selecting = false;
-            self.marked_range = None;
-            self.pause_blinking(cx);
-            cx.notify();
             return;
         }
 
@@ -1098,7 +1052,6 @@ impl EditorView {
                 .iter()
                 .find(|(bounds, _)| bounds.contains(&event.position))
             {
-                self.clear_phantom_selection();
                 self.clear_extra_cursors();
                 self.clear_wrap_boundary_affinity();
                 self.marked_range = None;
@@ -1210,7 +1163,6 @@ impl EditorView {
         }
 
         if event.button == MouseButton::Left && event.click_count >= 2 {
-            self.clear_phantom_selection();
             self.clear_extra_cursors();
             self.table_handles.selection = None;
             self.clear_wrap_boundary_affinity();
@@ -1227,7 +1179,6 @@ impl EditorView {
             return;
         }
 
-        self.clear_phantom_selection();
         self.is_selecting = true;
         let prev_offset = self.cursor.offset;
         self.table_cell_selection = None;
@@ -1901,19 +1852,6 @@ impl EditorView {
             self.table_cell_selection = None;
         }
 
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_select_at(event.position);
-            self.open_context_menu(
-                ContextMenu {
-                    position: event.position,
-                    kind: ContextMenuKind::Whiteboard,
-                },
-                true,
-                cx,
-            );
-            return;
-        }
-
         if self.active_tab_is_image() {
             self.open_context_menu(
                 ContextMenu {
@@ -2101,19 +2039,10 @@ impl EditorView {
             cx.stop_propagation();
             return;
         }
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_on_mouse_up(event, cx);
-            return;
-        }
         if self.stop_code_block_horizontal_scrollbar_drag(event.position, cx) {
             return;
         }
         if self.stop_editor_scrollbar_drag(event.position, cx) {
-            return;
-        }
-
-        if self.phantom_selecting {
-            self.phantom_selecting = false;
             return;
         }
 
@@ -2278,10 +2207,6 @@ impl EditorView {
             self.runtime_profile_mouse_move_events =
                 self.runtime_profile_mouse_move_events.wrapping_add(1);
         }
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_on_mouse_move(event, window, cx);
-            return;
-        }
         let toolbar_hover_changed = self.update_toolbar_corner_hover(event.position, cx);
         let track_precise_hover_position = event.modifiers.secondary()
             || self.editor_uses_horizontal_text_scroll()
@@ -2321,22 +2246,6 @@ impl EditorView {
         if self.line_format_toolbar_hovered {
             self.set_line_format_toolbar_hovered(false, cx);
         }
-        // Extend a read-only phantom-row selection while dragging.
-        if self.phantom_selecting {
-            if event.dragging()
-                && let Some(mut sel) = self.phantom_selection
-                && let Some((hunk, row, offset)) = self.phantom_offset_at_position(event.position)
-                && hunk == sel.hunk_base_start
-                && (row != sel.head_row || offset != sel.head_offset)
-            {
-                sel.head_row = row;
-                sel.head_offset = offset;
-                self.phantom_selection = Some(sel);
-                cx.notify();
-            }
-            return;
-        }
-
         if let Some(drag) = self.generated_preview_drag_state.clone() {
             if event.dragging() {
                 let view = self.generated_preview_view_mut(&drag.cache_key);
@@ -2403,9 +2312,6 @@ impl EditorView {
             || !self.generated_preview_zoom_areas.is_empty()
             || !self.image_edit_areas.is_empty()
             || !self.gutter_fold_areas.is_empty()
-            || !self.inline_diff_gutter_areas.is_empty()
-            || !self.inline_diff_hunk_areas.is_empty()
-            || !self.inline_diff_revert_areas.is_empty()
             || !self.table_click_areas.is_empty()
             || !self.table_column_border_segments.is_empty()
             || !self.table_row_border_segments.is_empty();
@@ -2580,38 +2486,7 @@ impl EditorView {
             cx.notify();
         }
 
-        let hovering_inline_diff_gutter = self
-            .inline_diff_gutter_areas
-            .iter()
-            .find(|(bounds, _)| bounds.contains(&event.position))
-            .map(|(_, hunk_index)| *hunk_index);
-        if hovering_inline_diff_gutter != self.hovering_inline_diff_gutter_hunk {
-            self.hovering_inline_diff_gutter_hunk = hovering_inline_diff_gutter;
-            cx.notify();
-        }
-
-        let hovering_inline_diff_hunk = self
-            .inline_diff_hunk_areas
-            .iter()
-            .find(|(bounds, _)| bounds.contains(&event.position))
-            .map(|(_, hunk_index)| *hunk_index);
-        if hovering_inline_diff_hunk != self.hovering_inline_diff_hunk {
-            self.hovering_inline_diff_hunk = hovering_inline_diff_hunk;
-            cx.notify();
-        }
-
-        let hovering_inline_diff_revert = self
-            .inline_diff_revert_areas
-            .iter()
-            .find(|(bounds, _)| bounds.contains(&event.position))
-            .map(|(_, hunk_index)| *hunk_index);
-        if hovering_inline_diff_revert != self.hovering_inline_diff_revert_hunk {
-            self.hovering_inline_diff_revert_hunk = hovering_inline_diff_revert;
-            cx.notify();
-        }
-
-        let gutter_styles = &self.styles.gutter;
-        let fold_hit_padding = self.scaled(gutter_styles.gutter_fold_hit_padding_px);
+        let fold_hit_padding = self.scaled(self.styles.self_drawn.gutter_fold_hit_padding_px);
         let pane_left = self.last_editor_left;
         let hovering_gutter_fold_area = super::element::gutter_fold_hover_x_contains(
             event.position.x,
@@ -2959,8 +2834,6 @@ impl EditorView {
                 0,
                 font_size,
                 &self.theme,
-                self.styles.selection.selection_diff_added_inline_bg,
-                self.styles.selection.selection_diff_removed_inline_bg,
                 self.styles.wiki_link.wiki_link_text_color,
                 self.styles.wiki_link.wiki_link_text_weight,
                 self.styles.editor.editor_list_marker_text_color,
@@ -3062,9 +2935,6 @@ impl EditorView {
         offset: usize,
         affinity: Option<WrapBoundaryAffinityKind>,
     ) -> Option<Bounds<Pixels>> {
-        if self.active_tab_is_diff() {
-            return None;
-        }
         let (table, line, column) = self.table_cell_for_offset(offset)?;
         let row = self.table_visual_row_for_source_line(table, line)?;
         let bounds = self
@@ -3106,7 +2976,7 @@ impl EditorView {
         offset: usize,
         affinity: Option<WrapBoundaryAffinityKind>,
     ) -> Option<(f32, f32)> {
-        if self.table_cell_for_offset(offset).is_some() && !self.active_tab_is_diff() {
+        if self.table_cell_for_offset(offset).is_some() {
             let bounds = self.table_row_bounds_for_offset(window, offset, affinity)?;
             let top = f32::from(bounds.origin.y - self.content_origin.y) + self.scroll_offset;
             return Some((top, top + f32::from(bounds.size.height)));
@@ -3344,9 +3214,16 @@ impl EditorView {
             self.collapsed_front_matter_range().is_some(),
         );
         let viewport = bounds.intersect(&window.content_mask().bounds);
-        let slot_size = self.scaled(super::element::LINE_FORMAT_ICON_SIZE_PX);
-        let (column_inset, _) =
-            super::element::front_matter_content_geometry(true, 0.0, 1.0, self.scaled(1.0));
+        let slot_size = self.scaled(self.styles.self_drawn.format_trigger_size_px);
+        let (column_inset, _) = super::element::front_matter_content_geometry(
+            true,
+            0.0,
+            1.0,
+            crate::ui::self_drawn::FrontMatterControl::column_width(
+                &self.styles.self_drawn,
+                self.scaled(1.0),
+            ),
+        );
         for line in rows {
             let Some(info) = self
                 .line_display_info
@@ -3390,9 +3267,10 @@ impl EditorView {
                 type_areas.push((hit, property_line));
             }
             if fold_line == Some(line) {
-                let icon_size = self.scaled(self.styles.gutter.gutter_fold_icon_size_px);
+                let icon_size = self.scaled(self.styles.self_drawn.gutter_fold_icon_size_px);
                 let hit = super::element::front_matter_fold_hit_bounds(
-                    left - icon_size - self.scaled(super::element::LINE_FORMAT_CONTENT_GAP_PX),
+                    left - icon_size
+                        - self.scaled(self.styles.self_drawn.format_trigger_content_gap_px),
                     left,
                     top,
                     info.total_height(),
@@ -3446,7 +3324,10 @@ impl EditorView {
                 true,
                 0.0,
                 (width - self.padding_left() - self.padding_right()).max(self.scaled(120.0)),
-                self.scaled(1.0),
+                crate::ui::self_drawn::FrontMatterControl::column_width(
+                    &self.styles.self_drawn,
+                    self.scaled(1.0),
+                ),
             );
             super::element::push_front_matter_group_paint(
                 self,
@@ -3534,7 +3415,10 @@ impl EditorView {
                         .is_some_and(|table| table.is_separator)),
             editor_left + self.padding_left(),
             text_width,
-            self.scaled(1.0),
+            crate::ui::self_drawn::FrontMatterControl::column_width(
+                &self.styles.self_drawn,
+                self.scaled(1.0),
+            ),
         );
 
         let text_style = window.text_style();
@@ -3933,8 +3817,6 @@ impl EditorView {
             collapsed_task_prefix_display_columns,
             font_size,
             &self.theme,
-            self.styles.selection.selection_diff_added_inline_bg,
-            self.styles.selection.selection_diff_removed_inline_bg,
             self.styles.wiki_link.wiki_link_text_color,
             self.styles.wiki_link.wiki_link_text_weight,
             self.styles.editor.editor_list_marker_text_color,
@@ -4294,10 +4176,6 @@ impl EditorView {
             self.outline_rail_clicked_active_line = None;
         }
 
-        if self.active_tab_is_whiteboard() {
-            self.whiteboard_on_scroll(event, cx);
-            return;
-        }
         if self.preview_overlay.is_some() {
             let delta = event.delta.pixel_delta(px(40.0));
             let dx = f32::from(delta.x);
@@ -5047,7 +4925,7 @@ mod tests {
                 .table_info
                 .as_ref()
                 .is_some_and(|table| table.is_front_matter && !table.is_separator);
-            let geometry = front_matter_content_geometry(has_type_column, 100.0, 300.0, 1.0);
+            let geometry = front_matter_content_geometry(has_type_column, 100.0, 300.0, 24.0);
             assert_eq!(
                 geometry,
                 if (1..9).contains(&line) {
@@ -5090,7 +4968,7 @@ mod tests {
             0.7,
         );
         assert!(display.starts_with("  title:"));
-        let (content_x, wrap_width) = front_matter_content_geometry(true, 100.0, 300.0, 1.0);
+        let (content_x, wrap_width) = front_matter_content_geometry(true, 100.0, 300.0, 24.0);
         assert_eq!((content_x, wrap_width), (124.0, 276.0));
         for col in marked_start..=source.len() {
             if !source.is_char_boundary(col) {

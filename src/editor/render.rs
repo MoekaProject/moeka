@@ -259,46 +259,44 @@ impl EditorView {
         let subtitle = tooltip_subtitle.map(SharedString::from);
         let is_hovered = self.hovered_toolbar_button == Some(id);
 
-        let button = div()
-            .id(id)
-            .w(px(button_width))
-            .h(px(button_height))
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(gpui::transparent_black())
-            .cursor(CursorStyle::Arrow)
-            .on_hover({
-                let editor = editor.clone();
-                move |hovering: &bool, _: &mut Window, cx: &mut App| {
-                    let _ = editor.update(cx, |this, cx| {
-                        let next_hover = if *hovering { Some(id) } else { None };
-                        if this.hovered_toolbar_button == Some(id) || next_hover.is_some() {
-                            if this.hovered_toolbar_button != next_hover {
-                                this.hovered_toolbar_button = next_hover;
-                                cx.notify();
-                            }
+        let button = crate::ui::button::icon_button(
+            id,
+            self.styles.toolbar_button(button_height),
+            Default::default(),
+            1.0,
+        )
+        .w(px(button_width))
+        .on_hover({
+            let editor = editor.clone();
+            move |hovering: &bool, _: &mut Window, cx: &mut App| {
+                let _ = editor.update(cx, |this, cx| {
+                    let next_hover = if *hovering { Some(id) } else { None };
+                    if this.hovered_toolbar_button == Some(id) || next_hover.is_some() {
+                        if this.hovered_toolbar_button != next_hover {
+                            this.hovered_toolbar_button = next_hover;
+                            cx.notify();
                         }
-                    });
-                }
-            })
-            .child(
-                img(helpers::asset_image_source(icon_path))
-                    .w(px(icon_size))
-                    .h(px(icon_size))
-                    .opacity(if is_hovered {
-                        hover_opacity
-                    } else {
-                        base_opacity
-                    }),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    on_click(this, cx);
+                    }
+                });
+            }
+        })
+        .child(
+            img(helpers::asset_image_source(icon_path))
+                .w(px(icon_size))
+                .h(px(icon_size))
+                .opacity(if is_hovered {
+                    hover_opacity
+                } else {
+                    base_opacity
                 }),
-            );
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                on_click(this, cx);
+            }),
+        );
         tooltip::with_tooltip(button, cx.entity().clone(), title, subtitle)
     }
 
@@ -306,27 +304,39 @@ impl EditorView {
         let editor_handle = cx.entity().clone();
         let action_size = self.scaled(
             self.styles
-                .code_block
+                .self_drawn
                 .generated_preview_action_button_size_px,
         );
-        let icon_size = self.scaled(self.styles.code_block.generated_preview_action_icon_size_px);
-        let gap = self.scaled(self.styles.code_block.generated_preview_action_gap_px);
-        let top = self.scaled(self.styles.code_block.generated_preview_action_padding_px);
-        let right = self.scaled(self.styles.code_block.generated_preview_action_padding_px);
-        let button_bg = self.styles.code_block.code_block_copy_button_bg;
-        let button_hover_bg = self.styles.code_block.code_block_copy_button_hover_bg;
-        let button_border = self.styles.code_block.generated_preview_action_border_color;
+        let icon_size = self.scaled(self.styles.self_drawn.generated_preview_action_icon_size_px);
+        let gap = self.scaled(self.styles.self_drawn.generated_preview_action_gap_px);
+        let top = self.scaled(self.styles.self_drawn.generated_preview_action_padding_px);
+        let right = self.scaled(self.styles.self_drawn.generated_preview_action_padding_px);
+        let button_bg = self.styles.self_drawn.colors.code_block_copy_button_bg;
+        let button_hover_bg = self
+            .styles
+            .self_drawn
+            .colors
+            .code_block_copy_button_hover_bg;
+        let button_border = self
+            .styles
+            .self_drawn
+            .colors
+            .generated_preview_action_border_color;
         let button_radius = px(self.scaled(
             self.styles
-                .code_block
+                .self_drawn
                 .generated_preview_action_button_radius_px,
         ));
         let button_border_width = px(self.scaled(
             self.styles
-                .code_block
+                .self_drawn
                 .generated_preview_action_border_width_px,
         ));
-        let icon_color = self.styles.code_block.code_block_copy_button_text_color;
+        let icon_color = self
+            .styles
+            .self_drawn
+            .colors
+            .code_block_copy_button_text_color;
         let icon_opacity = 0.78;
         let actions = [
             (
@@ -517,9 +527,6 @@ impl Render for EditorView {
             self.clear_table_handle_hover(cx);
         }
         self.refresh_chat_terminal_metrics(window, cx);
-        self.process_pending_inline_diff(cx);
-        // The status bar only needs HEAD, not a scan of the worktree or upstream.
-        self.refresh_status_bar_git_branch(cx);
         if self.pending_editor_focus {
             window.focus(&self.focus_handle(cx));
             self.pending_editor_focus = false;
@@ -778,258 +785,274 @@ impl Render for EditorView {
         let wb = window.bounds();
         self.last_window_width = f32::from(wb.size.width);
         self.last_window_height = f32::from(wb.size.height);
-        let content = div()
-            .id("editor-root")
-            .key_context(if self.focused_sidebar_path.is_some() {
-                "MarkdownEditor Sidebar"
-            } else if self.active_tab_is_whiteboard() {
-                "MarkdownEditor Whiteboard"
-            } else {
-                "MarkdownEditor"
-            })
-            .track_focus(&self.focus_handle(cx))
-            .when_some(global_mouse_listeners, |this, listeners| {
-                this.child(listeners)
-            })
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if this.active_tab_is_whiteboard()
-                    && event.keystroke.key == "space"
-                    && this.whiteboard_text_editor.is_none()
-                    && !this.whiteboard_space_down
-                {
-                    this.whiteboard_space_down = true;
-                    cx.notify();
+        let content = crate::ui::chrome::window_frame(
+            self.styles.window_frame(),
+            root_window_radius,
+            self.ui_scale,
+        )
+        .id("editor-root")
+        .key_context(if self.focused_sidebar_path.is_some() {
+            "MarkdownEditor Sidebar"
+        } else {
+            "MarkdownEditor"
+        })
+        .track_focus(&self.focus_handle(cx))
+        .when_some(global_mouse_listeners, |this, listeners| {
+            this.child(listeners)
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                if this.context_menu.is_some() {
+                    this.close_context_menu(cx);
                 }
-            }))
-            .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, _, cx| {
-                if event.keystroke.key == "space" && this.whiteboard_space_down {
-                    this.whiteboard_space_down = false;
-                    cx.notify();
-                }
-            }))
-            .relative()
-            .size_full()
-            .flex()
-            .flex_row()
-            .overflow_hidden()
-            .font_family(SharedString::from(self.styles.ui_font_family))
-            .text_size(px(self.scaled(self.styles.ui_font_size_px)))
-            .bg(ws.window_bg)
-            .border(px(ws.window_border_width_px))
-            .border_color(ws.window_border_color)
-            .rounded(px(root_window_radius))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    if this.context_menu.is_some() {
-                        this.close_context_menu(cx);
-                    }
-                }),
-            )
-            .on_action(cx.listener(Self::on_undo))
-            .on_action(cx.listener(Self::on_redo))
-            .on_action(cx.listener(Self::on_backspace))
-            .on_action(cx.listener(Self::on_delete))
-            .on_action(cx.listener(Self::on_left))
-            .on_action(cx.listener(Self::on_right))
-            .on_action(cx.listener(Self::on_up))
-            .on_action(cx.listener(Self::on_down))
-            .on_action(cx.listener(Self::on_select_left))
-            .on_action(cx.listener(Self::on_select_right))
-            .on_action(cx.listener(Self::on_select_up))
-            .on_action(cx.listener(Self::on_select_down))
-            .on_action(cx.listener(Self::on_select_all))
-            .on_action(cx.listener(Self::on_home))
-            .on_action(cx.listener(Self::on_end))
-            .on_action(cx.listener(Self::on_select_home))
-            .on_action(cx.listener(Self::on_select_end))
-            .on_action(cx.listener(Self::on_enter))
-            .on_action(cx.listener(Self::on_tab))
-            .on_action(cx.listener(Self::on_back_tab))
-            .on_action(cx.listener(Self::on_copy))
-            .on_action(cx.listener(Self::on_cut))
-            .on_action(cx.listener(Self::on_paste))
-            .on_action(cx.listener(Self::on_paste_plain_text))
-            .on_action(cx.listener(Self::on_insert_soft_break))
-            .on_action(cx.listener(Self::on_show_character_palette))
-            .on_action(cx.listener(Self::on_move_word_left))
-            .on_action(cx.listener(Self::on_move_word_right))
-            .on_action(cx.listener(Self::on_select_word_left))
-            .on_action(cx.listener(Self::on_select_word_right))
-            .on_action(cx.listener(Self::on_delete_word_left))
-            .on_action(cx.listener(Self::on_delete_word_right))
-            .on_action(cx.listener(Self::on_move_to_document_start))
-            .on_action(cx.listener(Self::on_move_to_document_end))
-            .on_action(cx.listener(Self::on_select_to_document_start))
-            .on_action(cx.listener(Self::on_select_to_document_end))
-            .on_action(cx.listener(Self::on_delete_to_line_start))
-            .on_action(cx.listener(Self::on_delete_to_line_end))
-            .on_action(cx.listener(Self::on_kill_to_line_end))
-            .on_action(cx.listener(Self::on_yank))
-            .on_action(cx.listener(Self::on_open_line))
-            .on_action(cx.listener(Self::on_transpose_chars))
-            .on_action(cx.listener(Self::on_move_page_down))
-            .on_action(cx.listener(Self::on_toggle_line_comment))
-            .on_action(cx.listener(Self::on_fold))
-            .on_action(cx.listener(Self::on_unfold))
-            .on_action(cx.listener(Self::on_toggle_fold))
-            .on_action(cx.listener(Self::on_fold_all))
-            .on_action(cx.listener(Self::on_unfold_all))
-            .on_action(cx.listener(Self::on_join_lines))
-            .on_action(cx.listener(Self::on_toggle_bold))
-            .on_action(cx.listener(Self::on_toggle_italic))
-            .on_action(cx.listener(Self::on_toggle_underline))
-            .on_action(cx.listener(Self::on_toggle_strikethrough))
-            .on_action(cx.listener(Self::on_toggle_inline_code))
-            .on_action(cx.listener(Self::on_toggle_link))
-            .on_action(cx.listener(Self::on_toggle_image))
-            .on_action(cx.listener(Self::on_toggle_quote))
-            .on_action(cx.listener(Self::on_toggle_todo))
-            .on_action(cx.listener(Self::on_toggle_unordered_list))
-            .on_action(cx.listener(Self::on_toggle_ordered_list))
-            .on_action(cx.listener(Self::on_insert_table))
-            .on_action(cx.listener(Self::on_insert_code_block))
-            .on_action(cx.listener(Self::on_insert_horizontal_rule))
-            .on_action(cx.listener(Self::on_insert_heading1))
-            .on_action(cx.listener(Self::on_insert_heading2))
-            .on_action(cx.listener(Self::on_insert_heading3))
-            .on_action(cx.listener(Self::on_insert_heading4))
-            .on_action(cx.listener(Self::on_insert_heading5))
-            .on_action(cx.listener(Self::on_insert_heading6))
-            .on_action(cx.listener(Self::on_set_paragraph))
-            .on_action(cx.listener(Self::on_zoom_in))
-            .on_action(cx.listener(Self::on_zoom_out))
-            .on_action(cx.listener(Self::on_zoom_reset))
-            .on_action(cx.listener(Self::on_toggle_sidebar))
-            .on_action(cx.listener(Self::on_toggle_theme))
-            .on_action(cx.listener(Self::on_toggle_editor_left_align))
-            .on_action(cx.listener(Self::on_toggle_word_wrap))
-            .on_action(cx.listener(Self::on_select_line))
-            .on_action(cx.listener(Self::on_insert_line_below))
-            .on_action(cx.listener(Self::on_insert_line_above))
-            .on_action(cx.listener(Self::on_duplicate_line))
-            .on_action(cx.listener(Self::on_copy_line_up))
-            .on_action(cx.listener(Self::on_copy_line_down))
-            .on_action(cx.listener(Self::on_delete_line))
-            .on_action(cx.listener(Self::on_move_line_up))
-            .on_action(cx.listener(Self::on_move_line_down))
-            .on_action(cx.listener(Self::on_save))
-            .on_action(cx.listener(Self::on_save_as))
-            .on_action(cx.listener(Self::on_new_document))
-            .on_action(cx.listener(Self::on_new_tab))
-            .on_action(cx.listener(Self::on_new_whiteboard))
-            .on_action(cx.listener(Self::on_close_active_tab))
-            .on_action(cx.listener(Self::on_reopen_closed_tab))
-            .on_action(cx.listener(Self::on_activate_previous_tab))
-            .on_action(cx.listener(Self::on_activate_next_tab))
-            .on_action(cx.listener(Self::on_split_pane_right))
-            .on_action(cx.listener(Self::on_split_pane_left))
-            .on_action(cx.listener(Self::on_split_pane_up))
-            .on_action(cx.listener(Self::on_split_pane_down))
-            .on_action(cx.listener(Self::on_focus_next_pane))
-            .on_action(cx.listener(Self::on_find))
-            .on_action(cx.listener(Self::on_find_next))
-            .on_action(cx.listener(Self::on_find_previous))
-            .on_action(cx.listener(Self::on_dismiss_search))
-            .on_action(cx.listener(Self::on_toggle_replace))
-            .on_action(cx.listener(Self::on_toggle_search_case_sensitive))
-            .on_action(cx.listener(Self::on_toggle_search_whole_word))
-            .on_action(cx.listener(Self::on_toggle_search_regex))
-            .on_action(cx.listener(Self::on_replace_next))
-            .on_action(cx.listener(Self::on_replace_all))
-            .on_action(cx.listener(Self::on_open_file_dialog))
-            .on_action(cx.listener(Self::on_find_in_files))
-            .on_action(cx.listener(Self::on_quick_open))
-            .on_action(cx.listener(Self::on_open_settings))
-            .on_action(cx.listener(Self::on_toggle_command_palette))
-            .on_action(cx.listener(Self::on_escape))
-            .on_action(cx.listener(Self::on_toggle_fullscreen))
-            .on_key_down(cx.listener(Self::on_preview_overlay_key_down))
-            .on_action(cx.listener(Self::on_toggle_outline))
-            .on_action(cx.listener(Self::on_toggle_info_panel))
-            .on_action(cx.listener(Self::on_toggle_terminal_panel))
-            .on_action(cx.listener(Self::on_toggle_git_history))
-            .on_action(cx.listener(Self::on_toggle_theme_debugger))
-            .on_action(cx.listener(Self::on_add_cursor_above))
-            .on_action(cx.listener(Self::on_add_cursor_below))
-            .on_action(cx.listener(Self::on_select_next_occurrence))
-            .on_action(cx.listener(Self::on_select_all_occurrences))
-            .on_action(cx.listener(Self::on_toggle_runtime_profile))
-            .on_action(cx.listener(Self::on_write_runtime_profile_snapshot))
-            .on_action(cx.listener(Self::on_whiteboard_select_tool))
-            .on_action(cx.listener(Self::on_whiteboard_rectangle_tool))
-            .on_action(cx.listener(Self::on_whiteboard_ellipse_tool))
-            .on_action(cx.listener(Self::on_whiteboard_arrow_tool))
-            .on_action(cx.listener(Self::on_whiteboard_line_tool))
-            .on_action(cx.listener(Self::on_whiteboard_text_tool))
-            .on_action(cx.listener(Self::on_sidebar_create_file))
-            .on_action(cx.listener(Self::on_sidebar_create_folder))
-            .on_action(cx.listener(Self::on_sidebar_rename))
-            .on_action(cx.listener(Self::on_sidebar_delete))
-            .when(self.should_render_sidebar_panel(), |this| {
-                let sidebar_w = self.sidebar_width();
-                let sidebar_layout_w = self.sidebar_layout_width();
-                let file_list_w = self.file_list_width();
-                let file_list_layout_w = self.file_list_layout_width();
-                let search_w = self.workspace_search_panel_width();
-                let ss = &self.styles.sidebar;
-                let hover_indicator_color = ss.sidebar_resize_active_indicator_color;
-                let hover_indicator_width =
-                    self.scaled(ss.sidebar_resize_active_indicator_width_px);
-                let handle_width = self.scaled(ss.sidebar_resize_handle_width_px);
-                this.child(
-                    div()
-                        .id("sidebar-wrap")
-                        .w(px(sidebar_w + file_list_w + search_w))
-                        .h_full()
-                        .overflow_hidden()
-                        .flex_none()
-                        .flex()
-                        .child(
+            }),
+        )
+        .on_action(cx.listener(Self::on_undo))
+        .on_action(cx.listener(Self::on_redo))
+        .on_action(cx.listener(Self::on_backspace))
+        .on_action(cx.listener(Self::on_delete))
+        .on_action(cx.listener(Self::on_left))
+        .on_action(cx.listener(Self::on_right))
+        .on_action(cx.listener(Self::on_up))
+        .on_action(cx.listener(Self::on_down))
+        .on_action(cx.listener(Self::on_select_left))
+        .on_action(cx.listener(Self::on_select_right))
+        .on_action(cx.listener(Self::on_select_up))
+        .on_action(cx.listener(Self::on_select_down))
+        .on_action(cx.listener(Self::on_select_all))
+        .on_action(cx.listener(Self::on_home))
+        .on_action(cx.listener(Self::on_end))
+        .on_action(cx.listener(Self::on_select_home))
+        .on_action(cx.listener(Self::on_select_end))
+        .on_action(cx.listener(Self::on_enter))
+        .on_action(cx.listener(Self::on_tab))
+        .on_action(cx.listener(Self::on_back_tab))
+        .on_action(cx.listener(Self::on_copy))
+        .on_action(cx.listener(Self::on_cut))
+        .on_action(cx.listener(Self::on_paste))
+        .on_action(cx.listener(Self::on_paste_plain_text))
+        .on_action(cx.listener(Self::on_insert_soft_break))
+        .on_action(cx.listener(Self::on_show_character_palette))
+        .on_action(cx.listener(Self::on_move_word_left))
+        .on_action(cx.listener(Self::on_move_word_right))
+        .on_action(cx.listener(Self::on_select_word_left))
+        .on_action(cx.listener(Self::on_select_word_right))
+        .on_action(cx.listener(Self::on_delete_word_left))
+        .on_action(cx.listener(Self::on_delete_word_right))
+        .on_action(cx.listener(Self::on_move_to_document_start))
+        .on_action(cx.listener(Self::on_move_to_document_end))
+        .on_action(cx.listener(Self::on_select_to_document_start))
+        .on_action(cx.listener(Self::on_select_to_document_end))
+        .on_action(cx.listener(Self::on_delete_to_line_start))
+        .on_action(cx.listener(Self::on_delete_to_line_end))
+        .on_action(cx.listener(Self::on_kill_to_line_end))
+        .on_action(cx.listener(Self::on_yank))
+        .on_action(cx.listener(Self::on_open_line))
+        .on_action(cx.listener(Self::on_transpose_chars))
+        .on_action(cx.listener(Self::on_move_page_down))
+        .on_action(cx.listener(Self::on_toggle_line_comment))
+        .on_action(cx.listener(Self::on_fold))
+        .on_action(cx.listener(Self::on_unfold))
+        .on_action(cx.listener(Self::on_toggle_fold))
+        .on_action(cx.listener(Self::on_fold_all))
+        .on_action(cx.listener(Self::on_unfold_all))
+        .on_action(cx.listener(Self::on_join_lines))
+        .on_action(cx.listener(Self::on_toggle_bold))
+        .on_action(cx.listener(Self::on_toggle_italic))
+        .on_action(cx.listener(Self::on_toggle_underline))
+        .on_action(cx.listener(Self::on_toggle_strikethrough))
+        .on_action(cx.listener(Self::on_toggle_inline_code))
+        .on_action(cx.listener(Self::on_toggle_link))
+        .on_action(cx.listener(Self::on_toggle_image))
+        .on_action(cx.listener(Self::on_toggle_quote))
+        .on_action(cx.listener(Self::on_toggle_todo))
+        .on_action(cx.listener(Self::on_toggle_unordered_list))
+        .on_action(cx.listener(Self::on_toggle_ordered_list))
+        .on_action(cx.listener(Self::on_insert_table))
+        .on_action(cx.listener(Self::on_insert_code_block))
+        .on_action(cx.listener(Self::on_insert_horizontal_rule))
+        .on_action(cx.listener(Self::on_insert_heading1))
+        .on_action(cx.listener(Self::on_insert_heading2))
+        .on_action(cx.listener(Self::on_insert_heading3))
+        .on_action(cx.listener(Self::on_insert_heading4))
+        .on_action(cx.listener(Self::on_insert_heading5))
+        .on_action(cx.listener(Self::on_insert_heading6))
+        .on_action(cx.listener(Self::on_set_paragraph))
+        .on_action(cx.listener(Self::on_zoom_in))
+        .on_action(cx.listener(Self::on_zoom_out))
+        .on_action(cx.listener(Self::on_zoom_reset))
+        .on_action(cx.listener(Self::on_toggle_sidebar))
+        .on_action(cx.listener(Self::on_toggle_theme))
+        .on_action(cx.listener(Self::on_toggle_editor_left_align))
+        .on_action(cx.listener(Self::on_toggle_word_wrap))
+        .on_action(cx.listener(Self::on_select_line))
+        .on_action(cx.listener(Self::on_insert_line_below))
+        .on_action(cx.listener(Self::on_insert_line_above))
+        .on_action(cx.listener(Self::on_duplicate_line))
+        .on_action(cx.listener(Self::on_copy_line_up))
+        .on_action(cx.listener(Self::on_copy_line_down))
+        .on_action(cx.listener(Self::on_delete_line))
+        .on_action(cx.listener(Self::on_move_line_up))
+        .on_action(cx.listener(Self::on_move_line_down))
+        .on_action(cx.listener(Self::on_save))
+        .on_action(cx.listener(Self::on_save_as))
+        .on_action(cx.listener(Self::on_new_document))
+        .on_action(cx.listener(Self::on_new_tab))
+        .on_action(cx.listener(Self::on_close_active_tab))
+        .on_action(cx.listener(Self::on_reopen_closed_tab))
+        .on_action(cx.listener(Self::on_activate_previous_tab))
+        .on_action(cx.listener(Self::on_activate_next_tab))
+        .on_action(cx.listener(Self::on_split_pane_right))
+        .on_action(cx.listener(Self::on_split_pane_left))
+        .on_action(cx.listener(Self::on_split_pane_up))
+        .on_action(cx.listener(Self::on_split_pane_down))
+        .on_action(cx.listener(Self::on_focus_next_pane))
+        .on_action(cx.listener(Self::on_find))
+        .on_action(cx.listener(Self::on_find_next))
+        .on_action(cx.listener(Self::on_find_previous))
+        .on_action(cx.listener(Self::on_dismiss_search))
+        .on_action(cx.listener(Self::on_toggle_replace))
+        .on_action(cx.listener(Self::on_toggle_search_case_sensitive))
+        .on_action(cx.listener(Self::on_toggle_search_whole_word))
+        .on_action(cx.listener(Self::on_toggle_search_regex))
+        .on_action(cx.listener(Self::on_replace_next))
+        .on_action(cx.listener(Self::on_replace_all))
+        .on_action(cx.listener(Self::on_open_file_dialog))
+        .on_action(cx.listener(Self::on_find_in_files))
+        .on_action(cx.listener(Self::on_quick_open))
+        .on_action(cx.listener(Self::on_open_settings))
+        .on_action(cx.listener(Self::on_toggle_command_palette))
+        .on_action(cx.listener(Self::on_escape))
+        .on_action(cx.listener(Self::on_toggle_fullscreen))
+        .on_key_down(cx.listener(Self::on_preview_overlay_key_down))
+        .on_action(cx.listener(Self::on_toggle_outline))
+        .on_action(cx.listener(Self::on_toggle_info_panel))
+        .on_action(cx.listener(Self::on_toggle_terminal_panel))
+        .on_action(cx.listener(Self::on_toggle_theme_debugger))
+        .on_action(cx.listener(Self::on_add_cursor_above))
+        .on_action(cx.listener(Self::on_add_cursor_below))
+        .on_action(cx.listener(Self::on_select_next_occurrence))
+        .on_action(cx.listener(Self::on_select_all_occurrences))
+        .on_action(cx.listener(Self::on_toggle_runtime_profile))
+        .on_action(cx.listener(Self::on_write_runtime_profile_snapshot))
+        .on_action(cx.listener(Self::on_sidebar_create_file))
+        .on_action(cx.listener(Self::on_sidebar_create_folder))
+        .on_action(cx.listener(Self::on_sidebar_rename))
+        .on_action(cx.listener(Self::on_sidebar_delete))
+        .when(self.should_render_sidebar_panel(), |this| {
+            let sidebar_w = self.sidebar_width();
+            let sidebar_layout_w = self.sidebar_layout_width();
+            let file_list_w = self.file_list_width();
+            let file_list_layout_w = self.file_list_layout_width();
+            let search_w = self.workspace_search_panel_width();
+            let ss = &self.styles.sidebar;
+            let hover_indicator_color = ss.sidebar_resize_active_indicator_color;
+            let hover_indicator_width = self.scaled(ss.sidebar_resize_active_indicator_width_px);
+            let handle_width = self.scaled(ss.sidebar_resize_handle_width_px);
+            this.child(
+                div()
+                    .id("sidebar-wrap")
+                    .w(px(sidebar_w + file_list_w + search_w))
+                    .h_full()
+                    .overflow_hidden()
+                    .flex_none()
+                    .flex()
+                    .child(
+                        div()
+                            .h_full()
+                            .w(px(sidebar_w))
+                            .flex_none()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(px(sidebar_layout_w))
+                                    .child(self.render_sidebar(cx)),
+                            ),
+                    )
+                    .when(file_list_w > 0.5, |this| {
+                        this.child(
                             div()
                                 .h_full()
-                                .w(px(sidebar_w))
+                                .w(px(file_list_w))
                                 .flex_none()
                                 .overflow_hidden()
                                 .child(
                                     div()
                                         .h_full()
-                                        .w(px(sidebar_layout_w))
-                                        .child(self.render_sidebar(cx)),
+                                        .w(px(file_list_layout_w))
+                                        .child(self.render_file_list(cx)),
                                 ),
                         )
-                        .when(file_list_w > 0.5, |this| {
-                            this.child(
-                                div()
-                                    .h_full()
-                                    .w(px(file_list_w))
-                                    .flex_none()
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .h_full()
-                                            .w(px(file_list_layout_w))
-                                            .child(self.render_file_list(cx)),
-                                    ),
-                            )
-                        })
-                        .when(search_w > 0.5, |this| {
-                            this.child(
-                                div()
-                                    .h_full()
-                                    .w(px(search_w))
-                                    .flex_none()
-                                    .overflow_hidden()
-                                    .child(self.render_workspace_search_panel(cx)),
-                            )
+                    })
+                    .when(search_w > 0.5, |this| {
+                        this.child(
+                            div()
+                                .h_full()
+                                .w(px(search_w))
+                                .flex_none()
+                                .overflow_hidden()
+                                .child(self.render_workspace_search_panel(cx)),
+                        )
+                    }),
+            )
+            // Transparent sensing area for resize drag
+            .child(
+                div()
+                    .id("sidebar-resize-handle")
+                    .absolute()
+                    .left(px(sidebar_w - handle_width / 2.0))
+                    .top_0()
+                    .w(px(handle_width))
+                    .h_full()
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .hover(move |style| {
+                        style
+                            .border_l(px(hover_indicator_width))
+                            .border_color(hover_indicator_color)
+                    })
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                        if this.sidebar_resizing {
+                            let new_width = f32::from(event.position.x);
+                            let min_w =
+                                this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
+                            let max_w =
+                                this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
+                            let new_width = clamp_resize_dimension(new_width, min_w, max_w);
+                            this.set_active_sidebar_custom_width(new_width);
+                            this.set_sidebar_width_immediately(new_width);
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            this.sidebar_resizing = true;
+                            cx.notify();
                         }),
-                )
-                // Transparent sensing area for resize drag
-                .child(
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.sidebar_resizing = false;
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.sidebar_resizing = false;
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .when(file_list_w > 0.5, |this| {
+                this.child(
                     div()
-                        .id("sidebar-resize-handle")
+                        .id("file-list-resize-handle")
                         .absolute()
-                        .left(px(sidebar_w - handle_width / 2.0))
+                        .left(px(sidebar_w + file_list_w - handle_width / 2.0))
                         .top_0()
                         .w(px(handle_width))
                         .h_full()
@@ -1040,451 +1063,7 @@ impl Render for EditorView {
                                 .border_color(hover_indicator_color)
                         })
                         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                            if this.sidebar_resizing {
-                                let new_width = f32::from(event.position.x);
-                                let min_w =
-                                    this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
-                                let max_w =
-                                    this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
-                                let new_width = clamp_resize_dimension(new_width, min_w, max_w);
-                                this.set_active_sidebar_custom_width(new_width);
-                                this.set_sidebar_width_immediately(new_width);
-                                cx.notify();
-                            }
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                this.sidebar_resizing = true;
-                                cx.notify();
-                            }),
-                        )
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.sidebar_resizing = false;
-                                cx.notify();
-                            }),
-                        )
-                        .on_mouse_up_out(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.sidebar_resizing = false;
-                                cx.notify();
-                            }),
-                        ),
-                )
-                .when(file_list_w > 0.5, |this| {
-                    this.child(
-                        div()
-                            .id("file-list-resize-handle")
-                            .absolute()
-                            .left(px(sidebar_w + file_list_w - handle_width / 2.0))
-                            .top_0()
-                            .w(px(handle_width))
-                            .h_full()
-                            .cursor(CursorStyle::ResizeLeftRight)
-                            .hover(move |style| {
-                                style
-                                    .border_l(px(hover_indicator_width))
-                                    .border_color(hover_indicator_color)
-                            })
-                            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                                if this.file_list_resizing {
-                                    let new_width = f32::from(event.position.x)
-                                        - this.sidebar_width()
-                                        - this.file_list_resize_grab_offset_x;
-                                    let min_w = this
-                                        .scaled(this.styles.sidebar.file_list_resize_min_width_px);
-                                    let max_w = this
-                                        .scaled(this.styles.sidebar.file_list_resize_max_width_px);
-                                    let new_width = clamp_resize_dimension(new_width, min_w, max_w);
-                                    this.file_list_custom_width = Some(new_width);
-                                    this.file_list_display_width = new_width;
-                                    this.file_list_layout_width = new_width;
-                                    this.file_list_width_target = new_width;
-                                    this.file_list_width_task = None;
-                                    cx.notify();
-                                }
-                            }))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                                    let border_x = this.sidebar_width() + this.file_list_width();
-                                    this.file_list_resize_grab_offset_x =
-                                        f32::from(event.position.x) - border_x;
-                                    this.file_list_resizing = true;
-                                    cx.notify();
-                                }),
-                            )
-                            .on_mouse_up(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.finish_file_list_resize(cx);
-                                }),
-                            )
-                            .on_mouse_up_out(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.finish_file_list_resize(cx);
-                                }),
-                            ),
-                    )
-                })
-                .when(search_w > 0.5, |this| {
-                    this.child(
-                        div()
-                            .id("workspace-search-resize-handle")
-                            .absolute()
-                            .left(px(sidebar_w + file_list_w + search_w - handle_width / 2.0))
-                            .top_0()
-                            .w(px(handle_width))
-                            .h_full()
-                            .cursor(CursorStyle::ResizeLeftRight)
-                            .hover(move |style| {
-                                style
-                                    .border_l(px(hover_indicator_width))
-                                    .border_color(hover_indicator_color)
-                            })
-                            // Dragging is tracked by the window-wide overlay, so a
-                            // fast pointer cannot outrun this thin hit area.
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                    this.workspace_search_resizing = true;
-                                    cx.notify();
-                                }),
-                            ),
-                    )
-                })
-            })
-            .child(
-                div()
-                    .id("workspace-pane")
-                    .flex_1()
-                    .size_full()
-                    .overflow_hidden()
-                    .relative()
-                    .flex()
-                    .flex_row()
-                    .bg(self.styles.editor.editor_bg)
-                    .child(
-                        div()
-                            .id("workspace-main-column")
-                            .flex_1()
-                            .h_full()
-                            .min_w(px(0.0))
-                            .overflow_hidden()
-                            .flex()
-                            .flex_col()
-                            .when(show_empty_workspace, |this| {
-                                // Empty state: no tabs open
-                                let bg_hover = self.styles.sidebar.sidebar_item_hover_bg;
-                                let btn_color = self.styles.sidebar.sidebar_empty_btn_text_color;
-                                let border_color =
-                                    self.styles.sidebar.sidebar_empty_btn_border_color;
-                                let file_drop_bg = self.styles.editor.editor_file_drop_bg;
-                                this.child(
-                                    div()
-                                        .flex_1()
-                                        .flex()
-                                        .flex_col()
-                                        .items_center()
-                                        .justify_center()
-                                        .drag_over::<ExternalPaths>(move |style, _, _, _| {
-                                            style.bg(file_drop_bg)
-                                        })
-                                        .on_drop(cx.listener(
-                                            |this, paths: &ExternalPaths, _, cx| {
-                                                this.clear_sidebar_drag_state(cx);
-                                                this.open_external_paths_in_tabs(paths.paths(), cx);
-                                            },
-                                        ))
-                                        .cursor(CursorStyle::Arrow)
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(self.scaled(12.0)))
-                                                .child(
-                                                    div()
-                                                        .id("empty-workspace-new-file-btn")
-                                                        .px(px(20.0))
-                                                        .py(px(8.0))
-                                                        .border(px(self.ui_border_width(1.5)))
-                                                        .border_dashed()
-                                                        .border_color(border_color)
-                                                        .rounded_full()
-                                                        .text_size(px(self.scaled(
-                                                            self.styles
-                                                                .sidebar
-                                                                .sidebar_empty_btn_font_size_px,
-                                                        )))
-                                                        .text_color(btn_color)
-                                                        .cursor(CursorStyle::Arrow)
-                                                        .hover(move |s| s.bg(bg_hover))
-                                                        .child(
-                                                            self.t(crate::i18n::TextKey::NewFile),
-                                                        )
-                                                        .on_mouse_down(
-                                                            MouseButton::Left,
-                                                            cx.listener(
-                                                                |this,
-                                                                 _: &MouseDownEvent,
-                                                                 _,
-                                                                 cx| {
-                                                                    this.create_scratch_tab(cx);
-                                                                },
-                                                            ),
-                                                        ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id("empty-workspace-open-folder-btn")
-                                                        .px(px(20.0))
-                                                        .py(px(8.0))
-                                                        .border(px(self.ui_border_width(1.5)))
-                                                        .border_dashed()
-                                                        .border_color(border_color)
-                                                        .rounded_full()
-                                                        .text_size(px(self.scaled(
-                                                            self.styles
-                                                                .sidebar
-                                                                .sidebar_empty_btn_font_size_px,
-                                                        )))
-                                                        .text_color(btn_color)
-                                                        .cursor(CursorStyle::Arrow)
-                                                        .hover(move |s| s.bg(bg_hover))
-                                                        .child(
-                                                            self.t(crate::i18n::TextKey::OpenFolder),
-                                                        )
-                                                        .on_mouse_down(
-                                                            MouseButton::Left,
-                                                            cx.listener(
-                                                                |this,
-                                                                 _: &MouseDownEvent,
-                                                                 _,
-                                                                 cx| {
-                                                                    this.pick_workspace_folder(cx);
-                                                                },
-                                                            ),
-                                                        ),
-                                                ),
-                                        ),
-                                )
-                            })
-                            .when(!show_empty_workspace, |this| {
-                                this.child(self.render_workspace_content_column(window, cx))
-                            }),
-                    )
-                    .when(self.should_render_right_panels(), |this| {
-                        this.child(self.render_right_panels(cx))
-                    })
-                    .when(self.should_render_utility_panel_on_right(), |this| {
-                        this.child(
-                            div()
-                                .id("workspace-tab-bar-actions")
-                                .absolute()
-                                .top_0()
-                                // Sits beside the caption buttons the window
-                                // draws in the same corner.
-                                .right(px(self.window_caption_trailing_inset()))
-                                .h(px(self.tab_bar_height()))
-                                .flex()
-                                .items_center()
-                                .justify_end()
-                                .occlude()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(Self::on_tab_bar_drag_space_mouse_down),
-                                )
-                                .child(self.render_tab_bar_toggle_actions(cx)),
-                        )
-                    })
-                    .when(show_empty_workspace, |this| {
-                        let toolbar_top = self
-                            .scaled(self.styles.toolbar.toolbar_offset_top_px)
-                            .round();
-                        let toolbar_left = self
-                            .scaled(self.styles.toolbar.toolbar_offset_left_px)
-                            .round();
-                        let button_size =
-                            self.scaled(self.styles.toolbar.toolbar_primary_btn_size_px);
-                        let icon_size =
-                            self.scaled(self.styles.toolbar.toolbar_primary_icon_size_px);
-                        let hover_opacity = self.styles.toolbar.toolbar_primary_hover_opacity;
-                        let anchor =
-                            tooltip::toolbar_anchor_bounds(toolbar_left, toolbar_top, button_size);
-                        let sidebar_tooltip = if self.workspaces.is_empty() {
-                            self.t(crate::i18n::TextKey::OpenFolder)
-                        } else {
-                            crate::i18n::sidebar_visibility_action_label(
-                                self.ui_language,
-                                self.sidebar_visible,
-                            )
-                        };
-                        this.child(
-                            div()
-                                .id("empty-workspace-titlebar-drag-region")
-                                .absolute()
-                                .top_0()
-                                .left(px(button_size + toolbar_left * 2.0))
-                                .right(px(self.window_caption_trailing_inset()))
-                                .h(px(self.tab_bar_height()))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(Self::on_tab_bar_drag_space_mouse_down),
-                                ),
-                        )
-                        .when(!self.app_settings.simple_mode, |this| {
-                            this.child(
-                                div()
-                                    .absolute()
-                                    .left(px(toolbar_left))
-                                    .top(px(toolbar_top))
-                                    .child(self.render_toolbar_button(
-                                        "empty-toolbar-sidebar-toggle",
-                                        button_size,
-                                        button_size,
-                                        icon_size,
-                                        1.0,
-                                        hover_opacity,
-                                        SIDEBAR_TOGGLE_SVG_PATH,
-                                        anchor,
-                                        sidebar_tooltip,
-                                        Some(crate::editor::shortcut::hint("secondary-shift-s")),
-                                        cx,
-                                        |this, cx| {
-                                            if this.workspaces.is_empty() {
-                                                this.pick_workspace_folder(cx);
-                                            } else {
-                                                this.toggle_sidebar_visibility(cx);
-                                            }
-                                        },
-                                    )),
-                            )
-                        })
-                    }),
-            )
-            .when(pointer_dragging, |this| {
-                let indicator_line = if self.sidebar_resizing {
-                    let iw =
-                        self.scaled(self.styles.sidebar.sidebar_resize_active_indicator_width_px);
-                    let ic = self.styles.sidebar.sidebar_resize_active_indicator_color;
-                    let x = self.sidebar_width() - iw;
-                    Some(
-                        div()
-                            .absolute()
-                            .left(px(x))
-                            .top_0()
-                            .w(px(iw))
-                            .h_full()
-                            .bg(ic)
-                            .into_any_element(),
-                    )
-                } else if self.file_list_resizing {
-                    let iw =
-                        self.scaled(self.styles.sidebar.sidebar_resize_active_indicator_width_px);
-                    let ic = self.styles.sidebar.sidebar_resize_active_indicator_color;
-                    let x = self.sidebar_width() + self.file_list_width() - iw;
-                    Some(
-                        div()
-                            .absolute()
-                            .left(px(x))
-                            .top_0()
-                            .w(px(iw))
-                            .h_full()
-                            .bg(ic)
-                            .into_any_element(),
-                    )
-                } else if self.workspace_search_resizing {
-                    let iw =
-                        self.scaled(self.styles.sidebar.sidebar_resize_active_indicator_width_px);
-                    let ic = self.styles.sidebar.sidebar_resize_active_indicator_color;
-                    let x = self.sidebar_width()
-                        + self.file_list_width()
-                        + self.workspace_search_panel_width()
-                        - iw;
-                    Some(
-                        div()
-                            .absolute()
-                            .left(px(x))
-                            .top_0()
-                            .w(px(iw))
-                            .h_full()
-                            .bg(ic)
-                            .into_any_element(),
-                    )
-                } else if self.utility_panel_resizing {
-                    let iw = self.scaled(
-                        self.styles
-                            .utility_panel
-                            .utility_panel_resize_active_indicator_width_px,
-                    );
-                    let ic = self
-                        .styles
-                        .utility_panel
-                        .utility_panel_resize_active_indicator_color;
-                    let top = if self.tabs.is_empty() {
-                        0.0
-                    } else {
-                        self.tab_bar_height()
-                    };
-                    let height = (self.last_window_height - top).max(0.0);
-                    let x = (self.last_window_width - self.utility_panel_width()).max(0.0);
-                    Some(
-                        div()
-                            .absolute()
-                            .left(px(x))
-                            .top(px(top))
-                            .w(px(iw))
-                            .h(px(height))
-                            .bg(ic)
-                            .into_any_element(),
-                    )
-                } else {
-                    None
-                };
-                let resize_cursor = if self.code_block_horizontal_scrollbar_drag.is_some() {
-                    CursorStyle::Arrow
-                } else if self.pane_resize_drag.is_some() {
-                    match self.pane_resize_drag.as_ref().map(|drag| drag.axis) {
-                        Some(SplitAxis::Vertical) => CursorStyle::ResizeUpDown,
-                        _ => CursorStyle::ResizeLeftRight,
-                    }
-                } else {
-                    CursorStyle::ResizeLeftRight
-                };
-                this.child(deferred(
-                    div()
-                        .occlude()
-                        .absolute()
-                        .left(px(0.0))
-                        .top(px(0.0))
-                        .w_full()
-                        .h_full()
-                        .cursor(resize_cursor)
-                        .children(indicator_line)
-                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                            if this.code_block_horizontal_scrollbar_drag.is_some() {
-                                this.update_code_block_horizontal_scrollbar_drag(
-                                    event.position,
-                                    cx,
-                                );
-                            } else if this.pane_resize_drag.is_some() {
-                                this.update_pane_resize_drag(event.position);
-                                cx.notify();
-                            } else if this.sidebar_resizing {
-                                let new_width = f32::from(event.position.x);
-                                let min_w =
-                                    this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
-                                let max_w =
-                                    this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
-                                let new_width = clamp_resize_dimension(new_width, min_w, max_w);
-                                this.set_active_sidebar_custom_width(new_width);
-                                this.set_sidebar_width_immediately(new_width);
-                                cx.notify();
-                            } else if this.file_list_resizing {
+                            if this.file_list_resizing {
                                 let new_width = f32::from(event.position.x)
                                     - this.sidebar_width()
                                     - this.file_list_resize_grab_offset_x;
@@ -1499,120 +1078,492 @@ impl Render for EditorView {
                                 this.file_list_width_target = new_width;
                                 this.file_list_width_task = None;
                                 cx.notify();
-                            } else if this.workspace_search_resizing {
-                                let left_edge = this.sidebar_width() + this.file_list_width();
-                                let min_w =
-                                    this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
-                                let max_w =
-                                    this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
-                                let new_width = clamp_resize_dimension(
-                                    f32::from(event.position.x) - left_edge,
-                                    min_w,
-                                    max_w,
-                                );
-                                this.set_workspace_search_panel_width(new_width);
-                                cx.notify();
-                            } else if this.utility_panel_resizing {
-                                let window_width = f32::from(window.bounds().size.width);
-                                let active_panel = this.active_resizable_utility_panel();
-                                let (min_w, max_w) = active_panel
-                                    .map(|panel| this.utility_panel_resize_bounds_for(panel))
-                                    .unwrap_or_else(|| {
-                                        (
-                                            this.scaled(
-                                                this.styles
-                                                    .utility_panel
-                                                    .utility_panel_resize_min_width_px,
-                                            ),
-                                            this.scaled(
-                                                this.styles
-                                                    .utility_panel
-                                                    .utility_panel_resize_max_width_px,
-                                            ),
-                                        )
-                                    });
-                                let new_size = clamp_resize_dimension(
-                                    window_width - f32::from(event.position.x),
-                                    min_w,
-                                    max_w,
-                                );
-                                if let Some(panel) = active_panel {
-                                    this.set_utility_panel_custom_width_for(panel, Some(new_size));
-                                }
-                                this.set_utility_panel_width_immediately(new_size);
-                                cx.notify();
                             }
                         }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                let border_x = this.sidebar_width() + this.file_list_width();
+                                this.file_list_resize_grab_offset_x =
+                                    f32::from(event.position.x) - border_x;
+                                this.file_list_resizing = true;
+                                cx.notify();
+                            }),
+                        )
                         .on_mouse_up(
                             MouseButton::Left,
-                            cx.listener(|this, event: &MouseUpEvent, _, cx| {
-                                this.stop_code_block_horizontal_scrollbar_drag(event.position, cx);
-                                this.sidebar_resizing = false;
-                                this.utility_panel_resizing = false;
-                                this.pane_resize_drag = None;
-                                this.finish_workspace_search_resize(cx);
+                            cx.listener(|this, _, _, cx| {
                                 this.finish_file_list_resize(cx);
-                                cx.notify();
                             }),
                         )
                         .on_mouse_up_out(
                             MouseButton::Left,
-                            cx.listener(|this, event: &MouseUpEvent, _, cx| {
-                                this.stop_code_block_horizontal_scrollbar_drag(event.position, cx);
-                                cx.notify();
+                            cx.listener(|this, _, _, cx| {
+                                this.finish_file_list_resize(cx);
                             }),
-                        )
-                        .on_mouse_down(MouseButton::Left, cx.listener(|_this, _, _, _cx| {})),
-                ))
+                        ),
+                )
             })
-            .when(self.context_menu.is_some(), |this| {
-                this.child(deferred(self.render_context_menu(cx)))
-            })
-            .when(self.line_drag_active(), |this| {
-                this.child(deferred(super::line_drag::render_line_drag_overlay(cx.entity().clone())).with_priority(2))
-            })
-            .when(self.preview_overlay.is_some(), |this| {
-                this.child(deferred(self.render_preview_overlay(cx)).with_priority(2))
-            })
-            .when(self.settings_font_picker.is_some(), |this| {
-                if let Some(picker) = &self.settings_font_picker {
-                    this.child(deferred(self.render_font_picker_overlay(picker, cx)))
-                } else {
-                    this
-                }
-            })
-            .when(self.quick_open_visible, |this| {
-                this.child(deferred(self.render_quick_open_overlay(cx)))
-            })
-            .when(self.command_palette_visible, |this| {
-                this.child(deferred(self.render_command_palette_overlay(cx)))
-            })
-            .when(self.language_picker_visible, |this| {
-                this.child(deferred(self.render_language_picker_overlay(cx)))
-            })
-            .when(self.branch_picker_visible, |this| {
-                this.child(deferred(self.render_branch_picker_overlay(cx)))
-            })
-            .when(self.git_remote_input_visible, |this| {
-                this.child(deferred(self.render_git_remote_input_overlay(window, cx)))
-            })
-            .when(self.dialog.is_some(), |this| {
-                this.child(deferred(self.render_dialog(cx)))
-            })
-            .when(!self.notifications.is_empty(), |this| {
-                this.child(deferred(self.render_notifications(cx)))
-            })
-            // Anchored to the window rather than the tab bar, which stops short
-            // of the frame whenever a right-hand panel is open.
-            .when(show_window_caption_buttons, |this| {
+            .when(search_w > 0.5, |this| {
                 this.child(
                     div()
+                        .id("workspace-search-resize-handle")
                         .absolute()
+                        .left(px(sidebar_w + file_list_w + search_w - handle_width / 2.0))
                         .top_0()
-                        .right_0()
-                        .child(self.render_window_caption_buttons(cx)),
+                        .w(px(handle_width))
+                        .h_full()
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .hover(move |style| {
+                            style
+                                .border_l(px(hover_indicator_width))
+                                .border_color(hover_indicator_color)
+                        })
+                        // Dragging is tracked by the window-wide overlay, so a
+                        // fast pointer cannot outrun this thin hit area.
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                this.workspace_search_resizing = true;
+                                cx.notify();
+                            }),
+                        ),
                 )
-            });
+            })
+        })
+        .child(
+            div()
+                .id("workspace-pane")
+                .flex_1()
+                .size_full()
+                .overflow_hidden()
+                .relative()
+                .flex()
+                .flex_row()
+                .bg(self.styles.editor.editor_bg)
+                .child(
+                    div()
+                        .id("workspace-main-column")
+                        .flex_1()
+                        .h_full()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .flex()
+                        .flex_col()
+                        .when(show_empty_workspace, |this| {
+                            // Empty state: no tabs open
+                            let bg_hover = self.styles.sidebar.sidebar_item_hover_bg;
+                            let btn_color = self.styles.sidebar.sidebar_empty_btn_text_color;
+                            let border_color = self.styles.sidebar.sidebar_empty_btn_border_color;
+                            let file_drop_bg = self.styles.self_drawn.colors.drop_overlay;
+                            this.child(
+                                div()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                                        style.bg(file_drop_bg)
+                                    })
+                                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                                        this.clear_sidebar_drag_state(cx);
+                                        this.open_external_paths_in_tabs(paths.paths(), cx);
+                                    }))
+                                    .cursor(CursorStyle::Arrow)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(self.scaled(12.0)))
+                                            .child(
+                                                div()
+                                                    .id("empty-workspace-new-file-btn")
+                                                    .px(px(20.0))
+                                                    .py(px(8.0))
+                                                    .border(px(self.ui_border_width(1.5)))
+                                                    .border_dashed()
+                                                    .border_color(border_color)
+                                                    .rounded_full()
+                                                    .text_size(px(self.scaled(
+                                                        self.styles
+                                                            .sidebar
+                                                            .sidebar_empty_btn_font_size_px,
+                                                    )))
+                                                    .text_color(btn_color)
+                                                    .cursor(CursorStyle::Arrow)
+                                                    .hover(move |s| s.bg(bg_hover))
+                                                    .child(self.t(crate::i18n::TextKey::NewFile))
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(
+                                                            |this, _: &MouseDownEvent, _, cx| {
+                                                                this.create_scratch_tab(cx);
+                                                            },
+                                                        ),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("empty-workspace-open-folder-btn")
+                                                    .px(px(20.0))
+                                                    .py(px(8.0))
+                                                    .border(px(self.ui_border_width(1.5)))
+                                                    .border_dashed()
+                                                    .border_color(border_color)
+                                                    .rounded_full()
+                                                    .text_size(px(self.scaled(
+                                                        self.styles
+                                                            .sidebar
+                                                            .sidebar_empty_btn_font_size_px,
+                                                    )))
+                                                    .text_color(btn_color)
+                                                    .cursor(CursorStyle::Arrow)
+                                                    .hover(move |s| s.bg(bg_hover))
+                                                    .child(self.t(crate::i18n::TextKey::OpenFolder))
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(
+                                                            |this, _: &MouseDownEvent, _, cx| {
+                                                                this.pick_workspace_folder(cx);
+                                                            },
+                                                        ),
+                                                    ),
+                                            ),
+                                    ),
+                            )
+                        })
+                        .when(!show_empty_workspace, |this| {
+                            this.child(self.render_workspace_content_column(window, cx))
+                        }),
+                )
+                .when(self.should_render_right_panels(), |this| {
+                    this.child(self.render_right_panels(cx))
+                })
+                .when(self.should_render_utility_panel_on_right(), |this| {
+                    this.child(
+                        div()
+                            .id("workspace-tab-bar-actions")
+                            .absolute()
+                            .top_0()
+                            // Sits beside the caption buttons the window
+                            // draws in the same corner.
+                            .right(px(self.window_caption_trailing_inset()))
+                            .h(px(self.tab_bar_height()))
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .occlude()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+                            )
+                            .child(self.render_tab_bar_toggle_actions(cx)),
+                    )
+                })
+                .when(show_empty_workspace, |this| {
+                    let toolbar_top = self
+                        .scaled(self.styles.toolbar.toolbar_offset_top_px)
+                        .round();
+                    let toolbar_left = self
+                        .scaled(self.styles.toolbar.toolbar_offset_left_px)
+                        .round();
+                    let button_size = self.scaled(self.styles.toolbar.toolbar_primary_btn_size_px);
+                    let icon_size = self.scaled(self.styles.toolbar.toolbar_primary_icon_size_px);
+                    let hover_opacity = self.styles.toolbar.toolbar_primary_hover_opacity;
+                    let anchor =
+                        tooltip::toolbar_anchor_bounds(toolbar_left, toolbar_top, button_size);
+                    let sidebar_tooltip = if self.workspaces.is_empty() {
+                        self.t(crate::i18n::TextKey::OpenFolder)
+                    } else {
+                        crate::i18n::sidebar_visibility_action_label(
+                            self.ui_language,
+                            self.sidebar_visible,
+                        )
+                    };
+                    this.child(
+                        div()
+                            .id("empty-workspace-titlebar-drag-region")
+                            .absolute()
+                            .top_0()
+                            .left(px(button_size + toolbar_left * 2.0))
+                            .right(px(self.window_caption_trailing_inset()))
+                            .h(px(self.tab_bar_height()))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+                            ),
+                    )
+                    .when(!self.app_settings.simple_mode, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .left(px(toolbar_left))
+                                .top(px(toolbar_top))
+                                .child(self.render_toolbar_button(
+                                    "empty-toolbar-sidebar-toggle",
+                                    button_size,
+                                    button_size,
+                                    icon_size,
+                                    1.0,
+                                    hover_opacity,
+                                    SIDEBAR_TOGGLE_SVG_PATH,
+                                    anchor,
+                                    sidebar_tooltip,
+                                    Some(crate::editor::shortcut::hint("secondary-shift-s")),
+                                    cx,
+                                    |this, cx| {
+                                        if this.workspaces.is_empty() {
+                                            this.pick_workspace_folder(cx);
+                                        } else {
+                                            this.toggle_sidebar_visibility(cx);
+                                        }
+                                    },
+                                )),
+                        )
+                    })
+                }),
+        )
+        .when(pointer_dragging, |this| {
+            let indicator_line = if self.sidebar_resizing {
+                let iw = self.scaled(self.styles.sidebar.sidebar_resize_active_indicator_width_px);
+                let ic = self.styles.sidebar.sidebar_resize_active_indicator_color;
+                let x = self.sidebar_width() - iw;
+                Some(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top_0()
+                        .w(px(iw))
+                        .h_full()
+                        .bg(ic)
+                        .into_any_element(),
+                )
+            } else if self.file_list_resizing {
+                let iw = self.scaled(self.styles.sidebar.sidebar_resize_active_indicator_width_px);
+                let ic = self.styles.sidebar.sidebar_resize_active_indicator_color;
+                let x = self.sidebar_width() + self.file_list_width() - iw;
+                Some(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top_0()
+                        .w(px(iw))
+                        .h_full()
+                        .bg(ic)
+                        .into_any_element(),
+                )
+            } else if self.workspace_search_resizing {
+                let iw = self.scaled(self.styles.sidebar.sidebar_resize_active_indicator_width_px);
+                let ic = self.styles.sidebar.sidebar_resize_active_indicator_color;
+                let x = self.sidebar_width()
+                    + self.file_list_width()
+                    + self.workspace_search_panel_width()
+                    - iw;
+                Some(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top_0()
+                        .w(px(iw))
+                        .h_full()
+                        .bg(ic)
+                        .into_any_element(),
+                )
+            } else if self.utility_panel_resizing {
+                let iw = self.scaled(
+                    self.styles
+                        .utility_panel
+                        .utility_panel_resize_active_indicator_width_px,
+                );
+                let ic = self
+                    .styles
+                    .utility_panel
+                    .utility_panel_resize_active_indicator_color;
+                let top = if self.tabs.is_empty() {
+                    0.0
+                } else {
+                    self.tab_bar_height()
+                };
+                let height = (self.last_window_height - top).max(0.0);
+                let x = (self.last_window_width - self.utility_panel_width()).max(0.0);
+                Some(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px(top))
+                        .w(px(iw))
+                        .h(px(height))
+                        .bg(ic)
+                        .into_any_element(),
+                )
+            } else {
+                None
+            };
+            let resize_cursor = if self.code_block_horizontal_scrollbar_drag.is_some() {
+                CursorStyle::Arrow
+            } else if self.pane_resize_drag.is_some() {
+                match self.pane_resize_drag.as_ref().map(|drag| drag.axis) {
+                    Some(SplitAxis::Vertical) => CursorStyle::ResizeUpDown,
+                    _ => CursorStyle::ResizeLeftRight,
+                }
+            } else {
+                CursorStyle::ResizeLeftRight
+            };
+            this.child(deferred(
+                div()
+                    .occlude()
+                    .absolute()
+                    .left(px(0.0))
+                    .top(px(0.0))
+                    .w_full()
+                    .h_full()
+                    .cursor(resize_cursor)
+                    .children(indicator_line)
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                        if this.code_block_horizontal_scrollbar_drag.is_some() {
+                            this.update_code_block_horizontal_scrollbar_drag(event.position, cx);
+                        } else if this.pane_resize_drag.is_some() {
+                            this.update_pane_resize_drag(event.position);
+                            cx.notify();
+                        } else if this.sidebar_resizing {
+                            let new_width = f32::from(event.position.x);
+                            let min_w =
+                                this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
+                            let max_w =
+                                this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
+                            let new_width = clamp_resize_dimension(new_width, min_w, max_w);
+                            this.set_active_sidebar_custom_width(new_width);
+                            this.set_sidebar_width_immediately(new_width);
+                            cx.notify();
+                        } else if this.file_list_resizing {
+                            let new_width = f32::from(event.position.x)
+                                - this.sidebar_width()
+                                - this.file_list_resize_grab_offset_x;
+                            let min_w =
+                                this.scaled(this.styles.sidebar.file_list_resize_min_width_px);
+                            let max_w =
+                                this.scaled(this.styles.sidebar.file_list_resize_max_width_px);
+                            let new_width = clamp_resize_dimension(new_width, min_w, max_w);
+                            this.file_list_custom_width = Some(new_width);
+                            this.file_list_display_width = new_width;
+                            this.file_list_layout_width = new_width;
+                            this.file_list_width_target = new_width;
+                            this.file_list_width_task = None;
+                            cx.notify();
+                        } else if this.workspace_search_resizing {
+                            let left_edge = this.sidebar_width() + this.file_list_width();
+                            let min_w =
+                                this.scaled(this.styles.sidebar.sidebar_resize_min_width_px);
+                            let max_w =
+                                this.scaled(this.styles.sidebar.sidebar_resize_max_width_px);
+                            let new_width = clamp_resize_dimension(
+                                f32::from(event.position.x) - left_edge,
+                                min_w,
+                                max_w,
+                            );
+                            this.set_workspace_search_panel_width(new_width);
+                            cx.notify();
+                        } else if this.utility_panel_resizing {
+                            let window_width = f32::from(window.bounds().size.width);
+                            let active_panel = this.active_resizable_utility_panel();
+                            let (min_w, max_w) = active_panel
+                                .map(|panel| this.utility_panel_resize_bounds_for(panel))
+                                .unwrap_or_else(|| {
+                                    (
+                                        this.scaled(
+                                            this.styles
+                                                .utility_panel
+                                                .utility_panel_resize_min_width_px,
+                                        ),
+                                        this.scaled(
+                                            this.styles
+                                                .utility_panel
+                                                .utility_panel_resize_max_width_px,
+                                        ),
+                                    )
+                                });
+                            let new_size = clamp_resize_dimension(
+                                window_width - f32::from(event.position.x),
+                                min_w,
+                                max_w,
+                            );
+                            if let Some(panel) = active_panel {
+                                this.set_utility_panel_custom_width_for(panel, Some(new_size));
+                            }
+                            this.set_utility_panel_width_immediately(new_size);
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                            this.stop_code_block_horizontal_scrollbar_drag(event.position, cx);
+                            this.sidebar_resizing = false;
+                            this.utility_panel_resizing = false;
+                            this.pane_resize_drag = None;
+                            this.finish_workspace_search_resize(cx);
+                            this.finish_file_list_resize(cx);
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                            this.stop_code_block_horizontal_scrollbar_drag(event.position, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_down(MouseButton::Left, cx.listener(|_this, _, _, _cx| {})),
+            ))
+        })
+        .when(self.context_menu.is_some(), |this| {
+            this.child(deferred(self.render_context_menu(cx)))
+        })
+        .when(self.line_drag_active(), |this| {
+            this.child(
+                deferred(super::line_drag::render_line_drag_overlay(
+                    cx.entity().clone(),
+                ))
+                .with_priority(2),
+            )
+        })
+        .when(self.preview_overlay.is_some(), |this| {
+            this.child(deferred(self.render_preview_overlay(cx)).with_priority(2))
+        })
+        .when(self.settings_font_picker.is_some(), |this| {
+            if let Some(picker) = &self.settings_font_picker {
+                this.child(deferred(self.render_font_picker_overlay(picker, cx)))
+            } else {
+                this
+            }
+        })
+        .when(self.quick_open_visible, |this| {
+            this.child(deferred(self.render_quick_open_overlay(cx)))
+        })
+        .when(self.command_palette_visible, |this| {
+            this.child(deferred(self.render_command_palette_overlay(cx)))
+        })
+        .when(self.language_picker_visible, |this| {
+            this.child(deferred(self.render_language_picker_overlay(cx)))
+        })
+        .when(self.dialog.is_some(), |this| {
+            this.child(deferred(self.render_dialog(cx)))
+        })
+        .when(!self.notifications.is_empty(), |this| {
+            this.child(deferred(self.render_notifications(cx)))
+        })
+        // Anchored to the window rather than the tab bar, which stops short
+        // of the frame whenever a right-hand panel is open.
+        .when(show_window_caption_buttons, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .child(self.render_window_caption_buttons(cx)),
+            )
+        });
 
         #[cfg(target_os = "linux")]
         {
@@ -1746,39 +1697,23 @@ impl EditorView {
             .and_then(|index| self.tabs.get(index))
             .and_then(|tab| tab.path.clone());
 
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(self.scaled(10.0)))
-            .text_color(self.theme.text_secondary)
+        let style = self.styles.binary_placeholder(&self.theme);
+        crate::ui::panel::binary_placeholder(style, self.ui_scale)
             .child(
-                div()
-                    .text_size(px(self.scaled(self.styles.ui_font_size_px + 1.0)))
-                    .text_color(self.theme.text_primary)
+                crate::ui::typography::label(style.title, self.ui_scale)
                     .child(self.t(crate::i18n::TextKey::BinaryFileMessage)),
             )
             .child(
-                div()
-                    .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
-                    .child(
-                        path.as_ref()
-                            .map(|value| value.display().to_string())
-                            .unwrap_or_else(|| {
-                                self.t(crate::i18n::TextKey::CurrentFile).to_string()
-                            }),
-                    ),
+                crate::ui::typography::label(style.detail, self.ui_scale).child(
+                    path.as_ref()
+                        .map(|value| value.display().to_string())
+                        .unwrap_or_else(|| self.t(crate::i18n::TextKey::CurrentFile).to_string()),
+                ),
             )
             .child(
-                div()
-                    .px(px(self.scaled(12.0)))
-                    .py(px(self.scaled(4.0)))
-                    .rounded(px(self.scaled(8.0)))
-                    .bg(self.theme.bg_hover)
-                    .text_color(self.theme.text_primary)
-                    .cursor(CursorStyle::PointingHand)
+                crate::ui::button::button_frame(style.action, Default::default(), self.ui_scale)
+                    .h_auto()
+                    .py(px(self.scaled(style.action_padding_y_px)))
                     .child(self.t(crate::i18n::TextKey::OpenFile))
                     .on_mouse_down(
                         MouseButton::Left,

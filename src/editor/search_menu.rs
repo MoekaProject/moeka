@@ -1,6 +1,6 @@
 //! Unified searchable menu component: the single implementation of the
 //! anchored "search input + filtered rows" overlay used by the language /
-//! indentation picker, the git branch picker, and the settings / whiteboard
+//! indentation picker, the git branch picker, and the settings
 //! pickers (fonts, interface language, formats, …). All shared styling
 //! (panel, input, rows, empty state) lives here so every searchable menu
 //! looks and behaves identically.
@@ -12,12 +12,7 @@ use gpui::{
 
 use super::*;
 
-/// Fixed metrics shared by every searchable menu (before UI scaling).
-pub(crate) const SEARCH_MENU_ROW_HEIGHT_PX: f32 = 24.0;
-pub(crate) const SEARCH_MENU_INPUT_HEIGHT_PX: f32 = 33.0;
 pub(crate) const SEARCH_MENU_MAX_VISIBLE_ROWS: usize = 12;
-const SEARCH_MENU_LIST_PADDING_BOTTOM_PX: f32 = 4.0;
-const SEARCH_MENU_RADIUS_PX: f32 = 8.0;
 
 /// Content and state of a single searchable-menu row.
 #[derive(Default)]
@@ -45,11 +40,6 @@ impl SearchMenuRow {
             label: label.into(),
             ..Self::default()
         }
-    }
-
-    pub(crate) fn detail(mut self, detail: Option<impl Into<SharedString>>) -> Self {
-        self.detail = detail.map(Into::into);
-        self
     }
 
     pub(crate) fn selected(mut self, selected: bool) -> Self {
@@ -91,35 +81,13 @@ pub(crate) type SearchMenuScrollExtend = Box<dyn Fn(&mut EditorView, &mut Contex
 impl EditorView {
     /// Text-input styles shared by every searchable menu's query field.
     pub(crate) fn search_menu_text_input_styles(&self) -> crate::style::TextInputStyles {
-        let mut styles = self.styles.text_input.clone();
-        let menu = &self.styles.quick_open;
-        styles.text_input_bg = menu.quick_open_input_bg;
-        styles.text_input_hover_bg = Some(menu.quick_open_input_focus_bg);
-        styles.text_input_focus_bg = menu.quick_open_input_focus_bg;
-        styles.text_input_text_color = menu.quick_open_input_text_color;
-        styles.text_input_placeholder_color = menu.quick_open_result_secondary_text_color;
-        styles.text_input_cursor_color = menu.quick_open_input_text_color;
-        styles.text_input_border_width_px = 0.0;
-        styles.text_input_height_px = self.scaled(24.0);
-        styles.text_input_padding_left_px = menu.quick_open_input_text_padding_left_px;
-        styles.text_input_padding_right_px = menu.quick_open_input_text_padding_left_px;
-        styles.text_input_font_size_px = self.scaled(menu.quick_open_result_name_font_size_px);
-        styles.text_input_cursor_height_ratio = menu.quick_open_input_cursor_height_ratio;
-        styles.text_input_cursor_height_adjust_px = menu.quick_open_input_cursor_height_adjust_px;
-        styles
+        self.styles
+            .input_styles(crate::style::InputRole::Picker, self.ui_scale)
     }
 
     /// The standard "No matches" row shown when a query filters everything out.
     pub(crate) fn render_search_menu_empty_row(&self) -> AnyElement {
-        let styles = &self.styles.quick_open;
-        div()
-            .w_full()
-            .h(px(self.scaled(styles.quick_open_empty_height_px)))
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(px(self.scaled(styles.quick_open_empty_font_size_px)))
-            .text_color(styles.quick_open_empty_text_color)
+        crate::ui::list::empty(self.styles.search_menu_empty(), self.ui_scale)
             .child(crate::i18n::no_matches_label(self.ui_language))
             .into_any_element()
     }
@@ -133,87 +101,84 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let styles = &self.styles.quick_open;
-        let selected_bg = styles.quick_open_result_selected_bg;
-        let hover_bg = styles.quick_open_result_hover_bg;
         let text_secondary = styles.quick_open_result_secondary_text_color;
         let name_font = self.scaled(styles.quick_open_result_name_font_size_px);
         let detail_font = self.scaled(styles.quick_open_result_path_font_size_px);
         let label_color = if row.selected || row.checked {
-            self.theme.text_accent
+            styles.quick_open_result_accent_text_color
         } else {
             styles.quick_open_result_text_color
         };
 
-        div()
-            .id(id)
-            .h(px(self.scaled(SEARCH_MENU_ROW_HEIGHT_PX)))
-            .px(px(self.scaled(styles.quick_open_result_padding_x_px)))
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(6.0)))
-            .cursor(CursorStyle::Arrow)
-            .when(row.selected || row.checked, |this| this.bg(selected_bg))
-            .hover(move |style| style.bg(hover_bg))
-            .when(row.back, |this| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(detail_font))
-                        .text_color(text_secondary)
-                        .child("‹"),
-                )
-            })
-            .when_some(row.icon_path, |this, icon_path| {
-                this.child(
-                    svg()
-                        .path(icon_path)
-                        .size(px(self.scaled(14.0)))
-                        .flex_none()
-                        .text_color(label_color),
-                )
-            })
-            .child(
+        crate::ui::list::list_item(
+            self.styles.search_menu_item(),
+            crate::style::ControlState {
+                selected: row.selected || row.checked,
+                ..Default::default()
+            },
+            self.ui_scale,
+        )
+        .id(id)
+        .when(row.back, |this| {
+            this.child(
                 div()
-                    .flex_1()
-                    .min_w(px(0.0))
+                    .flex_none()
+                    .text_size(px(detail_font))
+                    .text_color(text_secondary)
+                    .child("‹"),
+            )
+        })
+        .when_some(row.icon_path, |this, icon_path| {
+            this.child(
+                svg()
+                    .path(icon_path)
+                    .size(px(self.scaled(self.styles.ui.spec.menu_icon_size_px)))
+                    .flex_none()
+                    .text_color(label_color),
+            )
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .truncate()
+                .whitespace_nowrap()
+                .text_size(px(name_font))
+                .text_color(label_color)
+                .when_some(row.preview_font, |this, font| this.font_family(font))
+                .child(row.label),
+        )
+        .when_some(row.detail, |this, detail| {
+            this.child(
+                div()
+                    .flex_none()
+                    .max_w(px(self.scaled(self.styles.ui.spec.menu_detail_max_width_px)))
                     .overflow_hidden()
                     .truncate()
                     .whitespace_nowrap()
-                    .text_size(px(name_font))
-                    .text_color(label_color)
-                    .when_some(row.preview_font, |this, font| this.font_family(font))
-                    .child(row.label),
+                    .text_size(px(detail_font))
+                    .text_color(text_secondary)
+                    .child(detail),
             )
-            .when_some(row.detail, |this, detail| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .max_w(px(self.scaled(140.0)))
-                        .overflow_hidden()
-                        .truncate()
-                        .whitespace_nowrap()
-                        .text_size(px(detail_font))
-                        .text_color(text_secondary)
-                        .child(detail),
-                )
-            })
-            .when(row.submenu, |this| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(detail_font))
-                        .text_color(text_secondary)
-                        .child("▸"),
-                )
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    on_click(this, window, cx);
-                }),
+        })
+        .when(row.submenu, |this| {
+            this.child(
+                div()
+                    .flex_none()
+                    .text_size(px(detail_font))
+                    .text_color(text_secondary)
+                    .child("▸"),
             )
-            .into_any_element()
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                on_click(this, window, cx);
+            }),
+        )
+        .into_any_element()
     }
 
     /// The anchored menu panel: search input on top of a scrollable row list.
@@ -228,13 +193,14 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let styles = &self.styles.quick_open;
-        let bg = styles.quick_open_panel_bg;
         let border = styles.quick_open_panel_border_color;
-        let input_h = self.scaled(SEARCH_MENU_INPUT_HEIGHT_PX);
-        let row_h = self.scaled(SEARCH_MENU_ROW_HEIGHT_PX);
+        let input_h = self.scaled(self.styles.ui.spec.search_menu_input_height_px());
+        let row_h = self.scaled(self.styles.ui.spec.menu_row_height_px);
+        let fixed_corner_padding =
+            self.styles.ui.spec.appearance.corners == crate::style::UiCorners::Full;
+        let bottom_padding = self.scaled(self.styles.ui.spec.search_menu_bottom_padding_px());
         let visible_rows = config.row_count.clamp(1, SEARCH_MENU_MAX_VISIBLE_ROWS);
-        let desired_h =
-            input_h + visible_rows as f32 * row_h + self.scaled(SEARCH_MENU_LIST_PADDING_BOTTOM_PX);
+        let desired_h = input_h + visible_rows as f32 * row_h + bottom_padding;
         let placement = helpers::anchored_popup_placement(
             config.viewport_width,
             config.viewport_height,
@@ -245,7 +211,11 @@ impl EditorView {
             self.scaled(self.styles.anchored_popup_gap_px),
             self.scaled(self.styles.anchored_popup_margin_px),
         );
-        let max_results_h = (placement.max_height - input_h).max(row_h);
+        let max_results_h = if fixed_corner_padding {
+            (placement.max_height - input_h - bottom_padding).max(0.0)
+        } else {
+            (placement.max_height - input_h).max(row_h)
+        };
 
         let rows = if rows.is_empty() {
             vec![self.render_search_menu_empty_row()]
@@ -253,17 +223,12 @@ impl EditorView {
             rows
         };
 
-        let panel = div()
+        let panel = crate::ui::surface::surface(&self.styles.search_menu_surface(), self.ui_scale)
             .id(config.id)
             .absolute()
             .left(px(placement.left))
             .w(px(placement.width))
             .max_h(px(placement.max_height))
-            .bg(bg)
-            .border(px(self.ui_border_width(1.0)))
-            .border_color(border)
-            .rounded(px(self.scaled(SEARCH_MENU_RADIUS_PX)))
-            .shadow_md()
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -286,27 +251,31 @@ impl EditorView {
                 div()
                     .w_full()
                     .flex_none()
+                    .min_h(px(input_h))
                     .px(px(self.scaled(styles.quick_open_input_padding_x_px)))
-                    .py(px(self.scaled(4.0)))
+                    .py(px(self.scaled(self.styles.ui.spec.menu_input_padding_y_px)))
                     .border_b(px(self.ui_border_width(1.0)))
                     .border_color(border)
                     .when_some(editor, |this, editor| this.child(editor)),
             )
             .child(
-                div()
-                    .id(SharedString::from(format!("{}-results", config.id)))
-                    .w_full()
-                    .max_h(px(max_results_h))
-                    .overflow_y_scroll()
-                    .pb(px(self.scaled(SEARCH_MENU_LIST_PADDING_BOTTOM_PX)))
-                    .when_some(scroll_handle, |this, handle| this.track_scroll(handle))
-                    .when_some(on_scroll_extend, |this, extend| {
-                        this.on_scroll_wheel(cx.listener(move |this, _, _, cx| {
-                            extend(this, cx);
-                        }))
-                    })
-                    .children(rows),
-            );
+                crate::ui::surface::menu_scroll_area(SharedString::from(format!(
+                    "{}-results",
+                    config.id
+                )))
+                .max_h(px(max_results_h))
+                .when(!fixed_corner_padding, |this| this.pb(px(bottom_padding)))
+                .when_some(scroll_handle, |this, handle| this.track_scroll(handle))
+                .when_some(on_scroll_extend, |this, extend| {
+                    this.on_scroll_wheel(cx.listener(move |this, _, _, cx| {
+                        extend(this, cx);
+                    }))
+                })
+                .children(rows),
+            )
+            .when(fixed_corner_padding, |this| {
+                this.child(div().w_full().h(px(bottom_padding)).flex_none())
+            });
         match placement.vertical {
             helpers::AnchoredPopupVertical::Above { bottom } => panel.bottom(px(bottom)),
             helpers::AnchoredPopupVertical::Below { top } => panel.top(px(top)),

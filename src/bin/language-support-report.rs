@@ -53,7 +53,7 @@ fn main() -> Result<()> {
     let output = arguments
         .next()
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("docs/language-support-audit.md"));
+        .unwrap_or_else(|| PathBuf::from("target/language-support-audit.md"));
     let source = arguments.next().map(PathBuf::from);
     anyhow::ensure!(
         arguments.next().is_none(),

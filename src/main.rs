@@ -9,7 +9,6 @@ macro_rules! log_error {
 
 mod actions;
 mod buffer;
-mod checkbox;
 mod cursor;
 mod editor;
 mod front_matter;
@@ -23,6 +22,7 @@ mod style;
 mod table_ops;
 mod text_input;
 mod theme;
+mod ui;
 
 use crate::i18n::system_application_display_name;
 use std::borrow::Cow;
@@ -697,11 +697,6 @@ fn main() {
             ),
             KeyBinding::new("secondary-alt-i", ToggleInfoPanel, Some("MarkdownEditor")),
             KeyBinding::new(
-                keys::TOGGLE_GIT_HISTORY,
-                ToggleGitHistory,
-                Some("MarkdownEditor"),
-            ),
-            KeyBinding::new(
                 "secondary-alt-y",
                 ToggleThemeDebugger,
                 Some("MarkdownEditor"),
@@ -786,19 +781,6 @@ fn main() {
             KeyBinding::new("secondary-n", NewChatTab, Some("ChatTerminal")),
             KeyBinding::new("secondary-w", CloseActiveChatTab, Some("ChatTerminal")),
             KeyBinding::new("secondary-k", ClearTerminal, Some("ChatTerminal")),
-        ]);
-
-        cx.bind_keys([
-            KeyBinding::new("v", WhiteboardSelectTool, Some("Whiteboard && !TextInput")),
-            KeyBinding::new(
-                "r",
-                WhiteboardRectangleTool,
-                Some("Whiteboard && !TextInput"),
-            ),
-            KeyBinding::new("o", WhiteboardEllipseTool, Some("Whiteboard && !TextInput")),
-            KeyBinding::new("a", WhiteboardArrowTool, Some("Whiteboard && !TextInput")),
-            KeyBinding::new("l", WhiteboardLineTool, Some("Whiteboard && !TextInput")),
-            KeyBinding::new("t", WhiteboardTextTool, Some("Whiteboard && !TextInput")),
         ]);
 
         cx.bind_keys([

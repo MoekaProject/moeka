@@ -70,14 +70,10 @@ impl EditorView {
             .gap(px(self.scaled(ns.notification_gap_px)))
             .children(self.notifications.iter().map(|notification| {
                 let id = notification.id;
-                div()
+                crate::ui::surface::surface(&self.styles.notification_surface(), 1.0)
                     .id(("notification", id))
                     .occlude()
                     .w(px(self.scaled(ns.notification_width_px)))
-                    .bg(ns.notification_bg)
-                    .border(px(ns.notification_border_width_px))
-                    .border_color(ns.notification_border_color)
-                    .rounded(px(ns.notification_radius_px))
                     .overflow_hidden()
                     .flex()
                     .cursor(CursorStyle::PointingHand)
@@ -90,7 +86,7 @@ impl EditorView {
                             .py(px(self.scaled(ns.notification_padding_y_px)))
                             .whitespace_normal()
                             .text_size(px(self.scaled(ns.notification_font_size_px)))
-                            .text_color(ns.notification_text_color)
+                            .text_color(self.styles.notification_surface().foreground)
                             .child(SharedString::from(notification.message.clone())),
                     )
                     .on_mouse_down(

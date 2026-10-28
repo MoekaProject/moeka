@@ -1,59 +1,9 @@
-use gpui::{AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, div, prelude::*, px};
+use gpui::{AnyElement, Context, MouseButton, MouseDownEvent, div, prelude::*, px};
 
 use crate::markdown::{self, BlockType};
-use crate::theme::with_alpha;
 
 use super::chat_panel::TerminalStatusSummary;
 use super::*;
-
-#[derive(Default)]
-pub(crate) struct GitBranchStatus {
-    base_dir: Option<PathBuf>,
-    label: Option<String>,
-    dirty: bool,
-    epoch: usize,
-    scanned_at: Option<SystemTime>,
-    task: Option<Task<()>>,
-}
-
-impl GitBranchStatus {
-    fn invalidate(&mut self) {
-        self.dirty = true;
-        self.epoch = self.epoch.wrapping_add(1);
-    }
-
-    fn set_base_dir(&mut self, base_dir: Option<PathBuf>) -> bool {
-        if self.base_dir == base_dir {
-            return false;
-        }
-        self.base_dir = base_dir;
-        self.label = None;
-        self.scanned_at = None;
-        self.invalidate();
-        true
-    }
-
-    fn request_is_current(&self, base_dir: &Path, epoch: usize) -> bool {
-        self.base_dir.as_deref() == Some(base_dir) && self.epoch == epoch
-    }
-
-    fn finish(&mut self, result: std::io::Result<Option<String>>) {
-        // An optional status-bar label must not retry or toast on every render.
-        // The Git panel still reports genuine repository errors when opened.
-        self.label = result.ok().flatten();
-        self.dirty = false;
-        self.scanned_at = Some(SystemTime::now());
-    }
-}
-
-fn collect_status_bar_git_branch(base_dir: &Path) -> Result<Option<String>, String> {
-    match super::git_ops::run_git(base_dir, &["branch", "--show-current"]) {
-        Ok(branch) if !branch.is_empty() => Ok(Some(branch)),
-        Ok(_) => super::git_ops::run_git(base_dir, &["rev-parse", "--short", "HEAD"]).map(Some),
-        Err(error) if error.to_ascii_lowercase().contains("not a git repository") => Ok(None),
-        Err(error) => Err(error),
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IndentKind {
@@ -182,7 +132,7 @@ fn convert_text_indentation(
 
 impl EditorView {
     pub(crate) fn status_bar_height(&self) -> f32 {
-        self.scaled(24.0)
+        self.scaled(self.styles.status_bar().height_px)
     }
 
     pub(crate) fn editor_visible_height(&self) -> f32 {
@@ -230,168 +180,47 @@ impl EditorView {
         self.close_context_menu(cx);
     }
 
-    pub(crate) fn invalidate_status_bar_git_branch(&mut self) {
-        self.git_branch_status.invalidate();
-    }
-
-    pub(crate) fn update_status_bar_git_branch(&mut self, base_dir: &Path, label: Option<String>) {
-        self.git_branch_status
-            .set_base_dir(Some(base_dir.to_path_buf()));
-        self.git_branch_status.invalidate();
-        self.git_branch_status.finish(Ok(label));
-    }
-
-    pub(crate) fn status_bar_git_branch_label(&self) -> Option<String> {
-        (self.git_branch_status.base_dir == self.git_panel_base_dir())
-            .then(|| self.git_branch_status.label.clone())
-            .flatten()
-    }
-
-    pub(crate) fn refresh_status_bar_git_branch(&mut self, cx: &mut Context<Self>) {
-        let base_dir = self.git_panel_base_dir();
-        if self.git_branch_status.set_base_dir(base_dir.clone()) {
-            self.git_panel_snapshot = None;
-            self.git_panel_status_scanned_at = None;
-            self.invalidate_git_panel_status();
-        }
-        if !crate::platform::capabilities::CHILD_PROCESSES
-            || !self.git_branch_status.dirty
-            || self.git_branch_status.task.is_some()
-        {
-            return;
-        }
-        let Some(base_dir) = base_dir else { return };
-        if file_watch::operation_suppressed("Read Git branch", &base_dir) {
-            return;
-        }
-        let epoch = self.git_branch_status.epoch;
-        let delay = remaining_refresh_delay(self.git_branch_status.scanned_at, 350);
-        let task = cx.spawn(async move |this, cx| {
-            if !delay.is_zero() {
-                cx.background_executor().timer(delay).await;
-            }
-            let should_run = this
-                .update(cx, |this, cx| {
-                    if !this.git_branch_status.request_is_current(&base_dir, epoch)
-                        || this.git_panel_base_dir().as_ref() != Some(&base_dir)
-                    {
-                        this.git_branch_status.task = None;
-                        this.refresh_status_bar_git_branch(cx);
-                        return false;
-                    }
-                    true
-                })
-                .unwrap_or(false);
-            if !should_run {
-                return;
-            }
-            let background_base_dir = base_dir.clone();
-            let result =
-                crate::platform::fs_task::run("Read Git branch", base_dir.clone(), move || {
-                    collect_status_bar_git_branch(&background_base_dir)
-                        .map_err(std::io::Error::other)
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                this.git_branch_status.task = None;
-                if !this.git_branch_status.request_is_current(&base_dir, epoch)
-                    || this.git_panel_base_dir().as_ref() != Some(&base_dir)
-                {
-                    this.refresh_status_bar_git_branch(cx);
-                    return;
-                }
-                this.git_branch_status.finish(result);
-                cx.notify();
-            })
-            .ok();
-        });
-        self.git_branch_status.task = Some(task);
-    }
-
     pub(crate) fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        // Light themes get the paler bar color; dark themes keep the elevated
-        // surface. The border matches the tab bar so the two chrome strips
-        // frame the editor consistently.
-        let is_light = self.theme.bg_primary.l >= 0.5;
-        let bg = if is_light {
-            self.theme.bg_bar
-        } else {
-            self.theme.bg_elevated
-        };
-        let border = self.styles.tab_bar.tab_bar_border_color;
-        let border_width = self.styles.tab_bar.tab_bar_border_width_px;
-        let title_color = if is_light {
-            with_alpha(self.theme.text_primary, 0.86)
-        } else {
-            self.theme.text_secondary
-        };
-        let value_color = if is_light {
-            with_alpha(self.theme.text_primary, 0.78)
-        } else {
-            with_alpha(self.theme.text_secondary, 0.62)
-        };
+        let ss = self.styles.status_bar();
+        let title_color = ss.title;
+        let value_color = ss.value;
         if let Some(summary) = self.active_terminal_status_summary() {
-            return self.render_terminal_status_bar(
-                summary,
-                bg,
-                border,
-                border_width,
-                title_color,
-                value_color,
-            );
+            return self.render_terminal_status_bar(summary, title_color, value_color);
         }
-        let hover_bg = with_alpha(self.theme.text_primary, 0.08);
         let cursor_label = self.cursor_status_label();
         let (indent_title, indent_value) = self.indent_settings.status_parts(self.ui_language);
         let language_value = self.language_status_label();
-        let branch_label = self.status_bar_git_branch_label();
-
-        div()
-            .id("editor-status-bar")
-            .h(px(self.status_bar_height()))
-            .w_full()
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_end()
-            .pl(px(self.scaled(self.styles.status_bar_padding_left_px)))
-            .pr(px(0.0))
-            .border_t(px(border_width))
-            .border_color(border)
-            .bg(bg)
-            .text_size(px(self.scaled(12.0)))
-            .when_some(branch_label, |this, branch| {
-                this.child(self.render_status_bar_branch_button(branch, title_color, hover_bg, cx))
-            })
-            .child(div().flex_1())
-            .child(self.render_status_bar_label(cursor_label, value_color))
-            .child(self.render_status_bar_button(
-                indent_title,
-                indent_value,
-                title_color,
-                value_color,
-                hover_bg,
-                Some(StatusBarAction::OpenIndentationMenu),
-                cx,
-            ))
-            .child(self.render_status_bar_button(
-                crate::i18n::status_language_label(self.ui_language),
-                language_value,
-                title_color,
-                value_color,
-                hover_bg,
-                Some(StatusBarAction::OpenLanguagePicker),
-                cx,
-            ))
-            .into_any_element()
+        crate::ui::chrome::status_bar(
+            self.styles.status_bar(),
+            self.ui_scale,
+            self.styles.status_bar_padding_left_px,
+        )
+        .id("editor-status-bar")
+        .justify_end()
+        .child(div().flex_1())
+        .child(self.render_status_bar_label(cursor_label, value_color))
+        .child(self.render_status_bar_button(
+            indent_title,
+            indent_value,
+            title_color,
+            value_color,
+            Some(StatusBarAction::OpenIndentationMenu),
+            cx,
+        ))
+        .child(self.render_status_bar_button(
+            crate::i18n::status_language_label(self.ui_language),
+            language_value,
+            title_color,
+            value_color,
+            Some(StatusBarAction::OpenLanguagePicker),
+            cx,
+        ))
+        .into_any_element()
     }
 
     fn render_terminal_status_bar(
         &self,
         summary: TerminalStatusSummary,
-        bg: gpui::Hsla,
-        border: gpui::Hsla,
-        border_width: f32,
         title_color: gpui::Hsla,
         value_color: gpui::Hsla,
     ) -> AnyElement {
@@ -401,122 +230,62 @@ impl EditorView {
             crate::i18n::terminal_scrollback_label(self.ui_language, offset, history_size)
         });
 
-        div()
-            .id("terminal-status-bar")
-            .h(px(self.status_bar_height()))
-            .w_full()
-            .flex_none()
-            .flex()
-            .items_center()
-            .pl(px(self.scaled(self.styles.status_bar_padding_left_px)))
-            .pr(px(0.0))
-            .border_t(px(border_width))
-            .border_color(border)
-            .bg(bg)
-            .text_size(px(self.scaled(12.0)))
-            .child(
-                div()
-                    .h_full()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .px(px(self.scaled(6.0)))
-                    .flex()
-                    .items_center()
-                    .gap(px(self.scaled(4.0)))
-                    .child(
-                        gpui::svg()
-                            .path(summary.agent.icon_path())
-                            .size(px(self.scaled(11.0)))
-                            .flex_none()
-                            .text_color(title_color),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .whitespace_nowrap()
-                            .text_color(title_color)
-                            .child(agent_label),
-                    )
-                    .when(show_title, |this| {
-                        this.child(div().flex_none().text_color(value_color).child("·"))
-                            .child(
-                                div()
-                                    .min_w(px(0.0))
-                                    .overflow_hidden()
-                                    .truncate()
-                                    .whitespace_nowrap()
-                                    .text_color(value_color)
-                                    .child(summary.title),
-                            )
-                    }),
-            )
-            .when_some(scrollback, |this, scrollback| {
-                this.child(self.render_status_bar_label(scrollback, value_color))
-            })
-            .into_any_element()
+        crate::ui::chrome::status_bar(
+            self.styles.status_bar(),
+            self.ui_scale,
+            self.styles.status_bar_padding_left_px,
+        )
+        .id("terminal-status-bar")
+        .child(
+            div()
+                .h_full()
+                .flex_1()
+                .min_w(px(0.0))
+                .px(px(self.scaled(self.styles.status_bar().padding_x_px)))
+                .flex()
+                .items_center()
+                .gap(px(self.scaled(self.styles.status_bar().item_gap_px)))
+                .child(
+                    gpui::svg()
+                        .path(summary.agent.icon_path())
+                        .size(px(self.scaled(self.styles.status_bar().icon_size_px)))
+                        .flex_none()
+                        .text_color(title_color),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_color(title_color)
+                        .child(agent_label),
+                )
+                .when(show_title, |this| {
+                    this.child(div().flex_none().text_color(value_color).child("·"))
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .truncate()
+                                .whitespace_nowrap()
+                                .text_color(value_color)
+                                .child(summary.title),
+                        )
+                }),
+        )
+        .when_some(scrollback, |this, scrollback| {
+            this.child(self.render_status_bar_label(scrollback, value_color))
+        })
+        .into_any_element()
     }
 
     fn render_status_bar_label(&self, label: String, color: gpui::Hsla) -> AnyElement {
         div()
-            .px(px(self.scaled(6.0)))
+            .px(px(self.scaled(self.styles.status_bar().padding_x_px)))
             .h_full()
             .flex()
             .items_center()
             .text_color(color)
             .child(label)
-            .into_any_element()
-    }
-
-    fn render_status_bar_branch_button(
-        &self,
-        branch: String,
-        title_color: gpui::Hsla,
-        hover_bg: gpui::Hsla,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let font_size = self.scaled(11.0);
-        let button = div()
-            .id("status-bar-branch")
-            .px(px(self.scaled(6.0)))
-            .h_full()
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(4.0)))
-            .max_w(px(self.scaled(220.0)))
-            .cursor(CursorStyle::Arrow)
-            .hover(move |style| style.bg(hover_bg))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    this.open_branch_picker(event.position, window, cx);
-                }),
-            )
-            .child(
-                gpui::svg()
-                    .path(GIT_BRANCH_SVG_PATH)
-                    .size(px(font_size))
-                    .flex_none()
-                    .text_color(title_color),
-            )
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .truncate()
-                    .whitespace_nowrap()
-                    .text_color(title_color)
-                    .child(branch),
-            )
-            .into_any_element();
-        let bounds_cell = self.status_bar_branch_button_bounds.clone();
-        div()
-            .h_full()
-            .flex_none()
-            .on_children_prepainted(move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
-                bounds_cell.set(bounds.first().copied());
-            })
-            .child(button)
             .into_any_element()
     }
 
@@ -526,36 +295,34 @@ impl EditorView {
         value: String,
         title_color: gpui::Hsla,
         value_color: gpui::Hsla,
-        hover_bg: gpui::Hsla,
         action: Option<StatusBarAction>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let button = div()
-            .px(px(self.scaled(6.0)))
-            .h_full()
-            .flex()
-            .items_center()
-            .cursor(CursorStyle::Arrow)
-            .hover(move |style| style.bg(hover_bg))
-            .child(div().text_color(title_color).child(format!("{}: ", title)))
-            .child(div().text_color(value_color).child(value))
-            .when_some(action, |this, action| {
-                this.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        match action {
-                            StatusBarAction::OpenIndentationMenu => {
-                                this.open_indentation_picker(event.position, window, cx);
-                            }
-                            StatusBarAction::OpenLanguagePicker => {
-                                this.open_language_picker(event.position, window, cx);
-                            }
+        let button = crate::ui::button::button_frame(
+            self.styles.status_button(),
+            Default::default(),
+            self.ui_scale,
+        )
+        .gap(px(0.0))
+        .child(div().text_color(title_color).child(format!("{}: ", title)))
+        .child(div().text_color(value_color).child(value))
+        .when_some(action, |this, action| {
+            this.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    match action {
+                        StatusBarAction::OpenIndentationMenu => {
+                            this.open_indentation_picker(event.position, window, cx);
                         }
-                    }),
-                )
-            })
-            .into_any_element();
+                        StatusBarAction::OpenLanguagePicker => {
+                            this.open_language_picker(event.position, window, cx);
+                        }
+                    }
+                }),
+            )
+        })
+        .into_any_element();
         let bounds_cell = match action {
             Some(StatusBarAction::OpenIndentationMenu) => {
                 Some(self.status_bar_indent_button_bounds.clone())
@@ -622,7 +389,6 @@ impl EditorView {
             Some(FileKind::Text) => "Plain Text".to_string(),
             Some(FileKind::Image) => "Image".to_string(),
             Some(FileKind::Binary) => "Binary".to_string(),
-            Some(FileKind::Whiteboard) => "Whiteboard".to_string(),
             None => String::new(),
         }
     }
@@ -651,83 +417,6 @@ enum StatusBarAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn branch_cache_discards_previous_workspace_and_stale_requests() {
-        let mut status = GitBranchStatus::default();
-        let first = PathBuf::from("first");
-        let second = PathBuf::from("second");
-        assert!(status.set_base_dir(Some(first.clone())));
-        let first_epoch = status.epoch;
-        status.finish(Ok(Some("main".into())));
-        assert!(!status.dirty);
-        assert!(!status.set_base_dir(Some(first.clone())));
-        assert_eq!(status.label.as_deref(), Some("main"));
-        assert!(status.request_is_current(&first, first_epoch));
-        status.invalidate();
-        assert!(!status.request_is_current(&first, first_epoch));
-        let second_epoch = status.epoch;
-        assert!(status.set_base_dir(Some(second.clone())));
-        assert!(status.label.is_none());
-        assert!(status.scanned_at.is_none());
-        assert!(status.dirty);
-        assert!(!status.request_is_current(&first, second_epoch));
-        assert!(status.request_is_current(&second, status.epoch));
-        assert!(status.set_base_dir(None));
-        assert!(status.label.is_none());
-    }
-
-    #[test]
-    fn branch_lookup_failure_consumes_invalidation_without_render_retries() {
-        let mut status = GitBranchStatus::default();
-        status.set_base_dir(Some(PathBuf::from("repo")));
-        status.finish(Err(std::io::Error::other("unavailable")));
-        assert!(!status.dirty);
-        assert!(status.scanned_at.is_some());
-        assert!(status.label.is_none());
-        status.invalidate();
-        assert!(status.dirty);
-    }
-
-    #[cfg(not(feature = "mas"))]
-    #[test]
-    fn branch_label_is_independent_of_remote_upstream_and_worktree_status() {
-        use super::super::git_ops::run_git;
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        assert_eq!(collect_status_bar_git_branch(root).unwrap(), None);
-        run_git(root, &["init", "-q", "--initial-branch=main"]).unwrap();
-        assert_eq!(
-            collect_status_bar_git_branch(root).unwrap().as_deref(),
-            Some("main")
-        );
-        run_git(root, &["config", "user.name", "Moeka Test"]).unwrap();
-        run_git(root, &["config", "user.email", "test@example.com"]).unwrap();
-        run_git(
-            root,
-            &[
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "initial",
-            ],
-        )
-        .unwrap();
-        run_git(root, &["config", "branch.main.remote", "missing"]).unwrap();
-        run_git(root, &["config", "branch.main.merge", "refs/heads/main"]).unwrap();
-        std::fs::write(root.join(".git/index"), b"invalid index").unwrap();
-        assert_eq!(
-            collect_status_bar_git_branch(root).unwrap().as_deref(),
-            Some("main")
-        );
-        std::fs::remove_file(root.join(".git/index")).unwrap();
-        run_git(root, &["checkout", "--detach", "HEAD"]).unwrap();
-        let hash = run_git(root, &["rev-parse", "--short", "HEAD"]).unwrap();
-        assert_eq!(collect_status_bar_git_branch(root).unwrap(), Some(hash));
-        assert!(collect_status_bar_git_branch(&root.join("missing")).is_err());
-    }
 
     #[test]
     fn converts_space_indentation_to_tabs() {

@@ -4,7 +4,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, ClipboardItem, Context, CursorStyle, FontWeight, Image, ImageFormat, MouseButton,
+    AnyElement, ClipboardItem, Context, CursorStyle, Image, ImageFormat, MouseButton,
     MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, Window, div, prelude::*, px, svg,
 };
 
@@ -186,19 +186,19 @@ impl gpui::Render for FrontMatterTypeMenuTooltip {
         let editor = self.editor.read(cx);
         let styles = &editor.styles.tooltip;
         let font_size = editor.scaled(styles.tooltip_title_font_size_px);
-        div()
+        let mut surface = editor.styles.tooltip_surface();
+        surface.shadow = crate::style::ShadowStyle::default();
+        crate::ui::surface::surface(&surface, editor.ui_scale)
             .max_w(px(editor.scaled(styles.tooltip_max_width_px)))
             .px(px(editor.scaled(styles.tooltip_padding_x_px)))
             .py(px(editor.scaled(styles.tooltip_padding_y_px)))
             .font_family(SharedString::from(editor.styles.ui_font_family))
             .text_size(px(font_size))
-            .line_height(px(font_size * 1.3))
+            .line_height(px(
+                font_size * editor.styles.ui.spec.tooltip_line_height_factor
+            ))
             .text_color(styles.tooltip_title_text_color)
             .whitespace_normal()
-            .bg(styles.tooltip_bg)
-            .border(px(editor.scaled(styles.tooltip_border_width_px)))
-            .border_color(styles.tooltip_border_color)
-            .rounded(px(editor.scaled(styles.tooltip_radius_px)))
             .child(self.text.clone())
     }
 }
@@ -3098,59 +3098,43 @@ impl EditorView {
 
         let ms = &self.styles.context_menu;
         let wss = &self.styles.workspace_switcher;
-        let text_color = if is_destructive {
-            ms.menu_item_danger_text_color
-        } else {
-            ms.menu_item_primary_text_color
-        };
-        let hover_bg = ms.menu_item_hover_bg;
         let item_id = SharedString::from(format!("menu-item-{}", label));
-        let (icon_col_w, gap) = menu_icon_column_metrics(
+        let (icon_col_w, _gap) = menu_icon_column_metrics(
             ms.menu_format_icon_size_px,
             wss.ws_menu_item_check_size_px,
             wss.ws_menu_item_action_icon_gap_px,
         );
-        let item_height = self.scaled(ms.menu_item_height_px);
-        let padding_x = self.scaled(ms.menu_item_padding_x_px);
-        let font_size = self.scaled(ms.menu_item_font_size_px);
         let icon_col_w = self.scaled(icon_col_w);
-        let gap = self.scaled(gap);
-        div()
-            .id(item_id)
-            .w_full()
-            .h(px(item_height))
-            .px(px(padding_x))
-            .flex()
-            .items_center()
-            .gap(px(gap))
-            .text_size(px(font_size))
-            .text_color(text_color)
-            .hover(move |s| s.bg(hover_bg))
-            .cursor(CursorStyle::Arrow)
-            .child(
-                div()
-                    .w(px(icon_col_w))
-                    .h(px(icon_col_w))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center(),
-            )
-            .child(label.to_string())
-            .on_mouse_move(cx.listener(|this, _, _, cx| {
-                this.dismiss_export_submenu(cx);
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
-                    this.close_context_menu(cx);
-                    handler(this, window, cx);
-                }),
-            )
-            .into_any_element()
+        crate::ui::list::list_item(
+            self.styles.menu_item(is_destructive),
+            Default::default(),
+            self.ui_scale,
+        )
+        .id(item_id)
+        .child(
+            div()
+                .w(px(icon_col_w))
+                .h(px(icon_col_w))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center(),
+        )
+        .child(label.to_string())
+        .on_mouse_move(cx.listener(|this, _, _, cx| {
+            this.dismiss_export_submenu(cx);
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.suppress_editor_mouse_up_for_current_menu_event(cx);
+                this.close_context_menu(cx);
+                handler(this, window, cx);
+            }),
+        )
+        .into_any_element()
     }
 
     fn render_context_menu_item_with_icon(
@@ -3182,72 +3166,56 @@ impl EditorView {
     ) -> AnyElement {
         let ms = &self.styles.context_menu;
         let wss = &self.styles.workspace_switcher;
-        let text_color = if is_destructive {
-            ms.menu_item_danger_text_color
-        } else {
-            ms.menu_item_primary_text_color
-        };
-        let hover_bg = ms.menu_item_hover_bg;
         let item_id = SharedString::from(format!("menu-item-{}", label));
-        let (icon_col_w, gap) = menu_icon_column_metrics(
+        let (icon_col_w, _gap) = menu_icon_column_metrics(
             ms.menu_format_icon_size_px,
             wss.ws_menu_item_check_size_px,
             wss.ws_menu_item_action_icon_gap_px,
         );
         let icon_size = self.scaled(ms.menu_format_icon_size_px);
-        let item_height = self.scaled(ms.menu_item_height_px);
-        let padding_x = self.scaled(ms.menu_item_padding_x_px);
-        let font_size = self.scaled(ms.menu_item_font_size_px);
         let icon_col_w = self.scaled(icon_col_w);
-        let gap = self.scaled(gap);
-        div()
-            .id(item_id)
-            .w_full()
-            .h(px(item_height))
-            .px(px(padding_x))
-            .flex()
-            .items_center()
-            .gap(px(gap))
-            .text_size(px(font_size))
-            .text_color(text_color)
-            .hover(move |s| s.bg(hover_bg))
-            .cursor(CursorStyle::Arrow)
-            .child(
-                div()
-                    .w(px(icon_col_w))
-                    .h(px(icon_col_w))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        svg()
-                            .path(icon_path)
-                            .size(px(icon_size))
-                            .text_color(wss.ws_menu_item_action_icon_color),
-                    ),
-            )
-            .child(label.to_string())
-            .when(dismiss_export_submenu, |this| {
-                this.on_mouse_move(cx.listener(|this, _, _, cx| {
-                    this.dismiss_export_submenu(cx);
-                    if this.table_adjustment_menu.popup_table.take().is_some() {
-                        this.table_size_hover = None;
-                        cx.notify();
-                    }
-                }))
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
-                    this.close_context_menu(cx);
-                    handler(this, window, cx);
-                }),
-            )
-            .into_any_element()
+        crate::ui::list::list_item(
+            self.styles.menu_item(is_destructive),
+            Default::default(),
+            self.ui_scale,
+        )
+        .id(item_id)
+        .child(
+            div()
+                .w(px(icon_col_w))
+                .h(px(icon_col_w))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .child(
+                    svg()
+                        .path(icon_path)
+                        .size(px(icon_size))
+                        .text_color(wss.ws_menu_item_action_icon_color),
+                ),
+        )
+        .child(label.to_string())
+        .when(dismiss_export_submenu, |this| {
+            this.on_mouse_move(cx.listener(|this, _, _, cx| {
+                this.dismiss_export_submenu(cx);
+                if this.table_adjustment_menu.popup_table.take().is_some() {
+                    this.table_size_hover = None;
+                    cx.notify();
+                }
+            }))
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.suppress_editor_mouse_up_for_current_menu_event(cx);
+                this.close_context_menu(cx);
+                handler(this, window, cx);
+            }),
+        )
+        .into_any_element()
     }
 
     fn dismiss_export_submenu(&mut self, cx: &mut Context<Self>) {
@@ -3266,51 +3234,42 @@ impl EditorView {
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
-        let ms = &self.styles.context_menu;
         let wss = &self.styles.workspace_switcher;
-        let hover_bg = ms.menu_item_hover_bg;
         let icon_size = self.scaled(wss.ws_menu_item_check_size_px);
-        let gap = self.scaled(wss.ws_menu_item_action_icon_gap_px);
-        div()
-            .w_full()
-            .h(px(self.scaled(ms.menu_item_height_px)))
-            .px(px(self.scaled(ms.menu_item_padding_x_px)))
-            .flex()
-            .items_center()
-            .gap(px(gap))
-            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
-            .text_color(ms.menu_item_primary_text_color)
-            .hover(move |s| s.bg(hover_bg))
-            .cursor(CursorStyle::Arrow)
-            .child(
-                div()
-                    .w(px(icon_size))
-                    .h(px(icon_size))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .when(is_active, |this| {
-                        this.child(
-                            svg()
-                                .path(CHECK_SVG_PATH)
-                                .size(px(icon_size))
-                                .text_color(wss.ws_menu_item_check_color),
-                        )
-                    }),
-            )
-            .child(label.to_string())
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
-                    this.close_context_menu(cx);
-                    handler(this, window, cx);
+        crate::ui::list::list_item(
+            self.styles.menu_item(false),
+            Default::default(),
+            self.ui_scale,
+        )
+        .child(
+            div()
+                .w(px(icon_size))
+                .h(px(icon_size))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .when(is_active, |this| {
+                    this.child(
+                        svg()
+                            .path(CHECK_SVG_PATH)
+                            .size(px(icon_size))
+                            .text_color(wss.ws_menu_item_check_color),
+                    )
                 }),
-            )
-            .into_any_element()
+        )
+        .child(label.to_string())
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.suppress_editor_mouse_up_for_current_menu_event(cx);
+                this.close_context_menu(cx);
+                handler(this, window, cx);
+            }),
+        )
+        .into_any_element()
     }
 
     fn render_front_matter_type_choice_item(
@@ -3331,72 +3290,80 @@ impl EditorView {
             wss.ws_menu_item_check_size_px,
             wss.ws_menu_item_action_icon_gap_px,
         );
-        let item = div()
-            .id(SharedString::from(format!("front-matter-type-{target:?}")))
-            .w_full()
-            .h(px(self.scaled(ms.menu_item_height_px)))
-            .px(px(self.scaled(ms.menu_item_padding_x_px)))
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(gap)))
-            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
-            .text_color(ms.menu_item_primary_text_color)
-            .when(enabled, |this| this.hover(|s| s.bg(ms.menu_item_hover_bg)))
-            .cursor(CursorStyle::Arrow)
-            .child(
-                div()
-                    .w(px(self.scaled(icon_col_w)))
-                    .h(px(icon_size))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .opacity(if enabled { 1.0 } else { 0.4 })
-                    .child(
+        let mut row_style = ms.item();
+        row_style.control.gap_px = gap;
+        row_style.control.disabled_opacity = 1.0;
+        let item = crate::ui::list::list_item(
+            row_style,
+            crate::style::ControlState {
+                disabled: !enabled,
+                ..Default::default()
+            },
+            self.ui_scale,
+        )
+        .id(SharedString::from(format!("front-matter-type-{target:?}")))
+        .child(
+            div()
+                .w(px(self.scaled(icon_col_w)))
+                .h(px(icon_size))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .opacity(if enabled {
+                    1.0
+                } else {
+                    self.styles.ui.spec.application.menu_disabled_label_opacity
+                })
+                .child(
+                    svg()
+                        .path(front_matter_type_icon(target))
+                        .size(px(icon_size))
+                        .text_color(wss.ws_menu_item_action_icon_color),
+                ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .opacity(if enabled {
+                    1.0
+                } else {
+                    self.styles.ui.spec.application.menu_disabled_label_opacity
+                })
+                .child(crate::i18n::front_matter_type_label(
+                    self.ui_language,
+                    front_matter_type_label_key(target),
+                )),
+        )
+        .child(
+            div()
+                .size(px(check_size))
+                .flex_none()
+                .when(is_active, |this| {
+                    this.child(
                         svg()
-                            .path(front_matter_type_icon(target))
-                            .size(px(icon_size))
-                            .text_color(wss.ws_menu_item_action_icon_color),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .opacity(if enabled { 1.0 } else { 0.4 })
-                    .child(crate::i18n::front_matter_type_label(
-                        self.ui_language,
-                        front_matter_type_label_key(target),
-                    )),
-            )
-            .child(
-                div()
-                    .size(px(check_size))
-                    .flex_none()
-                    .when(is_active, |this| {
-                        this.child(
-                            svg()
-                                .path(CHECK_SVG_PATH)
-                                .size(px(check_size))
-                                .text_color(wss.ws_menu_item_check_color),
-                        )
-                    }),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
-                    if enabled {
-                        this.close_context_menu(cx);
-                        handler(this, cx);
-                    }
+                            .path(CHECK_SVG_PATH)
+                            .size(px(check_size))
+                            .text_color(wss.ws_menu_item_check_color),
+                    )
                 }),
-            );
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.suppress_editor_mouse_up_for_current_menu_event(cx);
+                if enabled {
+                    this.close_context_menu(cx);
+                    handler(this, cx);
+                }
+            }),
+        );
         if let Some(reason) = disabled_reason {
             let editor = cx.entity().clone();
             item.tooltip(move |_, cx| {
@@ -3447,17 +3414,6 @@ impl EditorView {
     ) -> AnyElement {
         let ms = &self.styles.context_menu;
         let icon_path = icon_path.or_else(|| self.context_menu_icon_path(label));
-        let bg = if is_selected {
-            ms.menu_item_selected_bg
-        } else {
-            gpui::transparent_black()
-        };
-        let hover_bg = ms.menu_item_hover_bg;
-        let text_color = if is_active {
-            ms.menu_format_active_text_color
-        } else {
-            ms.menu_item_primary_text_color
-        };
         let icon_color = if is_active {
             ms.menu_format_active_text_color
         } else {
@@ -3473,60 +3429,56 @@ impl EditorView {
             text_color: ms.menu_shortcut_text_color,
             gap_px: self.scaled(ms.menu_shortcut_gap_px),
         };
-        div()
-            .w_full()
-            .h(px(self.scaled(ms.menu_item_height_px)))
-            .bg(bg)
-            .px(px(self.scaled(ms.menu_item_padding_x_px)))
-            .flex()
-            .items_center()
-            .justify_between()
-            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
-            .text_color(text_color)
-            .hover(move |s| s.bg(hover_bg))
-            .cursor(CursorStyle::Arrow)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(icon_gap))
-                    .child(
-                        div()
-                            .w(px(icon_size))
-                            .h(px(icon_size))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .flex_none()
-                            .when_some(icon_shared, |this, path| {
-                                this.child(
-                                    svg().path(path).size(px(icon_size)).text_color(icon_color),
-                                )
-                            }),
-                    )
-                    .child(label.to_string()),
-            )
-            .when_some(shortcut, |this, shortcut| {
-                if shortcut
-                    .chars()
-                    .any(|ch| matches!(ch, '⌘' | '⌥' | '⌃' | '⇧'))
-                {
-                    this.child(div().child(render_shortcut(&shortcut, shortcut_style)))
-                } else {
-                    this.child(
-                        div()
-                            .font_family(self.styles.editor.editor_monospace_font_family)
-                            .text_size(px(self.scaled(ms.menu_shortcut_font_size_px)))
-                            .text_color(ms.menu_shortcut_text_color)
-                            .child(shortcut.to_string()),
-                    )
-                }
-            })
-            .when(
-                !matches!(hover_behavior, FormatMenuHoverBehavior::None),
-                |this| {
-                    this.on_mouse_move(cx.listener(
-                        move |this, event: &MouseMoveEvent, _window, cx| match hover_behavior {
+        crate::ui::list::list_item(
+            self.styles.format_menu_item(is_active),
+            crate::style::ControlState {
+                selected: is_selected,
+                ..Default::default()
+            },
+            self.ui_scale,
+        )
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(icon_gap))
+                .child(
+                    div()
+                        .w(px(icon_size))
+                        .h(px(icon_size))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_none()
+                        .when_some(icon_shared, |this, path| {
+                            this.child(svg().path(path).size(px(icon_size)).text_color(icon_color))
+                        }),
+                )
+                .child(label.to_string()),
+        )
+        .when_some(shortcut, |this, shortcut| {
+            if shortcut
+                .chars()
+                .any(|ch| matches!(ch, '⌘' | '⌥' | '⌃' | '⇧'))
+            {
+                this.child(div().child(render_shortcut(&shortcut, shortcut_style)))
+            } else {
+                this.child(
+                    div()
+                        .font_family(self.styles.editor.editor_monospace_font_family)
+                        .text_size(px(self.scaled(ms.menu_shortcut_font_size_px)))
+                        .text_color(ms.menu_shortcut_text_color)
+                        .child(shortcut.to_string()),
+                )
+            }
+        })
+        .when(
+            !matches!(hover_behavior, FormatMenuHoverBehavior::None),
+            |this| {
+                this.on_mouse_move(
+                    cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                        match hover_behavior {
                             FormatMenuHoverBehavior::None => {}
                             FormatMenuHoverBehavior::ClearSubmenu => {
                                 if this.should_preserve_format_submenu(event.position) {
@@ -3538,20 +3490,21 @@ impl EditorView {
                                     cx.notify();
                                 }
                             }
-                        },
-                    ))
-                },
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
-                    handler(this, window, cx);
-                }),
-            )
-            .into_any_element()
+                        }
+                    }),
+                )
+            },
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.suppress_editor_mouse_up_for_current_menu_event(cx);
+                handler(this, window, cx);
+            }),
+        )
+        .into_any_element()
     }
 
     fn render_format_submenu_trigger_item(
@@ -3578,13 +3531,6 @@ impl EditorView {
             (icon_size, self.scaled(ms.menu_format_icon_gap_px))
         };
         let arrow_size = (icon_size - self.scaled(2.0)).max(self.scaled(10.0));
-        let hover_bg = ms.menu_item_hover_bg;
-        let text_color = ms.menu_item_primary_text_color;
-        let bg = if is_open {
-            ms.menu_item_selected_bg
-        } else {
-            gpui::transparent_black()
-        };
         let icon_shared = icon_path.map(SharedString::from);
         let trigger_bounds = match submenu_kind {
             ContextMenuKind::FormatHeading => self.format_heading_trigger_bounds.clone(),
@@ -3593,76 +3539,73 @@ impl EditorView {
             _ => Rc::new(Cell::new(None)),
         };
 
-        let row = div()
-            .w_full()
-            .h(px(self.scaled(ms.menu_item_height_px)))
-            .bg(bg)
-            .px(px(self.scaled(ms.menu_item_padding_x_px)))
-            .flex()
-            .items_center()
-            .justify_between()
-            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
-            .text_color(text_color)
-            .hover(move |style| style.bg(hover_bg))
-            .cursor(CursorStyle::Arrow)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(icon_gap))
-                    .child(
-                        div()
-                            .w(px(icon_col_w))
-                            .h(px(icon_col_w))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .flex_none()
-                            .when_some(icon_shared, |this, path| {
-                                this.child(
-                                    svg()
-                                        .path(path)
-                                        .size(px(icon_size))
-                                        .text_color(ms.menu_format_icon_color),
-                                )
-                            }),
-                    )
-                    .child(label.to_string()),
-            )
-            .child(
-                svg()
-                    .path("assets/icons/navigation/right.svg")
-                    .size(px(arrow_size))
-                    .text_color(ms.menu_shortcut_text_color),
-            )
-            .on_mouse_move({
-                let submenu_kind = submenu_kind.clone();
-                cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
-                    this.context_submenu_aim = Some(ContextSubmenuAim {
-                        origin: event.position,
-                    });
-                    this.context_submenu_hovered = false;
-                    if this.context_submenu.as_ref() != Some(&submenu_kind) {
-                        this.table_adjustment_menu = TableAdjustmentMenu::default();
-                        this.context_submenu = Some(submenu_kind.clone());
-                        cx.notify();
-                    }
-                })
-            })
-            .on_mouse_down(MouseButton::Left, {
-                let submenu_kind = submenu_kind.clone();
-                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    cx.stop_propagation();
-                    this.context_submenu_aim = Some(ContextSubmenuAim {
-                        origin: event.position,
-                    });
-                    this.context_submenu_hovered = false;
+        let row = crate::ui::list::list_item(
+            self.styles.menu_item(false),
+            crate::style::ControlState {
+                open: is_open,
+                ..Default::default()
+            },
+            self.ui_scale,
+        )
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(icon_gap))
+                .child(
+                    div()
+                        .w(px(icon_col_w))
+                        .h(px(icon_col_w))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_none()
+                        .when_some(icon_shared, |this, path| {
+                            this.child(
+                                svg()
+                                    .path(path)
+                                    .size(px(icon_size))
+                                    .text_color(ms.menu_format_icon_color),
+                            )
+                        }),
+                )
+                .child(label.to_string()),
+        )
+        .child(
+            svg()
+                .path("assets/icons/navigation/right.svg")
+                .size(px(arrow_size))
+                .text_color(ms.menu_shortcut_text_color),
+        )
+        .on_mouse_move({
+            let submenu_kind = submenu_kind.clone();
+            cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                this.context_submenu_aim = Some(ContextSubmenuAim {
+                    origin: event.position,
+                });
+                this.context_submenu_hovered = false;
+                if this.context_submenu.as_ref() != Some(&submenu_kind) {
                     this.table_adjustment_menu = TableAdjustmentMenu::default();
                     this.context_submenu = Some(submenu_kind.clone());
                     cx.notify();
-                })
+                }
             })
-            .into_any_element();
+        })
+        .on_mouse_down(MouseButton::Left, {
+            let submenu_kind = submenu_kind.clone();
+            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.context_submenu_aim = Some(ContextSubmenuAim {
+                    origin: event.position,
+                });
+                this.context_submenu_hovered = false;
+                this.table_adjustment_menu = TableAdjustmentMenu::default();
+                this.context_submenu = Some(submenu_kind.clone());
+                cx.notify();
+            })
+        })
+        .into_any_element();
 
         let trigger = div()
             .w_full()
@@ -3686,13 +3629,7 @@ impl EditorView {
     }
 
     fn render_context_menu_separator(&self) -> AnyElement {
-        let ms = &self.styles.context_menu;
-        div()
-            .w_full()
-            .h(px(ms.menu_separator_height_px))
-            .my(px(ms.menu_separator_margin_y_px))
-            .bg(ms.menu_separator_color)
-            .into_any_element()
+        crate::ui::surface::separator(self.styles.context_menu.separator(), 1.0).into_any_element()
     }
 
     fn render_sidebar_context_menu(
@@ -4511,34 +4448,29 @@ impl EditorView {
             return div().into_any_element();
         }
 
-        let mut bar = div()
-            .id("format-toolbar")
-            .w(px(natural_width))
-            .min_w(px(natural_width))
-            .max_w(px(available_width))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .items_start()
-            .py(px(metrics.padding))
-            .gap(px(metrics.gap))
-            .opacity(opacity)
-            .when(interactive, |this| this.occlude())
-            .bg(fts.format_toolbar_bg)
-            .border(px(metrics.border))
-            .border_color(fts.format_toolbar_border_color)
-            .rounded(px(self.scaled(fts.format_toolbar_radius_px)))
-            .shadow_sm()
-            .cursor(CursorStyle::Arrow)
-            .when(interactive, |this| {
-                this.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|_, _, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    }),
-                )
-            });
+        let mut bar =
+            crate::ui::surface::surface(&self.styles.format_surface(opacity), self.ui_scale)
+                .id("format-toolbar")
+                .w(px(natural_width))
+                .min_w(px(natural_width))
+                .max_w(px(available_width))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .items_start()
+                .py(px(metrics.padding))
+                .gap(px(metrics.gap))
+                .when(interactive, |this| this.occlude())
+                .cursor(CursorStyle::Arrow)
+                .when(interactive, |this| {
+                    this.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }),
+                    )
+                });
 
         for (row_index, entries) in rows.into_iter().enumerate() {
             let mut row = div()
@@ -4584,49 +4516,43 @@ impl EditorView {
             let hover_kind = kind.clone();
             let trigger_bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
             let click_bounds = trigger_bounds.clone();
-            let hover_bg = self.styles.context_menu.menu_item_hover_bg;
             let label = crate::i18n::table_adjustment_label(self.ui_language, false);
-            let row = div()
-                .id("format-toolbar-table-adjustment")
-                .w_full()
-                .min_h(px(self.scaled(self.styles.context_menu.menu_item_height_px)))
-                .px(px(metrics.padding))
-                .flex()
-                .items_center()
-                .gap(px(metrics.gap))
-                .text_size(px(
-                    self.scaled(self.styles.context_menu.menu_item_font_size_px)
-                ))
-                .text_color(fts.format_toolbar_icon_color)
-                .hover(move |style| style.bg(hover_bg))
-                .child(
-                    div()
-                        .size(px(metrics.button))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            svg()
-                                .path(FMT_TABLE_SVG)
-                                .size(px(self.scaled(fts.format_toolbar_icon_size_px)))
-                                .text_color(fts.format_toolbar_icon_color),
-                        ),
-                )
-                .child(div().flex_1().min_w_0().child(label))
-                .child(
-                    svg()
-                        .path("assets/icons/navigation/right.svg")
-                        .size(px(self.scaled(12.0)))
-                        .text_color(fts.format_toolbar_icon_color),
-                )
-                .when(interactive, |this| {
-                    this.on_click(cx.listener(move |this, _, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                        this.open_selection_toolbar_menu(kind.clone(), click_bounds.get(), cx);
-                    }))
-                });
+            let row = crate::ui::list::list_item(
+                self.styles.format_footer_row(),
+                Default::default(),
+                self.ui_scale,
+            )
+            .id("format-toolbar-table-adjustment")
+            .h_auto()
+            .min_h(px(self.scaled(self.styles.context_menu.menu_item_height_px)))
+            .child(
+                div()
+                    .size(px(metrics.button))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        svg()
+                            .path(FMT_TABLE_SVG)
+                            .size(px(self.scaled(fts.format_toolbar_icon_size_px)))
+                            .text_color(fts.format_toolbar_icon_color),
+                    ),
+            )
+            .child(div().flex_1().min_w_0().child(label))
+            .child(
+                svg()
+                    .path("assets/icons/navigation/right.svg")
+                    .size(px(self.scaled(12.0)))
+                    .text_color(fts.format_toolbar_icon_color),
+            )
+            .when(interactive, |this| {
+                this.on_click(cx.listener(move |this, _, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.open_selection_toolbar_menu(kind.clone(), click_bounds.get(), cx);
+                }))
+            });
             bar = bar.child(SelectionToolbarHoverRegion {
                 child: div()
                     .w_full()
@@ -4640,46 +4566,41 @@ impl EditorView {
                 menu_kind: interactive.then_some(hover_kind),
             });
             bar = bar.child(
-                div()
-                    .id("format-toolbar-table-source")
-                    .w_full()
-                    .min_h(px(self.scaled(self.styles.context_menu.menu_item_height_px)))
-                    .px(px(metrics.padding))
-                    .flex()
-                    .items_center()
-                    .gap(px(metrics.gap))
-                    .text_size(px(
-                        self.scaled(self.styles.context_menu.menu_item_font_size_px)
-                    ))
-                    .text_color(fts.format_toolbar_icon_color)
-                    .hover(move |style| style.bg(hover_bg))
-                    .child(
-                        div()
-                            .size(px(metrics.button))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                svg()
-                                    .path(FMT_CODE_SVG)
-                                    .size(px(self.scaled(fts.format_toolbar_icon_size_px)))
-                                    .text_color(fts.format_toolbar_icon_color),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(crate::i18n::table_source_view_label(self.ui_language)),
-                    )
-                    .when(interactive, |this| {
-                        this.on_click(cx.listener(move |this, _, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                            this.show_table_source(table_start_line, cx);
-                        }))
-                    }),
+                crate::ui::list::list_item(
+                    self.styles.format_footer_row(),
+                    Default::default(),
+                    self.ui_scale,
+                )
+                .id("format-toolbar-table-source")
+                .h_auto()
+                .min_h(px(self.scaled(self.styles.context_menu.menu_item_height_px)))
+                .child(
+                    div()
+                        .size(px(metrics.button))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            svg()
+                                .path(FMT_CODE_SVG)
+                                .size(px(self.scaled(fts.format_toolbar_icon_size_px)))
+                                .text_color(fts.format_toolbar_icon_color),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(crate::i18n::table_source_view_label(self.ui_language)),
+                )
+                .when(interactive, |this| {
+                    this.on_click(cx.listener(move |this, _, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.show_table_source(table_start_line, cx);
+                    }))
+                }),
             );
         }
 
@@ -4710,61 +4631,44 @@ impl EditorView {
         let fts = &self.styles.format_toolbar;
         let group_name = SharedString::from(format!("format-toolbar-{label}"));
         let hover_color = fts.format_toolbar_icon_hover_color;
-        let mut icon_color = if is_active {
-            fts.format_toolbar_icon_active_color
-        } else {
-            fts.format_toolbar_icon_color
-        };
-        if !is_active {
-            icon_color.a *= 0.76;
-        }
-        let button_size = self.scaled(fts.format_toolbar_btn_size_px);
+        let style = self.styles.format_button(is_active);
+        let icon_color = style.normal.foreground;
         let icon_size = self.scaled(fts.format_toolbar_icon_size_px);
 
-        let button = div()
-            .id(SharedString::from(format!("format-toolbar-btn-{label}")))
-            .group(group_name.clone())
-            .w(px(button_size))
-            .h(px(button_size))
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .cursor(CursorStyle::Arrow)
-            .when_some(icon, |this, icon| {
-                this.child(
-                    svg()
-                        .path(icon)
-                        .size(px(icon_size))
-                        .text_color(icon_color)
-                        .group_hover(group_name.clone(), move |style| {
-                            style.text_color(hover_color)
-                        }),
-                )
-            })
-            .when(icon.is_none(), |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .gap(px(self.scaled(2.0)))
-                        .children((0..3).map(|_| {
-                            div()
-                                .size(px(self.scaled(2.0)))
-                                .rounded_full()
-                                .bg(icon_color)
-                        })),
-                )
-            })
-            .when(interactive, |this| {
-                this.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                        on_click(this, cx);
+        let button = crate::ui::button::icon_button(
+            SharedString::from(format!("format-toolbar-btn-{label}")),
+            style,
+            Default::default(),
+            self.ui_scale,
+        )
+        .group(group_name.clone())
+        .when_some(icon, |this, icon| {
+            this.child(
+                svg()
+                    .path(icon)
+                    .size(px(icon_size))
+                    .text_color(icon_color)
+                    .group_hover(group_name.clone(), move |style| {
+                        style.text_color(hover_color)
                     }),
-                )
-            });
+            )
+        })
+        .when(icon.is_none(), |this| {
+            this.child(crate::ui::decoration::ellipsis(
+                self.styles.format_ellipsis(icon_color),
+                self.ui_scale,
+            ))
+        })
+        .when(interactive, |this| {
+            this.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    on_click(this, cx);
+                }),
+            )
+        });
 
         button.into_any_element()
     }
@@ -5335,7 +5239,6 @@ impl EditorView {
 
         for (index, (path, item, highlight_indices)) in search_items.into_iter().enumerate() {
             let is_selected = index == self.menu_selected_index;
-            let hover_bg = ms.menu_item_hover_bg;
             let directory_path = self
                 .relative_path_for_path(&path)
                 .map(std::path::PathBuf::from)
@@ -5346,52 +5249,49 @@ impl EditorView {
                 })
                 .filter(|parent| !parent.is_empty() && parent != ".");
             items.push(
-                div()
-                    .id(SharedString::from(format!("wiki-link-item-{}", index)))
-                    .mx(px(ms.menu_border_width_px))
-                    .h(px(self.scaled(ms.menu_item_height_px)))
-                    .px(px(self.scaled(ms.menu_item_padding_x_px)))
-                    .flex()
-                    .items_center()
-                    .gap(px(self.scaled(self.styles.sidebar.sidebar_item_gap_px)))
-                    .text_size(px(self.scaled(ms.menu_item_font_size_px)))
-                    .text_color(ms.menu_item_primary_text_color)
-                    .bg(if is_selected {
-                        ms.menu_item_selected_bg
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .hover(move |style| style.bg(hover_bg))
-                    .cursor(CursorStyle::Arrow)
-                    .child(self.render_wiki_link_menu_indicator(&path, &item))
-                    .child(self.render_wiki_link_menu_label(
-                        &item,
-                        &highlight_indices,
-                        ms.menu_item_primary_text_color,
-                        self.styles.quick_open.quick_open_result_match_text_color,
-                    ))
-                    .when_some(directory_path, |this, directory_path| {
-                        this.child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .text_size(px(self.scaled(ms.menu_item_font_size_px)))
-                                .text_color(ms.menu_item_text_color)
-                                .opacity(0.5)
-                                .child(directory_path),
-                        )
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.menu_selected_index = index;
-                            this.confirm_wiki_link_selection(cx);
-                        }),
+                crate::ui::list::list_item(
+                    ms.item(),
+                    crate::style::ControlState {
+                        selected: is_selected,
+                        ..Default::default()
+                    },
+                    self.ui_scale,
+                )
+                .id(SharedString::from(format!("wiki-link-item-{}", index)))
+                .when(
+                    self.styles.ui.base_spec.appearance.corners != crate::style::UiCorners::Full,
+                    |this| this.w_auto().mx(px(ms.menu_border_width_px)),
+                )
+                .gap(px(self.scaled(self.styles.sidebar.sidebar_item_gap_px)))
+                .child(self.render_wiki_link_menu_indicator(&path, &item))
+                .child(self.render_wiki_link_menu_label(
+                    &item,
+                    &highlight_indices,
+                    ms.menu_item_primary_text_color,
+                    self.styles.quick_open.quick_open_result_match_text_color,
+                ))
+                .when_some(directory_path, |this, directory_path| {
+                    this.child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
+                            .text_color(ms.menu_item_text_color)
+                            .opacity(0.5)
+                            .child(directory_path),
                     )
-                    .into_any_element(),
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.menu_selected_index = index;
+                        this.confirm_wiki_link_selection(cx);
+                    }),
+                )
+                .into_any_element(),
             );
         }
 
@@ -5456,21 +5356,14 @@ impl EditorView {
         let ss = &self.styles.sidebar;
 
         if let Some(label) = file_kind_badge_text(path) {
-            return div()
-                .flex_none()
-                .min_w(px(self.scaled(ss.sidebar_item_badge_min_width_px)))
-                .h(px(self.scaled(ss.sidebar_item_badge_height_px)))
-                .px(px(self.scaled(ss.sidebar_item_badge_padding_x_px)))
-                .rounded(px(self.scaled(ss.sidebar_item_badge_radius_px)))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(ss.sidebar_item_badge_bg)
-                .text_size(px(self.scaled(ss.sidebar_item_badge_font_size_px)))
-                .text_color(ss.sidebar_item_badge_text_color)
-                .font_weight(FontWeight::EXTRA_BOLD)
-                .child(label)
-                .into_any_element();
+            return crate::ui::typography::badge(
+                self.styles.sidebar_kind_badge(false),
+                self.ui_scale,
+            )
+            .min_w(px(self.scaled(ss.sidebar_item_badge_min_width_px)))
+            .h(px(self.scaled(ss.sidebar_item_badge_height_px)))
+            .child(label)
+            .into_any_element();
         }
 
         svg()
@@ -5796,8 +5689,12 @@ impl EditorView {
                 .context_menu
                 .as_ref()
                 .is_some_and(|menu| matches!(menu.kind, ContextMenuKind::TableResize { .. }));
+        let fixed_corner_padding = !table_resize_panel
+            && self.styles.ui.base_spec.appearance.corners == crate::style::UiCorners::Full;
 
-        let mut menu_div = div()
+        let mut surface = ms.surface();
+        surface.radius_px = self.scaled(surface.radius_px);
+        let mut menu_div = crate::ui::surface::surface(&surface, 1.0)
             .id(panel_id)
             .absolute()
             .left(px(layout.left))
@@ -5814,14 +5711,16 @@ impl EditorView {
                     this.overflow_hidden()
                 }
             })
-            .when(!table_resize_panel, |this| {
+            .when(!table_resize_panel && !fixed_corner_padding, |this| {
                 this.overflow_y_scroll()
                     .py(px(self.scaled(ms.menu_padding_y_px)))
             })
-            .bg(ms.menu_bg)
-            .border(px(ms.menu_border_width_px))
-            .border_color(ms.menu_border_color)
-            .rounded(px(self.scaled(ms.menu_radius_px)));
+            .when(fixed_corner_padding, |this| {
+                this.overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .py(px(self.scaled(ms.menu_padding_y_px)))
+            });
 
         if let Some(bottom_anchor) = layout.bottom_anchor {
             menu_div = menu_div.bottom(px(bottom_anchor));
@@ -5829,12 +5728,17 @@ impl EditorView {
             menu_div = menu_div.top(px(layout.estimated_top));
         }
 
-        if ms.menu_shadow {
-            menu_div = menu_div.shadow_sm();
-        }
-
+        let menu_div = if fixed_corner_padding {
+            menu_div.child(
+                crate::ui::surface::menu_scroll_area(SharedString::from(format!(
+                    "{panel_id}-scroll"
+                )))
+                .children(items),
+            )
+        } else {
+            menu_div.children(items)
+        };
         let menu_div = menu_div
-            .children(items)
             .cursor(CursorStyle::Arrow)
             .on_mouse_down(
                 MouseButton::Left,
@@ -6013,22 +5917,22 @@ impl EditorView {
             (
                 "Markdown",
                 "assets/icons/menu/markdown.svg",
-                super::info_panel::ExportFormat::Markdown,
+                super::export::ExportFormat::Markdown,
             ),
             (
                 "HTML",
                 "assets/icons/menu/html.svg",
-                super::info_panel::ExportFormat::Html,
+                super::export::ExportFormat::Html,
             ),
             (
                 "PDF",
                 "assets/icons/menu/pdf.svg",
-                super::info_panel::ExportFormat::Pdf,
+                super::export::ExportFormat::Pdf,
             ),
             (
                 "PNG",
                 "assets/icons/menu/png.svg",
-                super::info_panel::ExportFormat::Png,
+                super::export::ExportFormat::Png,
             ),
         ]
         .into_iter()
@@ -6185,12 +6089,9 @@ impl EditorView {
             .table_size_hover
             .unwrap_or((current_rows.min(MAX_ROWS), current_columns.min(MAX_COLUMNS)));
         let ms = &self.styles.context_menu;
-        let cell_size = self.scaled(9.0);
-        let gap = self.scaled(3.0);
+        let grid_style = self.styles.table_size_grid();
+        let gap = self.scaled(grid_style.gap_px);
         let padding = self.scaled(ms.menu_padding_y_px);
-        let current_bg = crate::theme::with_alpha(ms.menu_format_active_text_color, 0.46);
-        let hover_bg = crate::theme::with_alpha(ms.menu_format_active_text_color, 0.22);
-        let overlap_bg = crate::theme::with_alpha(ms.menu_format_active_text_color, 0.62);
         let mut rows = Vec::with_capacity(MAX_ROWS);
 
         for row in 1..=MAX_ROWS {
@@ -6199,42 +6100,29 @@ impl EditorView {
                 let hovered = row <= hover_rows && column <= hover_columns;
                 let currently_covered = row <= current_rows && column <= current_columns;
                 cells.push(
-                    div()
-                        .id(SharedString::from(format!(
-                            "table-size-{table_start_line}-{row}-{column}"
-                        )))
-                        .w(px(cell_size))
-                        .h(px(cell_size))
-                        .border(px(self.scaled(1.0)))
-                        .border_color(if hovered || currently_covered {
-                            ms.menu_format_active_text_color
-                        } else {
-                            ms.menu_border_color
-                        })
-                        .bg(if hovered && currently_covered {
-                            overlap_bg
-                        } else if currently_covered {
-                            current_bg
-                        } else if hovered {
-                            hover_bg
-                        } else {
-                            gpui::transparent_black()
-                        })
-                        .cursor(CursorStyle::Arrow)
-                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                            if *hovered && this.table_size_hover != Some((row, column)) {
-                                this.table_size_hover = Some((row, column));
-                                cx.notify();
-                            }
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| {
-                                window.prevent_default();
-                                cx.stop_propagation();
-                                this.table_resize(table_start_line, row, column, cx);
-                            }),
-                        ),
+                    crate::ui::list::selection_grid_cell(
+                        grid_style,
+                        currently_covered,
+                        hovered,
+                        self.ui_scale,
+                    )
+                    .id(SharedString::from(format!(
+                        "table-size-{table_start_line}-{row}-{column}"
+                    )))
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered && this.table_size_hover != Some((row, column)) {
+                            this.table_size_hover = Some((row, column));
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.table_resize(table_start_line, row, column, cx);
+                        }),
+                    ),
                 );
             }
             rows.push(div().flex().gap(px(gap)).children(cells));
@@ -6495,159 +6383,6 @@ impl EditorView {
                         this.close_context_menu(cx);
                     },
                 ));
-                (
-                    items,
-                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
-                )
-            }
-            ContextMenuKind::Whiteboard => {
-                let mut items = Vec::new();
-                items.push(self.render_context_menu_item_with_icon(
-                    self.t(crate::i18n::TextKey::Cut),
-                    MENU_CLIP_SVG_PATH,
-                    false,
-                    cx,
-                    |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.whiteboard_cut(cx);
-                    },
-                ));
-                items.push(self.render_context_menu_item_with_icon(
-                    self.t(crate::i18n::TextKey::Copy),
-                    MENU_COPY_SVG_PATH,
-                    false,
-                    cx,
-                    |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.whiteboard_copy(cx);
-                    },
-                ));
-                items.push(self.render_context_menu_item_with_icon(
-                    self.t(crate::i18n::TextKey::Paste),
-                    MENU_PASTE_SVG_PATH,
-                    false,
-                    cx,
-                    |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.whiteboard_paste(cx);
-                    },
-                ));
-                items.push(self.render_context_menu_item_with_icon(
-                    self.t(crate::i18n::TextKey::Delete),
-                    MENU_DELETE_SVG_PATH,
-                    true,
-                    cx,
-                    |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.whiteboard_delete_selected(cx);
-                    },
-                ));
-                // Copy-as exports (selection, or the whole canvas when empty).
-                items.push(self.render_context_menu_separator());
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::WhiteboardCopyAsPng),
-                    false,
-                    cx,
-                    |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.whiteboard_copy_as_png(cx);
-                    },
-                ));
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::WhiteboardCopyAsSvg),
-                    false,
-                    cx,
-                    |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.whiteboard_copy_as_svg(cx);
-                    },
-                ));
-                if self.whiteboard_has_selection() {
-                    // Grouping
-                    if self.whiteboard_can_group() || self.whiteboard_can_ungroup() {
-                        items.push(self.render_context_menu_separator());
-                        if self.whiteboard_can_group() {
-                            items.push(self.render_context_menu_item(
-                                self.t(crate::i18n::TextKey::WhiteboardGroup),
-                                false,
-                                cx,
-                                |this, _, cx| {
-                                    this.close_context_menu(cx);
-                                    this.whiteboard_group_selection(cx);
-                                },
-                            ));
-                        }
-                        if self.whiteboard_can_ungroup() {
-                            items.push(self.render_context_menu_item(
-                                self.t(crate::i18n::TextKey::WhiteboardUngroup),
-                                false,
-                                cx,
-                                |this, _, cx| {
-                                    this.close_context_menu(cx);
-                                    this.whiteboard_ungroup_selection(cx);
-                                },
-                            ));
-                        }
-                    }
-                    // Z-ordering
-                    items.push(self.render_context_menu_separator());
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::WhiteboardBringForward),
-                        false,
-                        cx,
-                        |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.whiteboard_bring_forward(cx);
-                        },
-                    ));
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::WhiteboardSendBackward),
-                        false,
-                        cx,
-                        |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.whiteboard_send_backward(cx);
-                        },
-                    ));
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::WhiteboardBringToFront),
-                        false,
-                        cx,
-                        |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.whiteboard_bring_to_front(cx);
-                        },
-                    ));
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::WhiteboardSendToBack),
-                        false,
-                        cx,
-                        |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.whiteboard_send_to_back(cx);
-                        },
-                    ));
-                    // Mirroring
-                    items.push(self.render_context_menu_separator());
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::WhiteboardFlipHorizontal),
-                        false,
-                        cx,
-                        |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.whiteboard_flip_horizontal(cx);
-                        },
-                    ));
-                    items.push(self.render_context_menu_item(
-                        self.t(crate::i18n::TextKey::WhiteboardFlipVertical),
-                        false,
-                        cx,
-                        |this, _, cx| {
-                            this.close_context_menu(cx);
-                            this.whiteboard_flip_vertical(cx);
-                        },
-                    ));
-                }
                 (
                     items,
                     self.scaled(self.styles.context_menu.menu_sidebar_width_px),
@@ -6919,13 +6654,7 @@ impl EditorView {
                 let current_root = self.sidebar_root.clone();
                 let check_color = wss.ws_menu_item_check_color;
                 let check_size = self.scaled(wss.ws_menu_item_check_size_px);
-                let close_color = wss.ws_menu_item_close_color;
-                let close_hover_color = wss.ws_menu_item_close_hover_color;
-                let close_hover_bg = wss.ws_menu_item_close_hover_bg;
-                let close_size = self.scaled(wss.ws_menu_item_close_size_px);
                 let ms = &self.styles.context_menu;
-                let row_hover_bg = ms.menu_item_hover_bg;
-                let text_color = ms.menu_item_primary_text_color;
 
                 for workspace in self.workspaces.clone() {
                     let ws_name = workspace
@@ -6940,18 +6669,9 @@ impl EditorView {
                     let close_btn_id = SharedString::from(format!("ws-close-{}", ws_name));
 
                     items.push(
-                        div()
+                        crate::ui::list::list_item(ms.item(), Default::default(), self.ui_scale)
                             .id(item_id)
-                            .w_full()
-                            .h(px(self.scaled(ms.menu_item_height_px)))
-                            .px(px(self.scaled(ms.menu_item_padding_x_px)))
-                            .flex()
-                            .items_center()
                             .gap(px(self.scaled(wss.ws_menu_item_action_icon_gap_px)))
-                            .text_size(px(self.scaled(ms.menu_item_font_size_px)))
-                            .text_color(text_color)
-                            .hover(move |s| s.bg(row_hover_bg))
-                            .cursor(CursorStyle::Arrow)
                             .child(
                                 div()
                                     .w(px(check_size))
@@ -6978,40 +6698,29 @@ impl EditorView {
                                     .child(ws_name),
                             )
                             .child(
-                                div()
-                                    .id(close_btn_id)
-                                    .w(px(close_size))
-                                    .h(px(close_size))
-                                    .flex()
-                                    .flex_none()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .text_size(px(self.scaled(self.styles.ui_font_size_px - 3.0)))
-                                    .text_color(close_color)
-                                    .cursor(CursorStyle::Arrow)
-                                    .hover(move |s| {
-                                        s.text_color(close_hover_color).bg(close_hover_bg)
-                                    })
-                                    .child("✕")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, window, cx| {
-                                            window.prevent_default();
-                                            cx.stop_propagation();
-                                            this.suppress_editor_mouse_up_for_current_menu_event(
-                                                cx,
-                                            );
-                                            this.close_workspace(&ws_close, cx);
-                                        }),
-                                    )
-                                    .on_mouse_up(
-                                        MouseButton::Left,
-                                        cx.listener(|_, _, window, cx| {
-                                            window.prevent_default();
-                                            cx.stop_propagation();
-                                        }),
-                                    ),
+                                crate::ui::button::icon_button(
+                                    close_btn_id,
+                                    self.styles.workspace_close_button(),
+                                    Default::default(),
+                                    self.ui_scale,
+                                )
+                                .child("✕")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, window, cx| {
+                                        window.prevent_default();
+                                        cx.stop_propagation();
+                                        this.suppress_editor_mouse_up_for_current_menu_event(cx);
+                                        this.close_workspace(&ws_close, cx);
+                                    }),
+                                )
+                                .on_mouse_up(
+                                    MouseButton::Left,
+                                    cx.listener(|_, _, window, cx| {
+                                        window.prevent_default();
+                                        cx.stop_propagation();
+                                    }),
+                                ),
                             )
                             .on_mouse_down(
                                 MouseButton::Left,

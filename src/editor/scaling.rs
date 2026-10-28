@@ -430,7 +430,7 @@ impl EditorView {
         if !self.active_tab_supports_text_buffer() || self.last_viewport_height <= 0.0 {
             return None;
         }
-        if self.table_cursor_cell().is_some() && !self.active_tab_is_diff() {
+        if self.table_cursor_cell().is_some() {
             let geometry = self.table_cursor_paint_bounds?;
             if geometry.offset != self.cursor.offset {
                 return None;
@@ -495,16 +495,6 @@ impl EditorView {
         if next_panel == Some(RightUtilityPanel::Info) {
             self.invalidate_info_panel_cache();
         }
-        if next_panel == Some(RightUtilityPanel::GitHistory) {
-            self.invalidate_git_history_cache();
-        }
-        if previous_panel != next_panel
-            && (previous_panel == Some(RightUtilityPanel::GitHistory)
-                || next_panel == Some(RightUtilityPanel::GitHistory))
-        {
-            self.invalidate_git_panel_status();
-        }
-
         // Switching directly between two visible utility panels is a panel-type
         // switch: apply the width change instantly. Only animate when a panel is
         // appearing (none -> some) or disappearing (some -> none).
@@ -668,7 +658,8 @@ impl EditorView {
             .max(gutter_styles.gutter_heading_h3_icon_size_px)
             .max(gutter_styles.gutter_heading_h4_icon_size_px);
         self.scaled(
-            (gutter_styles.gutter_fold_icon_size_px + gutter_styles.gutter_fold_icon_offset_px)
+            (self.styles.self_drawn.gutter_fold_icon_size_px
+                + self.styles.self_drawn.gutter_fold_icon_offset_px)
                 .max(max_heading_icon_size + gutter_styles.gutter_heading_icon_offset_px),
         )
     }
@@ -794,19 +785,9 @@ impl EditorView {
         let (base_top, base_bottom) = self.base_block_padding_for_line(line);
         let table_handle_padding = super::table_handles::top_padding(
             self.decorations.get(line),
-            self.active_tab_is_diff(),
-            self.scaled(self.styles.table.table_border_track_width_px),
+            self.scaled(self.styles.self_drawn.table_border_track_width_px),
         );
-        // Expanded inline-diff hunks reserve space for their read-only removed
-        // rows by growing the anchor line's top padding (or the last line's
-        // bottom padding for a trailing deletion). Routing this through
-        // `block_padding_for_line` keeps every consumer — the geometry cache,
-        // `text_y_offset_for_line`, and the per-line layout — in agreement. The
-        // removed rows soft-wrap, so the reserved height comes from the measured
-        // (or estimated) phantom heights rather than a fixed row count.
-        let above = self.inline_diff_phantom_reserved_above(line);
-        let below = self.inline_diff_phantom_reserved_below(line);
-        (base_top + table_handle_padding + above, base_bottom + below)
+        (base_top + table_handle_padding, base_bottom)
     }
 
     fn base_block_padding_for_line(&self, line: usize) -> (f32, f32) {
@@ -1149,7 +1130,7 @@ impl EditorView {
         if self.focused_code_mode_preview_key().is_some() {
             return;
         }
-        if self.table_cursor_cell().is_some() && !self.active_tab_is_diff() {
+        if self.table_cursor_cell().is_some() {
             let Some((top, bottom)) = self.cursor_vertical_bounds() else {
                 self.pending_scroll_to_cursor = true;
                 return;
@@ -1334,15 +1315,14 @@ impl EditorView {
             .visual_row_vertical_bounds_for_offset(self.cursor.offset)
             .unwrap_or_else(|| (0.0, self.line_height_for_block(&BlockType::Normal)));
         let text_top = self.text_y_offset_for_line(line);
-        let (cursor_top, cursor_bottom) =
-            if self.table_cursor_cell().is_some() && !self.active_tab_is_diff() {
-                let Some(bounds) = self.cursor_vertical_bounds() else {
-                    return false;
-                };
-                bounds
-            } else {
-                (text_top + row_top, text_top + row_bottom)
+        let (cursor_top, cursor_bottom) = if self.table_cursor_cell().is_some() {
+            let Some(bounds) = self.cursor_vertical_bounds() else {
+                return false;
             };
+            bounds
+        } else {
+            (text_top + row_top, text_top + row_bottom)
+        };
         let restored_offset = edit_scroll_target(
             guard.scroll_offset,
             guard.viewport_height,
@@ -1955,7 +1935,6 @@ impl EditorView {
             if let Some(tab_id) = self.active_tab_id.as_ref() {
                 self.non_markdown_horizontal_scroll_states.remove(tab_id);
             }
-            self.clear_inline_diff_phantom_layout_cache();
             self.clear_active_tab_layout_cache();
             if let Some(anchor) = anchor.as_mut() {
                 anchor.epoch = self.scroll_anim_epoch;
@@ -2033,7 +2012,6 @@ impl EditorView {
         self.wiki_link_start = None;
         self.clear_marked_ranges();
         self.pending_line_display_transfer = None;
-        self.clear_inline_diff_phantom_layout_cache();
         self.clear_active_tab_layout_cache();
         self.reparse();
         self.table_cursor_paint_bounds = None;
@@ -2292,13 +2270,6 @@ impl EditorView {
 
     pub(crate) fn toggle_info_panel(&mut self, cx: &mut Context<Self>) {
         self.toggle_utility_panel(RightUtilityPanel::Info, cx);
-    }
-
-    pub(crate) fn toggle_git_history_panel(&mut self, cx: &mut Context<Self>) {
-        if !crate::platform::capabilities::CHILD_PROCESSES {
-            return;
-        }
-        self.toggle_utility_panel(RightUtilityPanel::GitHistory, cx);
     }
 
     pub(crate) fn toggle_outline_panel(&mut self, cx: &mut Context<Self>) {

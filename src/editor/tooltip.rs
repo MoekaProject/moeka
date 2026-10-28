@@ -13,10 +13,6 @@ use super::{
     },
 };
 
-/// Explicit tooltip text line-height factor, shared between the rendered view
-/// and the size estimate so above-anchor placement never overlaps the button.
-const TOOLTIP_LINE_HEIGHT_FACTOR: f32 = 1.3;
-
 pub(crate) fn with_tooltip(
     child: impl IntoElement,
     editor: Entity<EditorView>,
@@ -222,7 +218,7 @@ impl Render for TooltipView {
             gap_px: editor.scaled(styles.tooltip_shortcut_gap_px),
         };
 
-        div()
+        crate::ui::surface::surface(&editor.styles.tooltip_surface(), editor.ui_scale)
             .w(px(self.width))
             .px(px(editor.scaled(styles.tooltip_padding_x_px)))
             .py(px(editor.scaled(styles.tooltip_padding_y_px)))
@@ -231,11 +227,9 @@ impl Render for TooltipView {
             .justify_center()
             .gap(px(editor.scaled(styles.tooltip_gap_px)))
             .font_family(SharedString::from(editor.styles.ui_font_family))
-            .line_height(px(title_font_size * TOOLTIP_LINE_HEIGHT_FACTOR))
-            .bg(styles.tooltip_bg)
-            .border(px(editor.scaled(styles.tooltip_border_width_px)))
-            .border_color(styles.tooltip_border_color)
-            .rounded(px(editor.scaled(styles.tooltip_radius_px)))
+            .line_height(px(
+                title_font_size * editor.styles.ui.spec.tooltip_line_height_factor
+            ))
             .child(
                 div()
                     .min_w(px(0.0))
@@ -246,15 +240,9 @@ impl Render for TooltipView {
             )
             .when_some(self.shortcut.as_ref(), |this, shortcut| {
                 this.child(
-                    div()
+                    crate::ui::typography::badge(editor.styles.tooltip_keycap(), editor.ui_scale)
                         .min_w(px(editor.scaled(styles.tooltip_shortcut_key_min_width_px)))
                         .h(px(editor.scaled(styles.tooltip_shortcut_key_height_px)))
-                        .px(px(editor.scaled(styles.tooltip_shortcut_key_padding_x_px)))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(editor.scaled(styles.tooltip_shortcut_key_radius_px)))
-                        .bg(styles.tooltip_shortcut_key_bg)
                         .child(render_shortcut(shortcut, shortcut_style)),
                 )
             })
@@ -301,8 +289,10 @@ fn tooltip_size(editor: &EditorView, title: &str, shortcut: Option<&str>) -> (f3
         .max(1.0);
     // Match TooltipView's explicit line height so the height estimate is
     // exact; an underestimate makes above-anchor tooltips overlap the button.
-    let content_height =
-        (title_font_size * TOOLTIP_LINE_HEIGHT_FACTOR * title_lines).max(if shortcut_width > 0.0 {
+    let content_height = (title_font_size
+        * editor.styles.ui.spec.tooltip_line_height_factor
+        * title_lines)
+        .max(if shortcut_width > 0.0 {
             editor.scaled(styles.tooltip_shortcut_key_height_px)
         } else {
             0.0

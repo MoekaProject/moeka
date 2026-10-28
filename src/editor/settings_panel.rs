@@ -4,23 +4,23 @@ use std::rc::Rc;
 use std::sync::{Arc, Weak};
 
 use gpui::{
-    AnyElement, Context, CursorStyle, Focusable, MouseButton, ScrollHandle, SharedString, Window,
-    div, prelude::*, px, svg,
+    AnyElement, Context, Focusable, MouseButton, ScrollHandle, SharedString, Window, div,
+    prelude::*, px, svg,
 };
 
-use crate::checkbox::{Checkbox, CheckboxColors};
 use crate::i18n::{
     TextKey, UiLanguage, attachment_settings_label, language_picker_options,
     terminal_settings_label,
 };
 use crate::theme::{EditorThemeMode, ThemeKind};
+use crate::ui::switch::Switch;
 
 use super::app_settings::ThemeMode;
 #[cfg(not(target_os = "macos"))]
 use super::helpers;
 use super::{
     APP_VERSION, ChatAgentCli, DOC_SVG_PATH, EditorView, FILE_INFO_SECTION_INFO_SVG_PATH,
-    FLOWER_SVG_PATH, GIT_SYNC_SVG_PATH, MOUNTAIN_SVG_PATH, SITE_SVG_PATH, SearchMenuConfig,
+    FLOWER_SVG_PATH, MOUNTAIN_SVG_PATH, SITE_SVG_PATH, SYNC_SVG_PATH, SearchMenuConfig,
     SearchMenuRow, THEME_AUTO_MINI_SVG_PATH, THEME_DARK_MINI_SVG_PATH, THEME_LIGHT_MINI_SVG_PATH,
     TerminalCursorShape, attachments, tooltip,
 };
@@ -47,8 +47,6 @@ pub(crate) enum FontRole {
     TerminalCursorShape,
     TerminalLaunchCommand,
     TerminalFont,
-    /// Font family for selected whiteboard elements (whiteboard panel).
-    WhiteboardFont,
 }
 
 #[derive(Clone)]
@@ -79,6 +77,7 @@ enum SettingsOptionAction {
     AutoSave(bool),
     SimpleMode(bool),
     SidebarAlwaysDark(bool),
+    UiElevation(bool),
     TerminalCopyOnSelect(bool),
 }
 
@@ -119,6 +118,35 @@ fn capture_attachment_folder_bookmark(path: &std::path::Path) -> std::io::Result
     }
 }
 
+fn settings_header_row(gap: f32) -> gpui::Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_end()
+        .justify_between()
+        .gap(px(gap))
+}
+
+fn settings_header_actions(gap: f32) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("settings-header-actions")
+        .ml_auto()
+        .flex_none()
+        .max_w_full()
+        .flex()
+        .flex_row()
+        .flex_nowrap()
+        .overflow_x_scroll()
+        .items_center()
+        .gap(px(gap))
+}
+
+fn settings_header_button_max_width(content_width: f32, padding: f32, limit: f32) -> f32 {
+    limit.min((content_width - padding * 2.0).max(0.0))
+}
+
 // ── Settings panel rendering ────────────────────────────────────────
 
 impl EditorView {
@@ -135,7 +163,9 @@ impl EditorView {
                     - 2.0 * self.styles.window.window_border_width_px)
                     .max(1.0)
             });
-        pane_width.min(self.scaled(640.0)).max(1.0)
+        pane_width
+            .min(self.scaled(self.styles.ui.spec.settings_max_width_px))
+            .max(1.0)
     }
 
     pub(crate) fn render_settings_panel(
@@ -143,10 +173,15 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let bg = self.styles.editor.editor_bg;
+        let bg = self.styles.settings_background();
         let sps = &self.styles.settings_panel;
         let version_label = format!("v{APP_VERSION}");
         let content_width = self.settings_content_width(f32::from(window.bounds().size.width));
+        let button_max_width = settings_header_button_max_width(
+            content_width,
+            self.scaled(self.styles.ui.spec.settings_padding_x_px),
+            self.scaled(sps.settings_header_button_max_width_px),
+        );
 
         div()
             .id("settings-panel")
@@ -162,29 +197,29 @@ impl EditorView {
                 div()
                     .w(px(content_width))
                     .flex_none()
-                    .max_w(px(self.scaled(640.0)))
+                    .max_w(px(self.scaled(self.styles.ui.spec.settings_max_width_px)))
                     .mx_auto()
-                    .py(px(self.scaled(60.0)))
-                    .px(px(self.scaled(40.0)))
+                    .py(px(self.scaled(self.styles.ui.spec.settings_padding_y_px)))
+                    .px(px(self.scaled(self.styles.ui.spec.settings_padding_x_px)))
                     .flex()
                     .flex_col()
-                    .gap(px(self.scaled(32.0)))
+                    .gap(px(self.scaled(self.styles.ui.spec.settings_section_gap_px)))
                     .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_end()
-                            .justify_between()
-                            .gap(px(self.scaled(sps.settings_header_gap_px)))
+                        settings_header_row(self.scaled(sps.settings_header_gap_px))
                             .child(
                                 div()
-                                    .flex_1()
+                                    .flex_none()
+                                    .max_w_full()
                                     .min_w(px(0.0))
                                     .flex()
                                     .items_end()
                                     .gap(px(self.scaled(sps.settings_title_version_gap_px)))
                                     .child(
                                         div()
+                                            .min_w(px(0.0))
+                                            .overflow_hidden()
+                                            .truncate()
+                                            .whitespace_nowrap()
                                             .text_size(px(
                                                 self.scaled(self.styles.ui_font_size_px + 9.0)
                                             ))
@@ -194,6 +229,7 @@ impl EditorView {
                                     )
                                     .child(
                                         div()
+                                            .flex_none()
                                             .mb(px(self.scaled(
                                                 sps.settings_title_version_margin_bottom_px,
                                             )))
@@ -204,19 +240,17 @@ impl EditorView {
                                     ),
                             )
                             .child(
-                                div()
-                                    .ml_auto()
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_end()
-                                    .gap(px(self.scaled(sps.settings_header_actions_gap_px)))
-                                    .when(crate::platform::capabilities::SELF_UPDATE, |this| {
-                                        this.child(self.render_settings_update_button(cx))
-                                    })
-                                    .child(self.render_settings_config_button(cx))
-                                    .child(self.render_settings_help_button(cx))
-                                    .child(self.render_settings_site_button(cx)),
+                                settings_header_actions(
+                                    self.scaled(sps.settings_header_actions_gap_px),
+                                )
+                                .when(crate::platform::capabilities::SELF_UPDATE, |this| {
+                                    this.child(
+                                        self.render_settings_update_button(button_max_width, cx),
+                                    )
+                                })
+                                .child(self.render_settings_config_button(button_max_width, cx))
+                                .child(self.render_settings_help_button(button_max_width, cx))
+                                .child(self.render_settings_site_button(button_max_width, cx)),
                             ),
                     )
                     .child(self.render_theme_section(cx))
@@ -230,10 +264,8 @@ impl EditorView {
             .into_any_element()
     }
 
-    fn render_settings_update_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_settings_update_button(&self, max_width: f32, cx: &mut Context<Self>) -> AnyElement {
         let sps = &self.styles.settings_panel;
-        let height = self.scaled(sps.settings_site_button_height_px);
-        let icon_size = self.scaled(sps.settings_site_button_icon_size_px);
         let checking = self.update_check_in_progress();
         let label = if checking {
             crate::i18n::checking_updates_label(self.ui_language)
@@ -241,147 +273,125 @@ impl EditorView {
             crate::i18n::check_updates_label(self.ui_language)
         };
 
-        div()
-            .id("settings-update-button")
-            .h(px(height))
-            .max_w(px(self.scaled(sps.settings_header_button_max_width_px)))
-            .px(px(self.scaled(sps.settings_site_button_padding_x_px)))
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(sps.settings_site_button_gap_px)))
-            .rounded(px(self.scaled(sps.settings_site_button_radius_px)))
-            .border(px(sps.settings_site_button_border_width_px))
-            .border_color(sps.settings_site_button_border_color)
-            .bg(sps.settings_site_button_bg)
-            .text_size(px(self.scaled(sps.settings_site_button_font_size_px)))
-            .text_color(sps.settings_site_button_text_color)
-            .cursor(CursorStyle::Arrow)
-            .when(checking, |this| this.opacity(0.6))
-            .hover({
-                let hover_bg = sps.settings_site_button_hover_bg;
-                move |style| style.bg(hover_bg)
-            })
-            .child(
-                svg()
-                    .path(GIT_SYNC_SVG_PATH)
-                    .size(px(icon_size))
-                    .text_color(sps.settings_site_button_icon_color),
-            )
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .truncate()
-                    .whitespace_nowrap()
-                    .child(label),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.start_manual_update_check(cx);
-                }),
-            )
-            .into_any_element()
+        let button = crate::ui::button::button(
+            "settings-update-button",
+            self.styles.settings_header_button(),
+            crate::style::ControlState {
+                loading: checking,
+                ..Default::default()
+            },
+            self.ui_scale,
+        )
+        .max_w(px(max_width))
+        .child(crate::ui::button::icon(
+            self.styles.settings_header_button(),
+            SYNC_SVG_PATH,
+            sps.settings_site_button_icon_color,
+            self.ui_scale,
+        ))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .truncate()
+                .whitespace_nowrap()
+                .child(label),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.start_manual_update_check(cx);
+            }),
+        )
+        .into_any_element();
+        tooltip::with_tooltip(
+            button,
+            cx.entity().clone(),
+            crate::i18n::check_updates_label(self.ui_language),
+            None::<&'static str>,
+        )
     }
 
-    fn render_settings_config_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_settings_config_button(&self, max_width: f32, cx: &mut Context<Self>) -> AnyElement {
         let sps = &self.styles.settings_panel;
-        let height = self.scaled(sps.settings_site_button_height_px);
-        let icon_size = self.scaled(sps.settings_site_button_icon_size_px);
 
-        div()
-            .id("settings-config-button")
-            .h(px(height))
-            .max_w(px(self.scaled(sps.settings_header_button_max_width_px)))
-            .px(px(self.scaled(sps.settings_site_button_padding_x_px)))
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(sps.settings_site_button_gap_px)))
-            .rounded(px(self.scaled(sps.settings_site_button_radius_px)))
-            .border(px(sps.settings_site_button_border_width_px))
-            .border_color(sps.settings_site_button_border_color)
-            .bg(sps.settings_site_button_bg)
-            .text_size(px(self.scaled(sps.settings_site_button_font_size_px)))
-            .text_color(sps.settings_site_button_text_color)
-            .cursor(CursorStyle::Arrow)
-            .hover({
-                let hover_bg = sps.settings_site_button_hover_bg;
-                move |style| style.bg(hover_bg)
-            })
-            .child(
-                svg()
-                    .path(FILE_INFO_SECTION_INFO_SVG_PATH)
-                    .size(px(icon_size))
-                    .text_color(sps.settings_site_button_icon_color),
-            )
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .truncate()
-                    .whitespace_nowrap()
-                    .child(crate::i18n::config_file_label(self.ui_language)),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.open_config_file_tab(cx);
-                }),
-            )
-            .into_any_element()
+        let button = crate::ui::button::button(
+            "settings-config-button",
+            self.styles.settings_header_button(),
+            crate::style::ControlState::default(),
+            self.ui_scale,
+        )
+        .max_w(px(max_width))
+        .child(crate::ui::button::icon(
+            self.styles.settings_header_button(),
+            FILE_INFO_SECTION_INFO_SVG_PATH,
+            sps.settings_site_button_icon_color,
+            self.ui_scale,
+        ))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .truncate()
+                .whitespace_nowrap()
+                .child(crate::i18n::config_file_label(self.ui_language)),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.open_config_file_tab(cx);
+            }),
+        )
+        .into_any_element();
+        tooltip::with_tooltip(
+            button,
+            cx.entity().clone(),
+            crate::i18n::config_file_label(self.ui_language),
+            None::<&'static str>,
+        )
     }
 
-    fn render_settings_help_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_settings_help_button(&self, max_width: f32, cx: &mut Context<Self>) -> AnyElement {
         let sps = &self.styles.settings_panel;
-        let height = self.scaled(sps.settings_site_button_height_px);
-        let icon_size = self.scaled(sps.settings_site_button_icon_size_px);
 
-        div()
-            .id("settings-help-button")
-            .h(px(height))
-            .max_w(px(self.scaled(sps.settings_header_button_max_width_px)))
-            .px(px(self.scaled(sps.settings_site_button_padding_x_px)))
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(sps.settings_site_button_gap_px)))
-            .rounded(px(self.scaled(sps.settings_site_button_radius_px)))
-            .border(px(sps.settings_site_button_border_width_px))
-            .border_color(sps.settings_site_button_border_color)
-            .bg(sps.settings_site_button_bg)
-            .text_size(px(self.scaled(sps.settings_site_button_font_size_px)))
-            .text_color(sps.settings_site_button_text_color)
-            .cursor(CursorStyle::Arrow)
-            .hover({
-                let hover_bg = sps.settings_site_button_hover_bg;
-                move |style| style.bg(hover_bg)
-            })
-            .child(
-                svg()
-                    .path(DOC_SVG_PATH)
-                    .size(px(icon_size))
-                    .text_color(sps.settings_site_button_icon_color),
-            )
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .truncate()
-                    .whitespace_nowrap()
-                    .child(self.t(TextKey::HelpManual)),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.open_welcome_tab(cx);
-                }),
-            )
-            .into_any_element()
+        let button = crate::ui::button::button(
+            "settings-help-button",
+            self.styles.settings_header_button(),
+            crate::style::ControlState::default(),
+            self.ui_scale,
+        )
+        .max_w(px(max_width))
+        .child(crate::ui::button::icon(
+            self.styles.settings_header_button(),
+            DOC_SVG_PATH,
+            sps.settings_site_button_icon_color,
+            self.ui_scale,
+        ))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .truncate()
+                .whitespace_nowrap()
+                .child(self.t(TextKey::HelpManual)),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.open_welcome_tab(cx);
+            }),
+        )
+        .into_any_element();
+        tooltip::with_tooltip(
+            button,
+            cx.entity().clone(),
+            self.t(TextKey::HelpManual),
+            None::<&'static str>,
+        )
     }
 
-    fn render_settings_site_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_settings_site_button(&self, max_width: f32, cx: &mut Context<Self>) -> AnyElement {
         let sps = &self.styles.settings_panel;
-        let height = self.scaled(sps.settings_site_button_height_px);
-        let icon_size = self.scaled(sps.settings_site_button_icon_size_px);
         let update_ready = self.prepared_update().is_some();
         let text_color = if update_ready {
             sps.settings_site_button_update_text_color
@@ -399,52 +409,46 @@ impl EditorView {
             self.t(TextKey::OfficialWebsite).to_string()
         };
 
-        div()
-            .id("settings-site-button")
-            .h(px(height))
-            .max_w(px(self.scaled(sps.settings_header_button_max_width_px)))
-            .px(px(self.scaled(sps.settings_site_button_padding_x_px)))
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(sps.settings_site_button_gap_px)))
-            .rounded(px(self.scaled(sps.settings_site_button_radius_px)))
-            .border(px(sps.settings_site_button_border_width_px))
-            .border_color(sps.settings_site_button_border_color)
-            .bg(sps.settings_site_button_bg)
-            .text_size(px(self.scaled(sps.settings_site_button_font_size_px)))
-            .text_color(text_color)
-            .cursor(CursorStyle::Arrow)
-            .hover({
-                let hover_bg = sps.settings_site_button_hover_bg;
-                move |style| style.bg(hover_bg)
-            })
-            .child(
-                svg()
-                    .path(SITE_SVG_PATH)
-                    .size(px(icon_size))
-                    .text_color(icon_color),
-            )
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .truncate()
-                    .whitespace_nowrap()
-                    .child(label),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    if this.prepared_update().is_some() {
-                        this.show_prepared_update_dialog(cx);
-                    } else if let Err(error) =
-                        crate::platform::shell::open_url("https://moeka.app/")
-                    {
-                        log_error!("failed to open official website: {error}");
-                    }
-                }),
-            )
-            .into_any_element()
+        let tooltip_label = label.clone();
+        let button = crate::ui::button::button(
+            "settings-site-button",
+            self.styles.settings_header_button(),
+            crate::style::ControlState::default(),
+            self.ui_scale,
+        )
+        .max_w(px(max_width))
+        .text_color(text_color)
+        .child(crate::ui::button::icon(
+            self.styles.settings_header_button(),
+            SITE_SVG_PATH,
+            icon_color,
+            self.ui_scale,
+        ))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .truncate()
+                .whitespace_nowrap()
+                .child(label),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                if this.prepared_update().is_some() {
+                    this.show_prepared_update_dialog(cx);
+                } else if let Err(error) = crate::platform::shell::open_url("https://moeka.app/") {
+                    log_error!("failed to open official website: {error}");
+                }
+            }),
+        )
+        .into_any_element();
+        tooltip::with_tooltip(
+            button,
+            cx.entity().clone(),
+            tooltip_label,
+            None::<&'static str>,
+        )
     }
 
     fn render_format_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -455,7 +459,9 @@ impl EditorView {
             .flex_none()
             .flex()
             .flex_col()
-            .gap(px(self.scaled(12.0)))
+            .gap(px(self.scaled(
+                self.styles.ui.space(crate::style::SpaceStep::Three),
+            )))
             .child(self.render_section_heading(self.t(TextKey::FormatSection)))
             .child(self.render_editor_display_options(cx))
             .child(self.render_picker_row(
@@ -485,7 +491,9 @@ impl EditorView {
             .flex_none()
             .flex()
             .flex_col()
-            .gap(px(self.scaled(12.0)))
+            .gap(px(self.scaled(
+                self.styles.ui.space(crate::style::SpaceStep::Three),
+            )))
             .child(
                 self.render_section_heading(terminal_settings_label(self.ui_language, "section")),
             )
@@ -526,20 +534,13 @@ impl EditorView {
     }
 
     fn render_terminal_command_args_row(&self) -> AnyElement {
-        let settings = &self.styles.settings_panel;
-        let control = div()
-            .w_full()
-            .h(px(self.scaled(settings.settings_input_height_px)))
-            .border(px(settings.settings_option_button_border_width_px))
-            .border_color(settings.settings_option_button_border_color)
-            .rounded(px(self.scaled(settings.settings_input_radius_px)))
-            .bg(settings.settings_option_button_bg)
-            .overflow_hidden()
-            .when_some(
-                self.settings_terminal_command_args_editor.clone(),
-                |this, editor| this.child(editor),
-            )
-            .into_any_element();
+        let control =
+            crate::ui::card::input_frame(self.styles.settings_input_frame(), self.ui_scale)
+                .when_some(
+                    self.settings_terminal_command_args_editor.clone(),
+                    |this, editor| this.child(editor),
+                )
+                .into_any_element();
         self.render_attachment_settings_row(
             terminal_settings_label(self.ui_language, "command_args"),
             control,
@@ -595,7 +596,9 @@ impl EditorView {
         div()
             .flex()
             .flex_col()
-            .gap(px(self.scaled(12.0)))
+            .gap(px(self.scaled(
+                self.styles.ui.space(crate::style::SpaceStep::Three),
+            )))
             .child(self.render_section_heading(label("section")))
             .child(self.render_attachment_settings_row(label("location"), location_controls))
             .when(
@@ -614,41 +617,21 @@ impl EditorView {
     }
 
     fn render_attachment_settings_row(&self, label: &str, control: AnyElement) -> AnyElement {
-        div()
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(12.0)))
-            .child(
-                div()
-                    .w(px(self.scaled(120.0)))
-                    .text_size(px(self.scaled(13.0)))
-                    .text_color(self.styles.settings_panel.settings_secondary_text_color)
-                    .child(label.to_string()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .flex()
-                    .items_center()
-                    .child(control),
-            )
-            .into_any_element()
+        crate::ui::field::field(
+            self.styles.settings_field(),
+            self.ui_scale,
+            label.to_string(),
+            control,
+        )
+        .into_any_element()
     }
 
     fn render_attachment_folder_row(&self) -> AnyElement {
-        let settings = &self.styles.settings_panel;
         let editor = self.settings_attachment_folder_editor.clone();
-        let control = div()
-            .w_full()
-            .h(px(self.scaled(settings.settings_input_height_px)))
-            .border(px(settings.settings_option_button_border_width_px))
-            .border_color(settings.settings_option_button_border_color)
-            .rounded(px(self.scaled(settings.settings_input_radius_px)))
-            .bg(settings.settings_option_button_bg)
-            .overflow_hidden()
-            .when_some(editor, |this, editor| this.child(editor))
-            .into_any_element();
+        let control =
+            crate::ui::card::input_frame(self.styles.settings_input_frame(), self.ui_scale)
+                .when_some(editor, |this, editor| this.child(editor))
+                .into_any_element();
         self.render_attachment_settings_row(
             attachment_settings_label(self.ui_language, "folder"),
             control,
@@ -656,42 +639,32 @@ impl EditorView {
     }
 
     fn render_external_attachment_folder_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let settings = &self.styles.settings_panel;
         let path = if self.app_settings.attachment_external_folder.is_empty() {
             attachment_settings_label(self.ui_language, "choose_external_folder").to_string()
         } else {
             self.app_settings.attachment_external_folder.clone()
         };
-        let control = div()
-            .id("settings-external-attachment-folder")
-            .w_full()
-            .h(px(self.scaled(settings.settings_input_height_px)))
-            .px(px(self.scaled(8.0)))
-            .flex()
-            .items_center()
-            .border(px(settings.settings_option_button_border_width_px))
-            .border_color(settings.settings_option_button_border_color)
-            .rounded(px(self.scaled(settings.settings_input_radius_px)))
-            .bg(settings.settings_option_button_bg)
-            .text_color(settings.settings_option_button_text_color)
-            .cursor(CursorStyle::Arrow)
-            .hover({
-                let hover = settings.settings_option_button_hover_bg;
-                move |style| style.bg(hover)
-            })
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .truncate()
-                    .whitespace_nowrap()
-                    .child(path),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| this.pick_external_attachment_folder(cx)),
-            )
-            .into_any_element();
+        let control = crate::ui::button::button(
+            "settings-external-attachment-folder",
+            self.styles.settings_folder_picker(),
+            Default::default(),
+            self.ui_scale,
+        )
+        .w_full()
+        .justify_start()
+        .child(
+            div()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .truncate()
+                .whitespace_nowrap()
+                .child(path),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| this.pick_external_attachment_folder(cx)),
+        )
+        .into_any_element();
         self.render_attachment_settings_row(
             attachment_settings_label(self.ui_language, "external_folder_path"),
             control,
@@ -840,7 +813,9 @@ impl EditorView {
         div()
             .flex()
             .flex_col()
-            .gap(px(self.scaled(8.0)))
+            .gap(px(
+                self.scaled(self.styles.ui.space(crate::style::SpaceStep::Two))
+            ))
             .child(self.render_attachment_settings_row(
                 crate::i18n::settings_label(self.ui_language, "auto_save"),
                 self.render_boolean_settings_checkbox(
@@ -913,22 +888,17 @@ impl EditorView {
         action: SettingsOptionAction,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let styles = &self.styles.settings_panel;
-        Checkbox::new(
+        Switch::new(
             id,
-            checked,
+            crate::style::ControlState {
+                checked,
+                ..Default::default()
+            },
             value_label,
             self.ui_scale,
-            CheckboxColors {
-                checked_background: self.theme.text_primary,
-                checked_hover_background: self.theme.text_bright,
-                unchecked_background: styles.settings_option_button_bg,
-                unchecked_hover_background: styles.settings_option_button_hover_bg,
-                unchecked_border: styles.settings_contrast_border_color,
-                border_width_px: self.styles.checkbox.checkbox_border_width_px,
-                thumb: self.theme.bg_primary,
-                description: styles.settings_theme_option_text_color,
-            },
+            self.styles
+                .switch
+                .for_size(self.styles.ui.spec.application.switch_size),
         )
         .render()
         .on_mouse_down(
@@ -971,6 +941,10 @@ impl EditorView {
             SettingsOptionAction::SidebarAlwaysDark(value) => {
                 self.app_settings.sidebar_always_dark = value;
                 self.refresh_theme_styles(false, cx);
+            }
+            SettingsOptionAction::UiElevation(value) => {
+                self.app_settings.ui_elevation = value;
+                self.set_ui_style_spec(self.app_settings.ui_style_spec(), cx);
             }
             SettingsOptionAction::TerminalCopyOnSelect(value) => {
                 self.app_settings.terminal_copy_on_select = value;
@@ -1039,62 +1013,27 @@ impl EditorView {
     // ── Section heading ─────────────────────────────────────────
 
     fn render_section_heading(&self, label: &str) -> AnyElement {
-        let border_color = self.styles.settings_panel.settings_contrast_border_color;
         let heading_label = if self.ui_language == UiLanguage::English {
             label.to_uppercase()
         } else {
             label.to_string()
         };
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(self.scaled(8.0)))
-            .child(
-                div()
-                    .text_size(px(self.scaled(self.styles.ui_font_size_px - 1.0)))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(self.styles.settings_panel.settings_primary_text_color)
-                    .child(heading_label),
-            )
-            .child(div().w_full().h(px(1.0)).bg(border_color))
-            .into_any_element()
+        crate::ui::field::section_heading(
+            self.styles.settings_section_heading(),
+            self.ui_scale,
+            heading_label,
+        )
+        .into_any_element()
     }
 
     fn settings_text_input_styles(&self) -> crate::style::TextInputStyles {
-        let mut styles = self.styles.text_input.clone();
-        let settings = &self.styles.settings_panel;
-        styles.text_input_bg = settings.settings_option_button_bg;
-        styles.text_input_hover_bg = Some(settings.settings_option_button_hover_bg);
-        styles.text_input_focus_bg = settings.settings_option_button_hover_bg;
-        styles.text_input_border_width_px = 0.0;
-        styles.text_input_height_px = self.scaled(settings.settings_input_height_px);
-        styles.text_input_padding_left_px = self.scaled(8.0);
-        styles.text_input_padding_right_px = self.scaled(8.0);
-        styles.text_input_font_size_px = self.scaled(self.styles.ui_font_size_px + 1.0);
-        styles.text_input_radius_px = self.scaled(settings.settings_input_radius_px);
-        styles.text_input_cursor_width_px =
-            self.scaled(self.styles.text_input.text_input_cursor_width_px);
-        styles.text_input_cursor_height_ratio = self
-            .styles
-            .workspace_search
-            .ws_search_input_cursor_height_ratio;
-        styles.text_input_cursor_height_adjust_px = self.scaled(
-            self.styles
-                .workspace_search
-                .ws_search_input_cursor_height_adjust_px,
-        );
-        styles
+        self.styles
+            .input_styles(crate::style::InputRole::Settings, self.ui_scale)
     }
 
     fn inline_stepper_input_styles(&self) -> crate::style::TextInputStyles {
-        let mut styles = self.settings_text_input_styles();
-        styles.text_input_padding_left_px = self.scaled(2.0);
-        styles.text_input_padding_right_px = self.scaled(2.0);
-        styles.text_input_radius_px =
-            self.scaled(self.styles.settings_panel.settings_stepper_input_radius_px);
-        styles.text_input_center = true;
-        styles
+        self.styles
+            .input_styles(crate::style::InputRole::Stepper, self.ui_scale)
     }
 
     pub(crate) fn sync_settings_text_input_styles(&mut self, cx: &mut Context<Self>) {
@@ -1207,6 +1146,9 @@ impl EditorView {
             self.theme_kind.is_dark(),
         );
         self.ui_scale = self.app_settings.ui_scale;
+        if self.styles.ui.base_spec.appearance != self.app_settings.ui_style_spec().appearance {
+            self.styles.ui.base_spec = self.app_settings.ui_style_spec();
+        }
         self.refresh_theme_styles(true, cx);
         self.refresh_builtin_tab_titles();
 
@@ -1215,6 +1157,49 @@ impl EditorView {
     }
 
     // ── Theme section ───────────────────────────────────────────
+
+    fn render_ui_corners_control(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::style::{ControlState, GroupPosition, Orientation, UiCorners};
+        let style = self
+            .styles
+            .raised_segment(self.styles.editor_theme_toggle());
+        crate::ui::button::toggle_group(self.styles.segmented_group(style.radius_px), self.ui_scale)
+            .children(
+                UiCorners::ALL
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, corners)| {
+                        let key = match corners {
+                            UiCorners::Square => "corners_square",
+                            UiCorners::Half => "corners_half",
+                            UiCorners::Full => "corners_full",
+                        };
+                        crate::ui::button::toggle_segment(
+                            ("settings-ui-corners", index),
+                            style,
+                            ControlState {
+                                selected: self.app_settings.ui_corners == corners,
+                                ..Default::default()
+                            },
+                            GroupPosition {
+                                orientation: Orientation::Horizontal,
+                                first: index == 0,
+                                last: index + 1 == UiCorners::ALL.len(),
+                            },
+                            self.ui_scale,
+                        )
+                        .child(crate::i18n::settings_label(self.ui_language, key))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                let elevation = this.app_settings.ui_elevation;
+                                this.set_ui_appearance(corners, elevation, cx);
+                            }),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
 
     fn render_theme_appearance_segment(
         &self,
@@ -1225,18 +1210,10 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let styles = &self.styles.settings_panel;
-        let text_secondary = styles.settings_option_button_text_color;
-        let hover_bg = styles.settings_option_button_hover_bg;
-        let active_bg = styles.settings_option_button_active_bg;
-        let active_text = styles.settings_option_button_active_text_color;
+        let style = self.styles.raised_segment(self.styles.settings_toggle());
+        let text_secondary = style.normal.foreground;
+        let active_text = style.selected.foreground;
         let icon_size = self.scaled(styles.settings_theme_toggle_icon_size_px);
-        let height = self.scaled(styles.settings_theme_toggle_height_px);
-        let padding_x = self.scaled(styles.settings_theme_toggle_padding_x_px);
-        let gap = self.scaled(styles.settings_theme_toggle_gap_px);
-        let radius = self.scaled(styles.settings_theme_toggle_radius_px);
-        let border_width = self.scaled(styles.settings_theme_toggle_border_width_px);
-        let font_size = self.scaled(styles.settings_theme_option_font_size_px);
-        let border_color = styles.settings_theme_option_border_color;
         let (id, icon, label) = match choice {
             ThemeAppearanceChoice::Auto => (
                 "theme-toggle-auto",
@@ -1255,43 +1232,33 @@ impl EditorView {
             ),
         };
 
-        div()
-            .id(id)
-            .h(px(height))
-            .px(px(padding_x))
-            .flex()
-            .items_center()
-            .gap(px(gap))
-            .text_size(px(font_size))
-            .border_t(px(border_width))
-            .border_b(px(border_width))
-            .border_color(border_color)
-            .when(first, |this| {
-                this.rounded_l(px(radius)).border_l(px(border_width))
-            })
-            .when(last, |this| {
-                this.rounded_r(px(radius)).border_r(px(border_width))
-            })
-            .bg(styles.settings_option_button_bg)
-            .cursor(CursorStyle::Arrow)
-            .when(active, |this| this.bg(active_bg).text_color(active_text))
-            .when(!active, |this| {
-                this.text_color(text_secondary)
-                    .hover(move |s| s.bg(hover_bg))
-            })
-            .child(svg().path(icon).size(px(icon_size)).text_color(if active {
-                active_text
-            } else {
-                text_secondary
-            }))
-            .child(label.to_string())
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.select_theme_appearance(choice, window, cx);
-                }),
-            )
-            .into_any_element()
+        crate::ui::button::toggle_segment(
+            id,
+            style,
+            crate::style::ControlState {
+                selected: active,
+                ..Default::default()
+            },
+            crate::style::GroupPosition {
+                first,
+                last,
+                orientation: crate::style::Orientation::Horizontal,
+            },
+            self.ui_scale,
+        )
+        .child(svg().path(icon).size(px(icon_size)).text_color(if active {
+            active_text
+        } else {
+            text_secondary
+        }))
+        .child(label.to_string())
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                this.select_theme_appearance(choice, window, cx);
+            }),
+        )
+        .into_any_element()
     }
 
     fn select_theme_appearance(
@@ -1325,26 +1292,38 @@ impl EditorView {
             ThemeKind::light_themes()
         };
         let icon_size = self.scaled(settings_styles.settings_theme_toggle_icon_size_px);
-        let toggle_gap = self.scaled(settings_styles.settings_theme_toggle_gap_px);
-        let option_height = self.scaled(settings_styles.settings_theme_option_height_px);
-        let option_padding_x = self.scaled(settings_styles.settings_theme_option_padding_x_px);
-        let option_radius = self.scaled(settings_styles.settings_theme_option_radius_px);
         let option_border_width =
             self.scaled(settings_styles.settings_theme_option_border_width_px);
-        let option_font_size = self.scaled(settings_styles.settings_theme_option_font_size_px);
-        let option_border_color = settings_styles.settings_theme_option_border_color;
-        let option_text_color = settings_styles.settings_theme_option_text_color;
-        let option_active_text_color = settings_styles.settings_theme_option_active_text_color;
-        let option_active_bg = settings_styles.settings_theme_option_active_bg;
-        let option_hover_bg = settings_styles.settings_theme_option_hover_bg;
+        let editor_mode_style = self
+            .styles
+            .raised_segment(self.styles.editor_theme_toggle());
+        let raised = self.styles.ui.spec.appearance.elevation;
+        let option_text_color = editor_mode_style.normal.foreground;
+        let option_active_text_color = editor_mode_style.selected.foreground;
 
         div()
             .w_full()
             .flex_none()
             .flex()
             .flex_col()
-            .gap(px(self.scaled(16.0)))
+            .gap(px(
+                self.scaled(self.styles.ui.space(crate::style::SpaceStep::Four))
+            ))
             .child(self.render_section_heading(self.t(TextKey::ThemeSection)))
+            .child(self.render_attachment_settings_row(
+                crate::i18n::settings_label(self.ui_language, "ui_corners"),
+                self.render_ui_corners_control(cx),
+            ))
+            .child(self.render_attachment_settings_row(
+                crate::i18n::settings_label(self.ui_language, "ui_elevation"),
+                self.render_boolean_settings_checkbox(
+                    "settings-ui-elevation",
+                    self.app_settings.ui_elevation,
+                    SettingsOptionAction::UiElevation(false),
+                    SettingsOptionAction::UiElevation(true),
+                    cx,
+                ),
+            ))
             .child(self.render_attachment_settings_row(
                 crate::i18n::settings_label(self.ui_language, "simple_mode"),
                 self.render_boolean_settings_checkbox(
@@ -1374,111 +1353,96 @@ impl EditorView {
                     .justify_between()
                     .gap(px(self.scaled(settings_styles.settings_theme_group_gap_px)))
                     .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(0.0))
-                            .child(self.render_theme_appearance_segment(
-                                ThemeAppearanceChoice::Auto,
-                                theme_mode == ThemeMode::Auto,
-                                true,
-                                false,
-                                cx,
-                            ))
-                            .child(self.render_theme_appearance_segment(
-                                ThemeAppearanceChoice::Light,
-                                theme_mode != ThemeMode::Auto && !is_dark_mode,
-                                false,
-                                false,
-                                cx,
-                            ))
-                            .child(self.render_theme_appearance_segment(
-                                ThemeAppearanceChoice::Dark,
-                                theme_mode != ThemeMode::Auto && is_dark_mode,
-                                false,
-                                true,
-                                cx,
-                            )),
+                        crate::ui::button::toggle_group(
+                            self.styles.segmented_group(
+                                self.styles
+                                    .raised_segment(self.styles.settings_toggle())
+                                    .radius_px,
+                            ),
+                            self.ui_scale,
+                        )
+                        .child(self.render_theme_appearance_segment(
+                            ThemeAppearanceChoice::Auto,
+                            theme_mode == ThemeMode::Auto,
+                            true,
+                            false,
+                            cx,
+                        ))
+                        .child(self.render_theme_appearance_segment(
+                            ThemeAppearanceChoice::Light,
+                            theme_mode != ThemeMode::Auto && !is_dark_mode,
+                            false,
+                            false,
+                            cx,
+                        ))
+                        .child(self.render_theme_appearance_segment(
+                            ThemeAppearanceChoice::Dark,
+                            theme_mode != ThemeMode::Auto && is_dark_mode,
+                            false,
+                            true,
+                            cx,
+                        )),
                     )
                     .child(
-                        div().flex().flex_row().gap(px(0.0)).children(
+                        crate::ui::button::toggle_group(
+                            self.styles.segmented_group(editor_mode_style.radius_px),
+                            self.ui_scale,
+                        )
+                        .children(
                             EditorThemeMode::all()
                                 .iter()
                                 .enumerate()
                                 .map(|(index, mode)| {
                                     let is_active = *mode == editor_theme_mode;
                                     let mode = *mode;
-                                    div()
-                                        .id(SharedString::from(format!(
+                                    crate::ui::button::toggle_segment(
+                                        SharedString::from(format!(
                                             "editor-theme-mode-{}",
                                             mode.as_str()
-                                        )))
-                                        .h(px(option_height))
-                                        .border_t(px(option_border_width))
-                                        .border_b(px(option_border_width))
-                                        .border_color(option_border_color)
-                                        .px(px(option_padding_x))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap(px(toggle_gap))
-                                        .text_size(px(option_font_size))
-                                        .text_color(if is_active {
-                                            option_active_text_color
-                                        } else {
-                                            option_text_color
-                                        })
-                                        .bg(if is_active {
-                                            option_active_bg
-                                        } else {
-                                            settings_styles.settings_option_button_bg
-                                        })
-                                        .cursor(CursorStyle::Arrow)
-                                        .when(!is_active, |this| {
-                                            this.hover(move |s| s.bg(option_hover_bg))
-                                        })
-                                        .when(index > 0, |this| {
-                                            this.border_l(px(option_border_width))
-                                                .border_color(option_border_color)
-                                        })
-                                        .when(index == 0, |this| {
-                                            this.rounded_l(px(option_radius))
-                                                .border_l(px(option_border_width))
-                                        })
-                                        .when(index + 1 == EditorThemeMode::all().len(), |this| {
-                                            this.rounded_r(px(option_radius))
-                                                .border_r(px(option_border_width))
-                                        })
-                                        .child(
-                                            svg()
-                                                .path(match mode {
-                                                    EditorThemeMode::Colorful => FLOWER_SVG_PATH,
-                                                    EditorThemeMode::Monochrome => {
-                                                        MOUNTAIN_SVG_PATH
-                                                    }
-                                                })
-                                                .size(px(icon_size))
-                                                .text_color(if is_active {
-                                                    option_active_text_color
-                                                } else {
-                                                    option_text_color
-                                                }),
-                                        )
-                                        .child(match mode {
-                                            EditorThemeMode::Colorful => {
-                                                self.t(TextKey::ThemeModeColorful)
-                                            }
-                                            EditorThemeMode::Monochrome => {
-                                                self.t(TextKey::ThemeModeMonochrome)
-                                            }
-                                        })
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.set_editor_theme_mode(mode, cx);
+                                        )),
+                                        editor_mode_style,
+                                        crate::style::ControlState {
+                                            selected: is_active,
+                                            ..Default::default()
+                                        },
+                                        crate::style::GroupPosition {
+                                            orientation: crate::style::Orientation::Horizontal,
+                                            first: index == 0,
+                                            last: index + 1 == EditorThemeMode::all().len(),
+                                        },
+                                        self.ui_scale,
+                                    )
+                                    .when(index > 0 && !raised, |this| {
+                                        this.border_l(px(option_border_width))
+                                    })
+                                    .child(
+                                        svg()
+                                            .path(match mode {
+                                                EditorThemeMode::Colorful => FLOWER_SVG_PATH,
+                                                EditorThemeMode::Monochrome => MOUNTAIN_SVG_PATH,
+                                            })
+                                            .size(px(icon_size))
+                                            .text_color(if is_active {
+                                                option_active_text_color
+                                            } else {
+                                                option_text_color
                                             }),
-                                        )
-                                        .into_any_element()
+                                    )
+                                    .child(match mode {
+                                        EditorThemeMode::Colorful => {
+                                            self.t(TextKey::ThemeModeColorful)
+                                        }
+                                        EditorThemeMode::Monochrome => {
+                                            self.t(TextKey::ThemeModeMonochrome)
+                                        }
+                                    })
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.set_editor_theme_mode(mode, cx);
+                                        }),
+                                    )
+                                    .into_any_element()
                                 }),
                         ),
                     ),
@@ -1507,100 +1471,17 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let preview = kind.build();
-        let card_bg = preview.bg_primary;
-        let swatch_text = preview.text_primary;
-        let swatch_accent = preview.text_accent;
-        let swatch_heading = preview.heading;
-        let swatch_code = preview.inline_code;
-        let swatch_secondary_bg = preview.bg_secondary;
-        let active_accent = self.theme.text_accent;
-        let inactive_border = preview.border_secondary;
-        let inactive_hover_border = preview.border_tertiary;
-
-        let swatch_size = self.scaled(10.0);
-
-        div()
+        let style = self.styles.theme_card(&preview, is_active);
+        crate::ui::card::theme_card(style, self.ui_scale)
             .id(SharedString::from(format!("theme-{}", kind.label())))
-            .w_full()
-            .min_w(px(0.0))
-            .py(px(self.scaled(8.0)))
-            .px(px(self.scaled(8.0)))
-            .flex()
-            .flex_col()
-            .gap(px(self.scaled(6.0)))
-            .rounded(px(self.scaled(8.0)))
-            .border(px(2.0))
-            .border_color(if is_active {
-                active_accent
-            } else {
-                inactive_border
-            })
-            .bg(card_bg)
-            .cursor(CursorStyle::Arrow)
-            .hover(move |style| {
-                if !is_active {
-                    style.border_color(inactive_hover_border)
-                } else {
-                    style
-                }
-            })
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.set_theme(kind, cx);
-                }),
+                cx.listener(move |this, _, _, cx| this.set_theme(kind, cx)),
             )
-            // Color swatches row (reversed order, circular)
+            .child(crate::ui::card::swatch_row(style, self.ui_scale))
             .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(self.scaled(4.0)))
-                    .child(
-                        div()
-                            .w(px(swatch_size))
-                            .h(px(swatch_size))
-                            .rounded_full()
-                            .bg(swatch_code),
-                    )
-                    .child(
-                        div()
-                            .w(px(swatch_size))
-                            .h(px(swatch_size))
-                            .rounded_full()
-                            .bg(swatch_heading),
-                    )
-                    .child(
-                        div()
-                            .w(px(swatch_size))
-                            .h(px(swatch_size))
-                            .rounded_full()
-                            .bg(swatch_accent),
-                    )
-                    .child(
-                        div()
-                            .w(px(swatch_size))
-                            .h(px(swatch_size))
-                            .rounded_full()
-                            .bg(swatch_text),
-                    )
-                    .child(
-                        div()
-                            .w(px(swatch_size))
-                            .h(px(swatch_size))
-                            .rounded_full()
-                            .bg(swatch_secondary_bg),
-                    ),
-            )
-            // Theme name
-            .child(
-                div()
+                crate::ui::typography::label(style.title, self.ui_scale)
                     .w_full()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(self.scaled(11.0)))
-                    .text_color(swatch_text)
                     .child(kind.label()),
             )
             .into_any_element()
@@ -1626,7 +1507,9 @@ impl EditorView {
             .flex_none()
             .flex()
             .flex_col()
-            .gap(px(self.scaled(12.0)))
+            .gap(px(self.scaled(
+                self.styles.ui.space(crate::style::SpaceStep::Three),
+            )))
             .child(self.render_section_heading(self.t(TextKey::FontsSection)))
             // UI font
             .child(self.render_picker_row(
@@ -1794,26 +1677,15 @@ impl EditorView {
         option_index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let text_secondary = self.styles.settings_panel.settings_secondary_text_color;
         let control = self.render_picker_control(current_value, role, option_index, cx);
-
-        div()
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(self.scaled(12.0)))
-            .child(
-                div()
-                    .w(px(self.scaled(120.0)))
-                    .flex_none()
-                    .overflow_hidden()
-                    .text_size(px(self.scaled(13.0)))
-                    .text_color(text_secondary)
-                    .child(label.to_string()),
-            )
-            .child(control)
-            .into_any_element()
+        crate::ui::field::field(
+            self.styles.settings_field(),
+            self.ui_scale,
+            label.to_string(),
+            control,
+        )
+        .w_full()
+        .into_any_element()
     }
 
     fn render_picker_control(
@@ -1823,11 +1695,6 @@ impl EditorView {
         option_index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let settings = &self.styles.settings_panel;
-        let hover_bg = settings.settings_option_button_hover_bg;
-        let text_primary = settings.settings_option_button_text_color;
-        let border_color = settings.settings_option_button_border_color;
-        let bg = settings.settings_option_button_bg;
         let current_value = current_value.to_string();
         let bounds_cell = self
             .font_picker_button_bounds
@@ -1847,34 +1714,24 @@ impl EditorView {
                 }
             })
             .child(
-                div()
-                    .id(SharedString::from(format!(
-                        "font-picker-{:?}-{}",
-                        role as u8, option_index
-                    )))
-                    .w_full()
-                    .h(px(self.scaled(settings.settings_input_height_px)))
-                    .px(px(self.scaled(10.0)))
-                    .flex()
-                    .items_center()
-                    .rounded(px(self.scaled(settings.settings_input_radius_px)))
-                    .border(px(settings.settings_option_button_border_width_px))
-                    .border_color(border_color)
-                    .bg(bg)
-                    .text_size(px(self.scaled(13.0)))
-                    .text_color(text_primary)
-                    .overflow_hidden()
-                    .truncate()
-                    .cursor(CursorStyle::Arrow)
-                    .hover(move |style| style.bg(hover_bg))
-                    .child(current_value)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &gpui::MouseDownEvent, window, cx| {
-                            window.prevent_default();
-                            this.open_font_picker(role, option_index, window, cx);
-                        }),
-                    ),
+                crate::ui::button::button(
+                    SharedString::from(format!("font-picker-{:?}-{}", role as u8, option_index)),
+                    self.styles.settings_picker(),
+                    Default::default(),
+                    self.ui_scale,
+                )
+                .w_full()
+                .justify_start()
+                .overflow_hidden()
+                .truncate()
+                .child(current_value)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &gpui::MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        this.open_font_picker(role, option_index, window, cx);
+                    }),
+                ),
             )
             .into_any_element()
     }
@@ -1924,7 +1781,9 @@ impl EditorView {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(self.scaled(12.0)))
+            .gap(px(self.scaled(
+                self.styles.ui.space(crate::style::SpaceStep::Three),
+            )))
             .child(
                 div()
                     .w(px(self.scaled(120.0)))
@@ -1991,26 +1850,15 @@ impl EditorView {
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
-        let hover_bg = self.theme.bg_hover;
-        let button = div()
-            .id(id)
-            .w(px(self.scaled(30.0)))
-            .h(px(self.scaled(30.0)))
-            .flex()
-            .items_center()
-            .justify_center()
-            .when(increase, |this| this.rounded_r(px(self.scaled(6.0))))
-            .when(!increase, |this| this.rounded_l(px(self.scaled(6.0))))
-            .border(px(self.scaled(
-                self.styles
-                    .settings_panel
-                    .settings_option_button_border_width_px,
-            )))
-            .border_color(self.styles.settings_panel.settings_contrast_border_color)
-            .text_size(px(self.scaled(14.0)))
-            .text_color(self.styles.settings_panel.settings_primary_text_color)
-            .cursor(CursorStyle::Arrow)
-            .hover(move |style| style.bg(hover_bg))
+        let style = self.styles.settings_stepper();
+        let button = crate::ui::button::icon_button(id, style, Default::default(), self.ui_scale)
+            .rounded(px(0.0))
+            .when(increase, |this| {
+                this.rounded_r(px(self.scaled(style.radius_px)))
+            })
+            .when(!increase, |this| {
+                this.rounded_l(px(self.scaled(style.radius_px)))
+            })
             .child(symbol)
             .on_mouse_down(
                 MouseButton::Left,
@@ -2071,7 +1919,9 @@ impl EditorView {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(self.scaled(12.0)))
+            .gap(px(self.scaled(
+                self.styles.ui.space(crate::style::SpaceStep::Three),
+            )))
             .child(
                 div()
                     .w(px(self.scaled(120.0)))
@@ -2176,7 +2026,9 @@ impl EditorView {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(self.scaled(12.0)))
+            .gap(px(self.scaled(
+                self.styles.ui.space(crate::style::SpaceStep::Three),
+            )))
             .child(
                 div()
                     .w(px(self.scaled(120.0)))
@@ -2243,7 +2095,9 @@ impl EditorView {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(self.scaled(12.0)))
+            .gap(px(self.scaled(
+                self.styles.ui.space(crate::style::SpaceStep::Three),
+            )))
             .child(
                 div()
                     .w(px(self.scaled(120.0)))
@@ -2349,7 +2203,9 @@ impl EditorView {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(self.scaled(12.0)))
+            .gap(px(self.scaled(
+                self.styles.ui.space(crate::style::SpaceStep::Three),
+            )))
             .child(
                 div()
                     .w(px(self.scaled(120.0)))
@@ -2454,7 +2310,9 @@ impl EditorView {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(self.scaled(12.0)))
+            .gap(px(self.scaled(
+                self.styles.ui.space(crate::style::SpaceStep::Three),
+            )))
             .child(
                 div()
                     .w(px(self.scaled(120.0)))
@@ -2481,7 +2339,11 @@ impl EditorView {
                     ))
                     .child(
                         div()
-                            .w(px(self.scaled(60.0)))
+                            .w(px(self.scaled(
+                                self.styles
+                                    .settings_panel
+                                    .settings_content_width_input_width_px,
+                            )))
                             .h(px(self.scaled(30.0)))
                             .border_y(px(self.scaled(
                                 self.styles
@@ -2711,11 +2573,6 @@ impl EditorView {
             (FontRole::TerminalLaunchCommand, _) => {
                 self.app_settings.terminal_launch_command.clone()
             }
-            (FontRole::WhiteboardFont, _) => self
-                .whiteboard_current_style()
-                .font
-                .family
-                .unwrap_or_default(),
         };
         let selected_index = all_options
             .iter()
@@ -2834,7 +2691,7 @@ impl EditorView {
         let sidebar_w = self.sidebar_width();
         let right_panel_w = self.right_panel_width();
         let pane_w = self.last_window_width - sidebar_w - right_panel_w - 2.0 * border_w;
-        let settings_px = self.scaled(40.0);
+        let settings_px = self.scaled(self.styles.ui.spec.settings_padding_x_px);
         let settings_content_w = self.settings_content_width(self.last_window_width);
         // mx_auto centers the content within the pane
         let settings_left = sidebar_w + border_w + (pane_w - settings_content_w) / 2.0;
@@ -2974,10 +2831,6 @@ impl EditorView {
                         }
                     }
                 }
-                (FontRole::WhiteboardFont, _) => {
-                    self.whiteboard_apply_font_family(font_name, cx);
-                    return;
-                }
                 _ => {}
             }
             self.app_settings.save();
@@ -3072,6 +2925,66 @@ pub(crate) fn apply_app_icon_to_dock() {}
 mod tests {
     use super::super::app_settings::AppSettings;
     use super::*;
+    use gpui::Styled;
+
+    #[test]
+    fn settings_header_keeps_actions_in_one_scrollable_row() {
+        for scale in [1.0, 1.5, 2.0] {
+            let mut row = settings_header_row(12.0 * scale);
+            assert_eq!(row.style().flex_direction, Some(gpui::FlexDirection::Row));
+            assert_eq!(row.style().flex_wrap, Some(gpui::FlexWrap::Wrap));
+            let mut actions = settings_header_actions(8.0 * scale);
+            assert_eq!(
+                actions.style().flex_direction,
+                Some(gpui::FlexDirection::Row)
+            );
+            assert_eq!(actions.style().flex_wrap, Some(gpui::FlexWrap::NoWrap));
+            assert_eq!(actions.style().overflow.x, Some(gpui::Overflow::Scroll));
+            assert_eq!(actions.style().justify_content, None);
+            assert_eq!(
+                actions.style().max_size.width,
+                Some(gpui::relative(1.0).into())
+            );
+            assert_eq!(
+                settings_header_button_max_width(640.0 * scale, 40.0 * scale, 150.0 * scale),
+                150.0 * scale
+            );
+            assert_eq!(
+                settings_header_button_max_width(120.0 * scale, 40.0 * scale, 150.0 * scale),
+                40.0 * scale
+            );
+        }
+    }
+
+    #[test]
+    fn settings_header_original_labels_are_localized() {
+        for &language in UiLanguage::supported() {
+            for label in [
+                crate::i18n::check_updates_label(language),
+                crate::i18n::config_file_label(language),
+                crate::i18n::translate(language, TextKey::HelpManual),
+                crate::i18n::translate(language, TextKey::OfficialWebsite),
+            ] {
+                assert!(!label.trim().is_empty(), "{language:?}");
+            }
+        }
+        assert_eq!(
+            crate::i18n::check_updates_label(UiLanguage::ChineseSimplified),
+            "检查更新"
+        );
+        assert_eq!(
+            crate::i18n::config_file_label(UiLanguage::ChineseSimplified),
+            "配置文件"
+        );
+        assert_eq!(
+            crate::i18n::translate(UiLanguage::ChineseSimplified, TextKey::HelpManual),
+            "帮助手册"
+        );
+        assert_eq!(
+            crate::i18n::translate(UiLanguage::ChineseSimplified, TextKey::OfficialWebsite),
+            "官方网站"
+        );
+    }
 
     #[test]
     fn attachment_folder_results_reject_superseded_requests_and_changed_settings() {

@@ -1,3 +1,4 @@
+use crate::theme::{TerminalPalette as ChatTerminalPalette, terminal_palette};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::ops::Range;
@@ -254,37 +255,6 @@ struct ChatTerminalListener {
 struct ChatTerminalSize {
     rows: usize,
     cols: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct ChatTerminalPalette {
-    foreground: Hsla,
-    bright_foreground: Hsla,
-    dim_foreground: Hsla,
-    black: Hsla,
-    red: Hsla,
-    green: Hsla,
-    yellow: Hsla,
-    blue: Hsla,
-    magenta: Hsla,
-    cyan: Hsla,
-    white: Hsla,
-    bright_black: Hsla,
-    bright_red: Hsla,
-    bright_green: Hsla,
-    bright_yellow: Hsla,
-    bright_blue: Hsla,
-    bright_magenta: Hsla,
-    bright_cyan: Hsla,
-    bright_white: Hsla,
-    dim_black: Hsla,
-    dim_red: Hsla,
-    dim_green: Hsla,
-    dim_yellow: Hsla,
-    dim_blue: Hsla,
-    dim_magenta: Hsla,
-    dim_cyan: Hsla,
-    dim_white: Hsla,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2008,73 +1978,6 @@ fn normalize_cell_char(cell: &Cell) -> String {
     text
 }
 
-/// Terminal colors are intentionally independent from the editor theme. These
-/// are Zed's One Dark/Light terminal palettes; only the terminal background is
-/// supplied by the active Moeka theme.
-fn terminal_palette(panel_bg: Hsla) -> ChatTerminalPalette {
-    if panel_bg.l < 0.5 {
-        ChatTerminalPalette {
-            foreground: crate::hex_hsla!("#ABB2BF"),
-            bright_foreground: crate::hex_hsla!("#DCE0E5"),
-            dim_foreground: crate::hex_hsla!("#636D83"),
-            black: crate::hex_hsla!("#282C34"),
-            red: crate::hex_hsla!("#E06C75"),
-            green: crate::hex_hsla!("#98C379"),
-            yellow: crate::hex_hsla!("#E5C07B"),
-            blue: crate::hex_hsla!("#61AFEF"),
-            magenta: crate::hex_hsla!("#C678DD"),
-            cyan: crate::hex_hsla!("#56B6C2"),
-            white: crate::hex_hsla!("#ABB2BF"),
-            bright_black: crate::hex_hsla!("#636D83"),
-            bright_red: crate::hex_hsla!("#EA858B"),
-            bright_green: crate::hex_hsla!("#AAD581"),
-            bright_yellow: crate::hex_hsla!("#FFD885"),
-            bright_blue: crate::hex_hsla!("#85C1FF"),
-            bright_magenta: crate::hex_hsla!("#D398EB"),
-            bright_cyan: crate::hex_hsla!("#6ED5DE"),
-            bright_white: crate::hex_hsla!("#FAFAFA"),
-            dim_black: crate::hex_hsla!("#3B3F4A"),
-            dim_red: crate::hex_hsla!("#A7545A"),
-            dim_green: crate::hex_hsla!("#6D8F59"),
-            dim_yellow: crate::hex_hsla!("#B8985B"),
-            dim_blue: crate::hex_hsla!("#457CAD"),
-            dim_magenta: crate::hex_hsla!("#8D54A0"),
-            dim_cyan: crate::hex_hsla!("#3C818A"),
-            dim_white: crate::hex_hsla!("#8F969B"),
-        }
-    } else {
-        ChatTerminalPalette {
-            foreground: crate::hex_hsla!("#2A2C33"),
-            bright_foreground: crate::hex_hsla!("#2A2C33"),
-            dim_foreground: crate::hex_hsla!("#BBBBBB"),
-            black: crate::hex_hsla!("#000000"),
-            red: crate::hex_hsla!("#DE3E35"),
-            green: crate::hex_hsla!("#3F953A"),
-            yellow: crate::hex_hsla!("#D2B67C"),
-            blue: crate::hex_hsla!("#2F5AF3"),
-            magenta: crate::hex_hsla!("#950095"),
-            cyan: crate::hex_hsla!("#0997B3"),
-            white: crate::hex_hsla!("#BBBBBB"),
-            bright_black: crate::hex_hsla!("#000000"),
-            bright_red: crate::hex_hsla!("#DE3E35"),
-            bright_green: crate::hex_hsla!("#3F953A"),
-            bright_yellow: crate::hex_hsla!("#D2B67C"),
-            bright_blue: crate::hex_hsla!("#2F5AF3"),
-            bright_magenta: crate::hex_hsla!("#A00095"),
-            bright_cyan: crate::hex_hsla!("#0BBCD6"),
-            bright_white: crate::hex_hsla!("#FFFFFF"),
-            dim_black: crate::hex_hsla!("#555555"),
-            dim_red: crate::hex_hsla!("#9C2B26"),
-            dim_green: crate::hex_hsla!("#2B6927"),
-            dim_yellow: crate::hex_hsla!("#A48C5A"),
-            dim_blue: crate::hex_hsla!("#2140AB"),
-            dim_magenta: crate::hex_hsla!("#6A006A"),
-            dim_cyan: crate::hex_hsla!("#0A7B92"),
-            dim_white: crate::hex_hsla!("#888888"),
-        }
-    }
-}
-
 fn terminal_dimmed_color(color: AlacColor, palette: &ChatTerminalPalette, resolved: Hsla) -> Hsla {
     match color {
         AlacColor::Named(NamedColor::Foreground | NamedColor::BrightForeground) => {
@@ -2609,7 +2512,6 @@ impl EditorView {
                             return false;
                         }
                         if editor.current_file_path.as_ref() != Some(&path)
-                            || editor.active_tab_is_diff()
                             || !editor.active_tab_supports_text_buffer()
                         {
                             return true;
@@ -2811,9 +2713,6 @@ impl EditorView {
                 extra_cursors: Vec::new(),
             },
             image_view: ImageViewState::default(),
-            whiteboard: None,
-            git_diff: None,
-            inline_diff: None,
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -4470,7 +4369,7 @@ impl EditorView {
                 scroll_top,
                 viewport_height + terminal_padding * 2.0,
                 0.0,
-                self.scaled(self.styles.editor.editor_scrollbar_right_margin_px),
+                self.scaled(self.styles.self_drawn.scrollbar.right_margin_px),
                 cx,
             )
         };

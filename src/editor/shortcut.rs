@@ -21,7 +21,6 @@ pub(crate) enum CommandId {
     ToggleOutline,
     ToggleTerminal,
     ToggleInfo,
-    ToggleGitHistory,
     ToggleTheme,
     Bold,
     Italic,
@@ -66,7 +65,6 @@ pub(crate) enum CommandId {
     NextTab,
     PreviousTab,
     PinTab,
-    NewWhiteboard,
     OpenTerminalWindow,
     HorizontalRule,
 }
@@ -98,11 +96,11 @@ impl CommandSpec {
 impl CommandId {
     /// Whether this build can run the command at all.
     ///
-    /// The terminal and git commands need child processes, which the App Store
+    /// The terminal commands need child processes, which the App Store
     /// sandbox denies; hide them rather than offer a button that always fails.
     pub(crate) fn is_available(self) -> bool {
         match self {
-            Self::ToggleTerminal | Self::OpenTerminalWindow | Self::ToggleGitHistory => {
+            Self::ToggleTerminal | Self::OpenTerminalWindow => {
                 crate::platform::capabilities::CHILD_PROCESSES
             }
             _ => true,
@@ -125,7 +123,6 @@ impl CommandId {
             Self::ToggleOutline => Box::new(ToggleOutline),
             Self::ToggleTerminal => Box::new(ToggleTerminalPanel),
             Self::ToggleInfo => Box::new(ToggleInfoPanel),
-            Self::ToggleGitHistory => Box::new(ToggleGitHistory),
             Self::ToggleTheme => Box::new(ToggleTheme),
             Self::Bold => Box::new(ToggleBold),
             Self::Italic => Box::new(ToggleItalic),
@@ -170,7 +167,6 @@ impl CommandId {
             Self::NextTab => Box::new(ActivateNextTab),
             Self::PreviousTab => Box::new(ActivatePreviousTab),
             Self::PinTab => Box::new(PinTab),
-            Self::NewWhiteboard => Box::new(NewWhiteboard),
             Self::OpenTerminalWindow => Box::new(OpenTerminalWindow),
             Self::HorizontalRule => Box::new(InsertHorizontalRule),
         }
@@ -192,7 +188,6 @@ impl CommandId {
             Self::ToggleOutline => "Show or hide the document outline",
             Self::ToggleTerminal => "Show or hide Terminal",
             Self::ToggleInfo => "Show or hide file information",
-            Self::ToggleGitHistory => "Show or hide Git history",
             Self::ToggleTheme => "Switch between light and dark themes",
             Self::Bold => "Toggle bold formatting",
             Self::Italic => "Toggle italic formatting",
@@ -237,7 +232,6 @@ impl CommandId {
             Self::NextTab => "Activate the next tab",
             Self::PreviousTab => "Activate the previous tab",
             Self::PinTab => "Pin or unpin the active tab",
-            Self::NewWhiteboard => "Create a new whiteboard",
             Self::OpenTerminalWindow => "Open a standalone terminal window",
             Self::HorizontalRule => "Insert a horizontal rule",
         }
@@ -260,7 +254,6 @@ impl CommandId {
             Self::ToggleOutline => "toggle_outline",
             Self::ToggleTerminal => "toggle_terminal",
             Self::ToggleInfo => "toggle_info",
-            Self::ToggleGitHistory => "toggle_git_history",
             Self::ToggleTheme => "toggle_theme",
             Self::Bold => "bold",
             Self::Italic => "italic",
@@ -305,7 +298,6 @@ impl CommandId {
             Self::NextTab => "next_tab",
             Self::PreviousTab => "previous_tab",
             Self::PinTab => "pin_tab",
-            Self::NewWhiteboard => "new_whiteboard",
             Self::OpenTerminalWindow => "open_terminal_window",
             Self::HorizontalRule => "horizontal_rule",
         }
@@ -567,7 +559,6 @@ pub(crate) fn app_menus(language: UiLanguage) -> Vec<gpui::Menu> {
                 Some(command_item(CommandId::ToggleOutline)),
                 optional_command_item(CommandId::ToggleTerminal),
                 Some(command_item(CommandId::ToggleInfo)),
-                optional_command_item(CommandId::ToggleGitHistory),
                 Some(MenuItem::separator()),
                 Some(command_item(CommandId::ZoomIn)),
                 Some(command_item(CommandId::ZoomOut)),
@@ -698,13 +689,6 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
         TextKey::FileInfo,
         "View",
         "secondary-alt-i",
-        false,
-    ),
-    command(
-        CommandId::ToggleGitHistory,
-        TextKey::GitHistory,
-        "View",
-        crate::platform::keys::TOGGLE_GIT_HISTORY,
         false,
     ),
     command_without_shortcut(
@@ -904,12 +888,6 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
     command_labelled(CommandId::NextTab, "Tab", "next_tab"),
     command_labelled(CommandId::PreviousTab, "Tab", "previous_tab"),
     command_without_shortcut(CommandId::PinTab, TextKey::PinTab, "Tab", false),
-    command_without_shortcut(
-        CommandId::NewWhiteboard,
-        TextKey::NewWhiteboard,
-        "File",
-        false,
-    ),
     command_labelled(
         CommandId::OpenTerminalWindow,
         "Application",
@@ -1073,6 +1051,15 @@ mod command_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn git_history_is_not_a_registered_command() {
+        assert!(
+            COMMAND_SPECS
+                .iter()
+                .all(|spec| spec.id.config_key() != "toggle_git_history")
+        );
     }
 
     #[test]
@@ -1284,17 +1271,11 @@ pub(crate) fn render_shortcut(shortcut: &str, style: ShortcutRenderStyle) -> Any
         .font_family(SharedString::from(style.font_family))
         .children(tokens.into_iter().map(|token| {
             let width = estimate_token_width(&token, style.font_size_px);
-            div()
-                .w(px(width))
-                .h(px(style.font_size_px))
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .text_size(px(style.font_size_px))
-                .line_height(px(style.font_size_px))
-                .text_color(style.text_color)
-                .child(token)
+            crate::ui::typography::keycap(
+                crate::style::TextStyle::new(style.font_size_px, style.text_color),
+                width,
+            )
+            .child(token)
         }))
         .into_any_element()
 }

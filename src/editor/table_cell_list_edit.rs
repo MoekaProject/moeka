@@ -306,10 +306,18 @@ fn list_prefix(source: &str, kind: &BlockType) -> usize {
     }
 }
 
-fn indent_step(kind: &BlockType) -> Option<usize> {
+fn indent_step(kind: &BlockType, source: &str) -> Option<usize> {
     match kind {
         BlockType::OrderedList => Some(3),
-        BlockType::UnorderedList | BlockType::TaskList(_) => Some(2),
+        BlockType::TaskList(_) => {
+            let (_, body) = markdown::split_continuation_prefix(source);
+            Some(if markdown::ordered_list_prefix_len(body) > 0 {
+                3
+            } else {
+                2
+            })
+        }
+        BlockType::UnorderedList => Some(2),
         _ => None,
     }
 }
@@ -332,7 +340,7 @@ pub(super) fn enter(
     if prefix > 0 && caret >= range.start + indent + prefix {
         if line[indent + prefix..].trim().is_empty() {
             let mut edit = if indent > quote {
-                let step = indent_step(kind).unwrap().min(indent - quote);
+                let step = indent_step(kind, line).unwrap().min(indent - quote);
                 Edit::new(
                     range,
                     format!(
@@ -345,12 +353,18 @@ pub(super) fn enter(
             } else {
                 Edit::new(range, format!("{}{newline}", &line[..quote]))
             };
-            edit.normalize = matches!(kind, BlockType::OrderedList)
+            edit.normalize = (matches!(kind, BlockType::OrderedList)
+                || (matches!(kind, BlockType::TaskList(_))
+                    && markdown::ordered_list_prefix_len(trimmed) > 0))
                 .then_some((false, if indent > quote { 0 } else { newline.len() }));
             return edit;
         }
         let marker = match kind {
-            BlockType::TaskList(_) => format!("{}[ ] ", &trimmed[..2]),
+            BlockType::TaskList(_) => {
+                super::task_list_continuation(trimmed)
+                    .expect("task fragment has a valid prefix")
+                    .0
+            }
             BlockType::OrderedList => {
                 // Read digits, not `prefix - 2`: accepted prefixes can use `)`
                 // or multiple spaces/tabs. Continuations use the ordinary `. `.
@@ -361,7 +375,10 @@ pub(super) fn enter(
             _ => trimmed[..prefix].to_string(),
         };
         let mut edit = Edit::new(selection, format!("{newline}{whitespace}{marker}"));
-        if matches!(kind, BlockType::OrderedList) {
+        if matches!(kind, BlockType::OrderedList)
+            || (matches!(kind, BlockType::TaskList(_))
+                && markdown::ordered_list_prefix_len(trimmed) > 0)
+        {
             edit.normalize = Some((true, 0));
         }
         return edit;
@@ -491,7 +508,7 @@ pub(super) fn cell_indent(
         .collect();
     if !fragments
         .iter()
-        .any(|f| indent_step(&f.block_type).is_some())
+        .any(|f| indent_step(&f.block_type, &source[f.range.clone()]).is_some())
     {
         return None;
     }
@@ -500,7 +517,8 @@ pub(super) fn cell_indent(
         fragments
             .into_iter()
             .map(|fragment| {
-                width = indent_step(&fragment.block_type).unwrap_or(width);
+                width = indent_step(&fragment.block_type, &source[fragment.range.clone()])
+                    .unwrap_or(width);
                 let start = fragment.range.start;
                 if forward {
                     Edit::new(start..start, " ".repeat(width))
@@ -533,11 +551,15 @@ pub(super) fn ordered_edits(
     };
     let info = |index: usize| {
         let f = fragments.get(index)?;
-        if !matches!(f.block_type, BlockType::OrderedList) {
-            return None;
-        }
         let line = &source[f.range.clone()];
         let indent = leading(line);
+        if !matches!(
+            f.block_type,
+            BlockType::OrderedList | BlockType::TaskList(_)
+        ) || markdown::ordered_list_prefix_len(&line[indent..]) == 0
+        {
+            return None;
+        }
         let digits = line[indent..]
             .bytes()
             .take_while(u8::is_ascii_digit)
@@ -1139,6 +1161,44 @@ mod tests {
             assert_eq!(edit.range, 0..6);
             assert_eq!(run(&format!("{bullet} [X] "), 6, false).0, "<br>");
         }
+    }
+
+    #[test]
+    fn ordered_tasks_continue_and_normalize_like_ordered_lists() {
+        for (source, next) in [
+            ("1. [x] done", "2. [ ] "),
+            ("9) [X] done", "10) [ ] "),
+            ("9.\t[ ] done", "10.\t[ ] "),
+        ] {
+            let d = decoration(source);
+            assert_eq!(
+                d.table_cell_fragments[0].block_type,
+                BlockType::TaskList(source.contains("[x]") || source.contains("[X]"))
+            );
+            let ordinary = enter(
+                source,
+                0..source.len(),
+                &d.table_cell_fragments[0].block_type,
+                source.len()..source.len(),
+                source.len(),
+                "\n",
+            );
+            assert_eq!(ordinary.text, format!("\n{next}"));
+            assert!(ordinary.normalize.is_some());
+            assert_eq!(
+                run(source, source.len(), false).0,
+                format!("{source}<br>{next}")
+            );
+        }
+
+        let source = "1. [x] first<br>4. [ ] second<br>7. ordinary";
+        let d = decoration(source);
+        let edits = ordered_edits(source, &d, "1. [x] first".len(), true);
+        let mut updated = source.to_string();
+        for edit in edits.into_iter().rev() {
+            updated.replace_range(edit.range, &edit.text);
+        }
+        assert_eq!(updated, "1. [x] first<br>2. [ ] second<br>3. ordinary");
     }
 
     #[test]
