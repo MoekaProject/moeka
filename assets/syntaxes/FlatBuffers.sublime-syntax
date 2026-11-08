@@ -1,0 +1,31 @@
+%YAML 1.2
+---
+name: FlatBuffers
+file_extensions: [fbs]
+scope: source.flatbuffers
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.flatbuffers
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.flatbuffers
+        - match: '\*/'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.flatbuffers
+        - match: '\\(?:u[0-9a-fA-F]{4}|.)'
+          scope: constant.character.escape.flatbuffers
+        - match: '"'
+          pop: true
+    - match: '\b(?:include|native_include|namespace|attribute|table|struct|enum|union|root_type|file_identifier|file_extension|rpc_service)\b'
+      scope: keyword.declaration.flatbuffers
+    - match: '\b(?:bool|byte|ubyte|short|ushort|int|uint|long|ulong|float|double|string|int8|uint8|int16|uint16|int32|uint32|int64|uint64|float32|float64)\b'
+      scope: storage.type.flatbuffers
+    - match: '\b(?:true|false|null|nan|inf|infinity)\b'
+      scope: constant.language.flatbuffers
+    - match: '(?<![A-Za-z_])[+-]?(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?)\b'
+      scope: constant.numeric.flatbuffers
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.type.flatbuffers

@@ -1,0 +1,49 @@
+%YAML 1.2
+---
+name: Moeka C-family tokens
+hidden: true
+scope: source.moeka.c-family
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.c
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.c
+        - match: '\*/'
+          pop: true
+    - match: '((?:u8|u|U|L)?R)"([^ ()\\\t\n]{0,16})\('
+      push:
+        - meta_scope: string.quoted.double.raw.c++
+        - match: '\)\2"'
+          pop: true
+    - match: '(?:u8|u|U|L)?"'
+      push:
+        - meta_scope: string.quoted.double.c
+        - match: '\\.'
+          scope: constant.character.escape.c
+        - match: '"'
+          pop: true
+    - match: "(?:u8|u|U|L)?'"
+      push:
+        - meta_scope: string.quoted.single.c
+        - match: '\\.'
+          scope: constant.character.escape.c
+        - match: "'"
+          pop: true
+    - match: '^\s*#\s*[A-Za-z_][A-Za-z0-9_]*'
+      scope: keyword.control.directive.c
+    - match: '\b(?:if|else|for|while|do|switch|case|default|break|continue|return|goto|try|catch|throw|new|delete|sizeof|alignof|decltype|typeid|static_assert|using|namespace|template|typename|class|struct|union|enum|typedef|public|protected|private|operator|friend|virtual|override|final|this|co_await|co_return|co_yield|requires)\b'
+      scope: keyword.control.c++
+    - match: '\b(?:const|constexpr|consteval|constinit|volatile|static|extern|inline|explicit|mutable|thread_local|register|restrict|signed|unsigned|noexcept)\b'
+      scope: storage.modifier.c
+    - match: '\b(?:void|bool|char|short|int|long|float|double|auto|size_t|ptrdiff_t|wchar_t|char8_t|char16_t|char32_t)\b'
+      scope: storage.type.c
+    - match: '\b(?:true|false|nullptr|NULL)\b'
+      scope: constant.language.c++
+    - match: '(?<![A-Za-z_])(?:0[xX][0-9a-fA-F]+(?:\.[0-9a-fA-F]*)?(?:[pP][+-]?[0-9]+)?|0[bB][01]+|[0-9]+(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?|\.[0-9]+(?:[eE][+-]?[0-9]+)?)[uUlLfF]*\b'
+      scope: constant.numeric.c
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: variable.function.c
+    - match: '::|->|[=+*/%<>!&|^~?:-]+'
+      scope: keyword.operator.c

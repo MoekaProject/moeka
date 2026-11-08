@@ -1,0 +1,60 @@
+%YAML 1.2
+---
+name: Dhall
+file_extensions: [dhall]
+scope: source.dhall
+contexts:
+  main:
+    - match: '--.*$'
+      scope: comment.line.double-dash.dhall
+    - match: '\{-'
+      push: comment
+    - match: "''"
+      push:
+        - meta_scope: string.quoted.multiline.dhall
+        - match: "'''|''\\$\\{"
+          scope: constant.character.escape.dhall
+        - match: "''"
+          pop: true
+        - include: interpolation
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.dhall
+        - match: '\\.'
+          scope: constant.character.escape.dhall
+        - include: interpolation
+        - match: '"'
+          pop: true
+    - match: '\b(?:let|in|if|then|else|assert|as|using|merge|toMap|with|forall)\b'
+      scope: keyword.control.dhall
+    - match: '\b(?:Natural|Integer|Double|Text|List|Optional)/[A-Za-z]+\b'
+      scope: support.function.dhall
+    - match: '\b(?:Bool|Natural|Integer|Double|Text|List|Optional|Type|Kind|Sort)\b'
+      scope: storage.type.dhall
+    - match: '\b(?:True|False|Some|None|NaN|Infinity)\b'
+      scope: constant.language.dhall
+    - match: '(?:https?://|env:)[^\s,})]+|(?:\.\.?/|~/)[^\s,})]+'
+      scope: string.unquoted.import.dhall
+    - match: '[+-]?\b[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\b'
+      scope: constant.numeric.dhall
+    - match: '->|==|!=|&&|\|\||//|/\+\\|[=+*?:\\]'
+      scope: keyword.operator.dhall
+  comment:
+    - meta_scope: comment.block.dhall
+    - match: '\{-'
+      push: comment
+    - match: '-\}'
+      pop: true
+  interpolation:
+    - match: '\$\{'
+      push:
+        - clear_scopes: 1
+        - meta_scope: meta.interpolation.dhall
+        - match: '\}'
+          pop: true
+        - match: '\{'
+          push:
+            - match: '\}'
+              pop: true
+            - include: main
+        - include: main

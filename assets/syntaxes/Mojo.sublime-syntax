@@ -1,0 +1,54 @@
+%YAML 1.2
+---
+name: Mojo
+file_extensions: [mojo]
+first_line_match: '^#!.*\bmojo\b'
+scope: source.mojo
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.mojo
+    - match: '"""'
+      push:
+        - meta_scope: string.quoted.triple.double.mojo
+        - match: '\\.'
+          scope: constant.character.escape.mojo
+        - match: '"""'
+          pop: true
+    - match: "'''"
+      push:
+        - meta_scope: string.quoted.triple.single.mojo
+        - match: '\\.'
+          scope: constant.character.escape.mojo
+        - match: "'''"
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.mojo
+        - match: '\\.'
+          scope: constant.character.escape.mojo
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.mojo
+        - match: '\\.'
+          scope: constant.character.escape.mojo
+        - match: "'"
+          pop: true
+    - match: '\b(?:fn|var|let|struct|trait|alias|raises|owned|borrowed|inout|out|mut|comptime|capturing|origin|deinit)\b'
+      scope: keyword.declaration.mojo
+    - match: '\b(?:Int|UInt|Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64|Float16|Float32|Float64|Bool|String|SIMD|DType|Scalar|Self|AnyType|Movable|Copyable|CollectionElement|UnsafePointer)\b'
+      scope: storage.type.mojo
+    - match: '\b(?:and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b'
+      scope: keyword.control.mojo
+    - match: '\b(?:True|False|None|NotImplemented|Ellipsis)\b'
+      scope: constant.language.mojo
+    - match: '\b(?:self|cls)\b'
+      scope: variable.language.mojo
+    - match: '@[A-Za-z_][A-Za-z0-9_.]*'
+      scope: entity.name.function.decorator.mojo
+    - match: '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]+)?)\b'
+      scope: constant.numeric.mojo
+    - match: '->|\*\*|//|[=+*/%<>!&|^~:-]+'
+      scope: keyword.operator.mojo

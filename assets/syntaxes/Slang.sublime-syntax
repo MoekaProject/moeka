@@ -1,0 +1,37 @@
+%YAML 1.2
+---
+name: Slang
+file_extensions: [slang, slangh]
+scope: source.slang
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.slang
+    - match: '/\*'
+      push: comment
+    - match: '^\s*#\s*\w+'
+      scope: keyword.control.preprocessor.slang
+    - match: '"'
+      push: string
+    - match: '\b(?:import|module|namespace|using|struct|class|interface|extension|enum|typedef|typealias|generic|where|let|var|func|property|subscript|associatedtype|This|public|private|internal|static|const|in|out|inout|uniform|if|else|for|while|do|switch|case|default|break|continue|return|discard|__init|__subscript|__generic|__exported|__target_switch|__requireCapability)\b'
+      scope: keyword.control.slang
+    - match: '\b(?:void|bool|int|uint|int64_t|uint64_t|half|float|double)(?:[1-4](?:x[1-4])?)?\b|\b(?:Texture(?:1D|2D|3D|Cube)(?:Array)?|RWTexture[123]D|SamplerState|SamplerComparisonState|StructuredBuffer|RWStructuredBuffer|ByteAddressBuffer|RWByteAddressBuffer|ConstantBuffer|vector|matrix)\b'
+      scope: storage.type.slang
+    - match: '\b(?:true|false|nullptr)\b'
+      scope: constant.language.slang
+    - match: '\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)[uUfFlL]*\b'
+      scope: constant.numeric.slang
+    - match: '\bSV_\w+\b'
+      scope: variable.language.semantic.slang
+    - match: '[=<>!+*/%&|^~-]+'
+      scope: keyword.operator.slang
+  string:
+    - meta_scope: string.quoted.double.slang
+    - match: '\\.'
+      scope: constant.character.escape.slang
+    - match: '"'
+      pop: true
+  comment:
+    - meta_scope: comment.block.slang
+    - match: '\*/'
+      pop: true

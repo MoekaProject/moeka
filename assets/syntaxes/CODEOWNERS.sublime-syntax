@@ -1,0 +1,15 @@
+%YAML 1.2
+---
+name: CODEOWNERS
+file_extensions: [CODEOWNERS]
+scope: source.codeowners
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.codeowners
+    - match: '^\s*(?:\\.|[^\s#\\])+'
+      scope: string.unquoted.path.codeowners
+    - match: '@[A-Za-z0-9_-]+(?:/[A-Za-z0-9_.-]+)?'
+      scope: variable.other.owner.codeowners
+    - match: '[A-Za-z0-9_.%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+      scope: variable.other.owner.codeowners

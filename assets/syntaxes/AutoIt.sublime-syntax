@@ -1,0 +1,40 @@
+%YAML 1.2
+---
+name: AutoIt
+file_extensions: [au3]
+scope: source.autoit
+contexts:
+  main:
+    - match: '(?i)^\s*#(?:cs|comments-start)\b'
+      push:
+        - meta_scope: comment.block.autoit
+        - match: '(?i)^\s*#(?:ce|comments-end)\b'
+          pop: true
+    - match: ';.*$'
+      scope: comment.line.semicolon.autoit
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.autoit
+        - match: '""'
+          scope: constant.character.escape.autoit
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.autoit
+        - match: "''"
+          scope: constant.character.escape.autoit
+        - match: "'"
+          pop: true
+    - match: '\$[A-Za-z_]\w*'
+      scope: variable.other.autoit
+    - match: '@[A-Za-z_]\w*'
+      scope: constant.language.macro.autoit
+    - match: '(?i)\b(?:Func|EndFunc|If|Then|Else|ElseIf|EndIf|For|To|Step|Next|While|WEnd|Do|Until|Switch|Case|EndSwitch|Select|EndSelect|Return|Exit|ExitLoop|ContinueLoop|Local|Global|Dim|Const|Static|ByRef|With|EndWith|And|Or|Not)\b'
+      scope: keyword.control.autoit
+    - match: '(?i)\b(?:True|False|Null|Default)\b'
+      scope: constant.language.autoit
+    - match: '\b(?:0x[\da-fA-F]+|\d+(?:\.\d+)?)\b'
+      scope: constant.numeric.autoit
+    - match: '\b[A-Za-z_]\w*(?=\s*\()'
+      scope: support.function.autoit

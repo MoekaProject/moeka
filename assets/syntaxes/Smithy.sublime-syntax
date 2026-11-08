@@ -1,0 +1,39 @@
+%YAML 1.2
+---
+name: Smithy
+file_extensions: [smithy]
+scope: source.smithy
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.smithy
+    - match: '"""'
+      push:
+        - meta_scope: string.quoted.triple.smithy
+        - match: '\\.'
+          scope: constant.character.escape.smithy
+        - match: '"""'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.smithy
+        - match: '\\.'
+          scope: constant.character.escape.smithy
+        - match: '"'
+          pop: true
+    - match: '@[A-Za-z_][A-Za-z0-9_.]*(?:#[A-Za-z_][A-Za-z0-9_]*)?'
+      scope: entity.name.function.trait.smithy
+    - match: '\$(?:version|operationInputSuffix|operationOutputSuffix|input|output)\b'
+      scope: variable.language.smithy
+    - match: '\b(?:namespace|use|apply|metadata|service|resource|operation|structure|union|list|map|set|enum|intEnum|blob|boolean|string|byte|short|integer|long|float|double|bigInteger|bigDecimal|timestamp|document|with|for)\b'
+      scope: keyword.declaration.smithy
+    - match: '\b(?:Blob|Boolean|String|Byte|Short|Integer|Long|Float|Double|BigInteger|BigDecimal|Timestamp|Document|Unit|PrimitiveBoolean|PrimitiveByte|PrimitiveShort|PrimitiveInteger|PrimitiveLong|PrimitiveFloat|PrimitiveDouble)\b'
+      scope: storage.type.smithy
+    - match: '\b(?:true|false|null)\b'
+      scope: constant.language.smithy
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*:)'
+      scope: variable.other.member.smithy
+    - match: '(?<![A-Za-z_])-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\b'
+      scope: constant.numeric.smithy
+    - match: ':=|='
+      scope: keyword.operator.smithy

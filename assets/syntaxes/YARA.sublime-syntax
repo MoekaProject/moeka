@@ -1,0 +1,46 @@
+%YAML 1.2
+---
+name: YARA
+file_extensions: [yar, yara]
+scope: source.yara
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.yara
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.yara
+        - match: '\*/'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.yara
+        - match: '\\.'
+          scope: constant.character.escape.yara
+        - match: '"'
+          pop: true
+    - match: '/(?![/*])'
+      push:
+        - meta_scope: string.regexp.yara
+        - match: '\\.'
+          scope: constant.character.escape.yara
+        - match: '\['
+          push:
+            - match: '\\.'
+              scope: constant.character.escape.yara
+            - match: '\]'
+              pop: true
+        - match: '/[is]*'
+          pop: true
+    - match: '\b(?:rule|private|global|import|include|meta|strings|condition)\b'
+      scope: keyword.declaration.yara
+    - match: '\b(?:and|or|not|for|all|any|none|of|them|in|at|filesize|entrypoint|matches|contains|icontains|startswith|istartswith|endswith|iendswith|iequals|defined|ascii|wide|nocase|fullword|xor|base64|base64wide)\b'
+      scope: keyword.control.yara
+    - match: '[$#@!][A-Za-z_][A-Za-z0-9_]*\*?'
+      scope: variable.other.yara
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.yara
+    - match: '\b(?:u?int(?:8|16|32)(?:be)?|hash|math|pe|elf|dotnet|time)\b'
+      scope: support.function.yara
+    - match: '\b(?:0x[0-9a-fA-F]+|[0-9]+(?:KB|MB)?)\b'
+      scope: constant.numeric.yara

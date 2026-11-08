@@ -1,0 +1,34 @@
+%YAML 1.2
+---
+name: Noir
+file_extensions: [nr]
+scope: source.noir
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.noir
+    - match: '/\*'
+      push: comment
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.noir
+        - match: '\\.'
+          scope: constant.character.escape.noir
+        - match: '"'
+          pop: true
+    - match: '\b(?:fn|let|mut|pub|use|mod|as|struct|trait|impl|type|global|comptime|unconstrained|if|else|for|in|while|loop|break|continue|return|assert|assert_eq)\b'
+      scope: keyword.control.noir
+    - match: '\b(?:Field|bool|u8|u16|u32|u64|u128|i8|i16|i32|i64|str)\b'
+      scope: storage.type.noir
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.noir
+    - match: '\b(?:0x[\da-fA-F_]+|\d[\d_]*)\b'
+      scope: constant.numeric.noir
+    - match: '->|[=+*/%<>!&|^?:-]+'
+      scope: keyword.operator.noir
+  comment:
+    - meta_scope: comment.block.noir
+    - match: '/\*'
+      push: comment
+    - match: '\*/'
+      pop: true

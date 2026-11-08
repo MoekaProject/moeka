@@ -1,0 +1,50 @@
+%YAML 1.2
+---
+name: ABAP
+file_extensions: [abap]
+scope: source.abap
+contexts:
+  main:
+    - match: '^\*.*$|".*$'
+      scope: comment.line.abap
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.abap
+        - match: "''"
+          scope: constant.character.escape.abap
+        - match: "'"
+          pop: true
+    - match: '`'
+      push:
+        - meta_scope: string.quoted.other.abap
+        - match: '``'
+          scope: constant.character.escape.abap
+        - match: '`'
+          pop: true
+    - match: '\|'
+      push:
+        - meta_scope: string.quoted.template.abap
+        - match: '\\.'
+          scope: constant.character.escape.abap
+        - match: '\{'
+          push: interpolation
+        - match: '\|'
+          pop: true
+    - match: '(?i)\b(?:report|program|class|endclass|definition|implementation|public|protected|private|section|methods|class-methods|method|endmethod|interface|endinterface|interfaces|data|class-data|constants|statics|types|type|like|table|of|begin|end|structure|field-symbols|parameters|select-options|selection-screen|initialization|start-of-selection|end-of-selection|at|if|elseif|else|endif|case|when|endcase|do|enddo|while|endwhile|loop|endloop|where|try|catch|cleanup|endtry|raise|raising|return|exit|continue|check|assert|call|function|endfunction|form|endform|perform|select|single|from|into|appending|corresponding|fields|join|inner|left|outer|on|group|by|order|having|up|to|rows|endselect|insert|update|delete|modify|read|append|collect|sort|clear|free|refresh|assign|unassign|move|move-corresponding|write|message|new|value|ref|cast|conv|cond|switch|reduce|filter|for|let|in|base|optional|default|importing|exporting|changing|returning|using|tables|exceptions|and|or|not|is|initial|bound|assigned|instance)\b'
+      scope: keyword.control.abap
+    - match: '(?i)\b(?:i|int8|f|p|c|n|d|t|string|xstring|decfloat16|decfloat34|abap_bool)\b'
+      scope: storage.type.abap
+    - match: '(?i)\b(?:abap_true|abap_false|abap_undefined|space|sy-[a-z0-9_]+)\b'
+      scope: constant.language.abap
+    - match: '\b[0-9]+(?:\.[0-9]+)?\b'
+      scope: constant.numeric.abap
+    - match: '##[A-Za-z_][A-Za-z0-9_]*'
+      scope: entity.other.attribute-name.abap
+    - match: '->|=>|&&|<>|<=|>=|[=+*/<>-]'
+      scope: keyword.operator.abap
+  interpolation:
+    - clear_scopes: 1
+    - meta_scope: meta.interpolation.abap
+    - match: '\}'
+      pop: true
+    - include: main

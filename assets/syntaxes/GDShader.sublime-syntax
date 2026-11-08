@@ -1,0 +1,18 @@
+%YAML 1.2
+---
+name: GDShader
+file_extensions: [gdshader, gdshaderinc]
+scope: source.gdshader
+contexts:
+  main:
+    - match: '\b(?:shader_type|render_mode|group_uniforms|instance|global|varying)\b'
+      scope: keyword.declaration.gdshader
+    - match: '\b(?:spatial|canvas_item|particles|sky|fog|unshaded|blend_mix|blend_add|blend_sub|blend_mul|blend_premul_alpha|depth_draw_opaque|depth_draw_always|depth_draw_never|cull_back|cull_front|cull_disabled|skip_vertex_transform|world_vertex_coords|source_color|hint_[A-Za-z_]+|filter_[A-Za-z_]+|repeat_enable|repeat_disable)\b'
+      scope: constant.language.gdshader
+    - match: '\b(?:ALBEDO|ALPHA|METALLIC|ROUGHNESS|NORMAL|NORMAL_MAP|EMISSION|VERTEX|POSITION|UV|UV2|COLOR|TIME|SCREEN_UV|SCREEN_PIXEL_SIZE|TEXTURE_PIXEL_SIZE|MODEL_MATRIX|VIEW_MATRIX|PROJECTION_MATRIX|FRAGCOORD|POINT_COORD|LIGHT|LIGHT_COLOR|LIGHT_ENERGY|ATTENUATION)\b'
+      scope: variable.language.gdshader
+    - match: '\b(?:uniform|flat|smooth|in|out|inout|const|precision|highp|mediump|lowp)\b'
+      scope: storage.modifier.gdshader
+    - match: '\b(?:(?:[biu]?vec|mat)[2-4](?:x[2-4])?|[iu]?sampler(?:2D|3D|Cube|2DArray|2DShadow|2DArrayShadow))\b'
+      scope: storage.type.gdshader
+    - include: scope:source.moeka.c-family

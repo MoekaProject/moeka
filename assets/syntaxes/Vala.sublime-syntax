@@ -1,0 +1,38 @@
+%YAML 1.2
+---
+name: Vala
+file_extensions: [vala, vapi]
+scope: source.vala
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.vala
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.vala
+        - match: '\*/'
+          pop: true
+    - match: '"""'
+      push:
+        - meta_scope: string.quoted.triple.double.vala
+        - match: '"""'
+          pop: true
+    - match: '@?"'
+      push:
+        - meta_scope: string.quoted.double.vala
+        - match: '\\.'
+          scope: constant.character.escape.vala
+        - match: '"'
+          pop: true
+    - match: "'(?:\\\\.|[^'\\\\])'"
+      scope: string.quoted.single.vala
+    - match: '\b(?:using|namespace|class|interface|struct|enum|public|private|protected|internal|abstract|virtual|override|static|const|owned|unowned|weak|delegate|signal|async|yield|throws|try|catch|finally|throw|if|else|for|foreach|in|while|do|switch|case|default|break|continue|return|new|delete|this|base|get|set|construct|var|out|ref|is|as|lock)\b'
+      scope: keyword.control.vala
+    - match: '\b(?:void|bool|char|uchar|short|ushort|int|uint|long|ulong|int8|uint8|int16|uint16|int32|uint32|int64|uint64|float|double|string|size_t|ssize_t|unichar)\b'
+      scope: storage.type.vala
+    - match: '\b(?:true|false|null)\b'
+      scope: constant.language.vala
+    - match: '\b(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b'
+      scope: constant.numeric.vala
+    - match: '[=+*/%<>!&|^~?:-]+'
+      scope: keyword.operator.vala

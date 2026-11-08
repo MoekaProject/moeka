@@ -1,0 +1,25 @@
+%YAML 1.2
+---
+name: MDX
+file_extensions: [mdx]
+scope: text.html.markdown.mdx
+contexts:
+  main:
+    - match: '^(?=\s*(?:import|export)\b)'
+      push:
+        - meta_scope: source.js.embedded.mdx
+        - match: '$'
+          pop: true
+        - include: scope:source.js
+    - match: '\{'
+      scope: punctuation.section.embedded.begin.mdx
+      push: expression
+    - include: scope:text.html.markdown
+  expression:
+    - meta_scope: source.js.embedded.mdx
+    - match: '\}'
+      scope: punctuation.section.embedded.end.mdx
+      pop: true
+    - match: '\{'
+      push: expression
+    - include: scope:source.js

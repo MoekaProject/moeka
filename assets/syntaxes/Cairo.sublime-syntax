@@ -1,0 +1,35 @@
+%YAML 1.2
+---
+name: Cairo
+file_extensions: [cairo]
+scope: source.cairo
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.cairo
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.cairo
+        - match: '\\.'
+          scope: constant.character.escape.cairo
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.cairo
+        - match: '\\.'
+          scope: constant.character.escape.cairo
+        - match: "'"
+          pop: true
+    - match: '#\[[^]]+\]'
+      scope: entity.name.function.attribute.cairo
+    - match: '\b(?:fn|let|mut|const|pub|mod|use|as|struct|enum|trait|impl|type|extern|if|else|match|loop|while|for|in|break|continue|return|ref|nopanic|of)\b'
+      scope: keyword.control.cairo
+    - match: '\b(?:felt252|bool|u8|u16|u32|u64|u128|u256|usize|i8|i16|i32|i64|i128|ByteArray)\b'
+      scope: storage.type.cairo
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.cairo
+    - match: '\b(?:0x[\da-fA-F_]+|\d[\d_]*)(?:_u(?:8|16|32|64|128|256))?\b'
+      scope: constant.numeric.cairo
+    - match: '->|=>|[=+*/%<>!&|^?:-]+'
+      scope: keyword.operator.cairo

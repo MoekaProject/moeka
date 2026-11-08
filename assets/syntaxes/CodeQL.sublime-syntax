@@ -1,0 +1,33 @@
+%YAML 1.2
+---
+name: CodeQL
+file_extensions: [ql, qll]
+scope: source.codeql
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.codeql
+    - match: '/\*'
+      push: comment
+    - match: '"'
+      push: string
+    - match: '\b(?:import|from|where|select|class|extends|implements|predicate|module|signature|newtype|abstract|private|cached|external|override|final|bindingset|pragma|transient|in|and|or|not|exists|forall|forex|if|then|else|any|none|result|this|super)\b'
+      scope: keyword.control.codeql
+    - match: '\b(?:int|float|string|boolean|date)\b'
+      scope: storage.type.codeql
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.codeql
+    - match: '\b\d+(?:\.\d+)?\b'
+      scope: constant.numeric.codeql
+    - match: '[=<>!+*/%-]+'
+      scope: keyword.operator.codeql
+  string:
+    - meta_scope: string.quoted.double.codeql
+    - match: '\\.'
+      scope: constant.character.escape.codeql
+    - match: '"'
+      pop: true
+  comment:
+    - meta_scope: comment.block.codeql
+    - match: '\*/'
+      pop: true

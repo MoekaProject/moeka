@@ -1,0 +1,41 @@
+%YAML 1.2
+---
+name: Pony
+file_extensions: [pony]
+scope: source.pony
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.pony
+    - match: '/\*'
+      push: comment
+    - match: '"""'
+      push: triple
+    - match: '"'
+      push: string
+    - match: '\b(?:actor|class|primitive|struct|trait|interface|type|use|fun|be|new|let|var|embed|if|ifdef|iftype|then|elseif|else|end|for|while|repeat|until|do|try|with|match|case|break|continue|return|error|recover|consume|not|and|or|xor|is|isnt|as|in|where|iso|trn|ref|val|box|tag)\b'
+      scope: keyword.control.pony
+    - match: '\b(?:Bool|String|None|Pointer|NullablePointer|Array|U8|U16|U32|U64|U128|USize|I8|I16|I32|I64|I128|ISize|F32|F64)\b'
+      scope: storage.type.pony
+    - match: '\b(?:true|false|this)\b'
+      scope: constant.language.pony
+    - match: '\b(?:0x[0-9a-fA-F_]+|0b[01_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)\b'
+      scope: constant.numeric.pony
+    - match: '=>|[=<>!+*/%&|^-]+'
+      scope: keyword.operator.pony
+  triple:
+    - meta_scope: string.quoted.triple.pony
+    - match: '"""'
+      pop: true
+  string:
+    - meta_scope: string.quoted.double.pony
+    - match: '\\.'
+      scope: constant.character.escape.pony
+    - match: '"'
+      pop: true
+  comment:
+    - meta_scope: comment.block.pony
+    - match: '/\*'
+      push: comment
+    - match: '\*/'
+      pop: true

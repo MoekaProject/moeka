@@ -1,0 +1,14 @@
+%YAML 1.2
+---
+name: KDL
+file_extensions: [kdl]
+scope: source.kdl
+contexts:
+  main:
+    - match: '^\s*[\p{L}_][\p{L}\p{N}_-]*'
+      scope: entity.name.tag.kdl
+    - match: '[\p{L}_][\p{L}\p{N}_-]*(?=\s*=)'
+      scope: variable.other.member.kdl
+    - match: '#(?:true|false|null)\b'
+      scope: constant.language.kdl
+    - include: scope:source.json5

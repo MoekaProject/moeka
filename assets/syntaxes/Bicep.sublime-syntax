@@ -1,0 +1,53 @@
+%YAML 1.2
+---
+name: Bicep
+file_extensions: [bicep, bicepparam]
+scope: source.bicep
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.bicep
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.bicep
+        - match: '\*/'
+          pop: true
+    - match: "'''"
+      push:
+        - meta_scope: string.quoted.triple.bicep
+        - match: "'''"
+          pop: true
+    - match: "'"
+      push: string
+    - match: '\b(?:assert|existing|extension|for|func|if|import|in|metadata|module|output|param|provider|resource|targetScope|type|using|var|with|as)\b'
+      scope: keyword.control.bicep
+    - match: '\b(?:array|bool|int|object|string)\b'
+      scope: storage.type.bicep
+    - match: '\b(?:true|false|null)\b'
+      scope: constant.language.bicep
+    - match: '\b[0-9]+\b'
+      scope: constant.numeric.bicep
+    - match: '@[A-Za-z_][A-Za-z0-9_.]*'
+      scope: entity.name.function.decorator.bicep
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: variable.function.bicep
+    - match: '=>|==|!=|=~|!~|&&|\|\||\?\?|[=+*/%<>!?:|-]'
+      scope: keyword.operator.bicep
+  string:
+    - meta_scope: string.quoted.single.bicep
+    - match: '\\.'
+      scope: constant.character.escape.bicep
+    - match: '\$\{'
+      push:
+        - clear_scopes: 1
+        - meta_scope: meta.interpolation.bicep
+        - match: '\}'
+          pop: true
+        - match: '\{'
+          push:
+            - match: '\}'
+              pop: true
+            - include: main
+        - include: main
+    - match: "'"
+      pop: true

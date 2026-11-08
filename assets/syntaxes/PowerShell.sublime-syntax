@@ -1,0 +1,42 @@
+%YAML 1.2
+---
+name: PowerShell
+file_extensions: [ps1, psm1, psd1]
+scope: source.powershell
+contexts:
+  main:
+    - match: '<#'
+      scope: punctuation.definition.comment.begin
+      push:
+        - meta_scope: comment.block.powershell
+        - match: '#>'
+          pop: true
+    - match: '#.*$'
+      scope: comment.line.number-sign.powershell
+    - match: '"'
+      push: double-string
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.powershell
+        - match: "''"
+          scope: constant.character.escape.powershell
+        - match: "'"
+          pop: true
+    - match: '\$(?:[\w:]+|\{[^}]+\})'
+      scope: variable.other.powershell
+    - match: '(?i)\b(?:begin|break|catch|class|continue|data|do|dynamicparam|else|elseif|end|enum|exit|filter|finally|for|foreach|from|function|if|in|param|process|return|switch|throw|trap|try|until|using|while)\b'
+      scope: keyword.control.powershell
+    - match: '\b[A-Za-z]+-[A-Za-z][\w-]*\b'
+      scope: support.function.powershell
+    - match: '(?i)-(?:eq|ne|gt|ge|lt|le|like|match|not|and|or|in|contains|replace|join|split)\b|[=+*/|!-]'
+      scope: keyword.operator.powershell
+    - match: '\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b'
+      scope: constant.numeric.powershell
+  double-string:
+    - meta_scope: string.quoted.double.powershell
+    - match: '`.'
+      scope: constant.character.escape.powershell
+    - match: '\$[\w:]+'
+      scope: variable.other.powershell
+    - match: '"'
+      pop: true

@@ -1,0 +1,29 @@
+%YAML 1.2
+---
+name: Junos
+file_extensions: [junos]
+scope: source.junos
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.junos
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.junos
+        - match: '\*/'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.junos
+        - match: '\\.'
+          scope: constant.character.escape.junos
+        - match: '"'
+          pop: true
+    - match: '\b(?:ge|xe|et|fe)-\d+/\d+/\d+(?:\.\d+)?\b|\b(?:lo|ae|irb)\d+(?:\.\d+)?\b'
+      scope: entity.name.type.interface.junos
+    - match: '\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?\b'
+      scope: constant.numeric.address.junos
+    - match: '\b(?:set|delete|edit|show|commit|rollback|activate|deactivate|insert|rename|system|host-name|interfaces|unit|family|inet|inet6|address|protocols|bgp|ospf|routing-options|routing-instances|policy-options|firewall|security|term|from|then|accept|reject|discard|route|next-hop|neighbor|peer-as|description|apply-groups|inactive)\b'
+      scope: keyword.control.junos
+    - match: '\b\d+\b'
+      scope: constant.numeric.junos

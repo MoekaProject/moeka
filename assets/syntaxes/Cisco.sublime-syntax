@@ -1,0 +1,34 @@
+%YAML 1.2
+---
+name: Cisco
+file_extensions: [cisco, ios, nxos, iosxr]
+scope: source.cisco
+contexts:
+  main:
+    - match: '^\s*!.*$'
+      scope: comment.line.exclamation.cisco
+    - match: '^\s*(?:Building configuration|Current configuration).*'
+      scope: comment.line.header.cisco
+    - match: '^\s*(banner)\s+(\S+)\s+(\S)'
+      captures:
+        1: keyword.control.cisco
+        2: constant.language.cisco
+      push:
+        - meta_scope: string.unquoted.banner.cisco
+        - match: '\3'
+          pop: true
+    - match: '(?i)\b(?:GigabitEthernet|TenGigabitEthernet|FastEthernet|Ethernet|Loopback|Vlan|Tunnel|Serial|Port-channel|HundredGigE|TenGigE)\d[\d/.:]*'
+      scope: entity.name.type.interface.cisco
+    - match: '\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?\b|(?i)(?<![\w:])(?:[0-9a-f]{1,4}:){2,}[0-9a-f:]+(?:/\d{1,3})?'
+      scope: constant.numeric.address.cisco
+    - match: '(?i)\b(?:interface|router|hostname|ip|ipv6|address|route|network|access-list|access-group|permit|deny|switchport|vlan|vrf|neighbor|remote-as|description|shutdown|no|exit|end|configure|terminal|enable|line|username|password|secret|service|logging|snmp-server|spanning-tree|version|transport|input|output|eq|bgp|ospf|eigrp|rip|static)\b'
+      scope: keyword.control.cisco
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.cisco
+        - match: '\\.'
+          scope: constant.character.escape.cisco
+        - match: '"'
+          pop: true
+    - match: '\b\d+\b'
+      scope: constant.numeric.cisco

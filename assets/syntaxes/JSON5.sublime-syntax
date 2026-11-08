@@ -1,0 +1,36 @@
+%YAML 1.2
+---
+name: JSON5
+file_extensions: [json5, jsonc]
+scope: source.json5
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.json5
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.json5
+        - match: '\*/'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.json5
+        - match: '\\.'
+          scope: constant.character.escape.json5
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.json5
+        - match: '\\.'
+          scope: constant.character.escape.json5
+        - match: "'"
+          pop: true
+    - match: '[\p{L}_$][\p{L}\p{N}_$]*(?=\s*:)'
+      scope: variable.other.member.json5
+    - match: '\b(?:true|false|null|Infinity|NaN)\b'
+      scope: constant.language.json5
+    - match: '[+-]?(?:0[xX][\da-fA-F]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)'
+      scope: constant.numeric.json5
+    - match: '[{}\[\],:]'
+      scope: punctuation.separator.json5

@@ -1,0 +1,63 @@
+%YAML 1.2
+---
+name: Haxe
+file_extensions: [hx]
+scope: source.haxe
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.haxe
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.haxe
+        - match: '\*/'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.haxe
+        - include: escapes
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.haxe
+        - include: escapes
+        - match: '\$\{'
+          push: interpolation
+        - match: '\$[A-Za-z_][A-Za-z0-9_]*'
+          scope: variable.other.interpolation.haxe
+        - match: "'"
+          pop: true
+    - match: '~/'
+      push:
+        - meta_scope: string.regexp.haxe
+        - include: escapes
+        - match: '/[gimsu]*'
+          pop: true
+    - match: '#(?:if|elseif|else|end|error|line)\b'
+      scope: keyword.control.directive.haxe
+    - match: '@:?[A-Za-z_][A-Za-z0-9_.]*'
+      scope: entity.name.function.metadata.haxe
+    - match: '\b(?:abstract|as|break|case|cast|catch|class|continue|default|do|dynamic|else|enum|extends|extern|final|for|from|function|if|implements|import|in|inline|interface|macro|new|operator|overload|override|package|private|public|return|static|super|switch|this|throw|to|try|typedef|untyped|using|var|while)\b'
+      scope: keyword.control.haxe
+    - match: '\b(?:true|false|null)\b'
+      scope: constant.language.haxe
+    - match: '\b(?:Int|Float|Bool|String|Void|Dynamic|Any|Array|Map|Null|Iterator|Iterable)\b'
+      scope: storage.type.haxe
+    - match: '\b(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\b'
+      scope: constant.numeric.haxe
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.type.haxe
+    - match: '=>|->|[=+*/%<>!&|^~?:-]+'
+      scope: keyword.operator.haxe
+  escapes:
+    - match: '\\.'
+      scope: constant.character.escape.haxe
+  interpolation:
+    - clear_scopes: 1
+    - meta_scope: meta.interpolation.haxe
+    - match: '\}'
+      pop: true
+    - match: '\{'
+      push: interpolation
+    - include: main

@@ -1,0 +1,36 @@
+%YAML 1.2
+---
+name: VCL
+file_extensions: [vcl]
+scope: source.vcl
+contexts:
+  main:
+    - match: '(?:#|//).*$'
+      scope: comment.line.vcl
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.vcl
+        - match: '\*/'
+          pop: true
+    - match: '\{"'
+      push:
+        - meta_scope: string.quoted.other.long.vcl
+        - match: '"\}'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.vcl
+        - match: '\\.'
+          scope: constant.character.escape.vcl
+        - match: '"'
+          pop: true
+    - match: '\b(?:vcl|import|include|backend|probe|acl|sub|if|else|elseif|elsif|set|unset|return|call|new|synthetic|ban|hash_data)\b'
+      scope: keyword.control.vcl
+    - match: '\b(?:req|bereq|resp|beresp|obj|client|server|local|remote)\.[A-Za-z_][\w.-]*'
+      scope: variable.other.member.vcl
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.vcl
+    - match: '\b\d+(?:\.\d+)?(?:ms|s|m|h|d|B|KB|MB|GB)?\b'
+      scope: constant.numeric.vcl
+    - match: '[=+*/<>!&|~-]+'
+      scope: keyword.operator.vcl

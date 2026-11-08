@@ -1,0 +1,49 @@
+%YAML 1.2
+---
+name: Cypher
+file_extensions: [cypher, cyp]
+scope: source.cypher
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.cypher
+    - match: '/\*'
+      push: comment
+    - match: "'"
+      push: single
+    - match: '"'
+      push: double
+    - match: '`'
+      push: identifier
+    - match: '(?i)\b(?:match|optional|where|return|with|as|distinct|order|by|skip|limit|unwind|union|all|create|merge|on|set|remove|delete|detach|call|yield|load|csv|headers|from|foreach|case|when|then|else|end|exists|count|collect|in|is|not|and|or|xor|starts|ends|contains|using|index|constraint|show|drop|alter)\b'
+      scope: keyword.control.cypher
+    - match: '(?i)\b(?:true|false|null)\b'
+      scope: constant.language.cypher
+    - match: '\$[A-Za-z_]\w*'
+      scope: variable.parameter.cypher
+    - match: '\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b'
+      scope: constant.numeric.cypher
+    - match: '[=<>!+*/%|-]+'
+      scope: keyword.operator.cypher
+  single:
+    - meta_scope: string.quoted.single.cypher
+    - match: '\\.'
+      scope: constant.character.escape.cypher
+    - match: "'"
+      pop: true
+  double:
+    - meta_scope: string.quoted.double.cypher
+    - match: '\\.'
+      scope: constant.character.escape.cypher
+    - match: '"'
+      pop: true
+  identifier:
+    - meta_scope: variable.other.quoted.cypher
+    - match: '``'
+      scope: constant.character.escape.cypher
+    - match: '`'
+      pop: true
+  comment:
+    - meta_scope: comment.block.cypher
+    - match: '\*/'
+      pop: true

@@ -1,0 +1,19 @@
+#!/bin/bash
+# `ring`'s build script invokes the plain `clang` GNU driver for
+# aarch64-pc-windows-msvc, but cargo-xwin exports MSVC-style include flags.
+# Translate `/imsvc <dir>` into `-isystem <dir>` so both agree.
+set -euo pipefail
+
+real="$(xcrun -f clang)"
+
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    /imsvc)  shift; args+=(-isystem "$1") ;;
+    /imsvc*) args+=(-isystem "${1#/imsvc}") ;;
+    *)       args+=("$1") ;;
+  esac
+  shift
+done
+
+exec "$real" "${args[@]}"

@@ -1,0 +1,34 @@
+%YAML 1.2
+---
+name: Move
+file_extensions: [move]
+scope: source.move
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.move
+    - match: '/\*'
+      push: comment
+    - match: '[bx]?"'
+      push:
+        - meta_scope: string.quoted.double.move
+        - match: '\\.'
+          scope: constant.character.escape.move
+        - match: '"'
+          pop: true
+    - match: '\b(?:module|script|address|use|as|public|friend|fun|entry|native|struct|enum|const|let|mut|if|else|while|loop|for|in|break|continue|return|abort|acquires|has|copy|drop|store|key|move|spec|assert|assume|ensures|requires|invariant|match)\b'
+      scope: keyword.control.move
+    - match: '\b(?:bool|u8|u16|u32|u64|u128|u256|signer|vector)\b'
+      scope: storage.type.move
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.move
+    - match: '@?0x[\da-fA-F_]+\b|\b\d[\d_]*(?:u8|u16|u32|u64|u128|u256)?\b'
+      scope: constant.numeric.move
+    - match: '[=+*/%<>!&|^:-]+'
+      scope: keyword.operator.move
+  comment:
+    - meta_scope: comment.block.move
+    - match: '/\*'
+      push: comment
+    - match: '\*/'
+      pop: true

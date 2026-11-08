@@ -1,0 +1,1122 @@
+#![allow(unexpected_cfgs)]
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
+macro_rules! log_error {
+    ($($arg:tt)*) => {{
+        crate::log_nonfatal_error(format_args!($($arg)*));
+    }};
+}
+
+mod actions;
+mod buffer;
+mod cursor;
+mod editor;
+mod front_matter;
+mod i18n;
+#[cfg(test)]
+mod large_document_bench;
+mod markdown;
+mod markdown_format;
+mod platform;
+mod style;
+mod syntax;
+mod table_ops;
+mod text_input;
+mod theme;
+mod ui;
+
+use crate::i18n::system_application_display_name;
+use std::borrow::Cow;
+#[cfg(target_os = "macos")]
+use std::cell::RefCell;
+#[cfg(target_os = "macos")]
+use std::os::raw::c_char;
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::rc::Rc;
+#[cfg(target_os = "macos")]
+use std::sync::Once;
+use std::sync::OnceLock;
+
+use gpui::*;
+
+use actions::*;
+use editor::EditorView;
+use platform::keys;
+
+fn log_nonfatal_error(message: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+
+    let _ = writeln!(std::io::stderr(), "{message}");
+    #[cfg(windows)]
+    {
+        let path = editor::config_paths::cache_dir().join("app.log");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(
+                file,
+                "{} {message}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
+        }
+    }
+}
+
+const MIN_WINDOW_WIDTH_PX: f32 = 480.0;
+const MIN_WINDOW_HEIGHT_PX: f32 = 320.0;
+#[cfg(target_os = "macos")]
+const MAIN_WINDOW_FRAME_AUTOSAVE_NAME: &str = "MoekaMainWindow";
+
+/// Matches the standard macOS window corner; squared off while fullscreen.
+#[cfg(target_os = "macos")]
+pub(crate) const WINDOW_CONTENT_CORNER_RADIUS: f64 = 10.0;
+
+struct FsAssets;
+
+/// `assets/` baked in at build time as one blob plus a path-sorted index of
+/// `(key, start, end)`. See `build.rs`.
+static EMBEDDED_ASSET_DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/assets.bin"));
+static EMBEDDED_ASSETS: &[(&str, usize, usize)] =
+    include!(concat!(env!("OUT_DIR"), "/embedded_assets.rs"));
+
+fn embedded_asset(path: &str) -> Option<&'static [u8]> {
+    let index = EMBEDDED_ASSETS
+        .binary_search_by_key(&path, |(key, _, _)| key)
+        .ok()?;
+    let (_, start, end) = EMBEDDED_ASSETS[index];
+    Some(&EMBEDDED_ASSET_DATA[start..end])
+}
+
+impl AssetSource for FsAssets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        if let Some(asset) = embedded_asset(path) {
+            return Ok(Some(Cow::Borrowed(asset)));
+        }
+        let Some(resolved_path) = resolve_runtime_path(path) else {
+            return Ok(embedded_asset(path).map(Cow::Borrowed));
+        };
+
+        Ok(Some(std::fs::read(resolved_path)?.into()))
+    }
+
+    fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
+        let prefix = format!("{}/", path.trim_end_matches('/'));
+        let embedded = EMBEDDED_ASSETS
+            .iter()
+            .filter(|(key, _, _)| key.starts_with(&prefix))
+            .map(|(key, _, _)| SharedString::from(*key))
+            .collect::<Vec<_>>();
+        if !embedded.is_empty() {
+            return Ok(embedded);
+        }
+        let Some(resolved_path) = resolve_runtime_path(path) else {
+            let prefix = format!("{}/", path.trim_end_matches('/'));
+            return Ok(EMBEDDED_ASSETS
+                .iter()
+                .filter(|(key, _, _)| key.starts_with(&prefix))
+                .map(|(key, _, _)| SharedString::from(*key))
+                .collect());
+        };
+
+        Ok(std::fs::read_dir(resolved_path)?
+            .filter_map(|entry| {
+                entry
+                    .ok()
+                    .map(|entry| SharedString::from(entry.path().to_string_lossy().into_owned()))
+            })
+            .collect())
+    }
+}
+
+pub(crate) fn resolve_runtime_path(path: impl AsRef<Path>) -> Option<PathBuf> {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        return path.exists().then(|| path.to_path_buf());
+    }
+
+    runtime_search_roots()
+        .into_iter()
+        .map(|root| root.join(path))
+        .find(|candidate| candidate.exists())
+}
+
+fn runtime_search_roots() -> Vec<PathBuf> {
+    static RUNTIME_SEARCH_ROOTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+    RUNTIME_SEARCH_ROOTS
+        .get_or_init(platform::paths::asset_search_roots)
+        .clone()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_markdown_path_from_url(url: &str) -> Option<PathBuf> {
+    // Decoding is lexical; classification happens only after the window opens.
+    platform::paths::path_from_file_url(url)
+}
+
+/// Parse launch arguments without touching potentially unavailable mounts.
+fn launch_paths_from_args() -> Vec<PathBuf> {
+    std::env::args()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Opens launch paths: directories are added as workspaces (the last one
+/// becomes active), files open in permanent tabs.
+fn open_launch_paths(editor: &Entity<EditorView>, paths: Vec<PathBuf>, cx: &mut App) {
+    open_launch_paths_with_policy(editor, paths, false, true, cx);
+}
+
+fn open_launch_paths_with_policy(
+    editor: &Entity<EditorView>,
+    paths: Vec<PathBuf>,
+    markdown_only: bool,
+    fresh_window: bool,
+    cx: &mut App,
+) {
+    editor.update(cx, |editor, cx| {
+        // A window launched just to open outside files should not greet the
+        // user with an unrelated workspace. This is decided before any I/O so
+        // the sidebar never flashes; opened directories re-show it anyway.
+        if fresh_window && !launch_paths_touch_workspace(&editor.sidebar_root, &paths) {
+            editor.sidebar_visible = false;
+            editor.sidebar_resizing = false;
+            editor.set_sidebar_width_immediately(0.0);
+            cx.notify();
+        }
+        cx.spawn(async move |this, cx| {
+            let mut dirs = Vec::new();
+            let mut files = Vec::new();
+            for path in paths {
+                let candidate = path.clone();
+                match platform::fs_task::run("Open launch path", path.clone(), move || {
+                    let absolute = std::path::absolute(candidate)?;
+                    let metadata = std::fs::metadata(&absolute)?;
+                    Ok((absolute, metadata))
+                })
+                .await
+                {
+                    Ok((path, metadata)) if metadata.is_dir() => dirs.push(path),
+                    Ok((path, metadata))
+                        if metadata.is_file()
+                            && (!markdown_only || editor::is_markdown_file(&path)) =>
+                    {
+                        files.push(path)
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        this.update(cx, |editor, cx| editor.notify_diagnostic(error, cx))
+                            .ok();
+                    }
+                }
+            }
+            this.update(cx, |editor, cx| {
+                for dir in dirs {
+                    if !editor.workspaces.contains(&dir) {
+                        editor.workspaces.push(dir.clone());
+                    }
+                    editor.switch_workspace(dir, cx);
+                }
+                let file_count = files.len();
+                for (index, path) in files.into_iter().enumerate() {
+                    editor.open_path_in_permanent_tab(path, index + 1 == file_count, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    });
+}
+
+fn launch_paths_touch_workspace(root: &std::path::Path, paths: &[PathBuf]) -> bool {
+    !root.as_os_str().is_empty()
+        && paths
+            .iter()
+            .any(|path| std::path::absolute(path).is_ok_and(|path| path.starts_with(root)))
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn class_replaceMethod(
+        cls: *mut objc::runtime::Class,
+        name: objc::runtime::Sel,
+        imp: objc::runtime::Imp,
+        types: *const c_char,
+    ) -> objc::runtime::Imp;
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn gpui_view_mouse_down_can_move_window(
+    _: &objc::runtime::Object,
+    _: objc::runtime::Sel,
+) -> objc::runtime::BOOL {
+    objc::runtime::NO
+}
+
+#[cfg(target_os = "macos")]
+fn disable_gpui_content_view_window_drag(ns_view: *mut objc::runtime::Object) {
+    use objc::runtime::{Class, Imp, Object, Sel};
+    use objc::{msg_send, sel, sel_impl};
+
+    fn replace_mouse_down_can_move_window(class: &Class) {
+        let selector = Sel::register("mouseDownCanMoveWindow");
+        let implementation = gpui_view_mouse_down_can_move_window
+            as extern "C" fn(&Object, Sel) -> objc::runtime::BOOL;
+        let encoding = if cfg!(target_arch = "aarch64") {
+            b"B@:\0".as_ptr()
+        } else {
+            b"c@:\0".as_ptr()
+        };
+
+        unsafe {
+            let _ = class_replaceMethod(
+                class as *const Class as *mut Class,
+                selector,
+                std::mem::transmute::<extern "C" fn(&Object, Sel) -> objc::runtime::BOOL, Imp>(
+                    implementation,
+                ),
+                encoding.cast(),
+            );
+        }
+    }
+
+    static INSTALL: Once = Once::new();
+
+    INSTALL.call_once(|| {
+        let Some(class) = Class::get("GPUIView") else {
+            return;
+        };
+        replace_mouse_down_can_move_window(class);
+    });
+
+    unsafe {
+        let mut current_view = ns_view;
+        while !current_view.is_null() {
+            replace_mouse_down_can_move_window((*current_view).class());
+            current_view = msg_send![current_view, superview];
+        }
+    }
+}
+
+fn editor_window_options(cx: &App) -> WindowOptions {
+    #[cfg(target_os = "macos")]
+    let traffic_light_position =
+        EditorView::traffic_light_position_for_ui_scale(editor::AppSettings::load().ui_scale);
+    #[cfg(not(target_os = "macos"))]
+    let traffic_light_position = point(px(10.0), px(10.0));
+    #[cfg(target_os = "linux")]
+    let app_id = Some("app.moeka.moeka".into());
+    #[cfg(not(target_os = "linux"))]
+    let app_id = None;
+
+    WindowOptions {
+        window_bounds: Some(platform::window_state::restore(cx).unwrap_or_else(|| {
+            WindowBounds::Windowed(Bounds::centered(None, size(px(1024.0), px(768.0)), cx))
+        })),
+        window_min_size: Some(size(px(MIN_WINDOW_WIDTH_PX), px(MIN_WINDOW_HEIGHT_PX))),
+        titlebar: Some(TitlebarOptions {
+            title: Some(system_application_display_name().into()),
+            appears_transparent: true,
+            traffic_light_position: Some(traffic_light_position),
+        }),
+        window_background: WindowBackgroundAppearance::Transparent,
+        app_id,
+        ..Default::default()
+    }
+}
+
+fn configure_editor_window(window: &mut Window, _remember_main_window_frame: bool) {
+    window.set_background_appearance(WindowBackgroundAppearance::Transparent);
+    platform::window_chrome::apply_icon(window);
+    #[cfg(target_os = "macos")]
+    {
+        use objc::{class, msg_send, sel, sel_impl};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        if let Ok(handle) = window.window_handle()
+            && let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw()
+        {
+            unsafe {
+                let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
+                disable_gpui_content_view_window_drag(ns_view);
+                let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
+                if _remember_main_window_frame {
+                    let autosave_name = std::ffi::CString::new(MAIN_WINDOW_FRAME_AUTOSAVE_NAME)
+                        .expect("window frame autosave name");
+                    let autosave_name: *mut objc::runtime::Object = msg_send![
+                        class!(NSString),
+                        stringWithUTF8String: autosave_name.as_ptr()
+                    ];
+                    // Ignore saved frames whose display is no longer connected.
+                    let _: bool =
+                        msg_send![ns_window, setFrameUsingName: autosave_name force: false];
+                    let _: bool = msg_send![ns_window, setFrameAutosaveName: autosave_name];
+                }
+                let () = msg_send![ns_window, setTitlebarSeparatorStyle: 0i64];
+                let clear_color: *mut objc::runtime::Object =
+                    msg_send![class!(NSColor), clearColor];
+                let () = msg_send![ns_window, setBackgroundColor: clear_color];
+                let () = msg_send![ns_window, setHasShadow: true];
+                let () = msg_send![ns_window, setMovableByWindowBackground: false];
+                let content_view: *mut objc::runtime::Object = msg_send![ns_window, contentView];
+                let () = msg_send![content_view, setWantsLayer: true];
+                let layer: *mut objc::runtime::Object = msg_send![content_view, layer];
+                let () = msg_send![layer, setCornerRadius: WINDOW_CONTENT_CORNER_RADIUS];
+                let () = msg_send![layer, setMasksToBounds: true];
+            }
+        }
+    }
+}
+
+fn open_editor_window(
+    cx: &mut App,
+    restore_session: bool,
+) -> anyhow::Result<WindowHandle<EditorView>> {
+    let options = editor_window_options(cx);
+    let handle = cx.open_window(options, |window, cx| {
+        configure_editor_window(window, true);
+        let view = cx.new(|cx| {
+            if restore_session {
+                EditorView::new(cx)
+            } else {
+                EditorView::new_without_session(cx)
+            }
+        });
+        window.focus(&view.focus_handle(cx));
+        window.activate_window();
+        view
+    })?;
+    cx.activate(true);
+    Ok(handle)
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn restore_window(handle: AnyWindowHandle, cx: &mut App) {
+    let _ = handle.update(cx, |_, window, _| {
+        #[cfg(target_os = "macos")]
+        {
+            use objc::{msg_send, sel, sel_impl};
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+            if let Ok(handle) = window.window_handle()
+                && let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw()
+            {
+                unsafe {
+                    let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
+                    let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
+                    let is_minimized: bool = msg_send![ns_window, isMiniaturized];
+                    if is_minimized {
+                        let () = msg_send![ns_window, deminiaturize: std::ptr::null::<objc::runtime::Object>()];
+                    }
+                }
+            }
+        }
+        window.activate_window();
+    });
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn existing_editor_window(cx: &mut App) -> Option<WindowHandle<EditorView>> {
+    cx.window_stack()
+        .unwrap_or_default()
+        .into_iter()
+        .chain(cx.windows())
+        .filter_map(|handle| handle.downcast::<EditorView>())
+        .find(|handle| handle.entity(cx).is_ok())
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn open_external_paths(
+    paths: Vec<PathBuf>,
+    markdown_only: bool,
+    cx: &mut App,
+) -> anyhow::Result<()> {
+    let (handle, fresh_window) = match existing_editor_window(cx) {
+        Some(handle) => (handle, false),
+        None => (open_editor_window(cx, false)?, true),
+    };
+    let editor = handle.entity(cx)?;
+    open_launch_paths_with_policy(&editor, paths, markdown_only, fresh_window, cx);
+    restore_window(handle.into(), cx);
+    cx.activate(true);
+    Ok(())
+}
+
+fn open_terminal_window(cx: &mut App) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        platform::capabilities::CHILD_PROCESSES,
+        crate::i18n::runtime::RuntimeText::FeatureUnavailable.to_string()
+    );
+
+    let options = editor_window_options(cx);
+    cx.open_window(options, |window, cx| {
+        configure_editor_window(window, false);
+        let view = cx.new(|cx| {
+            let mut view = EditorView::new(cx);
+            let launch_cli = view.app_settings.terminal_launch_cli();
+            view.create_terminal_tab(launch_cli, cx);
+            view.sidebar_visible = false;
+            view.sidebar_resizing = false;
+            view.set_sidebar_width_immediately(0.0);
+            view
+        });
+        window.focus(&view.focus_handle(cx));
+        view
+    })?;
+    cx.activate(true);
+    Ok(())
+}
+
+/// Records panics to a file, since a windowed process has nowhere to print
+/// them and the message would otherwise be lost with the crash.
+fn install_panic_logger() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let path = editor::config_paths::cache_dir().join("crash.log");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write;
+
+            let _ = writeln!(
+                file,
+                "\n===== {} =====\n{info}\n{}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+        previous(info);
+    }));
+}
+
+fn dispatch_menu_without_window(action: &dyn Action, cx: &mut App) {
+    if cx.active_window().is_some() {
+        return;
+    }
+    let action = action.boxed_clone();
+    match open_editor_window(cx, false) {
+        Ok(handle) => {
+            let _ = handle.update(cx, |_, window, _| {
+                window.on_next_frame(move |window, cx| window.dispatch_action(action, cx));
+            });
+        }
+        Err(error) => log_error!("failed to create a window for menu command: {error:#}"),
+    }
+}
+
+fn main() {
+    #[cfg(not(target_os = "macos"))]
+    if let Some(status) = platform::export::helper_main() {
+        std::process::exit(status);
+    }
+    install_panic_logger();
+    i18n::runtime::set_language(editor::AppSettings::load().ui_language());
+
+    if let Some(directory) = std::env::var_os("MOEKA_EXPORT_SMOKE_DIR") {
+        Application::new().with_assets(FsAssets).run(move |cx| {
+            editor::export::run_native_smoke_test(PathBuf::from(&directory), cx);
+        });
+        return;
+    }
+
+    let launch_paths = launch_paths_from_args();
+    #[cfg(windows)]
+    let (forwarded_open_paths, _primary_instance) =
+        match platform::windows_single_instance::acquire(&launch_paths) {
+            Ok(platform::windows_single_instance::InstanceRole::Primary(receiver, guard)) => {
+                (receiver, guard)
+            }
+            Ok(platform::windows_single_instance::InstanceRole::SecondaryForwarded) => return,
+            Err(error) => {
+                log_error!("failed to open files in the running instance: {error}");
+                platform::windows_single_instance::show_startup_error(&error);
+                return;
+            }
+        };
+
+    #[cfg(target_os = "macos")]
+    let pending_open_paths = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+    #[cfg(target_os = "macos")]
+    let async_app_for_open_urls = Rc::new(RefCell::new(None::<AsyncApp>));
+
+    let application = Application::new().with_assets(FsAssets);
+    #[cfg(target_os = "macos")]
+    {
+        let pending_open_paths = pending_open_paths.clone();
+        let async_app_for_open_urls = async_app_for_open_urls.clone();
+        application.on_open_urls(move |urls| {
+            let paths = urls
+                .into_iter()
+                .filter_map(|url| macos_markdown_path_from_url(&url))
+                .collect::<Vec<_>>();
+            if paths.is_empty() {
+                return;
+            }
+
+            let async_app = async_app_for_open_urls.borrow().clone();
+            if let Some(async_app) = async_app {
+                async_app
+                    .spawn(async move |cx| {
+                        let _ = cx.update(|cx| {
+                            if let Err(error) = open_external_paths(paths, true, cx) {
+                                log_error!("failed to open external files: {error:#}");
+                            }
+                        });
+                    })
+                    .detach();
+            } else {
+                pending_open_paths.borrow_mut().extend(paths);
+            }
+        });
+    }
+    #[cfg(target_os = "macos")]
+    {
+        application.on_reopen(|cx| {
+            if let Some(window) = existing_editor_window(cx) {
+                restore_window(window.into(), cx);
+            } else {
+                if let Err(error) = open_editor_window(cx, false) {
+                    log_error!("failed to reopen main window: {error:#}");
+                }
+            }
+            cx.activate(true);
+        });
+    }
+
+    application.run(move |cx| {
+        #[cfg(target_os = "macos")]
+        {
+            *async_app_for_open_urls.borrow_mut() = Some(cx.to_async());
+        }
+        cx.bind_keys([
+            KeyBinding::new("secondary-z", Undo, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-shift-z", Redo, Some("MarkdownEditor")),
+            KeyBinding::new("backspace", Backspace, Some("MarkdownEditor")),
+            KeyBinding::new("delete", Delete, Some("MarkdownEditor")),
+            KeyBinding::new("left", Left, Some("MarkdownEditor")),
+            KeyBinding::new("right", Right, Some("MarkdownEditor")),
+            KeyBinding::new("up", Up, Some("MarkdownEditor")),
+            KeyBinding::new("down", Down, Some("MarkdownEditor")),
+            KeyBinding::new("shift-left", SelectLeft, Some("MarkdownEditor")),
+            KeyBinding::new("shift-right", SelectRight, Some("MarkdownEditor")),
+            KeyBinding::new("shift-up", SelectUp, Some("MarkdownEditor")),
+            KeyBinding::new("shift-down", SelectDown, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-a", SelectAll, Some("MarkdownEditor")),
+            KeyBinding::new(keys::LINE_HOME, Home, Some("MarkdownEditor")),
+            KeyBinding::new(keys::LINE_END, End, Some("MarkdownEditor")),
+            KeyBinding::new(keys::SELECT_LINE_HOME, SelectHome, Some("MarkdownEditor")),
+            KeyBinding::new(keys::SELECT_LINE_END, SelectEnd, Some("MarkdownEditor")),
+            KeyBinding::new(
+                keys::DOCUMENT_START,
+                MoveToDocumentStart,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new(
+                keys::DOCUMENT_END,
+                MoveToDocumentEnd,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new(
+                keys::SELECT_TO_DOCUMENT_START,
+                SelectToDocumentStart,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new(
+                keys::SELECT_TO_DOCUMENT_END,
+                SelectToDocumentEnd,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new("enter", Enter, Some("MarkdownEditor")),
+            KeyBinding::new("shift-enter", InsertSoftBreak, Some("MarkdownEditor")),
+            KeyBinding::new("tab", Tab, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-c", Copy, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-x", Cut, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-v", Paste, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-shift-v", PastePlainText, Some("MarkdownEditor")),
+            KeyBinding::new(
+                keys::CHARACTER_PALETTE,
+                ShowCharacterPalette,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new(keys::WORD_LEFT, MoveWordLeft, Some("MarkdownEditor")),
+            KeyBinding::new(keys::WORD_RIGHT, MoveWordRight, Some("MarkdownEditor")),
+            KeyBinding::new(
+                keys::SELECT_WORD_LEFT,
+                SelectWordLeft,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new(
+                keys::SELECT_WORD_RIGHT,
+                SelectWordRight,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new(
+                keys::DELETE_WORD_LEFT,
+                DeleteWordLeft,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new(
+                keys::DELETE_WORD_RIGHT,
+                DeleteWordRight,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new(
+                keys::DELETE_TO_LINE_START,
+                DeleteToLineStart,
+                Some("MarkdownEditor && !Sidebar"),
+            ),
+            KeyBinding::new(
+                keys::DELETE_TO_LINE_END,
+                DeleteToLineEnd,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new("secondary-/", ToggleLineComment, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-alt-[", Fold, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-alt-]", Unfold, Some("MarkdownEditor")),
+            KeyBinding::new("ctrl-j", JoinLines, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-b", ToggleBold, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-i", ToggleItalic, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-u", ToggleUnderline, Some("MarkdownEditor")),
+            KeyBinding::new(
+                "secondary-shift-x",
+                ToggleStrikethrough,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new("secondary-e", ToggleInlineCode, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-k", ToggleLink, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-alt-q", ToggleQuote, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-alt-enter", ToggleTodo, Some("MarkdownEditor")),
+            KeyBinding::new(
+                "secondary-alt-u",
+                ToggleUnorderedList,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new("secondary-alt-o", ToggleOrderedList, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-alt-t", InsertTable, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-alt-c", InsertCodeBlock, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-1", InsertHeading1, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-2", InsertHeading2, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-3", InsertHeading3, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-4", InsertHeading4, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-5", InsertHeading5, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-6", InsertHeading6, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-0", SetParagraph, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-=", ZoomIn, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-shift-=", ZoomIn, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-minus", ZoomOut, Some("MarkdownEditor")),
+            KeyBinding::new("secondary--", ZoomOut, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-alt-0", ZoomReset, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-shift-s", ToggleSidebar, Some("MarkdownEditor")),
+            KeyBinding::new(
+                "secondary-alt-l",
+                ToggleEditorLeftAlign,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new("secondary-l", SelectLine, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-enter", InsertLineBelow, Some("MarkdownEditor")),
+            KeyBinding::new(
+                "secondary-shift-enter",
+                InsertLineAbove,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new("secondary-shift-d", DuplicateLine, Some("MarkdownEditor")),
+            KeyBinding::new("shift-alt-up", CopyLineUp, Some("MarkdownEditor")),
+            KeyBinding::new("shift-alt-down", CopyLineDown, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-shift-k", DeleteLine, Some("MarkdownEditor")),
+            KeyBinding::new("shift-tab", BackTab, Some("MarkdownEditor")),
+            KeyBinding::new("alt-up", MoveLineUp, Some("MarkdownEditor")),
+            KeyBinding::new("alt-down", MoveLineDown, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-s", Save, Some("MarkdownEditor")),
+            KeyBinding::new(
+                "secondary-n",
+                NewDocument,
+                Some("MarkdownEditor && !Sidebar"),
+            ),
+            KeyBinding::new("secondary-t", NewTab, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-,", OpenSettings, Some("MarkdownEditor")),
+            KeyBinding::new(
+                "secondary-shift-p",
+                ToggleCommandPalette,
+                Some("MarkdownEditor"),
+            ),
+            #[cfg(target_os = "linux")]
+            KeyBinding::new("f10", ToggleApplicationMenu, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-q", Quit, Some("MarkdownEditor")),
+            KeyBinding::new("escape", Escape, Some("MarkdownEditor")),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("f11", ToggleFullscreen, Some("MarkdownEditor")),
+            KeyBinding::new(keys::TOGGLE_OUTLINE, ToggleOutline, Some("MarkdownEditor")),
+            KeyBinding::new(
+                keys::TOGGLE_TERMINAL_PANEL,
+                ToggleTerminalPanel,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new("secondary-alt-i", ToggleInfoPanel, Some("MarkdownEditor")),
+            KeyBinding::new(
+                "secondary-alt-y",
+                ToggleThemeDebugger,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new("alt-secondary-up", AddCursorAbove, Some("MarkdownEditor")),
+            KeyBinding::new("alt-secondary-down", AddCursorBelow, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-d", SelectNextOccurrence, Some("MarkdownEditor")),
+            KeyBinding::new(
+                "secondary-shift-l",
+                SelectAllOccurrences,
+                Some("MarkdownEditor"),
+            ),
+            // Tab management
+            KeyBinding::new("secondary-w", CloseActiveTab, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-shift-t", ReopenClosedTab, Some("MarkdownEditor")),
+            KeyBinding::new(
+                "secondary-shift-[",
+                ActivatePreviousTab,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new("secondary-shift-]", ActivateNextTab, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-\\", SplitPaneRight, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-shift-\\", SplitPaneDown, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-alt-\\", FocusNextPane, Some("MarkdownEditor")),
+            // Search
+            KeyBinding::new("secondary-f", Find, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-g", FindNext, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-shift-g", FindPrevious, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-alt-f", ToggleReplace, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-shift-f", FindInFiles, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-p", QuickOpen, Some("MarkdownEditor")),
+            KeyBinding::new("secondary-o", OpenFileDialog, None),
+            KeyBinding::new("alt-z", ToggleWordWrap, Some("MarkdownEditor")),
+            KeyBinding::new(
+                "secondary-alt-ctrl-p",
+                ToggleRuntimeProfile,
+                Some("MarkdownEditor"),
+            ),
+            KeyBinding::new(
+                "secondary-shift-alt-ctrl-p",
+                WriteRuntimeProfileSnapshot,
+                Some("MarkdownEditor"),
+            ),
+        ]);
+
+        // Emacs-style Control keys are only free where Command is the primary
+        // modifier; elsewhere Control+A/F/V are select-all, find and paste.
+        if keys::EMACS_BINDINGS {
+            cx.bind_keys([
+                KeyBinding::new("ctrl-a", Home, Some("MarkdownEditor")),
+                KeyBinding::new("ctrl-e", End, Some("MarkdownEditor")),
+                KeyBinding::new("ctrl-f", Right, Some("MarkdownEditor")),
+                KeyBinding::new("ctrl-b", Left, Some("MarkdownEditor")),
+                KeyBinding::new("ctrl-p", Up, Some("MarkdownEditor")),
+                KeyBinding::new("ctrl-n", Down, Some("MarkdownEditor")),
+                KeyBinding::new("ctrl-d", Delete, Some("MarkdownEditor")),
+                KeyBinding::new("ctrl-h", Backspace, Some("MarkdownEditor")),
+                KeyBinding::new("ctrl-k", KillToLineEnd, Some("MarkdownEditor")),
+                KeyBinding::new("ctrl-y", Yank, Some("MarkdownEditor")),
+                KeyBinding::new("ctrl-o", OpenLine, Some("MarkdownEditor")),
+                KeyBinding::new("ctrl-t", TransposeChars, Some("MarkdownEditor")),
+                KeyBinding::new("ctrl-v", MovePageDown, Some("MarkdownEditor")),
+            ]);
+        }
+
+        cx.bind_keys([
+            KeyBinding::new(
+                "secondary-alt-c",
+                ToggleSearchCaseSensitive,
+                Some("SearchBar"),
+            ),
+            KeyBinding::new("secondary-alt-w", ToggleSearchWholeWord, Some("SearchBar")),
+            KeyBinding::new("secondary-alt-r", ToggleSearchRegex, Some("SearchBar")),
+        ]);
+
+        cx.bind_keys([
+            KeyBinding::new(
+                keys::TOGGLE_TERMINAL_PANEL,
+                ToggleTerminalPanel,
+                Some("ChatTerminal"),
+            ),
+            KeyBinding::new("secondary-n", NewChatTab, Some("ChatTerminal")),
+            KeyBinding::new("secondary-w", CloseActiveChatTab, Some("ChatTerminal")),
+            KeyBinding::new("secondary-k", ClearTerminal, Some("ChatTerminal")),
+        ]);
+
+        cx.bind_keys([
+            KeyBinding::new(
+                "secondary-n",
+                SidebarCreateFile,
+                Some("Sidebar && !TextInput"),
+            ),
+            KeyBinding::new(
+                "secondary-shift-n",
+                SidebarCreateFolder,
+                Some("Sidebar && !TextInput"),
+            ),
+            KeyBinding::new("f2", SidebarRename, Some("Sidebar && !TextInput")),
+            KeyBinding::new(
+                keys::SIDEBAR_DELETE,
+                SidebarDelete,
+                Some("Sidebar && !TextInput"),
+            ),
+        ]);
+
+        // TextInput keybindings
+        cx.bind_keys([
+            KeyBinding::new("left", text_input::TextInputLeft, Some("TextInput")),
+            KeyBinding::new("right", text_input::TextInputRight, Some("TextInput")),
+            KeyBinding::new(
+                keys::LINE_HOME,
+                text_input::TextInputHome,
+                Some("TextInput"),
+            ),
+            KeyBinding::new(keys::LINE_END, text_input::TextInputEnd, Some("TextInput")),
+            KeyBinding::new(
+                "shift-left",
+                text_input::TextInputSelectLeft,
+                Some("TextInput"),
+            ),
+            KeyBinding::new(
+                "shift-right",
+                text_input::TextInputSelectRight,
+                Some("TextInput"),
+            ),
+            KeyBinding::new(
+                keys::SELECT_LINE_HOME,
+                text_input::TextInputSelectHome,
+                Some("TextInput"),
+            ),
+            KeyBinding::new(
+                keys::SELECT_LINE_END,
+                text_input::TextInputSelectEnd,
+                Some("TextInput"),
+            ),
+            KeyBinding::new(
+                "secondary-a",
+                text_input::TextInputSelectAll,
+                Some("TextInput"),
+            ),
+            KeyBinding::new(
+                "backspace",
+                text_input::TextInputBackspace,
+                Some("TextInput"),
+            ),
+            KeyBinding::new("delete", text_input::TextInputDelete, Some("TextInput")),
+            KeyBinding::new(
+                keys::DELETE_WORD_LEFT,
+                text_input::TextInputDeleteWordLeft,
+                Some("TextInput"),
+            ),
+            KeyBinding::new("secondary-c", text_input::TextInputCopy, Some("TextInput")),
+            KeyBinding::new("secondary-x", text_input::TextInputCut, Some("TextInput")),
+            KeyBinding::new("secondary-v", text_input::TextInputPaste, Some("TextInput")),
+            KeyBinding::new(
+                keys::WORD_LEFT,
+                text_input::TextInputMoveWordLeft,
+                Some("TextInput"),
+            ),
+            KeyBinding::new(
+                keys::WORD_RIGHT,
+                text_input::TextInputMoveWordRight,
+                Some("TextInput"),
+            ),
+            KeyBinding::new(
+                keys::SELECT_WORD_LEFT,
+                text_input::TextInputSelectWordLeft,
+                Some("TextInput"),
+            ),
+            KeyBinding::new(
+                keys::SELECT_WORD_RIGHT,
+                text_input::TextInputSelectWordRight,
+                Some("TextInput"),
+            ),
+            KeyBinding::new(
+                keys::DELETE_WORD_RIGHT,
+                text_input::TextInputDeleteWordRight,
+                Some("TextInput"),
+            ),
+            KeyBinding::new(
+                keys::DELETE_TO_LINE_START,
+                text_input::TextInputDeleteToStart,
+                Some("TextInput"),
+            ),
+            KeyBinding::new(
+                "ctrl-k",
+                text_input::TextInputDeleteToEnd,
+                Some("TextInput"),
+            ),
+            KeyBinding::new("secondary-z", text_input::TextInputUndo, Some("TextInput")),
+            KeyBinding::new("up", text_input::TextInputPickerUp, Some("TextInput")),
+            KeyBinding::new("down", text_input::TextInputPickerDown, Some("TextInput")),
+            KeyBinding::new("enter", text_input::TextInputSubmit, Some("TextInput")),
+            KeyBinding::new(
+                "shift-enter",
+                text_input::TextInputSubmitBackward,
+                Some("TextInput"),
+            ),
+        ]);
+
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|action: &NewDocument, cx| dispatch_menu_without_window(action, cx));
+        cx.on_action(|action: &NewTab, cx| dispatch_menu_without_window(action, cx));
+        cx.on_action(|action: &OpenFileDialog, cx| dispatch_menu_without_window(action, cx));
+        cx.on_action(|action: &OpenSettings, cx| dispatch_menu_without_window(action, cx));
+        cx.on_action(|action: &RunCommand, cx| {
+            if matches!(
+                action.id.as_str(),
+                "open_workspace"
+                    | "help"
+                    | "website"
+                    | "check_updates"
+                    | "open_config"
+                    | "settings_theme"
+                    | "settings_fonts"
+                    | "settings_format"
+                    | "settings_terminal"
+                    | "settings_attachments"
+            ) {
+                dispatch_menu_without_window(action, cx);
+            }
+        });
+        cx.on_app_quit(|_| {
+            platform::window_state::save_tracked();
+            async {}
+        })
+        .detach();
+        cx.on_action(|_: &OpenTerminalWindow, cx| {
+            if let Err(error) = open_terminal_window(cx) {
+                log_error!("failed to open terminal window: {error:#}");
+            }
+        });
+
+        // User keybinding overrides from settings.yaml are registered last so
+        // they take precedence over the default bindings above.
+        editor::register_keybinding_overrides(cx);
+        editor::set_application_menus(cx);
+
+        #[cfg(target_os = "macos")]
+        let pending_paths_for_window = pending_open_paths.clone();
+        // Preserve crash recovery on cold start; forwarded requests never restore a second session.
+        let window = open_editor_window(cx, true).expect("failed to open main window");
+        let view = window.entity(cx).expect("main editor window must be alive");
+        if !launch_paths.is_empty() {
+            open_launch_paths(&view, launch_paths, cx);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let pending_paths = std::mem::take(&mut *pending_paths_for_window.borrow_mut());
+            if !pending_paths.is_empty() {
+                open_launch_paths_with_policy(&view, pending_paths, true, true, cx);
+            }
+        }
+        #[cfg(windows)]
+        {
+            let receiver = forwarded_open_paths;
+            cx.spawn(async move |cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(50))
+                        .await;
+                    for _ in 0..32 {
+                        match receiver.try_recv() {
+                            Ok(paths) => {
+                                let _ = cx.update(|cx| {
+                                    if let Err(error) = open_external_paths(paths, false, cx) {
+                                        log_error!("failed to open forwarded files: {error:#}");
+                                    }
+                                });
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                log_error!("external file-open listener disconnected");
+                                return;
+                            }
+                        }
+                    }
+                }
+            })
+            .detach();
+        }
+    });
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_file_open_tests {
+    use super::macos_markdown_path_from_url;
+    use super::{EMBEDDED_ASSET_DATA, EMBEDDED_ASSETS, embedded_asset};
+
+    #[test]
+    fn decodes_markdown_file_urls_with_spaces_and_unicode() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("示例 note.mdx");
+        std::fs::write(&path, "# MDX").expect("write mdx");
+        let encoded_path = path
+            .to_string_lossy()
+            .replace(' ', "%20")
+            .replace("示例", "%E7%A4%BA%E4%BE%8B");
+
+        assert_eq!(
+            macos_markdown_path_from_url(&format!("file://{encoded_path}")),
+            Some(path),
+        );
+    }
+
+    #[test]
+    fn defers_file_classification_without_probing_the_launch_path() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("notes.txt");
+        std::fs::write(&path, "notes").expect("write text");
+
+        assert_eq!(
+            macos_markdown_path_from_url(&format!("file://{}", path.display())),
+            Some(path),
+        );
+        assert_eq!(
+            macos_markdown_path_from_url("https://example.com/a.md"),
+            None
+        );
+    }
+
+    #[test]
+    fn accepts_directory_urls_as_workspace_candidates() {
+        let directory = tempfile::tempdir().expect("tempdir");
+
+        assert_eq!(
+            macos_markdown_path_from_url(&format!("file://{}", directory.path().display())),
+            Some(directory.path().to_path_buf()),
+        );
+    }
+
+    #[test]
+    fn every_asset_is_embedded_and_reachable_by_lookup() {
+        assert!(
+            EMBEDDED_ASSETS.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "embedded assets must be sorted for the binary search to work"
+        );
+
+        for (key, start, end) in EMBEDDED_ASSETS {
+            assert!(start < end, "{key} is empty");
+            assert_eq!(
+                embedded_asset(key),
+                Some(&EMBEDDED_ASSET_DATA[*start..*end]),
+                "{key} is not findable"
+            );
+        }
+
+        // A bare `moeka.exe` has no `assets/` next to it, so a miss here is a
+        // missing icon on Windows.
+        assert!(embedded_asset(crate::editor::LOGO_SVG_PATH).is_some());
+        assert!(embedded_asset("assets/icons/filetree/star.svg").is_some());
+    }
+}

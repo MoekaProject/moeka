@@ -1,0 +1,33 @@
+%YAML 1.2
+---
+name: ANTLR
+file_extensions: [g4]
+scope: source.antlr
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.antlr
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.antlr
+        - match: '\*/'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.antlr
+        - match: '\\.'
+          scope: constant.character.escape.antlr
+        - match: "'"
+          pop: true
+    - match: '\b(?:grammar|lexer|parser|import|options|tokens|channels|fragment|returns|locals|throws|catch|finally|mode)\b'
+      scope: keyword.declaration.antlr
+    - match: '\b(?:skip|more|type|channel|pushMode|popMode)\b'
+      scope: support.function.antlr
+    - match: '\b[A-Z][A-Za-z_0-9]*\b'
+      scope: entity.name.type.token.antlr
+    - match: '\b[a-z][A-Za-z_0-9]*(?=\s*:)'
+      scope: entity.name.function.rule.antlr
+    - match: '\b\d+\b'
+      scope: constant.numeric.antlr
+    - match: '->|[|?*+~=]'
+      scope: keyword.operator.antlr

@@ -1,0 +1,28 @@
+%YAML 1.2
+---
+name: GN
+file_extensions: [gn, gni]
+scope: source.gn
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.gn
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.gn
+        - match: '\\.'
+          scope: constant.character.escape.gn
+        - match: '\$[A-Za-z_]\w*'
+          scope: variable.other.gn
+        - match: '"'
+          pop: true
+    - match: '\b(?:if|else|foreach|template|import|declare_args|assert|defined|print|exec_script|read_file|write_file|get_target_outputs|forward_variables_from|set_defaults|set_sources_assignment_filter)\b'
+      scope: keyword.control.gn
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.gn
+    - match: '\b\d+\b'
+      scope: constant.numeric.gn
+    - match: '\b[A-Za-z_]\w*(?=\s*\()'
+      scope: variable.function.gn
+    - match: '[=+<>!&|-]+'
+      scope: keyword.operator.gn

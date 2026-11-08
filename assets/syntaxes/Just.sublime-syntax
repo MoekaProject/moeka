@@ -1,0 +1,25 @@
+%YAML 1.2
+---
+name: Just
+file_extensions: [just, Justfile, justfile, .justfile]
+scope: source.just
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.just
+    - match: '^\s*(?:set|export|alias|import|mod)\b'
+      scope: keyword.control.just
+    - match: '^[A-Za-z_][\w-]*(?=\s*(?::=|:))'
+      scope: entity.name.function.just
+    - match: '\{\{'
+      push:
+        - meta_scope: source.just.interpolation
+        - match: '\}\}'
+          pop: true
+        - include: scope:source.python
+    - match: '"(?:\\.|[^"\\])*"|''[^'']*'''
+      scope: string.quoted.just
+    - match: ':=|&&|\|\||[+=]'
+      scope: keyword.operator.just
+    - match: '^\s+.+$'
+      scope: string.unquoted.command.just

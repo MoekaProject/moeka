@@ -1,0 +1,37 @@
+%YAML 1.2
+---
+name: P4
+file_extensions: [p4]
+scope: source.p4
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.p4
+    - match: '/\*'
+      push: comment
+    - match: '^\s*#\s*(?:include|define|undef|if|ifdef|ifndef|elif|else|endif|error)\b'
+      scope: keyword.control.preprocessor.p4
+    - match: '"'
+      push: string
+    - match: '\b(?:action|apply|control|parser|package|extern|header|header_union|struct|enum|typedef|type|table|state|transition|select|key|actions|entries|default_action|const|in|out|inout|if|else|switch|return|exit|abstract|verify|error|match_kind)\b'
+      scope: keyword.control.p4
+    - match: '\b(?:bit|int|varbit|bool|string|void|tuple)\b'
+      scope: storage.type.p4
+    - match: '\b(?:true|false|accept|reject|default|dontcare)\b'
+      scope: constant.language.p4
+    - match: '@[A-Za-z_]\w*'
+      scope: variable.annotation.p4
+    - match: '\b(?:\d+[ws])?(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|\d[\d_]*)\b'
+      scope: constant.numeric.p4
+    - match: '&&&|[=<>!+*/%&|^~-]+'
+      scope: keyword.operator.p4
+  string:
+    - meta_scope: string.quoted.double.p4
+    - match: '\\.'
+      scope: constant.character.escape.p4
+    - match: '"'
+      pop: true
+  comment:
+    - meta_scope: comment.block.p4
+    - match: '\*/'
+      pop: true

@@ -1,0 +1,59 @@
+%YAML 1.2
+---
+name: Pkl
+file_extensions: [pkl, PklProject]
+scope: source.pkl
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.pkl
+    - match: '/\*'
+      push: comment
+    - match: '"""'
+      push:
+        - meta_scope: string.quoted.triple.pkl
+        - match: '"""'
+          pop: true
+        - include: escapes
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.pkl
+        - include: escapes
+        - match: '"'
+          pop: true
+    - match: '#"'
+      push:
+        - meta_scope: string.quoted.double.raw.pkl
+        - match: '"#'
+          pop: true
+    - match: '\b(?:abstract|amends|as|class|const|else|extends|external|fixed|for|function|hidden|if|import|import\*|in|is|let|local|module|new|open|out|outer|read|read\*|read\?|super|this|throw|trace|typealias|unknown|when)\b'
+      scope: keyword.control.pkl
+    - match: '\b(?:Any|Nothing|Class|TypeAlias|Module|Boolean|String|Int|Float|Number|Duration|DataSize|Pair|Collection|List|Set|Map|Dynamic|Typed|Listing|Mapping|Regex|Function|Null)\b'
+      scope: storage.type.pkl
+    - match: '\b(?:true|false|null)\b'
+      scope: constant.language.pkl
+    - match: '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]+)?)(?:\.(?:ns|us|ms|s|min|h|d|b|kb|kib|mb|mib|gb|gib|tb|tib))?\b'
+      scope: constant.numeric.pkl
+    - match: '@[A-Za-z_][A-Za-z0-9_.]*'
+      scope: entity.name.function.annotation.pkl
+    - match: '\?\?|->|[=+*/%<>!&|?:-]+'
+      scope: keyword.operator.pkl
+  comment:
+    - meta_scope: comment.block.pkl
+    - match: '/\*'
+      push: comment
+    - match: '\*/'
+      pop: true
+  escapes:
+    - match: '\\\('
+      push: interpolation
+    - match: '\\.'
+      scope: constant.character.escape.pkl
+  interpolation:
+    - clear_scopes: 1
+    - meta_scope: meta.interpolation.pkl
+    - match: '\)'
+      pop: true
+    - match: '\('
+      push: interpolation
+    - include: main

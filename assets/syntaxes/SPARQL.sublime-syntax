@@ -1,0 +1,47 @@
+%YAML 1.2
+---
+name: SPARQL
+file_extensions: [rq, sparql]
+scope: source.sparql
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.sparql
+    - match: '<[^<>\s]*>'
+      scope: string.unquoted.iri.sparql
+    - match: '"""'
+      push:
+        - meta_scope: string.quoted.triple.double.sparql
+        - match: '\\.'
+          scope: constant.character.escape.sparql
+        - match: '"""'
+          pop: true
+    - match: "'''"
+      push:
+        - meta_scope: string.quoted.triple.single.sparql
+        - match: '\\.'
+          scope: constant.character.escape.sparql
+        - match: "'''"
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.sparql
+        - match: '\\.'
+          scope: constant.character.escape.sparql
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.sparql
+        - match: '\\.'
+          scope: constant.character.escape.sparql
+        - match: "'"
+          pop: true
+    - match: '[?$][A-Za-z_]\w*'
+      scope: variable.other.sparql
+    - match: '(?i)\b(?:PREFIX|BASE|SELECT|CONSTRUCT|DESCRIBE|ASK|WHERE|DISTINCT|REDUCED|FROM|NAMED|OPTIONAL|UNION|FILTER|BIND|AS|VALUES|GRAPH|SERVICE|MINUS|EXISTS|NOT|ORDER|BY|GROUP|HAVING|LIMIT|OFFSET|ASC|DESC|INSERT|DELETE|DATA|WITH|USING|LOAD|CLEAR|CREATE|DROP|SILENT|INTO|DEFAULT|ALL)\b'
+      scope: keyword.control.sparql
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.sparql
+    - match: '\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b'
+      scope: constant.numeric.sparql

@@ -1,0 +1,37 @@
+%YAML 1.2
+---
+name: Scilab
+file_extensions: [sci, sce]
+scope: source.scilab
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.scilab
+    - match: "(?<=[\\w)\\]}])\\.?'+"
+      scope: keyword.operator.transpose.scilab
+    - match: "'"
+      push: single
+    - match: '"'
+      push: double
+    - match: '\b(?:function|endfunction|if|then|elseif|else|end|for|while|do|select|case|otherwise|try|catch|break|continue|return|abort|resume|global|clear)\b'
+      scope: keyword.control.scilab
+    - match: '%(?:t|f|T|F|pi|e|i|inf|nan|eps|s|z)\b'
+      scope: constant.language.scilab
+    - match: '\b(?:disp|zeros|ones|eye|size|length|matrix|list|struct|plot|sin|cos|sqrt|sum|mean|mprintf|exec)\b'
+      scope: support.function.scilab
+    - match: '\b\d+(?:\.\d+)?(?:[eEdD][+-]?\d+)?\b'
+      scope: constant.numeric.scilab
+    - match: '[=<>!+*/%&|^~-]+'
+      scope: keyword.operator.scilab
+  single:
+    - meta_scope: string.quoted.single.scilab
+    - match: "''"
+      scope: constant.character.escape.scilab
+    - match: "'"
+      pop: true
+  double:
+    - meta_scope: string.quoted.double.scilab
+    - match: '""'
+      scope: constant.character.escape.scilab
+    - match: '"'
+      pop: true

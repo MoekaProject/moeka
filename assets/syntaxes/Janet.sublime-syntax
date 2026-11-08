@@ -1,0 +1,30 @@
+%YAML 1.2
+---
+name: Janet
+file_extensions: [janet]
+first_line_match: '^#!.*\bjanet\b'
+scope: source.janet
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.janet
+    - match: '@?"'
+      push:
+        - meta_scope: string.quoted.double.janet
+        - match: '\\.'
+          scope: constant.character.escape.janet
+        - match: '"'
+          pop: true
+    - match: '(`+)'
+      push:
+        - meta_scope: string.quoted.other.long.janet
+        - match: '\1'
+          pop: true
+    - match: ':[^\s()\[\]{}"#`]+'
+      scope: constant.other.keyword.janet
+    - match: '(?<![\w/-])(?:def|var|set|fn|defn|defmacro|if|when|unless|cond|case|do|let|each|for|loop|while|break|import|use|quote|quasiquote|unquote|splice|try|error|and|or|not)(?![\w/-])'
+      scope: keyword.control.janet
+    - match: '\b(?:true|false|nil)\b'
+      scope: constant.language.janet
+    - match: '(?<![\w/-])-?(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w/-])'
+      scope: constant.numeric.janet

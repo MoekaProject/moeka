@@ -1,0 +1,41 @@
+%YAML 1.2
+---
+name: SAS
+file_extensions: [sas]
+scope: source.sas
+contexts:
+  main:
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.sas
+        - match: '\*/'
+          pop: true
+    - match: '^\s*\*'
+      push:
+        - meta_scope: comment.line.statement.sas
+        - match: ';'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.sas
+        - match: '""'
+          scope: constant.character.escape.sas
+        - match: '&[A-Za-z_]\w*\.?'
+          scope: variable.other.macro.sas
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.sas
+        - match: "''"
+          scope: constant.character.escape.sas
+        - match: "'"
+          pop: true
+    - match: '(?i)%(?:macro|mend|let|if|then|else|do|end|include|put|local|global|return|sysfunc|eval)\b'
+      scope: keyword.control.macro.sas
+    - match: '&[A-Za-z_]\w*\.?'
+      scope: variable.other.macro.sas
+    - match: '(?i)\b(?:data|set|merge|by|proc|run|quit|input|output|infile|file|put|length|format|informat|label|retain|array|do|end|if|then|else|where|keep|drop|rename|libname|options|ods|select|from|group|order|having|create|table|as)\b'
+      scope: keyword.control.sas
+    - match: '\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b'
+      scope: constant.numeric.sas

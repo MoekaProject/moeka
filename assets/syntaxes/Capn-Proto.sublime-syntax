@@ -1,0 +1,29 @@
+%YAML 1.2
+---
+name: Cap'n Proto
+file_extensions: [capnp]
+scope: source.capnp
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.capnp
+    - match: '"'
+      push: string
+    - match: '\b(?:using|import|struct|enum|interface|extends|const|annotation|union|group|in|of|on)\b'
+      scope: keyword.declaration.capnp
+    - match: '\b(?:Void|Bool|Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64|Float32|Float64|Text|Data|List|AnyPointer)\b'
+      scope: storage.type.capnp
+    - match: '\b(?:true|false|void|inf|nan)\b'
+      scope: constant.language.capnp
+    - match: '@(?:0x[0-9a-fA-F]+|\d+)'
+      scope: constant.numeric.ordinal.capnp
+    - match: '\$[A-Za-z_]\w*(?:\.\w+)*'
+      scope: variable.annotation.capnp
+    - match: '\b\d+(?:\.\d+)?\b'
+      scope: constant.numeric.capnp
+  string:
+    - meta_scope: string.quoted.double.capnp
+    - match: '\\.'
+      scope: constant.character.escape.capnp
+    - match: '"'
+      pop: true

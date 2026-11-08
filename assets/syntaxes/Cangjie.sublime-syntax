@@ -1,0 +1,41 @@
+%YAML 1.2
+---
+name: Cangjie
+file_extensions: [cj]
+scope: source.cangjie
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.cangjie
+    - match: '/\*'
+      push: comment
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.cangjie
+        - match: '\\.'
+          scope: constant.character.escape.cangjie
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.cangjie
+        - match: '\\.'
+          scope: constant.character.escape.cangjie
+        - match: "'"
+          pop: true
+    - match: '\b(?:package|import|as|main|func|let|var|const|class|struct|enum|interface|extend|type|public|private|protected|internal|static|abstract|open|override|init|this|super|if|else|match|case|for|in|while|do|break|continue|return|try|catch|finally|throw|spawn|synchronized|unsafe|foreign|operator|mut|prop)\b'
+      scope: keyword.control.cangjie
+    - match: '\b(?:Int(?:8|16|32|64|Native)|UInt(?:8|16|32|64|Native)|Float(?:16|32|64)|Bool|Rune|Unit|Nothing|String)\b'
+      scope: storage.type.cangjie
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.cangjie
+    - match: '\b(?:0[xX][\da-fA-F_]+|0[bB][01_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)\b'
+      scope: constant.numeric.cangjie
+    - match: '->|=>|[=+*/%<>!&|^?:-]+'
+      scope: keyword.operator.cangjie
+  comment:
+    - meta_scope: comment.block.cangjie
+    - match: '/\*'
+      push: comment
+    - match: '\*/'
+      pop: true

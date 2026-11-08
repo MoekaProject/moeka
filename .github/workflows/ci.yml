@@ -1,0 +1,271 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  community:
+    name: Contributor metadata and workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Test contributor metadata checks
+        run: ruby scripts/test-check-community.rb
+      - name: Check issue forms, local documentation links, and workflow policy
+        run: ruby scripts/check-community.rb
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.0'
+          cache: false
+      - name: Validate GitHub Actions syntax
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes=
+
+  release-safety:
+    name: Asset paths and offline release safety tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - run: node scripts/check-assets.mjs
+      - run: bash scripts/test-publish-release.sh
+      - run: bash scripts/test-publish-homebrew.sh
+
+  secrets:
+    name: Secret scan (official Gitleaks CLI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.24.2'
+          cache: false
+      - name: Install official CLI (v8.24.3)
+        run: go install github.com/zricethezav/gitleaks/v8@v8.24.3
+      - name: Scan full reachable history without exposing secrets
+        run: gitleaks git --no-banner --redact --log-opts='--all' .
+
+  check:
+    name: Build, lint and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+
+      # gpui renders through Vulkan/Wayland/X11 on Linux and needs the
+      # corresponding development headers at build time.
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            libasound2-dev \
+            libfontconfig-dev \
+            libssl-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-shm0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-xkb-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            pkg-config
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Check formatting
+        if: matrix.os == 'macos-latest'
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --release --locked --all-targets
+
+      - name: Build application
+        run: cargo build --release --locked
+
+      - name: Test
+        env:
+          XDG_CONFIG_HOME: ${{ runner.temp }}/moeka-tests/config
+          XDG_CACHE_HOME: ${{ runner.temp }}/moeka-tests/cache
+          APPDATA: ${{ runner.temp }}/moeka-tests/config
+          LOCALAPPDATA: ${{ runner.temp }}/moeka-tests/cache
+        run: cargo test --release --locked
+
+      - name: GPUI event regression tests
+        env:
+          XDG_CONFIG_HOME: ${{ runner.temp }}/moeka-gpui-tests/config
+          XDG_CACHE_HOME: ${{ runner.temp }}/moeka-gpui-tests/cache
+          APPDATA: ${{ runner.temp }}/moeka-gpui-tests/config
+          LOCALAPPDATA: ${{ runner.temp }}/moeka-gpui-tests/cache
+        run: >-
+          cargo test --release --locked --features gpui-test-support --bin moeka --
+          --quiet command_ native_menu application_menu settings_header ui_messages
+          preview_overlay_dispatches_magnify_and_scroll outline_state_follows_the_active_tab minimap
+
+      - name: Check Mac App Store capability gates
+        if: matrix.os == 'macos-latest'
+        run: cargo check --release --locked --features mas
+
+  # `make windows` cross-builds the shipped binaries; this job is the native
+  # counterpart that would catch vendor/gpui drifting from upstream.
+  windows-package:
+    name: Windows portable package (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: windows-package-${{ matrix.arch }}
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Test terminal input
+        env:
+          APPDATA: ${{ runner.temp }}/moeka-terminal-tests/config
+          LOCALAPPDATA: ${{ runner.temp }}/moeka-terminal-tests/cache
+        run: cargo test --release --locked editor::chat_panel::tests -- --nocapture
+
+      # CI artifacts are candidates, not approved public distributions.
+      - name: Stage package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
+          Copy-Item target/release/moeka.exe dist/windows/Moeka.exe
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md dist/windows/
+          if (Test-Path licenses) { Copy-Item -Recurse licenses dist/windows/ }
+
+      - name: Upload package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Moeka-windows-${{ matrix.arch }}
+          path: dist/windows
+          if-no-files-found: error
+
+  linux-package:
+    name: Linux portable package (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustc --version
+          rustup target add "${{ matrix.target }}"
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            libasound2-dev \
+            libfontconfig-dev \
+            libssl-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-shm0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-xkb-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            patchelf \
+            pkg-config
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: linux-package-${{ matrix.arch }}
+
+      - name: Build package
+        run: CARGO_INCREMENTAL=0 make linux-${{ matrix.arch }}
+
+      - name: Upload package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Moeka-linux-${{ matrix.arch }}
+          path: dist/Moeka-linux-${{ matrix.arch }}.zip
+          if-no-files-found: error

@@ -1,0 +1,29 @@
+name: Bug fix, feature or improvement
+description: Report a problem or suggest a feature or improvement for Moeka. English only.
+body:
+  - type: textarea
+    id: details
+    attributes:
+      label: Problem, expected outcome and environment
+      description: Use English only for the issue title and description. Keep original diagnostic output unchanged and redact private information.
+      value: |
+        ### Problem
+
+        ### Expected outcome
+
+        ### Environment
+        - Operating system and version:
+        - Moeka version:
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: My issue title and description are written in English.
+          required: true
+        - label: I searched existing issues for duplicate reports or requests.
+          required: true
+        - label: I removed credentials, private documents, personal paths, and other sensitive information.
+          required: true

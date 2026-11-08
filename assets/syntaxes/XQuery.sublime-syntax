@@ -1,0 +1,43 @@
+%YAML 1.2
+---
+name: XQuery
+file_extensions: [xq, xql, xqm, xquery]
+scope: source.xquery
+contexts:
+  main:
+    - match: '\(:'
+      push: comment
+    - match: "'"
+      push: single
+    - match: '"'
+      push: double
+    - match: '\$[A-Za-z_][\w:.-]*'
+      scope: variable.other.xquery
+    - match: '\b(?:xquery|version|encoding|module|namespace|declare|default|function|variable|import|schema|for|let|where|order|by|group|count|return|some|every|satisfies|if|then|else|switch|typeswitch|case|try|catch|in|at|as|external|element|attribute|text|document|node|comment|processing-instruction|instance|of|cast|castable|treat|and|or|div|idiv|mod|eq|ne|lt|le|gt|ge|is|to|union|intersect|except)\b'
+      scope: keyword.control.xquery
+    - match: '\bxs:[A-Za-z_][\w.-]*'
+      scope: storage.type.xquery
+    - match: '\b(?:fn|map|array|math):[A-Za-z_][\w.-]*'
+      scope: support.function.xquery
+    - match: '\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b'
+      scope: constant.numeric.xquery
+    - match: '[=<>!+*/|-]+'
+      scope: keyword.operator.xquery
+  comment:
+    - meta_scope: comment.block.xquery
+    - match: '\(:'
+      push: comment
+    - match: ':\)'
+      pop: true
+  single:
+    - meta_scope: string.quoted.single.xquery
+    - match: "''"
+      scope: constant.character.escape.xquery
+    - match: "'"
+      pop: true
+  double:
+    - meta_scope: string.quoted.double.xquery
+    - match: '""'
+      scope: constant.character.escape.xquery
+    - match: '"'
+      pop: true

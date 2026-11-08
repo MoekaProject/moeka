@@ -1,0 +1,42 @@
+%YAML 1.2
+---
+name: Kusto
+file_extensions: [kql, csl]
+scope: source.kusto
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.kusto
+    - match: '@"'
+      push:
+        - meta_scope: string.quoted.double.verbatim.kusto
+        - match: '""'
+          scope: constant.character.escape.kusto
+        - match: '"'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.kusto
+        - match: '\\.'
+          scope: constant.character.escape.kusto
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.kusto
+        - match: '\\.'
+          scope: constant.character.escape.kusto
+        - match: "'"
+          pop: true
+    - match: '\b(?:let|where|project|project-away|project-rename|extend|summarize|by|join|on|union|order|sort|take|limit|top|render|distinct|count|as|in|between|and|or|not|has|contains|startswith|endswith|matches|regex|datatable|materialize|evaluate|mv-expand|mv-apply|make-series|parse|serialize|asc|desc)\b'
+      scope: keyword.control.kusto
+    - match: '\b(?:bool|datetime|decimal|dynamic|guid|int|long|real|string|timespan)\b'
+      scope: storage.type.kusto
+    - match: '\b(?:true|false|null)\b'
+      scope: constant.language.kusto
+    - match: '\b\d+(?:\.\d+)?(?:ms|s|m|h|d)?\b'
+      scope: constant.numeric.kusto
+    - match: '\b[A-Za-z_]\w*(?=\s*\()'
+      scope: support.function.kusto
+    - match: '[=+*/%<>!~|:-]+'
+      scope: keyword.operator.kusto

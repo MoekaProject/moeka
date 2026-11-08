@@ -1,0 +1,27 @@
+%YAML 1.2
+---
+name: WIT
+file_extensions: [wit]
+scope: source.wit
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.wit
+    - match: '/\*'
+      push: comment
+    - match: '\b(?:package|world|interface|use|include|import|export|type|record|variant|enum|flags|resource|func|constructor|static|async|with|as)\b'
+      scope: keyword.declaration.wit
+    - match: '\b(?:u8|u16|u32|u64|s8|s16|s32|s64|f32|f64|bool|char|string|list|option|result|tuple|own|borrow|future|stream)\b'
+      scope: storage.type.wit
+    - match: '@\d+(?:\.\d+)*(?:-[\w.-]+)?'
+      scope: constant.numeric.version.wit
+    - match: '\b\d+\b'
+      scope: constant.numeric.wit
+    - match: '->|[=:<>]'
+      scope: keyword.operator.wit
+  comment:
+    - meta_scope: comment.block.wit
+    - match: '/\*'
+      push: comment
+    - match: '\*/'
+      pop: true

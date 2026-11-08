@@ -1,0 +1,16 @@
+%YAML 1.2
+---
+name: HOCON
+file_extensions: [hocon]
+scope: source.hocon
+contexts:
+  main:
+    - match: '#.*$|//.*$'
+      scope: comment.line.hocon
+    - match: '\binclude\b'
+      scope: keyword.control.hocon
+    - match: '\$\{[^}]*\}'
+      scope: variable.other.hocon
+    - match: '[\w.-]+(?=\s*[=:])'
+      scope: variable.other.member.hocon
+    - include: scope:source.json5

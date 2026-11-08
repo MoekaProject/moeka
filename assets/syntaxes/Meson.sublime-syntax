@@ -1,0 +1,33 @@
+%YAML 1.2
+---
+name: Meson
+file_extensions: [meson.build, meson.options, meson_options.txt]
+scope: source.meson
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.meson
+    - match: "'''"
+      push:
+        - meta_scope: string.quoted.triple.meson
+        - match: "'''"
+          pop: true
+    - match: "f?'"
+      push:
+        - meta_scope: string.quoted.single.meson
+        - match: '\\.'
+          scope: constant.character.escape.meson
+        - match: '@[A-Za-z_][A-Za-z0-9_]*@'
+          scope: variable.other.interpolation.meson
+        - match: "'"
+          pop: true
+    - match: '\b(?:if|elif|else|endif|foreach|endforeach|break|continue|and|or|not|in)\b'
+      scope: keyword.control.meson
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.meson
+    - match: '\b(?:0[xX][0-9a-fA-F]+|0[oO][0-7]+|0[bB][01]+|[0-9]+)\b'
+      scope: constant.numeric.meson
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: support.function.meson
+    - match: '==|!=|<=|>=|[=+*/%<>?:-]'
+      scope: keyword.operator.meson

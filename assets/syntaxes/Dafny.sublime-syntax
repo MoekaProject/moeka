@@ -1,0 +1,35 @@
+%YAML 1.2
+---
+name: Dafny
+file_extensions: [dfy]
+scope: source.dafny
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.dafny
+    - match: '/\*'
+      push: comment
+    - match: '"'
+      push: string
+    - match: '\b(?:method|function|predicate|lemma|class|trait|datatype|codatatype|type|newtype|module|import|export|ghost|var|const|static|opaque|abstract|extends|refines|requires|ensures|reads|modifies|decreases|invariant|assert|assume|expect|calc|forall|exists|if|then|else|while|for|match|case|return|break|continue|yield|new|old|fresh|allocated|reveal|print|in|is|as|by)\b'
+      scope: keyword.control.dafny
+    - match: '\b(?:bool|char|int|nat|real|ordinal|string|object|array\d*|seq|set|iset|multiset|map|imap|bv\d+)\b'
+      scope: storage.type.dafny
+    - match: '\b(?:true|false|null|this)\b'
+      scope: constant.language.dafny
+    - match: '\b(?:0x[0-9a-fA-F_]+|\d[\d_]*(?:\.\d+)?)\b'
+      scope: constant.numeric.dafny
+    - match: ':=|::|[=<>!+*/%&|^-]+'
+      scope: keyword.operator.dafny
+  string:
+    - meta_scope: string.quoted.double.dafny
+    - match: '\\.'
+      scope: constant.character.escape.dafny
+    - match: '"'
+      pop: true
+  comment:
+    - meta_scope: comment.block.dafny
+    - match: '/\*'
+      push: comment
+    - match: '\*/'
+      pop: true

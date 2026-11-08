@@ -1,0 +1,42 @@
+%YAML 1.2
+---
+name: EdgeQL
+file_extensions: [edgeql, esdl]
+scope: source.edgeql
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.edgeql
+    - match: '\$([A-Za-z_]\w*)?\$'
+      push:
+        - meta_scope: string.quoted.other.dollar.edgeql
+        - match: '\$\1\$'
+          pop: true
+    - match: "'"
+      push: single
+    - match: '"'
+      push: double
+    - match: '(?i)\b(?:select|insert|update|delete|with|for|union|filter|order|by|offset|limit|set|group|using|into|by|create|alter|drop|type|property|link|module|function|constraint|index|alias|abstract|extending|required|multi|single|optional|on|target|if|else|exists|detached|global|access|policy|allow|deny|migration|start|commit|transaction|and|or|not|in|is|as)\b'
+      scope: keyword.control.edgeql
+    - match: '\b(?:str|bool|int16|int32|int64|float32|float64|decimal|bigint|uuid|datetime|duration|bytes|json|array|tuple|enum)\b'
+      scope: storage.type.edgeql
+    - match: '(?i)\b(?:true|false)\b'
+      scope: constant.language.edgeql
+    - match: '\$[A-Za-z_]\w*'
+      scope: variable.parameter.edgeql
+    - match: '\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?n?\b'
+      scope: constant.numeric.edgeql
+    - match: '::|:=|[=<>!+*/%-]+'
+      scope: keyword.operator.edgeql
+  single:
+    - meta_scope: string.quoted.single.edgeql
+    - match: '\\.'
+      scope: constant.character.escape.edgeql
+    - match: "'"
+      pop: true
+  double:
+    - meta_scope: string.quoted.double.edgeql
+    - match: '\\.'
+      scope: constant.character.escape.edgeql
+    - match: '"'
+      pop: true

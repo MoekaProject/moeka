@@ -1,0 +1,25 @@
+%YAML 1.2
+---
+name: Fennel
+file_extensions: [fnl]
+first_line_match: '^#!.*\bfennel\b'
+scope: source.fennel
+contexts:
+  main:
+    - match: ';.*$'
+      scope: comment.line.semicolon.fennel
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.fennel
+        - match: '\\.'
+          scope: constant.character.escape.fennel
+        - match: '"'
+          pop: true
+    - match: ':[^\s()\[\]{}";]+'
+      scope: string.unquoted.keyword.fennel
+    - match: '(?<![\w-])(?:fn|lambda|local|var|set|let|if|when|each|for|while|do|values|match|case|collect|icollect|fcollect|accumulate|import-macros|macro|macros|require-macros|include|eval-compiler|quote|unquote|and|or|not)(?![\w-])'
+      scope: keyword.control.fennel
+    - match: '\b(?:true|false|nil)\b'
+      scope: constant.language.fennel
+    - match: '(?<![\w-])-?(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w-])'
+      scope: constant.numeric.fennel

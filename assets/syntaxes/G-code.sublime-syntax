@@ -1,0 +1,35 @@
+%YAML 1.2
+---
+name: G-code
+file_extensions: [gcode, gco]
+scope: source.gcode
+contexts:
+  main:
+    - match: ';.*$'
+      scope: comment.line.semicolon.gcode
+    - match: '\('
+      push:
+        - meta_scope: comment.block.gcode
+        - match: '\)'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.gcode
+        - match: '\\.'
+          scope: constant.character.escape.gcode
+        - match: '"'
+          pop: true
+    - match: '(?i)[GM]\s*[0-9]+(?:\.[0-9]+)?'
+      scope: keyword.control.gcode
+    - match: '(?i)[NOT]\s*[0-9]+'
+      scope: entity.name.label.gcode
+    - match: '(?i)[XYZABCUVWIJKRFEHSDPQ](?=\s*[+-]?(?:[0-9.]|#|\[))'
+      scope: variable.parameter.gcode
+    - match: '#(?:[0-9]+|<[^>\n]+>)'
+      scope: variable.other.gcode
+    - match: '(?i)\b(?:IF|THEN|ELSE|ENDIF|WHILE|DO|END|GOTO|SUB|ENDSUB|CALL|RETURN|REPEAT|ENDREPEAT|AND|OR|XOR|MOD|EQ|NE|GT|GE|LT|LE)\b'
+      scope: keyword.control.gcode
+    - match: '[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)'
+      scope: constant.numeric.gcode
+    - match: '[=+*/%-]'
+      scope: keyword.operator.gcode

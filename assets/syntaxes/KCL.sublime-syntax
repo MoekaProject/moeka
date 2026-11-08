@@ -1,0 +1,66 @@
+%YAML 1.2
+---
+name: KCL
+file_extensions: [k]
+scope: source.kcl
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.kcl
+    - match: '"""'
+      push:
+        - meta_scope: string.quoted.triple.double.kcl
+        - match: '\\.'
+          scope: constant.character.escape.kcl
+        - match: '"""'
+          pop: true
+        - include: interpolation
+    - match: "'''"
+      push:
+        - meta_scope: string.quoted.triple.single.kcl
+        - match: '\\.'
+          scope: constant.character.escape.kcl
+        - match: "'''"
+          pop: true
+        - include: interpolation
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.kcl
+        - match: '\\.'
+          scope: constant.character.escape.kcl
+        - include: interpolation
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.kcl
+        - match: '\\.'
+          scope: constant.character.escape.kcl
+        - include: interpolation
+        - match: "'"
+          pop: true
+    - match: '\b(?:schema|mixin|protocol|rule|check|type|import|as|assert|if|elif|else|for|in|all|any|map|filter|lambda|and|or|not|is|relaxed|final)\b'
+      scope: keyword.control.kcl
+    - match: '\b(?:str|int|float|bool|any)\b'
+      scope: storage.type.kcl
+    - match: '\b(?:True|False|None|Undefined)\b'
+      scope: constant.language.kcl
+    - match: '@[A-Za-z_][A-Za-z0-9_.]*'
+      scope: entity.name.function.decorator.kcl
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.type.kcl
+    - match: '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]+)?)(?:[numkKMGTPE]i?)?\b'
+      scope: constant.numeric.kcl
+    - match: '==|!=|<=|>=|//|\*\*|[=+*/%<>!&|^~?:-]'
+      scope: keyword.operator.kcl
+  interpolation:
+    - match: '\$\{'
+      push: expression
+  expression:
+    - clear_scopes: 1
+    - meta_scope: meta.interpolation.kcl
+    - match: '\}'
+      pop: true
+    - match: '\{'
+      push: expression
+    - include: main

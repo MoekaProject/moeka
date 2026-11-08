@@ -1,0 +1,32 @@
+%YAML 1.2
+---
+name: TLA+
+file_extensions: [tla]
+scope: source.tla
+contexts:
+  main:
+    - match: '\\\*.*$'
+      scope: comment.line.tla
+    - match: '\(\*'
+      push: comment
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.tla
+        - match: '\\.'
+          scope: constant.character.escape.tla
+        - match: '"'
+          pop: true
+    - match: '\b(?:MODULE|EXTENDS|INSTANCE|WITH|CONSTANTS?|VARIABLES?|ASSUME|THEOREM|LEMMA|PROOF|BY|OBVIOUS|OMITTED|QED|LET|IN|IF|THEN|ELSE|CASE|OTHER|CHOOSE|EXCEPT|UNCHANGED|ENABLED|DOMAIN|SUBSET|UNION|LOCAL|RECURSIVE|LAMBDA)\b'
+      scope: keyword.control.tla
+    - match: '\b(?:TRUE|FALSE|BOOLEAN|Nat|Int|Real|STRING)\b'
+      scope: constant.language.tla
+    - match: '\\(?:in|notin|cup|cap|subseteq|A|E|neg|lor|land|div|mod|leq|geq|times)\b|==|=>|<=>|/\\|\\/|[=+*/<>!#~^-]+'
+      scope: keyword.operator.tla
+    - match: '\b\d+\b'
+      scope: constant.numeric.tla
+  comment:
+    - meta_scope: comment.block.tla
+    - match: '\(\*'
+      push: comment
+    - match: '\*\)'
+      pop: true

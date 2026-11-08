@@ -1,0 +1,44 @@
+%YAML 1.2
+---
+name: AutoHotkey
+file_extensions: [ahk, ahkl]
+scope: source.autohotkey
+contexts:
+  main:
+    - match: '^\s*;.*$|(?<=\s);.*$'
+      scope: comment.line.semicolon.autohotkey
+    - match: '^\s*/\*'
+      push:
+        - meta_scope: comment.block.autohotkey
+        - match: '^\s*\*/'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.autohotkey
+        - match: '`.|""'
+          scope: constant.character.escape.autohotkey
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.autohotkey
+        - match: "`.|''"
+          scope: constant.character.escape.autohotkey
+        - match: "'"
+          pop: true
+    - match: '^\s*#[A-Za-z][A-Za-z0-9_]*'
+      scope: keyword.control.directive.autohotkey
+    - match: '^\s*[^;\s].*?::'
+      scope: entity.name.function.hotkey.autohotkey
+    - match: '(?i)\b(?:if|else|loop|while|for|in|until|break|continue|return|switch|case|default|try|catch|finally|throw|class|extends|global|local|static|unset|and|or|not|is|as|new)\b'
+      scope: keyword.control.autohotkey
+    - match: '(?i)\bA_[A-Za-z0-9_]+\b'
+      scope: variable.language.autohotkey
+    - match: '(?i)\b(?:true|false)\b'
+      scope: constant.language.autohotkey
+    - match: '(?i)\b(?:MsgBox|Send|SendInput|SendText|Sleep|Run|RunWait|SetTimer|Hotkey|Hotstring|WinActivate|WinExist|WinWait|WinClose|FileRead|FileAppend|FileDelete|DirCreate|RegRead|RegWrite|DllCall|ComObject|InputBox|Click|MouseMove|GetKeyState|StrLen|SubStr|StrReplace|RegExMatch|RegExReplace)\b'
+      scope: support.function.autohotkey
+    - match: '\b(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\.[0-9]+)?)\b'
+      scope: constant.numeric.autohotkey
+    - match: ':=|=>|==|!=|<>|&&|\|\||\?\?|[=+*/%<>!&|^~?:.-]+'
+      scope: keyword.operator.autohotkey

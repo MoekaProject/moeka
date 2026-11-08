@@ -1,0 +1,28 @@
+%YAML 1.2
+---
+name: Hy
+file_extensions: [hy]
+first_line_match: '^#!.*\bhy(?:\s|$)'
+scope: source.hy
+contexts:
+  main:
+    - match: ';.*$'
+      scope: comment.line.semicolon.hy
+    - match: '"'
+      push: string
+    - match: '(?<![\w-])(?:defn|defclass|defmacro|setv|let|fn|do|if|when|cond|for|while|try|except|finally|raise|return|yield|import|require|with|match|and|or|not|del|global|nonlocal|assert|break|continue)(?![\w-])'
+      scope: keyword.control.hy
+    - match: '\b(?:True|False|None|Ellipsis)\b'
+      scope: constant.language.hy
+    - match: ':[A-Za-z_][\w-]*'
+      scope: constant.other.keyword.hy
+    - match: '\b(?:0x[0-9a-fA-F]+|0b[01]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b'
+      scope: constant.numeric.hy
+    - match: '[`~]|#\*{1,2}|[+*/%=<>!-]+'
+      scope: keyword.operator.hy
+  string:
+    - meta_scope: string.quoted.double.hy
+    - match: '\\.'
+      scope: constant.character.escape.hy
+    - match: '"'
+      pop: true

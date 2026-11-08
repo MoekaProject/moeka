@@ -1,0 +1,43 @@
+%YAML 1.2
+---
+name: Starlark
+file_extensions: [bzl, star, bazel, BUILD, WORKSPACE]
+scope: source.starlark
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.starlark
+    - match: '"""'
+      push:
+        - meta_scope: string.quoted.triple.double.starlark
+        - match: '"""'
+          pop: true
+    - match: "'''"
+      push:
+        - meta_scope: string.quoted.triple.single.starlark
+        - match: "'''"
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.starlark
+        - match: '\\.'
+          scope: constant.character.escape.starlark
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.starlark
+        - match: '\\.'
+          scope: constant.character.escape.starlark
+        - match: "'"
+          pop: true
+    - match: '\b(?:def|load|if|else|elif|for|in|return|break|continue|pass|lambda|and|or|not)\b'
+      scope: keyword.control.starlark
+    - match: '\b(?:True|False|None)\b'
+      scope: constant.language.starlark
+    - match: '\b(?:0[xX][\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b'
+      scope: constant.numeric.starlark
+    - match: '\b[A-Za-z_]\w*(?=\s*\()'
+      scope: variable.function.starlark
+    - match: '[=+*/%<>!&|^~-]+'
+      scope: keyword.operator.starlark

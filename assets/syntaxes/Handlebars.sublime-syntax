@@ -1,0 +1,33 @@
+%YAML 1.2
+---
+name: Handlebars
+file_extensions: [hbs, handlebars]
+scope: text.html.handlebars
+contexts:
+  main:
+    - match: '\{\{!--'
+      push:
+        - meta_scope: comment.block.handlebars
+        - match: '--\}\}'
+          pop: true
+    - match: '\{\{!'
+      push:
+        - meta_scope: comment.block.handlebars
+        - match: '\}\}'
+          pop: true
+    - match: '\{\{\{?'
+      scope: punctuation.section.embedded.begin.handlebars
+      push:
+        - match: '\}\}\}?'
+          pop: true
+        - match: '"[^"]*"|''[^'']*'''
+          scope: string.quoted.handlebars
+        - match: '[#/^>~]|(?<![\w-])(?:else|if|unless|each|with|lookup|log)(?![\w-])'
+          scope: keyword.control.handlebars
+        - match: '\b(?:true|false|null|undefined)\b'
+          scope: constant.language.handlebars
+        - match: '\b\d+(?:\.\d+)?\b'
+          scope: constant.numeric.handlebars
+        - match: '@?[A-Za-z_][\w./-]*'
+          scope: variable.other.handlebars
+    - include: scope:text.html.basic

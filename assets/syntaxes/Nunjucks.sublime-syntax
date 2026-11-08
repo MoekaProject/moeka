@@ -1,0 +1,38 @@
+%YAML 1.2
+---
+name: Nunjucks
+file_extensions: [njk, nunjucks]
+scope: text.html.nunjucks
+contexts:
+  main:
+    - match: '\{#'
+      push:
+        - meta_scope: comment.block.nunjucks
+        - match: '#\}'
+          pop: true
+    - match: '\{\{'
+      scope: punctuation.section.embedded.begin.nunjucks
+      push:
+        - match: '-?\}\}'
+          pop: true
+        - include: expression
+    - match: '\{%'
+      scope: punctuation.section.embedded.begin.nunjucks
+      push:
+        - match: '-?%\}'
+          pop: true
+        - include: expression
+    - include: scope:text.html.basic
+  expression:
+    - match: '"[^"]*"|''[^'']*'''
+      scope: string.quoted.nunjucks
+    - match: '\b(?:if|elif|else|endif|for|endfor|in|block|endblock|extends|include|import|from|macro|endmacro|call|endcall|set|endset|filter|endfilter|and|or|not|is|as)\b'
+      scope: keyword.control.nunjucks
+    - match: '\b(?:true|false|none|null|undefined)\b'
+      scope: constant.language.nunjucks
+    - match: '\b\d+(?:\.\d+)?\b'
+      scope: constant.numeric.nunjucks
+    - match: '\b[A-Za-z_]\w*'
+      scope: variable.other.nunjucks
+    - match: '[=+*/%<>!|:-]+'
+      scope: keyword.operator.nunjucks

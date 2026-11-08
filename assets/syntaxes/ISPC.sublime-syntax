@@ -1,0 +1,37 @@
+%YAML 1.2
+---
+name: ISPC
+file_extensions: [ispc, isph]
+scope: source.ispc
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.ispc
+    - match: '/\*'
+      push: comment
+    - match: '^\s*#\s*\w+'
+      scope: keyword.control.preprocessor.ispc
+    - match: '"'
+      push: string
+    - match: '\b(?:uniform|varying|unmasked|export|extern|task|launch|sync|foreach|foreach_active|foreach_unique|foreach_tiled|cif|cfor|cwhile|cdo|if|else|for|while|do|switch|case|default|break|continue|return|struct|enum|typedef|const|static|inline|sizeof|new|delete|soa)\b'
+      scope: keyword.control.ispc
+    - match: '\b(?:void|bool|int|unsigned|int8|int16|int32|int64|uint8|uint16|uint32|uint64|float|double)\b'
+      scope: storage.type.ispc
+    - match: '\b(?:programIndex|programCount|taskIndex|taskCount|threadIndex|threadCount)\b'
+      scope: variable.language.ispc
+    - match: '\b(?:true|false|NULL)\b'
+      scope: constant.language.ispc
+    - match: '\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)[uUfFlL]*\b'
+      scope: constant.numeric.ispc
+    - match: '[=<>!+*/%&|^~-]+'
+      scope: keyword.operator.ispc
+  string:
+    - meta_scope: string.quoted.double.ispc
+    - match: '\\.'
+      scope: constant.character.escape.ispc
+    - match: '"'
+      pop: true
+  comment:
+    - meta_scope: comment.block.ispc
+    - match: '\*/'
+      pop: true

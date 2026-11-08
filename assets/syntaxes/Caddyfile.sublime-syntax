@@ -1,0 +1,19 @@
+%YAML 1.2
+---
+name: Caddyfile
+file_extensions: [Caddyfile, caddyfile]
+scope: source.caddyfile
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.caddyfile
+    - match: '^\s*(?:import|bind|respond|reverse_proxy|file_server|root|encode|handle|handle_path|route|redir|rewrite|header|request_body|tls|log|php_fastcgi|try_files|basic_auth|basicauth|abort|error|vars|map|metrics)\b'
+      scope: keyword.control.caddyfile
+    - match: '\{[A-Za-z_][\w.]*\}'
+      scope: variable.other.caddyfile
+    - match: '@[\w-]+'
+      scope: entity.name.function.caddyfile
+    - match: '"(?:\\.|[^"\\])*"'
+      scope: string.quoted.double.caddyfile
+    - match: '\b\d+(?:ms|s|m|h|kb|mb)?\b'
+      scope: constant.numeric.caddyfile

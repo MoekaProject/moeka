@@ -1,0 +1,38 @@
+%YAML 1.2
+---
+name: Wren
+file_extensions: [wren]
+first_line_match: '^#!.*\bwren\b'
+scope: source.wren
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.wren
+    - match: '/\*'
+      push: comment
+    - match: '"""'
+      push:
+        - meta_scope: string.quoted.triple.double.wren
+        - match: '"""'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.wren
+        - match: '\\.'
+          scope: constant.character.escape.wren
+        - match: '"'
+          pop: true
+    - match: '\b(?:as|break|class|construct|continue|else|for|foreign|if|import|in|is|return|static|super|this|var|while)\b'
+      scope: keyword.control.wren
+    - match: '\b(?:true|false|null)\b'
+      scope: constant.language.wren
+    - match: '\b(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b'
+      scope: constant.numeric.wren
+    - match: '[=+*/%<>!&|^~?:-]+'
+      scope: keyword.operator.wren
+  comment:
+    - meta_scope: comment.block.wren
+    - match: '/\*'
+      push: comment
+    - match: '\*/'
+      pop: true

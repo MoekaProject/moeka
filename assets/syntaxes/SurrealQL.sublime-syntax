@@ -1,0 +1,40 @@
+%YAML 1.2
+---
+name: SurrealQL
+file_extensions: [surql]
+scope: source.surrealql
+contexts:
+  main:
+    - match: '(?:--|//).*$'
+      scope: comment.line.surrealql
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.surrealql
+        - match: '\*/'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.surrealql
+        - match: '\\.'
+          scope: constant.character.escape.surrealql
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.surrealql
+        - match: '\\.'
+          scope: constant.character.escape.surrealql
+        - match: "'"
+          pop: true
+    - match: '\$[A-Za-z_]\w*'
+      scope: variable.other.surrealql
+    - match: '(?i)\b(?:SELECT|FROM|WHERE|FETCH|CREATE|INSERT|INTO|UPDATE|UPSERT|DELETE|RELATE|SET|CONTENT|MERGE|PATCH|RETURN|LET|DEFINE|REMOVE|TABLE|FIELD|INDEX|EVENT|FUNCTION|PARAM|NAMESPACE|DATABASE|ACCESS|PERMISSIONS|SCHEMAFULL|SCHEMALESS|ON|TYPE|VALUE|ASSERT|DEFAULT|UNIQUE|IF|ELSE|FOR|IN|BEGIN|COMMIT|CANCEL|TRANSACTION|LIVE|ORDER|BY|GROUP|LIMIT|START|SPLIT|AND|OR|NOT|AS|ONLY)\b'
+      scope: keyword.control.surrealql
+    - match: '\b(?:true|false|NONE|NULL)\b'
+      scope: constant.language.surrealql
+    - match: '\b\d+(?:\.\d+)?(?:dec|f|ms|s|m|h|d|w|y)?\b'
+      scope: constant.numeric.surrealql
+    - match: '\b[A-Za-z_]\w*(?:::\w+)*(?=\s*\()'
+      scope: support.function.surrealql
+    - match: '->|<-|[=+*/%<>!&|?:-]+'
+      scope: keyword.operator.surrealql

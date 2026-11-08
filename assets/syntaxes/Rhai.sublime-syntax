@@ -1,0 +1,39 @@
+%YAML 1.2
+---
+name: Rhai
+file_extensions: [rhai]
+scope: source.rhai
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.rhai
+    - match: '/\*'
+      push: comment
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.rhai
+        - match: '\\.'
+          scope: constant.character.escape.rhai
+        - match: '"'
+          pop: true
+    - match: '`'
+      push:
+        - meta_scope: string.quoted.other.rhai
+        - match: '`'
+          pop: true
+    - match: "'(?:\\\\.|[^'\\\\])'"
+      scope: string.quoted.single.rhai
+    - match: '\b(?:let|const|fn|private|if|else|switch|for|in|while|loop|do|until|break|continue|return|throw|try|catch|import|export|as)\b'
+      scope: keyword.control.rhai
+    - match: '\b(?:true|false|this)\b'
+      scope: constant.language.rhai
+    - match: '\b(?:0[xX][\da-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)\b'
+      scope: constant.numeric.rhai
+    - match: '[=+*/%<>!&|^~?:-]+'
+      scope: keyword.operator.rhai
+  comment:
+    - meta_scope: comment.block.rhai
+    - match: '/\*'
+      push: comment
+    - match: '\*/'
+      pop: true

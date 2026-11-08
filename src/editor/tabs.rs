@@ -1,0 +1,3483 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use gpui::{
+    AnyElement, Context, CursorStyle, DragMoveEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    SharedString, Window, div, prelude::*, px,
+};
+use unicode_segmentation::UnicodeSegmentation;
+
+use super::*;
+use crate::platform::fs_task;
+
+/// Documents larger than this keep no text in the reopen list; they are read
+/// back from disk. Smaller ones stay resident so reopening is instant.
+const RECENTLY_CLOSED_RESIDENT_TEXT_LIMIT: usize = 256 * 1024;
+const TAB_TITLE_MAX_DISPLAY_UNITS: usize = 40;
+
+fn first_document_heading(text: &str) -> Option<String> {
+    let buffer = Buffer::from_text(text);
+    first_buffer_heading(&buffer)
+}
+
+fn first_buffer_heading(buffer: &Buffer) -> Option<String> {
+    super::fold::source_fold_structure(buffer, &[])
+        .0
+        .into_iter()
+        .find_map(|(line, level)| {
+            let heading = super::outline::source_outline_heading(buffer, line, level);
+            plain_heading_text(&format!("# {}", heading.text))
+        })
+}
+
+fn plain_heading_text(text: &str) -> Option<String> {
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+    let options = Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+        | Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS
+        | Options::ENABLE_MATH
+        | Options::ENABLE_HEADING_ATTRIBUTES;
+    let mut heading = None;
+    for event in Parser::new_ext(text, options) {
+        match event {
+            Event::Start(Tag::Heading { .. }) => heading = Some(String::new()),
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some(text) = heading.take()
+                    && !text.trim().is_empty()
+                {
+                    return Some(text.trim().to_string());
+                }
+            }
+            Event::Text(text) | Event::Code(text) | Event::InlineMath(text) => {
+                if let Some(heading) = heading.as_mut() {
+                    heading.push_str(&text);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some(heading) = heading.as_mut() {
+                    heading.push(' ');
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+enum TabDropTarget<'a> {
+    Before(&'a str),
+    After(&'a str),
+    End,
+}
+
+fn take_generated_preview_resource<T: Clone>(
+    resources: &mut HashMap<String, T>,
+    key: &str,
+    shared: bool,
+) -> Option<T> {
+    if shared {
+        resources.get(key).cloned()
+    } else {
+        resources.remove(key)
+    }
+}
+
+fn restore_generated_preview_resources<T>(
+    resources: &mut HashMap<String, T>,
+    saved: HashMap<String, T>,
+    prefer_live_keys: &HashSet<String>,
+) {
+    resources.extend(
+        saved
+            .into_iter()
+            .filter(|(key, _)| !prefer_live_keys.contains(key)),
+    );
+}
+
+impl EditorView {
+    pub(super) fn stash_active_tab_generated_preview_cache(&mut self) {
+        let Some(active_tab_id) = self.active_tab_id.clone() else {
+            return;
+        };
+
+        // A delayed rebuild belongs to the tab that scheduled it. Dropping the
+        // task prevents it from rebuilding whichever tab becomes active next.
+        self.generated_preview_rerender_task = None;
+        let shared_keys =
+            Self::other_pane_generated_preview_keys(&self.panes, self.focused_pane_id);
+        let keys = std::mem::take(&mut self.generated_preview_keys);
+        let mut cache = GeneratedPreviewTabCache {
+            code_mode_preview_key: self.code_mode_preview_key.take(),
+            rerender_pending: std::mem::take(&mut self.generated_preview_rerender_pending),
+            ..GeneratedPreviewTabCache::default()
+        };
+        for key in &keys {
+            let shared = shared_keys.contains(key);
+            if let Some(image) = take_generated_preview_resource(&mut self.image_cache, key, shared)
+            {
+                cache.images.insert(key.clone(), image);
+            }
+            if let Some(svg) =
+                take_generated_preview_resource(&mut self.generated_preview_svg_cache, key, shared)
+            {
+                cache.svgs.insert(key.clone(), svg);
+            }
+            if let Some(overlay) = take_generated_preview_resource(
+                &mut self.generated_preview_overlay_cache,
+                key,
+                shared,
+            ) {
+                cache.overlays.insert(key.clone(), overlay);
+            }
+            if let Some(view) =
+                take_generated_preview_resource(&mut self.generated_preview_views, key, shared)
+            {
+                cache.views.insert(key.clone(), view);
+            }
+        }
+        cache.keys = keys;
+
+        if cache.keys.is_empty()
+            && cache.images.is_empty()
+            && cache.svgs.is_empty()
+            && cache.overlays.is_empty()
+            && cache.views.is_empty()
+        {
+            self.tab_generated_preview_cache.remove(&active_tab_id);
+        } else {
+            self.tab_generated_preview_cache
+                .insert(active_tab_id, cache);
+        }
+    }
+
+    fn restore_generated_preview_cache_for_tab(&mut self, tab_id: &str) {
+        let Some(cache) = self.tab_generated_preview_cache.remove(tab_id) else {
+            self.generated_preview_keys.clear();
+            self.code_mode_preview_key = None;
+            self.generated_preview_rerender_pending = false;
+            return;
+        };
+
+        let shared_keys =
+            Self::other_pane_generated_preview_keys(&self.panes, self.focused_pane_id);
+        let mut prefer_live_keys = shared_keys.clone();
+        prefer_live_keys.retain(|key| {
+            self.image_cache.contains_key(key)
+                || self.generated_preview_svg_cache.contains_key(key)
+                || self.generated_preview_overlay_cache.contains_key(key)
+        });
+        // Choose a whole render bundle: a missing live overlay may have been
+        // invalidated by a newer SVG and must not be filled from the old tab.
+        // Views can still restore their last state if no live view exists.
+        let mut views = cache.views;
+        views.retain(|key, _| {
+            !shared_keys.contains(key) || !self.generated_preview_views.contains_key(key)
+        });
+        self.generated_preview_keys = cache.keys;
+        restore_generated_preview_resources(&mut self.image_cache, cache.images, &prefer_live_keys);
+        restore_generated_preview_resources(
+            &mut self.generated_preview_svg_cache,
+            cache.svgs,
+            &prefer_live_keys,
+        );
+        restore_generated_preview_resources(
+            &mut self.generated_preview_overlay_cache,
+            cache.overlays,
+            &prefer_live_keys,
+        );
+        self.generated_preview_views.extend(views);
+        self.code_mode_preview_key = cache.code_mode_preview_key;
+        self.generated_preview_rerender_pending = cache.rerender_pending;
+    }
+
+    pub(super) fn stash_active_tab_layout_cache(&mut self) {
+        let Some(active_tab_id) = self.active_tab_id.clone() else {
+            return;
+        };
+
+        if self.table_source.is_some() || self.line_display_info.is_empty() {
+            self.tab_layout_cache.remove(&active_tab_id);
+            return;
+        }
+
+        let line_display_info = self.take_line_display_info();
+        self.tab_layout_cache
+            .insert(active_tab_id, (line_display_info, self.last_text_width));
+    }
+
+    fn restore_layout_cache_for_tab(&mut self, tab_id: &str) {
+        if let Some((line_display_info, last_text_width)) = self.tab_layout_cache.remove(tab_id) {
+            self.set_line_display_info(line_display_info);
+            self.last_text_width = last_text_width;
+        } else {
+            self.clear_line_display_info();
+        }
+    }
+
+    /// Document images are decoded at full resolution and cached by path for
+    /// the whole session, so a handful of photos is hundreds of megabytes.
+    /// With no tab left in the window nothing can display them; the visible
+    /// image pass reloads whatever the next document needs.
+    fn retire_tab_generated_preview_cache(&mut self, tab_id: &str) {
+        let Some(cache) = self.tab_generated_preview_cache.remove(tab_id) else {
+            return;
+        };
+        for (key, image) in cache.images {
+            if let Some(image) = image {
+                let still_shared = self
+                    .image_cache
+                    .get(&key)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|live| Arc::ptr_eq(live, &image));
+                if !still_shared {
+                    self.retired_images.push(image);
+                }
+            }
+        }
+        for (key, (_, image)) in cache.overlays {
+            let still_shared = self
+                .generated_preview_overlay_cache
+                .get(&key)
+                .is_some_and(|(_, live)| Arc::ptr_eq(live, &image));
+            if !still_shared {
+                self.retired_images.push(image);
+            }
+        }
+    }
+
+    fn release_document_image_cache(&mut self) {
+        let generated_keys = std::mem::take(&mut self.generated_preview_keys);
+        let stale_keys = self
+            .image_cache
+            .keys()
+            .filter(|key| !generated_keys.contains(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        for cache_key in stale_keys {
+            self.retire_image_cache_entry(&cache_key);
+        }
+        self.image_cache.shrink_to_fit();
+        self.generated_preview_keys = generated_keys;
+    }
+
+    pub(super) fn ensure_settings_tab_first(&mut self) {
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.kind == TabKind::Settings)
+        {
+            if index != 0 {
+                let settings_tab = self.tabs.remove(index);
+                self.tabs.insert(0, settings_tab);
+            }
+        }
+    }
+
+    pub(crate) fn sidebar_root_name(&self) -> String {
+        if self.sidebar_root.as_os_str().is_empty() {
+            return self.t(crate::i18n::TextKey::OpenFolder).to_string();
+        }
+
+        self.sidebar_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.sidebar_root.display().to_string())
+    }
+
+    pub(crate) fn active_tab_index(&self) -> Option<usize> {
+        let active_tab_id = self.active_tab_id.as_ref()?;
+        if let Some(index) = self.active_tab_index_cache.get()
+            && self
+                .tabs
+                .get(index)
+                .is_some_and(|tab| tab.id == *active_tab_id)
+        {
+            return Some(index);
+        }
+
+        let index = self.tabs.iter().position(|tab| tab.id == *active_tab_id)?;
+        self.active_tab_index_cache.set(Some(index));
+        Some(index)
+    }
+
+    pub(crate) fn active_tab_is_settings(&self) -> bool {
+        self.active_tab_id
+            .as_ref()
+            .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
+            .is_some_and(|tab| tab.kind == TabKind::Settings)
+    }
+
+    pub(crate) fn request_editor_focus(&mut self, cx: &mut Context<Self>) {
+        self.focused_sidebar_path = None;
+        self.pending_editor_focus = true;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(16))
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.focused_sidebar_path = None;
+                this.pending_editor_focus = true;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn on_tab_bar_drag_space_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tab_drag_candidate_id.is_some() || self.tab_dragging_id.is_some() {
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
+
+        self.focused_sidebar_path = None;
+        window.prevent_default();
+        cx.stop_propagation();
+
+        if event.click_count >= 2 {
+            crate::platform::window_chrome::toggle_maximize(window);
+        } else {
+            crate::platform::window_chrome::start_drag(window);
+        }
+
+        cx.notify();
+    }
+
+    fn preview_tab_index(&self) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| tab.kind == TabKind::Editor && tab.is_preview)
+    }
+
+    fn tab_drop_changes_order_for(
+        current_tab_ids: &[String],
+        settings_tab_id: Option<&str>,
+        from_id: &str,
+        target: TabDropTarget<'_>,
+    ) -> bool {
+        let Some(from_idx) = current_tab_ids.iter().position(|tab_id| tab_id == from_id) else {
+            return false;
+        };
+
+        let mut reordered = current_tab_ids.to_vec();
+        let moved = reordered.remove(from_idx);
+
+        match target {
+            TabDropTarget::Before(to_id) => {
+                let Some(to_idx) = reordered.iter().position(|tab_id| tab_id == to_id) else {
+                    return false;
+                };
+                reordered.insert(to_idx, moved);
+            }
+            TabDropTarget::After(to_id) => {
+                let Some(to_idx) = reordered.iter().position(|tab_id| tab_id == to_id) else {
+                    return false;
+                };
+                reordered.insert((to_idx + 1).min(reordered.len()), moved);
+            }
+            TabDropTarget::End => reordered.push(moved),
+        }
+
+        if let Some(settings_tab_id) = settings_tab_id
+            && let Some(settings_idx) = reordered
+                .iter()
+                .position(|tab_id| tab_id == settings_tab_id)
+            && settings_idx != 0
+        {
+            let settings_tab = reordered.remove(settings_idx);
+            reordered.insert(0, settings_tab);
+        }
+
+        reordered != current_tab_ids
+    }
+
+    fn editor_tab_index_for_path(&self, path: &Path) -> Option<usize> {
+        self.tabs.iter().position(|tab| {
+            tab.kind == TabKind::Editor
+                && tab
+                    .path
+                    .as_deref()
+                    .or_else(|| session_store::restoring_path(self, &tab.id))
+                    .is_some_and(|tab_path| crate::platform::paths::same_file_path(tab_path, path))
+        })
+    }
+
+    fn tab_navigation_target_for_tab(tab: &OpenTab) -> TabNavigationTarget {
+        match tab.kind {
+            TabKind::Settings => TabNavigationTarget::Settings,
+            _ => tab
+                .path
+                .as_ref()
+                .map(|path| TabNavigationTarget::File(path.clone()))
+                .unwrap_or_else(|| TabNavigationTarget::LiveTab(tab.id.clone())),
+        }
+    }
+
+    fn active_tab_navigation_target(&self) -> Option<TabNavigationTarget> {
+        self.active_tab_id
+            .as_ref()
+            .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
+            .map(Self::tab_navigation_target_for_tab)
+    }
+
+    fn open_tab_index_for_navigation_target(&self, target: &TabNavigationTarget) -> Option<usize> {
+        match target {
+            TabNavigationTarget::Settings => self
+                .tabs
+                .iter()
+                .position(|tab| tab.kind == TabKind::Settings),
+            TabNavigationTarget::File(path) => self.editor_tab_index_for_path(path),
+            TabNavigationTarget::LiveTab(tab_id) => {
+                self.tabs.iter().position(|tab| &tab.id == tab_id)
+            }
+        }
+    }
+
+    fn remove_tab_navigation_target(&mut self, target: &TabNavigationTarget) {
+        self.tab_navigation_history.retain(|entry| entry != target);
+        self.tab_navigation_index = self
+            .tab_navigation_index
+            .min(self.tab_navigation_history.len().saturating_sub(1));
+    }
+
+    fn activate_previous_open_tab_after_close(
+        &mut self,
+        removed: &OpenTab,
+        removed_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let removed_target = Self::tab_navigation_target_for_tab(removed);
+        self.remove_tab_navigation_target(&removed_target);
+
+        for history_index in (0..self.tab_navigation_history.len()).rev() {
+            let target = self.tab_navigation_history[history_index].clone();
+            if let Some(index) = self.open_tab_index_for_navigation_target(&target) {
+                self.tab_navigation_suspended = true;
+                self.activate_tab_by_index(index, cx);
+                self.tab_navigation_suspended = false;
+                self.tab_navigation_index = history_index;
+                return;
+            }
+        }
+
+        let fallback_index = removed_index
+            .saturating_sub(1)
+            .min(self.tabs.len().saturating_sub(1));
+        self.activate_tab_by_index(fallback_index, cx);
+    }
+
+    fn record_active_tab_navigation_target(&mut self) {
+        if self.tab_navigation_suspended {
+            return;
+        }
+        let Some(target) = self.active_tab_navigation_target() else {
+            return;
+        };
+        if self.tab_navigation_history.get(self.tab_navigation_index) == Some(&target) {
+            return;
+        }
+
+        if self.tab_navigation_index + 1 < self.tab_navigation_history.len() {
+            self.tab_navigation_history
+                .truncate(self.tab_navigation_index + 1);
+        }
+
+        if let Some(existing_index) = self
+            .tab_navigation_history
+            .iter()
+            .position(|entry| entry == &target)
+        {
+            self.tab_navigation_history.remove(existing_index);
+            if existing_index < self.tab_navigation_index {
+                self.tab_navigation_index = self.tab_navigation_index.saturating_sub(1);
+            }
+        }
+
+        self.tab_navigation_history.push(target);
+        self.tab_navigation_index = self.tab_navigation_history.len().saturating_sub(1);
+    }
+
+    fn restore_closed_tab(&mut self, closed_tab: OpenTab, cx: &mut Context<Self>) {
+        // A large saved document was closed without keeping its text; read it
+        // back from disk instead of restoring an empty buffer.
+        if closed_tab.snapshot.text.is_empty()
+            && let Some(path) = closed_tab.path.as_ref()
+        {
+            let view = config_store::TabViewState {
+                editor_left_aligned: closed_tab.editor_left_aligned,
+                reading_mode: closed_tab.reading_mode && !closed_tab.source_mode,
+                source_mode: closed_tab.source_mode,
+                source_word_wrap: closed_tab.source_word_wrap,
+                ..Default::default()
+            };
+            self.open_path_in_permanent_tab_with_view(path.clone(), true, Some(view), cx);
+            return;
+        }
+        let tab = Self::tab_for_reopen(self.next_tab_identity(), closed_tab);
+        self.tabs.push(tab);
+        let index = self.tabs.len() - 1;
+        self.activate_tab_by_index(index, cx);
+    }
+
+    fn tab_for_reopen(id: String, closed_tab: OpenTab) -> OpenTab {
+        OpenTab {
+            id,
+            title: closed_tab.title,
+            heading_title_cache: Default::default(),
+            kind: TabKind::Editor,
+            path: closed_tab.path,
+            file_kind: closed_tab.file_kind,
+            editor_left_aligned: closed_tab.editor_left_aligned,
+            reading_mode: closed_tab.reading_mode && !closed_tab.source_mode,
+            source_mode: closed_tab.source_mode,
+            source_word_wrap: closed_tab.source_word_wrap,
+            snapshot: closed_tab.snapshot,
+            image_view: closed_tab.image_view,
+            is_preview: false,
+            is_dirty: false,
+            is_deleted: false,
+            is_pinned: false,
+            recovery: closed_tab.recovery,
+            history: closed_tab.history,
+        }
+    }
+
+    fn apply_reopened_tab_view(tab: &mut OpenTab, view: &config_store::TabViewState) {
+        tab.editor_left_aligned = view.editor_left_aligned;
+        tab.reading_mode = view.reading_mode && !view.source_mode;
+        tab.source_mode = view.source_mode;
+        tab.source_word_wrap = view.source_word_wrap;
+    }
+
+    fn activate_tab_navigation_target(
+        &mut self,
+        target: &TabNavigationTarget,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match target {
+            TabNavigationTarget::Settings => {
+                self.open_settings_tab(cx);
+                true
+            }
+            TabNavigationTarget::File(path) => {
+                if let Some(index) = self.editor_tab_index_for_path(path) {
+                    self.activate_tab_by_index(index, cx);
+                    return true;
+                }
+
+                if let Some(closed_index) = self
+                    .recently_closed_tabs
+                    .iter()
+                    .rposition(|tab| tab.path.as_ref() == Some(path))
+                {
+                    let closed_tab = self.recently_closed_tabs.remove(closed_index);
+                    self.restore_closed_tab(closed_tab, cx);
+                    return true;
+                }
+
+                self.open_path_in_permanent_tab(path.clone(), true, cx);
+                self.editor_tab_index_for_path(path).is_some()
+            }
+            TabNavigationTarget::LiveTab(tab_id) => {
+                if let Some(index) = self.tabs.iter().position(|tab| &tab.id == tab_id) {
+                    self.activate_tab_by_index(index, cx);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    pub(crate) fn can_navigate_tab_history_back(&self) -> bool {
+        self.tab_navigation_index > 0
+    }
+
+    pub(crate) fn can_navigate_tab_history_forward(&self) -> bool {
+        self.tab_navigation_index + 1 < self.tab_navigation_history.len()
+    }
+
+    pub(crate) fn navigate_tab_history_back(&mut self, cx: &mut Context<Self>) {
+        while self.tab_navigation_index > 0 {
+            let target_index = self.tab_navigation_index - 1;
+            let target = self.tab_navigation_history[target_index].clone();
+            self.tab_navigation_suspended = true;
+            let activated = self.activate_tab_navigation_target(&target, cx);
+            self.tab_navigation_suspended = false;
+            if activated {
+                self.tab_navigation_index = target_index;
+                return;
+            }
+
+            self.tab_navigation_history.remove(target_index);
+            self.tab_navigation_index = self.tab_navigation_index.saturating_sub(1);
+        }
+    }
+
+    pub(crate) fn navigate_tab_history_forward(&mut self, cx: &mut Context<Self>) {
+        while self.tab_navigation_index + 1 < self.tab_navigation_history.len() {
+            let target_index = self.tab_navigation_index + 1;
+            let target = self.tab_navigation_history[target_index].clone();
+            self.tab_navigation_suspended = true;
+            let activated = self.activate_tab_navigation_target(&target, cx);
+            self.tab_navigation_suspended = false;
+            if activated {
+                self.tab_navigation_index = target_index;
+                return;
+            }
+
+            self.tab_navigation_history.remove(target_index);
+        }
+    }
+
+    pub(crate) fn switch_to_existing_editor_tab_for_path(
+        &mut self,
+        path: &Path,
+        focus_editor: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.focus_pane_containing_editor_path(path, cx);
+        let Some(index) = self.editor_tab_index_for_path(path) else {
+            return false;
+        };
+        self.activate_tab_by_index(index, cx);
+        if focus_editor {
+            self.request_editor_focus(cx);
+        }
+        true
+    }
+
+    fn load_editor_tab_state_for_bytes(path: &Path, bytes: &[u8]) -> (EditorSnapshot, FileKind) {
+        let file_kind = classify_file_kind_for_bytes(path, bytes);
+        let text = if file_kind.supports_text_buffer() {
+            String::from_utf8_lossy(&bytes).into_owned()
+        } else {
+            String::new()
+        };
+        let cursor_offset = if matches!(file_kind, FileKind::Markdown) {
+            first_markdown_content_line_end(&text)
+                .unwrap_or_else(|| text.find('\n').unwrap_or(text.len()))
+        } else {
+            text.find('\n').unwrap_or(text.len())
+        };
+        (
+            EditorSnapshot {
+                text,
+                cursor_offset,
+                cursor_anchor: cursor_offset,
+                scroll_offset: 0.0,
+                extra_cursors: Vec::new(),
+            },
+            file_kind,
+        )
+    }
+
+    fn build_file_tab(
+        id: String,
+        path: &Path,
+        bytes: &[u8],
+        is_preview: bool,
+        default_left_align: bool,
+    ) -> OpenTab {
+        let (snapshot, file_kind) = Self::load_editor_tab_state_for_bytes(path, bytes);
+        let mut history = history_store::load_tab_history(&id, Some(path), &snapshot);
+        history.saved_text = Some(snapshot.text.clone());
+        let initial_left_aligned = matches!(file_kind, FileKind::Markdown) && default_left_align;
+        OpenTab {
+            id,
+            title: Self::title_for_path(path),
+            heading_title_cache: Default::default(),
+            kind: TabKind::Editor,
+            path: Some(path.to_path_buf()),
+            file_kind: Some(file_kind),
+            editor_left_aligned: initial_left_aligned,
+            reading_mode: false,
+            source_mode: false,
+            source_word_wrap: true,
+            snapshot,
+            image_view: ImageViewState::default(),
+            is_preview,
+            is_dirty: false,
+            is_deleted: false,
+            is_pinned: false,
+            recovery: config_store::TabRecoveryState::default(),
+            history,
+        }
+    }
+
+    /// When `path` is already open in another pane, moves focus there so the
+    /// existing tab is reused instead of opening a duplicate.
+    fn focus_pane_containing_editor_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let owner = self.pane_id_for_editor_path(path).or_else(|| {
+            self.all_tabs()
+                .find(|tab| session_store::restoring_path(self, &tab.id) == Some(path))
+                .and_then(|tab| self.pane_id_for_tab(&tab.id))
+        });
+        if let Some(owner) = owner
+            && owner != self.focused_pane_id
+        {
+            self.focus_pane(owner, cx);
+        }
+    }
+
+    pub(crate) fn open_path_in_preview_tab(
+        &mut self,
+        path: PathBuf,
+        focus_editor: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_pane_containing_editor_path(&path, cx);
+        self.preview_open_epoch = self.preview_open_epoch.wrapping_add(1);
+        if let Some(index) = self.editor_tab_index_for_path(&path) {
+            self.activate_tab_by_index(index, cx);
+            if focus_editor {
+                self.request_editor_focus(cx);
+            }
+            return;
+        }
+        let epoch = self.preview_open_epoch;
+        let pane_id = self.current_pane_id();
+        let tab_id = self.next_tab_identity();
+        let default_left_align = self.app_settings.default_left_align;
+        cx.spawn(async move |this, cx| {
+            let read_path = path.clone();
+            let loaded = fs_task::run("Open preview tab", path.clone(), move || {
+                let bytes = std::fs::read(&read_path)?;
+                Ok(Self::build_file_tab(
+                    tab_id,
+                    &read_path,
+                    &bytes,
+                    true,
+                    default_left_align,
+                ))
+            })
+            .await;
+            this.update(cx, |editor, cx| {
+                editor.with_pane_if_alive(pane_id, |editor| {
+                    if editor.preview_open_epoch != epoch || editor.focused_pane_id != pane_id {
+                        return;
+                    }
+                    let mut tab = match loaded {
+                        Ok(tab) => tab,
+                        Err(error) => {
+                            editor.notify_error(
+                                format!("{}: {error}", editor.t(TextKey::OpenFailed)),
+                                cx,
+                            );
+                            return;
+                        }
+                    };
+                    if let Some(index) = editor.editor_tab_index_for_path(&path) {
+                        editor.activate_tab_by_index(index, cx);
+                    } else {
+                        if let Some(index) = editor.preview_tab_index()
+                            && editor.tabs[index].is_dirty
+                        {
+                            editor.tabs[index].is_preview = false;
+                        }
+                        editor.persist_active_tab_state();
+                        if let Some(index) = editor.preview_tab_index() {
+                            let replaced_id = editor.tabs[index].id.clone();
+                            session_store::forget_restoring_tab(editor, &replaced_id);
+                            tab.id = replaced_id;
+                            editor.tabs[index] = tab;
+                            editor.activate_tab_by_index_without_persist(index, cx);
+                        } else {
+                            editor.tabs.push(tab);
+                            editor.activate_tab_by_index_without_persist(editor.tabs.len() - 1, cx);
+                        }
+                    }
+                    if focus_editor && editor.focused_pane_id == pane_id {
+                        editor.request_editor_focus(cx);
+                    }
+                    editor.apply_pending_workspace_search_match(epoch, cx);
+                    session_store::persist_session(editor);
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn open_path_in_permanent_tab(
+        &mut self,
+        path: PathBuf,
+        focus_editor: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_path_in_permanent_tab_with_view(path, focus_editor, None, cx);
+    }
+
+    fn open_path_in_permanent_tab_with_view(
+        &mut self,
+        path: PathBuf,
+        focus_editor: bool,
+        reopen_view: Option<config_store::TabViewState>,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_pane_containing_editor_path(&path, cx);
+        self.preview_open_epoch = self.preview_open_epoch.wrapping_add(1);
+        if let Some(index) = self.editor_tab_index_for_path(&path) {
+            self.tabs[index].is_preview = false;
+            self.activate_tab_by_index(index, cx);
+            if focus_editor {
+                self.request_editor_focus(cx);
+            }
+            return;
+        }
+        let epoch = self.preview_open_epoch;
+        let pane_id = self.current_pane_id();
+        let tab_id = self.next_tab_identity();
+        let default_left_align = self.app_settings.default_left_align;
+        cx.spawn(async move |this, cx| {
+            let read_path = path.clone();
+            let loaded = fs_task::run("Open tab", path.clone(), move || {
+                let bytes = std::fs::read(&read_path)?;
+                let mut tab =
+                    Self::build_file_tab(tab_id, &read_path, &bytes, false, default_left_align);
+                if let Some(view) = reopen_view {
+                    Self::apply_reopened_tab_view(&mut tab, &view);
+                }
+                Ok(tab)
+            })
+            .await;
+            this.update(cx, |editor, cx| {
+                editor.with_pane_if_alive(pane_id, |editor| {
+                    let tab = match loaded {
+                        Ok(tab) => tab,
+                        Err(error) => {
+                            editor.notify_error(
+                                format!("{}: {error}", editor.t(TextKey::OpenFailed)),
+                                cx,
+                            );
+                            return;
+                        }
+                    };
+                    let latest =
+                        editor.preview_open_epoch == epoch && editor.focused_pane_id == pane_id;
+                    if let Some(index) = editor.editor_tab_index_for_path(&path) {
+                        editor.tabs[index].is_preview = false;
+                        if latest {
+                            editor.activate_tab_by_index(index, cx);
+                        }
+                    } else {
+                        if latest {
+                            editor.persist_active_tab_state();
+                        }
+                        editor.tabs.push(tab);
+                        if latest {
+                            editor.activate_tab_by_index_without_persist(editor.tabs.len() - 1, cx);
+                        }
+                    }
+                    if latest && focus_editor {
+                        editor.request_editor_focus(cx);
+                    }
+                    if latest {
+                        editor.apply_pending_workspace_search_match(epoch, cx);
+                    }
+                    session_store::persist_session(editor);
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn open_external_paths_in_tabs(
+        &mut self,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        // The bounded read reports directories and inaccessible paths, without a UI-thread stat.
+        let file_paths = paths.to_vec();
+        let last_index = file_paths.len().saturating_sub(1);
+
+        for (index, path) in file_paths.into_iter().enumerate() {
+            self.open_path_in_permanent_tab(path, index == last_index, cx);
+        }
+    }
+
+    fn should_track_in_recently_closed(tab: &OpenTab) -> bool {
+        tab.kind == TabKind::Editor && tab.path.is_some() && !tab.is_preview
+    }
+
+    /// Whether a closed tab's text can be dropped because reopening it will
+    /// read the file back from disk. Unsaved or vanished documents only exist
+    /// in memory, so those keep their snapshot.
+    fn closed_tab_can_reload_from_disk(tab: &OpenTab) -> bool {
+        !tab.is_dirty
+            && !tab.is_deleted
+            && tab.snapshot.text.len() > RECENTLY_CLOSED_RESIDENT_TEXT_LIMIT
+            && tab.path.is_some()
+            && tab.history.saved_text.as_deref() == Some(tab.snapshot.text.as_str())
+    }
+
+    pub(crate) fn persist_active_tab_state(&mut self) {
+        self.commit_history_transaction();
+        if let Some(id) = self.active_tab_id.clone() {
+            self.outline_tab_states.insert(
+                id,
+                super::outline::OutlineTabState {
+                    collapsed: self.outline_rail_collapsed_heading_lines.clone(),
+                    scroll: f32::from(self.outline_panel_scroll_handle.offset().y),
+                },
+            );
+        }
+        if let Some(index) = self.active_tab_index() {
+            if matches!(self.tabs[index].kind, TabKind::Editor) {
+                if self.tabs[index]
+                    .file_kind
+                    .as_ref()
+                    .is_some_and(FileKind::supports_text_buffer)
+                {
+                    let snapshot = self.current_snapshot();
+                    self.tabs[index].set_snapshot(snapshot);
+                }
+                self.tabs[index].editor_left_aligned = self.editor_left_aligned;
+                self.tabs[index].reading_mode = self.reading_mode && !self.source_mode;
+                self.tabs[index].source_mode = self.source_mode;
+                self.tabs[index].source_word_wrap = self.source_word_wrap;
+                self.current_file_path = self.tabs[index].path.clone();
+            }
+        }
+    }
+
+    pub(crate) fn activate_tab_by_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        self.persist_active_tab_state();
+        if let Some(tab_id) = self.active_tab_id.clone() {
+            self.persist_recovery_for_tab(&tab_id);
+        }
+        self.stash_active_tab_layout_cache();
+        self.activate_tab_by_index_without_persist(index, cx);
+        session_store::persist_session(self);
+    }
+
+    pub(crate) fn activate_tab_by_index_without_persist(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        // Restoring a tab's scroll position must supersede any pending heading reveal.
+        self.cancel_outline_navigation();
+        self.fold_scroll_guard = None;
+        // Only the metadata is copied out: cloning the whole `OpenTab` here
+        // duplicated the document text and the undo history on every tab
+        // switch, which is hundreds of megabytes on a large file.
+        let tab_id = self.tabs[index].id.clone();
+        let tab_kind = self.tabs[index].kind;
+        let tab_file_kind = self.tabs[index].file_kind.clone();
+        let tab_path = self.tabs[index].path.clone();
+        let tab_left_aligned = self.tabs[index].editor_left_aligned;
+        let tab_source_mode = self.tabs[index].source_mode;
+        let tab_source_word_wrap = self.tabs[index].source_word_wrap;
+        let tab_reading_mode = self.tabs[index].reading_mode && !tab_source_mode;
+        let switching_tabs = self.active_tab_id.as_deref() != Some(tab_id.as_str());
+        if switching_tabs {
+            if let Some(id) = self.active_tab_id.clone()
+                && self.tabs.iter().any(|tab| tab.id == id)
+            {
+                self.outline_tab_states.insert(
+                    id,
+                    super::outline::OutlineTabState {
+                        collapsed: self.outline_rail_collapsed_heading_lines.clone(),
+                        scroll: f32::from(self.outline_panel_scroll_handle.offset().y),
+                    },
+                );
+            }
+            self.restore_active_outline_state(&tab_id);
+            self.folded_sections.clear();
+            self.folded_section_ends.clear();
+            self.folded_image_previews.clear();
+            self.pending_code_fence = None;
+            self.table_source = None;
+            self.reset_table_handles();
+            self.cancel_line_drag(cx);
+            self.stash_active_tab_generated_preview_cache();
+            self.table_boundary_caret = None;
+        }
+        self.invalidate_active_file_panel_caches();
+        self.active_tab_id = Some(tab_id.clone());
+        self.active_tab_index_cache.set(Some(index));
+        self.active_file_kind_cache = tab_file_kind.clone();
+        session_store::schedule_tab_restore(self, &tab_id, cx);
+        self.current_file_path = tab_path.clone();
+        self.editor_left_aligned = tab_left_aligned;
+        self.reading_mode = tab_reading_mode;
+        self.source_mode = tab_source_mode;
+        self.source_word_wrap = tab_source_word_wrap;
+        if switching_tabs {
+            self.restore_generated_preview_cache_for_tab(&tab_id);
+        }
+        if tab_kind.is_terminal() {
+            self.hide_right_panels_for_terminal(cx);
+            self.pending_terminal_focus = Some(tab_id.clone());
+        }
+        if matches!(tab_kind, TabKind::Editor) {
+            if tab_file_kind
+                .as_ref()
+                .is_some_and(FileKind::supports_text_buffer)
+            {
+                // Borrow the snapshot out of the tab instead of cloning it, then
+                // hand it straight back.
+                let snapshot = std::mem::take(&mut self.tabs[index].snapshot);
+                self.restore_tab_snapshot_state(&snapshot);
+                self.tabs[index].set_snapshot(snapshot);
+                self.restore_layout_cache_for_tab(&tab_id);
+            } else {
+                self.buffer = Buffer::from_text("");
+                self.cursor.offset = 0;
+                self.cursor.anchor = 0;
+                self.extra_cursors.clear();
+                self.clear_line_display_info();
+            }
+            self.marked_range = None;
+            self.close_preview_overlay();
+            self.toolbar_hide_task = None;
+            self.toolbar_corner_hide_task = None;
+            self.toolbar_hidden_by_scroll = self.scroll_offset > 0.5;
+            self.toolbar_corner_hovered = false;
+            self.sync_toolbar_opacity(cx);
+            if tab_file_kind.as_ref().is_some_and(FileKind::is_image)
+                && let Some(path) = tab_path.as_ref()
+            {
+                self.queue_image_load(path.to_string_lossy().into_owned(), cx);
+            }
+            self.clamp_scroll();
+            self.pause_blinking(cx);
+            self.request_editor_focus(cx);
+        }
+        if let Some(path) = tab_path {
+            let suppress_sidebar_sync = self
+                .suppress_next_sidebar_sync_path
+                .as_ref()
+                .is_some_and(|suppressed| suppressed == &path);
+            if suppress_sidebar_sync {
+                self.suppress_next_sidebar_sync_path = None;
+                self.set_file_list_dir_for_path(&path, cx);
+                self.selected_sidebar_paths.clear();
+                self.selected_sidebar_paths.insert(path.clone());
+                self.sidebar_selection_anchor = Some(path.clone());
+            } else {
+                self.sync_path_in_sidebar_state(path, cx);
+            }
+        }
+        self.record_active_tab_navigation_target();
+        if self.search_visible {
+            self.run_search(cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn switch_to_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        if self.active_tab_id.as_deref() == Some(tab_id) {
+            return;
+        }
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) {
+            self.activate_tab_by_index(index, cx);
+        }
+    }
+
+    pub(crate) fn close_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        self.cancel_auto_save_for_tab(tab_id);
+        // The tab may live in another pane (e.g. queued closes after a pane
+        // was refocused); move focus there first so the close logic below
+        // operates on the owning pane's tab list.
+        if let Some(owner) = self.pane_id_for_tab(tab_id)
+            && owner != self.focused_pane_id
+        {
+            self.focus_pane(owner, cx);
+        }
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            self.process_pending_close_queue(cx);
+            return;
+        };
+        session_store::forget_restoring_tab(self, tab_id);
+        let was_active = self.active_tab_id.as_deref() == Some(tab_id);
+        // Save to recently closed (keep up to 20)
+        let mut removed = self.tabs.remove(index);
+        self.outline_tab_states.remove(tab_id);
+        self.code_block_display_overrides.remove(&removed.id);
+        self.non_markdown_horizontal_scroll_states
+            .remove(&removed.id);
+        if removed.kind.is_terminal() {
+            self.stop_terminal_tab(&removed.id);
+        }
+        if Self::should_track_in_recently_closed(&removed) {
+            if Self::closed_tab_can_reload_from_disk(&removed) {
+                // Reopening a saved file reads it back from disk anyway, so
+                // parking its text and undo history here would keep the whole
+                // document resident for the next twenty closes.
+                removed.set_snapshot_text(String::new());
+                removed.history = history_store::TabHistory::default();
+            }
+            self.recently_closed_tabs.push(removed.clone());
+            if self.recently_closed_tabs.len() > 20 {
+                self.recently_closed_tabs.remove(0);
+            }
+        }
+        if self.tabs.is_empty() {
+            if self.is_utility_panel_active(RightUtilityPanel::Outline) {
+                self.set_visible_utility_panel(None, cx);
+            }
+            if was_active {
+                self.stash_active_tab_generated_preview_cache();
+            }
+            self.retire_tab_generated_preview_cache(tab_id);
+            self.tab_layout_cache.remove(tab_id);
+            self.active_tab_id = None;
+            self.active_tab_index_cache.set(None);
+            self.active_file_kind_cache = None;
+            self.pending_close_tab_ids.clear();
+            self.release_document_state();
+            // With a split still open the other pane keeps rendering, so only
+            // the single-pane window can drop the shared image cache.
+            if self.panes.len() <= 1 {
+                self.release_document_image_cache();
+            }
+            self.release_retired_images(cx);
+            // Closing the last tab of a split pane collapses the pane.
+            let pane_id = self.current_pane_id();
+            self.remove_pane_if_empty(pane_id, cx);
+            self.restore_tab_after_close(cx);
+            cx.notify();
+            session_store::persist_session(self);
+            return;
+        }
+        if was_active {
+            self.activate_previous_open_tab_after_close(&removed, index, cx);
+        } else {
+            cx.notify();
+        }
+        self.retire_tab_generated_preview_cache(tab_id);
+        self.release_retired_images(cx);
+        self.tab_layout_cache.remove(tab_id);
+        self.restore_tab_after_close(cx);
+        self.process_pending_close_queue(cx);
+        session_store::persist_session(self);
+    }
+
+    pub(crate) fn process_pending_close_queue(&mut self, cx: &mut Context<Self>) {
+        while let Some(tab_id) = self.pending_close_tab_ids.first().cloned() {
+            self.pending_close_tab_ids.remove(0);
+            if self.tabs.iter().any(|t| t.id == tab_id) {
+                self.request_close_tab(&tab_id, cx);
+                return;
+            }
+        }
+    }
+
+    pub(crate) fn close_active_tab(&mut self, cx: &mut Context<Self>) {
+        if let Some(tab_id) = self.active_tab_id.clone() {
+            self.request_close_tab(&tab_id, cx);
+        }
+    }
+
+    pub(crate) fn request_close_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        let Some(owner) = self.pane_id_for_tab(tab_id) else {
+            self.process_pending_close_queue(cx);
+            return;
+        };
+        if self.active_tab_id.as_deref() != Some(tab_id) && self.close_tab_return_to.is_none() {
+            self.close_tab_return_to = self.active_tab_id.clone();
+        }
+        if owner != self.focused_pane_id {
+            self.focus_pane(owner, cx);
+        }
+        self.switch_to_tab(tab_id, cx);
+        if let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) {
+            if tab.kind.is_terminal() && self.terminal_tab_has_running_command(tab_id) {
+                self.show_dialog(
+                    Dialog {
+                        title: crate::i18n::terminal_settings_label(
+                            self.ui_language,
+                            "close_running_title",
+                        )
+                        .to_string(),
+                        message: crate::i18n::terminal_settings_label(
+                            self.ui_language,
+                            "close_running_message",
+                        )
+                        .to_string(),
+                        save_label: None,
+                        confirm_label: self.t(crate::i18n::TextKey::Close).to_string(),
+                        cancel_label: self.t(crate::i18n::TextKey::Cancel).to_string(),
+                        is_danger: true,
+                        action: DialogAction::CloseRunningTerminal {
+                            tab_id: tab_id.to_string(),
+                        },
+                    },
+                    cx,
+                );
+                return;
+            }
+            if tab.is_dirty {
+                self.show_dialog(
+                    Dialog {
+                        title: self
+                            .t(crate::i18n::TextKey::UnsavedChangesTitle)
+                            .to_string(),
+                        message: crate::i18n::close_tab_unsaved_message(
+                            self.ui_language,
+                            &tab.title,
+                        ),
+                        save_label: Some(self.t(crate::i18n::TextKey::Save).to_string()),
+                        confirm_label: self.t(crate::i18n::TextKey::Discard).to_string(),
+                        cancel_label: self.t(crate::i18n::TextKey::Cancel).to_string(),
+                        is_danger: true,
+                        action: DialogAction::CloseTabUnsaved {
+                            tab_id: tab_id.to_string(),
+                        },
+                    },
+                    cx,
+                );
+                return;
+            }
+        }
+
+        self.close_tab(tab_id, cx);
+    }
+
+    pub(crate) fn restore_tab_after_close(&mut self, cx: &mut Context<Self>) {
+        if let Some(previous) = self.close_tab_return_to.take()
+            && let Some(owner) = self.pane_id_for_tab(&previous)
+        {
+            if owner != self.focused_pane_id {
+                self.focus_pane(owner, cx);
+            }
+            self.switch_to_tab(&previous, cx);
+        }
+    }
+
+    pub(crate) fn reopen_closed_tab(&mut self, cx: &mut Context<Self>) {
+        if let Some(closed_tab) = self.recently_closed_tabs.pop() {
+            self.restore_closed_tab(closed_tab, cx);
+            session_store::persist_session(self);
+        }
+    }
+
+    pub(crate) fn activate_previous_tab(&mut self, cx: &mut Context<Self>) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        if let Some(current) = self.active_tab_index() {
+            let prev = if current == 0 {
+                self.tabs.len() - 1
+            } else {
+                current - 1
+            };
+            self.activate_tab_by_index(prev, cx);
+        }
+    }
+
+    pub(crate) fn activate_next_tab(&mut self, cx: &mut Context<Self>) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        if let Some(current) = self.active_tab_index() {
+            let next = if current >= self.tabs.len() - 1 {
+                0
+            } else {
+                current + 1
+            };
+            self.activate_tab_by_index(next, cx);
+        }
+    }
+
+    pub(crate) fn toggle_pin_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.is_pinned = !tab.is_pinned;
+        }
+        // Move pinned tabs to the left
+        self.tabs.sort_by_key(|t| !t.is_pinned);
+        self.ensure_settings_tab_first();
+        cx.notify();
+    }
+
+    pub(crate) fn promote_tab_to_permanent(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            if tab.is_preview {
+                tab.is_preview = false;
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn close_left_tabs(&mut self, from_tab_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == from_tab_id) else {
+            return;
+        };
+        let to_close: Vec<String> = self.tabs[..index]
+            .iter()
+            .filter(|t| !t.is_pinned)
+            .map(|t| t.id.clone())
+            .collect();
+        self.pending_close_tab_ids = to_close;
+        self.process_pending_close_queue(cx);
+    }
+
+    pub(crate) fn close_other_tabs(&mut self, current_tab_id: &str, cx: &mut Context<Self>) {
+        let to_close: Vec<String> = self
+            .tabs
+            .iter()
+            .filter(|t| t.id != current_tab_id && !t.is_pinned)
+            .map(|t| t.id.clone())
+            .collect();
+        self.pending_close_tab_ids = to_close;
+        self.process_pending_close_queue(cx);
+    }
+
+    pub(crate) fn close_right_tabs(&mut self, from_tab_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == from_tab_id) else {
+            return;
+        };
+        let to_close: Vec<String> = self.tabs[(index + 1)..]
+            .iter()
+            .filter(|t| !t.is_pinned)
+            .map(|t| t.id.clone())
+            .collect();
+        self.pending_close_tab_ids = to_close;
+        self.process_pending_close_queue(cx);
+    }
+
+    pub(crate) fn close_saved_tabs(&mut self, cx: &mut Context<Self>) {
+        let active_id = self.active_tab_id.clone();
+        let to_close: Vec<String> = self
+            .tabs
+            .iter()
+            .filter(|t| !t.is_dirty && active_id.as_deref() != Some(t.id.as_str()))
+            .map(|t| t.id.clone())
+            .collect();
+        self.pending_close_tab_ids = to_close;
+        self.process_pending_close_queue(cx);
+    }
+
+    pub(crate) fn reorder_tab_before(
+        &mut self,
+        from_id: &str,
+        to_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if from_id == to_id {
+            return;
+        }
+        let Some(from_idx) = self.tabs.iter().position(|tab| tab.id == from_id) else {
+            return;
+        };
+        let Some(mut to_idx) = self.tabs.iter().position(|tab| tab.id == to_id) else {
+            return;
+        };
+        let moved = self.tabs.remove(from_idx);
+        if from_idx < to_idx {
+            to_idx = to_idx.saturating_sub(1);
+        }
+        self.tabs.insert(to_idx, moved);
+        self.ensure_settings_tab_first();
+        cx.notify();
+    }
+
+    pub(crate) fn reorder_tab_after(&mut self, from_id: &str, to_id: &str, cx: &mut Context<Self>) {
+        if from_id == to_id {
+            return;
+        }
+        let Some(from_idx) = self.tabs.iter().position(|tab| tab.id == from_id) else {
+            return;
+        };
+        let Some(mut to_idx) = self.tabs.iter().position(|tab| tab.id == to_id) else {
+            return;
+        };
+        let moved = self.tabs.remove(from_idx);
+        if from_idx < to_idx {
+            to_idx = to_idx.saturating_sub(1);
+        }
+        self.tabs.insert((to_idx + 1).min(self.tabs.len()), moved);
+        self.ensure_settings_tab_first();
+        cx.notify();
+    }
+
+    pub(crate) fn reorder_tab_to_end(&mut self, from_id: &str, cx: &mut Context<Self>) {
+        let Some(from_idx) = self.tabs.iter().position(|tab| tab.id == from_id) else {
+            return;
+        };
+        let moved = self.tabs.remove(from_idx);
+        self.tabs.push(moved);
+        self.ensure_settings_tab_first();
+        cx.notify();
+    }
+
+    pub(crate) fn mark_active_tab_dirty(&mut self) {
+        if let Some(index) = self.active_tab_index() {
+            self.tabs[index].is_preview = false;
+            self.tabs[index].is_dirty = true;
+            self.line_diff_dirty = true;
+            self.refresh_line_diff();
+        }
+    }
+
+    pub(crate) fn title_for_path(path: &Path) -> String {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string())
+    }
+
+    fn untitled_display_index(&self, title: &str) -> Option<usize> {
+        let untitled = self.t(crate::i18n::TextKey::Untitled);
+        if title == untitled {
+            return Some(1);
+        }
+
+        title
+            .strip_prefix(&format!("{untitled} "))?
+            .parse::<usize>()
+            .ok()
+            .filter(|index| *index > 1)
+    }
+
+    fn next_untitled_title(&self) -> String {
+        let mut used_indices = HashSet::new();
+        for tab in &self.tabs {
+            if tab.kind != TabKind::Editor || tab.path.is_some() {
+                continue;
+            }
+            if let Some(index) = self.untitled_display_index(&tab.title) {
+                used_indices.insert(index);
+            }
+        }
+
+        let mut next_index = 1;
+        while used_indices.contains(&next_index) {
+            next_index += 1;
+        }
+
+        crate::i18n::untitled_title(self.ui_language, next_index)
+    }
+
+    pub(crate) fn create_scratch_tab(&mut self, cx: &mut Context<Self>) {
+        self.persist_active_tab_state();
+        let title = self.next_untitled_title();
+        let tab_id = self.next_tab_identity();
+        let tab = OpenTab {
+            id: tab_id.clone(),
+            title,
+            heading_title_cache: Default::default(),
+            kind: TabKind::Editor,
+            path: None,
+            file_kind: Some(FileKind::Markdown),
+            editor_left_aligned: self.app_settings.default_left_align,
+            reading_mode: false,
+            source_mode: false,
+            source_word_wrap: true,
+            snapshot: EditorSnapshot {
+                text: String::new(),
+                cursor_offset: 0,
+                cursor_anchor: 0,
+                scroll_offset: 0.0,
+                extra_cursors: Vec::new(),
+            },
+            image_view: ImageViewState::default(),
+            is_preview: false,
+            is_dirty: false,
+            is_deleted: false,
+            is_pinned: false,
+            recovery: config_store::TabRecoveryState::default(),
+            history: history_store::TabHistory::new(
+                Some(history_store::default_source_identity(&tab_id, None)),
+                Some(history_store::default_journal_path(&tab_id, None)),
+            ),
+        };
+        self.tabs.push(tab);
+        if let Some(index) = self.tabs.len().checked_sub(1) {
+            self.activate_tab_by_index(index, cx);
+        }
+        self.scroll_tab_bar_to_end(cx);
+        session_store::persist_session(self);
+    }
+
+    pub(super) fn scroll_tab_bar_to_end(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(16))
+                .await;
+
+            this.update(cx, |this, _| {
+                let offset = this.tab_bar_scroll_handle.offset();
+                let max_offset = this.tab_bar_scroll_handle.max_offset();
+                let trailing_reserved =
+                    this.scaled(this.styles.tab_bar.tab_end_drop_target_width_px);
+                let target_x = -((max_offset.width - px(trailing_reserved)).max(px(0.0)));
+                this.tab_bar_scroll_handle
+                    .set_offset(gpui::point(target_x, offset.y));
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn next_tab_identity(&mut self) -> String {
+        let id = format!("tab-{}", self.next_tab_id);
+        self.next_tab_id += 1;
+        id
+    }
+
+    pub(crate) fn open_welcome_tab(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == WELCOME_TAB_ID && tab.path.is_none())
+        {
+            self.activate_tab_by_index(index, cx);
+            return;
+        }
+
+        self.persist_active_tab_state();
+        self.tabs.push(super::builtin_welcome_tab(self.ui_language));
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == WELCOME_TAB_ID && tab.path.is_none())
+        {
+            self.activate_tab_by_index(index, cx);
+        }
+        session_store::persist_session(self);
+    }
+
+    pub(crate) fn open_settings_tab(&mut self, cx: &mut Context<Self>) {
+        // Singleton: if a settings tab already exists (in any pane), switch to it
+        let existing_owner = self
+            .all_tabs()
+            .find(|tab| tab.kind == TabKind::Settings)
+            .map(|tab| tab.id.clone())
+            .and_then(|id| self.pane_id_for_tab(&id));
+        if let Some(owner) = existing_owner {
+            if owner != self.focused_pane_id {
+                self.focus_pane(owner, cx);
+            }
+            self.ensure_settings_tab_first();
+            self.activate_tab_by_index(0, cx);
+            return;
+        }
+        self.persist_active_tab_state();
+        let tab = OpenTab {
+            id: self.next_tab_identity(),
+            title: self.t(crate::i18n::TextKey::SettingsTitle).to_string(),
+            heading_title_cache: Default::default(),
+            kind: TabKind::Settings,
+            path: None,
+            file_kind: None,
+            editor_left_aligned: false,
+            reading_mode: false,
+            source_mode: false,
+            source_word_wrap: true,
+            snapshot: EditorSnapshot {
+                text: String::new(),
+                cursor_offset: 0,
+                cursor_anchor: 0,
+                scroll_offset: 0.0,
+                extra_cursors: Vec::new(),
+            },
+            image_view: ImageViewState::default(),
+            is_preview: false,
+            is_dirty: false,
+            is_deleted: false,
+            is_pinned: false,
+            recovery: config_store::TabRecoveryState::default(),
+            history: history_store::TabHistory::default(),
+        };
+        self.tabs.push(tab);
+        self.ensure_settings_tab_first();
+        self.ensure_font_size_editor(cx);
+        self.ensure_ui_font_size_editor(cx);
+        if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Settings) {
+            self.activate_tab_by_index(index, cx);
+        }
+        session_store::persist_session(self);
+    }
+
+    // ── Tab rendering ───────────────────────────────────────────────
+
+    fn tab_display_title(&self, tab: &OpenTab) -> (String, bool) {
+        let heading = (tab.kind == TabKind::Editor
+            && tab.file_kind.as_ref().is_none_or(FileKind::is_markdown))
+        .then(|| {
+            let mut cache = tab.heading_title_cache.borrow_mut();
+            cache
+                .get_or_insert_with(|| {
+                    if self.active_tab_id.as_deref() == Some(tab.id.as_str()) {
+                        first_buffer_heading(&self.buffer)
+                    } else {
+                        first_document_heading(&tab.snapshot.text)
+                    }
+                })
+                .clone()
+        })
+        .flatten();
+        let is_heading = heading.is_some();
+        let display_title = heading.unwrap_or_else(|| {
+            tab.path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| tab.title.clone())
+        });
+        (display_title, is_heading)
+    }
+
+    fn render_tab_title_label(
+        &self,
+        tab: &OpenTab,
+        is_active: bool,
+        is_preview: bool,
+        is_deleted: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let (display_title, is_heading) = self.tab_display_title(tab);
+        let (display_title_start, display_title_end) =
+            middle_ellipsize_parts(&display_title, TAB_TITLE_MAX_DISPLAY_UNITS);
+        let tooltip_text = tab
+            .path
+            .as_ref()
+            .map(|path| format!("{display_title}\n{}", path.display()))
+            .unwrap_or_else(|| display_title.clone());
+
+        let label = crate::ui::decoration::file_name(
+            self.styles.tab_name(is_active, is_preview, is_deleted),
+            self.ui_scale,
+        );
+        let label = if let Some(display_title_end) = display_title_end {
+            label
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(display_title_start),
+                )
+                .child(div().flex_none().whitespace_nowrap().child("..."))
+                .child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .child(display_title_end),
+                )
+        } else if is_heading {
+            label.child(crate::ui::decoration::file_name_base(display_title_start))
+        } else {
+            let (base, suffix) = split_file_name_for_display(&display_title_start);
+            label
+                .child(crate::ui::decoration::file_name_base(base.to_string()))
+                .when_some(suffix.filter(|_| tab.path.is_some()), |this, suffix| {
+                    this.child(
+                        div()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .opacity(ts.tab_item_suffix_opacity)
+                            .child(suffix.to_string()),
+                    )
+                })
+        };
+        tooltip::with_tab_tooltip(label, cx.entity().clone(), tooltip_text)
+    }
+
+    fn render_tab_file_indicator(&self, tab: &OpenTab, is_active: bool) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let opacity = if is_active {
+            ts.tab_item_icon_active_opacity
+        } else {
+            ts.tab_item_icon_inactive_opacity
+        };
+        let icon_size = px(self.scaled(ts.tab_item_icon_size_px));
+
+        if tab.is_pinned {
+            return crate::ui::decoration::icon(
+                crate::style::IconStyle::new(
+                    f32::from(px(self.scaled(ts.tab_pin_icon_size_px))),
+                    ts.tab_pin_icon_color,
+                ),
+                "assets/icons/format/pin.svg",
+            )
+            .opacity(opacity)
+            .into_any_element();
+        }
+
+        if let Some(path) = tab.path.as_ref()
+            && let Some(label) = file_kind_badge_text(path)
+        {
+            return crate::ui::typography::badge(self.styles.tab_badge(), self.ui_scale)
+                .min_w(px(self.scaled(ts.tab_item_badge_min_width_px)))
+                .h(px(self.scaled(ts.tab_item_badge_height_px)))
+                .opacity(opacity)
+                .child(label)
+                .into_any_element();
+        }
+
+        if tab
+            .path
+            .as_ref()
+            .is_some_and(|path| !file_kind_has_indicator(path))
+        {
+            return div()
+                .w(icon_size)
+                .h(icon_size)
+                .flex_none()
+                .into_any_element();
+        }
+
+        crate::ui::decoration::icon(
+            crate::style::IconStyle::new(f32::from(icon_size), ts.tab_item_icon_color),
+            MARKDOWN_SVG_PATH,
+        )
+        .opacity(opacity)
+        .into_any_element()
+    }
+
+    pub(crate) fn render_tab(
+        &self,
+        pane_id: PaneId,
+        tab: &OpenTab,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let is_active = self.active_tab_id.as_deref() == Some(tab.id.as_str());
+        let is_dirty = tab.is_dirty;
+        let is_deleted = tab.is_deleted;
+        let is_preview = tab.is_preview;
+        let tab_kind = tab.kind;
+        let tab_index = self
+            .tabs
+            .iter()
+            .position(|candidate| candidate.id == tab.id)
+            .unwrap_or(0);
+        let tab_id = tab.id.clone();
+        let close_id = tab.id.clone();
+        let middle_close_id = tab.id.clone();
+        let context_tab_id = tab.id.clone();
+        let drag_tab_id = tab.id.clone();
+        let press_tab_id = tab.id.clone();
+        let hover_tab_id = tab.id.clone();
+        let drop_tab_id = tab.id.clone();
+        let drag_title = self.tab_display_title(tab).0;
+        let ts = &self.styles.tab_bar;
+        let tab_surface_style = self.styles.tab_surface();
+        let drop_indicator_color = ts.tab_drop_indicator_color;
+        let drop_indicator_width = ts.tab_drop_indicator_width_px;
+        let source_opacity = ts.tab_drag_source_opacity;
+        let tab_surface_height = self.tab_bar_height();
+        let is_being_dragged = self.tab_dragging_id.as_deref() == Some(tab.id.as_str());
+        let current_tab_ids: Vec<String> = self
+            .tabs
+            .iter()
+            .map(|candidate| candidate.id.clone())
+            .collect();
+        let settings_tab_id = self
+            .tabs
+            .iter()
+            .find(|candidate| candidate.kind == TabKind::Settings)
+            .map(|candidate| candidate.id.clone());
+        div()
+            .id(SharedString::from(format!("tab-{}", tab.id)))
+            .debug_selector(|| format!("document-tab-{}", tab.id))
+            .group("tab-item")
+            .relative()
+            .h(px(self.tab_bar_height()))
+            .min_w(px(self.scaled(ts.tab_item_min_width_px)))
+            .max_w(px(self.scaled(ts.tab_item_max_width_px)))
+            .flex_none()
+            // Dim the source tab while dragging
+            .when(is_being_dragged, |this: gpui::Stateful<gpui::Div>| {
+                this.opacity(source_opacity)
+            })
+            // Drop indicator: show a single insertion line on the side where the tab will land.
+            .drag_over::<DraggedTab>({
+                let drop_tab_id = drop_tab_id.clone();
+                move |style, dragged, _, _| {
+                    if dragged.source_pane_id != pane_id {
+                        // Cross-pane: the dragged tab is inserted before this tab.
+                        return style
+                            .border_l(px(drop_indicator_width))
+                            .border_r(px(0.0))
+                            .border_color(drop_indicator_color);
+                    }
+                    let drop_target = if tab_index <= dragged.source_index {
+                        TabDropTarget::Before(drop_tab_id.as_str())
+                    } else {
+                        TabDropTarget::After(drop_tab_id.as_str())
+                    };
+                    if !Self::tab_drop_changes_order_for(
+                        &current_tab_ids,
+                        settings_tab_id.as_deref(),
+                        &dragged.tab_id,
+                        drop_target,
+                    ) {
+                        return style;
+                    }
+                    if matches!(drop_target, TabDropTarget::Before(_)) {
+                        style
+                            .border_l(px(drop_indicator_width))
+                            .border_r(px(0.0))
+                            .border_color(drop_indicator_color)
+                    } else {
+                        style
+                            .border_l(px(0.0))
+                            .border_r(px(drop_indicator_width))
+                            .border_color(drop_indicator_color)
+                    }
+                }
+            })
+            // Handle drop: reorder on the indicated side of the hovered tab.
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.tab_drag_split_target = None;
+                if dragged.source_pane_id != pane_id
+                    || this.pane_id_for_tab(&dragged.tab_id) != Some(pane_id)
+                {
+                    // Cross-pane drop: move the tab into this pane before the
+                    // hovered tab.
+                    let insert_index = this.with_pane(pane_id, |this| {
+                        this.tabs
+                            .iter()
+                            .position(|candidate| candidate.id == drop_tab_id)
+                    });
+                    this.move_tab_to_pane(&dragged.tab_id, pane_id, insert_index, cx);
+                    this.tab_drag_candidate_id = None;
+                    this.tab_dragging_id = None;
+                    return;
+                }
+                let dragged_tab_id = dragged.tab_id.clone();
+                let drop_tab_id = drop_tab_id.clone();
+                this.with_pane(pane_id, move |this| {
+                    let place_after = this
+                        .tabs
+                        .iter()
+                        .position(|candidate| candidate.id == dragged_tab_id)
+                        .zip(
+                            this.tabs
+                                .iter()
+                                .position(|candidate| candidate.id == drop_tab_id),
+                        )
+                        .is_some_and(|(from_idx, to_idx)| from_idx < to_idx);
+                    let current_tab_ids: Vec<String> = this
+                        .tabs
+                        .iter()
+                        .map(|candidate| candidate.id.clone())
+                        .collect();
+                    let settings_tab_id = this
+                        .tabs
+                        .iter()
+                        .find(|candidate| candidate.kind == TabKind::Settings)
+                        .map(|candidate| candidate.id.clone());
+                    let drop_target = if place_after {
+                        TabDropTarget::After(drop_tab_id.as_str())
+                    } else {
+                        TabDropTarget::Before(drop_tab_id.as_str())
+                    };
+                    if !Self::tab_drop_changes_order_for(
+                        &current_tab_ids,
+                        settings_tab_id.as_deref(),
+                        &dragged_tab_id,
+                        drop_target,
+                    ) {
+                        this.tab_drag_candidate_id = None;
+                        this.tab_dragging_id = None;
+                        return;
+                    }
+                    if place_after {
+                        this.reorder_tab_after(&dragged_tab_id, &drop_tab_id, cx);
+                    } else {
+                        this.reorder_tab_before(&dragged_tab_id, &drop_tab_id, cx);
+                    }
+                    this.tab_drag_candidate_id = None;
+                    this.tab_dragging_id = None;
+                });
+            }))
+            .child(
+                crate::ui::chrome::tab_surface(
+                    tab_surface_style,
+                    self.ui_scale,
+                    tab_surface_height,
+                    is_active,
+                )
+                .when(true, |this| {
+                    this.when(tab_kind == TabKind::Editor, |this| {
+                        this.child(self.render_tab_file_indicator(tab, is_active))
+                    })
+                    .when_some(tab_kind.terminal_agent(), |this, agent_cli| {
+                        this.child(
+                            crate::ui::decoration::icon(
+                                crate::style::IconStyle::new(
+                                    f32::from(px(self.scaled(ts.tab_item_icon_size_px))),
+                                    ts.tab_item_icon_color,
+                                ),
+                                agent_cli.icon_path(),
+                            )
+                            .opacity(if is_active {
+                                ts.tab_item_icon_active_opacity
+                            } else {
+                                ts.tab_item_icon_inactive_opacity
+                            }),
+                        )
+                    })
+                    .when(tab_kind == TabKind::Settings, |this| {
+                        this.child(
+                            crate::ui::decoration::icon(
+                                crate::style::IconStyle::new(
+                                    f32::from(px(self.scaled(ts.tab_item_icon_size_px))),
+                                    ts.tab_item_icon_color,
+                                ),
+                                "assets/icons/appearance/setting.svg",
+                            )
+                            .opacity(if is_active {
+                                ts.tab_item_icon_active_opacity
+                            } else {
+                                ts.tab_item_icon_inactive_opacity
+                            }),
+                        )
+                    })
+                    .child(self.render_tab_title_label(tab, is_active, is_preview, is_deleted, cx))
+                    .child(tooltip::with_tooltip(
+                        crate::ui::button::button(
+                            SharedString::from(format!("close-{}", tab.id)),
+                            self.styles.tab_close(is_active, is_dirty),
+                            Default::default(),
+                            self.ui_scale,
+                        )
+                        .w(px(self.scaled(ts.tab_item_close_size_px)))
+                        .when(is_dirty, |this| {
+                            this.child(crate::ui::decoration::swatch(
+                                self.styles.tab_dirty_dot(),
+                                self.ui_scale,
+                            ))
+                        })
+                        .when(!is_dirty, |this| {
+                            this.group_hover("tab-item", |style| {
+                                style.opacity(ts.tab_item_close_active_opacity)
+                            })
+                            .child("✕")
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.request_close_tab(&close_id, cx);
+                            }),
+                        ),
+                        cx.entity().clone(),
+                        self.t(crate::i18n::TextKey::Close),
+                        Some(crate::editor::shortcut::hint("secondary-w")),
+                    ))
+                })
+                .when(!is_active, |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .h(px(ts.tab_bar_border_width_px))
+                            .bg(ts.tab_bar_border_color),
+                    )
+                }),
+            )
+            // Drag initiation: create ghost element
+            .on_drag(
+                DraggedTab {
+                    tab_id: drag_tab_id.clone(),
+                    title: drag_title,
+                    source_index: tab_index,
+                    source_pane_id: pane_id,
+                },
+                {
+                    let ghost_style = self.styles.drag_preview(true, self.ui_scale);
+                    move |dragged, offset, _window, cx| {
+                        cx.new(|_cx| DraggedTabView {
+                            title: dragged.title.clone(),
+                            style: ghost_style.clone(),
+                            cursor_offset: offset,
+                        })
+                    }
+                },
+            )
+            .on_drag_move(cx.listener(
+                move |this, event: &DragMoveEvent<DraggedTab>, window, cx| {
+                    // Every tab's on_drag_move fires for every DraggedTab drag
+                    // in the window (no hover/ownership check in gpui), and the
+                    // first tab in paint order would otherwise hijack the drag
+                    // and stop propagation. Only the drag's source tab handles
+                    // it.
+                    if event.drag(cx).tab_id != drag_tab_id {
+                        return;
+                    }
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.tab_drag_candidate_id = Some(drag_tab_id.clone());
+                    let moved_enough = this
+                        .tab_drag_press_position
+                        .map(|origin| {
+                            let dx = f32::from(event.event.position.x) - f32::from(origin.x);
+                            let dy = f32::from(event.event.position.y) - f32::from(origin.y);
+                            (dx * dx + dy * dy).sqrt() >= 4.0
+                        })
+                        .unwrap_or(true);
+                    if moved_enough {
+                        this.tab_dragging_id = Some(drag_tab_id.clone());
+                    }
+                    // This handler is the only drag listener guaranteed to see
+                    // every move (capture propagation stops here), so it also
+                    // resolves the split-drop target for the pane under the
+                    // cursor.
+                    let new_target = if this.tab_dragging_id.is_some() {
+                        this.split_drop_target_at(event.event.position).filter(
+                            |(pane, direction)| {
+                                // Merging into the tab's own pane is a no-op;
+                                // don't show the full-pane highlight for it.
+                                direction.is_some()
+                                    || this.pane_id_for_tab(&drag_tab_id) != Some(*pane)
+                            },
+                        )
+                    } else {
+                        None
+                    };
+                    if this.tab_drag_split_target != new_target {
+                        this.tab_drag_split_target = new_target;
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_mouse_move(
+                cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
+                    if event.dragging()
+                        && (this.tab_drag_candidate_id.as_deref() == Some(hover_tab_id.as_str())
+                            || this.tab_dragging_id.is_some())
+                    {
+                        let moved_enough = this
+                            .tab_drag_press_position
+                            .map(|origin| {
+                                let dx = f32::from(event.position.x) - f32::from(origin.x);
+                                let dy = f32::from(event.position.y) - f32::from(origin.y);
+                                (dx * dx + dy * dy).sqrt() >= 4.0
+                            })
+                            .unwrap_or(true);
+                        if moved_enough {
+                            this.tab_dragging_id = Some(hover_tab_id.clone());
+                        }
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    this.tab_drag_candidate_id = Some(press_tab_id.clone());
+                    this.tab_drag_press_position = Some(event.position);
+                    this.switch_to_tab(&tab_id, cx);
+                    if event.click_count >= 2 {
+                        this.promote_tab_to_permanent(&tab_id, cx);
+                    }
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.open_tab_context_menu(context_tab_id.clone(), event.position, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.request_close_tab(&middle_close_id, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn render_tab_bar_action_button(
+        &self,
+        id: &'static str,
+        icon_path: &'static str,
+        is_active: bool,
+        is_enabled: bool,
+        on_right_click: Option<fn(&mut Self, &mut Context<Self>)>,
+        tooltip_title: &'static str,
+        shortcut: Option<SharedString>,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let style = self
+            .styles
+            .tab_action(id, is_active, self.tab_bar_height(), self.ui_scale);
+        let icon_size = self.scaled(style.icon_size_px);
+        let icon_color = style.normal.foreground;
+        let mut style = style;
+        if !is_enabled {
+            style.hover = style.normal;
+            style.pressed = style.normal;
+        }
+        let button = crate::ui::button::button(id, style, Default::default(), self.ui_scale)
+            .debug_selector(move || id.to_string())
+            .w(px(self.styles.tab_action_width(
+                id,
+                self.tab_bar_height(),
+                self.ui_scale,
+            )))
+            .child(crate::ui::decoration::icon(
+                crate::style::IconStyle::new(f32::from(px(icon_size)), icon_color),
+                icon_path,
+            ))
+            .when(is_enabled, |this| {
+                this.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        on_click(this, cx);
+                    }),
+                )
+            })
+            .when_some(on_right_click.filter(|_| is_enabled), |this, handler| {
+                this.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        handler(this, cx);
+                    }),
+                )
+            });
+        tooltip::with_tooltip(button, cx.entity().clone(), tooltip_title, shortcut)
+    }
+
+    /// Caption buttons for platforms whose title bar the app draws itself.
+    /// macOS keeps its native traffic lights.
+    #[cfg(target_os = "macos")]
+    pub(super) fn render_window_caption_buttons(&self, _cx: &mut Context<Self>) -> AnyElement {
+        div().into_any_element()
+    }
+
+    #[cfg(windows)]
+    pub(super) fn render_window_caption_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
+        use gpui::WindowControlArea;
+
+        let ts = &self.styles.tab_bar;
+        let height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
+        // Fluent caption buttons are 46x32dp regardless of the surrounding UI.
+        let icon_size = self.scaled(self.styles.ui.spec.application.caption_icon_size_px);
+        let icon_color = ts.tab_item_icon_color;
+        let is_maximized = self.window_is_maximized;
+        let close_foreground = self.styles.ui.colors.caption_close_hover_foreground;
+
+        let button = |id: &'static str,
+                      icon: &'static str,
+                      area: WindowControlArea,
+                      danger: bool,
+                      cx: &mut Context<Self>,
+                      action: fn(&mut Window)| {
+            let group = SharedString::from(id);
+            crate::ui::button::button(
+                id,
+                self.styles
+                    .caption_button(true, danger, height, self.ui_scale),
+                Default::default(),
+                self.ui_scale,
+            )
+            .group(group.clone())
+            .relative()
+            .child(
+                crate::ui::decoration::icon(
+                    crate::style::IconStyle::new(f32::from(px(icon_size)), icon_color),
+                    icon,
+                )
+                // The red close hover needs a light glyph to stay legible.
+                .when(danger, |this| {
+                    this.group_hover(group, move |style| style.text_color(close_foreground))
+                }),
+            )
+            .window_control_area(area)
+            // Windows routes these through the non-client area, so this only
+            // runs where that path does not exist.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, _, window, cx| {
+                    cx.stop_propagation();
+                    action(window);
+                }),
+            )
+        };
+
+        div()
+            .id("window-caption-buttons")
+            .h(px(height))
+            .flex_none()
+            .flex()
+            .items_center()
+            // Keeps the drag area of whatever sits underneath from claiming the
+            // buttons: the hit test reports the first control area it matches.
+            .occlude()
+            .child(button(
+                "window-minimize",
+                "assets/icons/window/minimize.svg",
+                WindowControlArea::Min,
+                false,
+                cx,
+                |window| window.minimize_window(),
+            ))
+            .child(button(
+                "window-maximize",
+                if is_maximized {
+                    "assets/icons/window/restore.svg"
+                } else {
+                    "assets/icons/window/maximize.svg"
+                },
+                WindowControlArea::Max,
+                false,
+                cx,
+                |window| crate::platform::window_chrome::toggle_maximize(window),
+            ))
+            .child(button(
+                "window-close",
+                "assets/icons/window/close.svg",
+                WindowControlArea::Close,
+                true,
+                cx,
+                |window| window.remove_window(),
+            ))
+            .into_any_element()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn render_window_caption_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
+        let icon_size = self.scaled(self.styles.ui.spec.application.linux_caption_icon_size_px);
+        let gap = self.scaled(self.styles.ui.spec.application.linux_caption_gap_px);
+        let padding = self.scaled(self.styles.ui.spec.application.linux_caption_padding_px);
+        let icon_color = ts.tab_item_icon_color;
+        let is_maximized = self.window_is_maximized;
+
+        let button = |id: &'static str,
+                      icon: &'static str,
+                      cx: &mut Context<Self>,
+                      action: fn(&mut Window)| {
+            crate::ui::button::button(
+                id,
+                self.styles
+                    .caption_button(false, false, height, self.ui_scale),
+                Default::default(),
+                self.ui_scale,
+            )
+            .child(crate::ui::decoration::icon(
+                crate::style::IconStyle::new(f32::from(px(icon_size)), icon_color),
+                icon,
+            ))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, _, window, cx| {
+                    cx.stop_propagation();
+                    action(window);
+                }),
+            )
+        };
+
+        div()
+            .id("linux-window-caption-buttons")
+            .h(px(height))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(gap))
+            .px(px(padding))
+            .occlude()
+            .child(button(
+                "linux-window-minimize",
+                "assets/icons/window/minimize.svg",
+                cx,
+                |window| window.minimize_window(),
+            ))
+            .child(button(
+                "linux-window-maximize",
+                if is_maximized {
+                    "assets/icons/window/restore.svg"
+                } else {
+                    "assets/icons/window/maximize.svg"
+                },
+                cx,
+                |window| window.zoom_window(),
+            ))
+            .child(button(
+                "linux-window-close",
+                "assets/icons/window/close.svg",
+                cx,
+                |window| window.remove_window(),
+            ))
+            .into_any_element()
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    pub(super) fn render_window_caption_buttons(&self, _cx: &mut Context<Self>) -> AnyElement {
+        div().into_any_element()
+    }
+
+    fn render_update_ready_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let button_height = (self.tab_bar_height()
+            - self.scaled(ts.tab_update_button_height_inset_px))
+        .max(self.scaled(ts.tab_update_button_min_height_px));
+        let icon_size = self.scaled(ts.tab_update_button_icon_size_px);
+        let padding_x = self.scaled(ts.tab_update_button_padding_x_px);
+        let gap = self.scaled(ts.tab_update_button_gap_px);
+        let text_color = ts.tab_update_button_text_color;
+        let hover_text_color = ts.tab_update_button_hover_text_color;
+        let icon_color = ts.tab_update_button_icon_color;
+        let opacity = ts.tab_update_button_opacity;
+        let hover_opacity = ts.tab_update_button_hover_opacity;
+
+        crate::ui::typography::label(
+            crate::style::TextStyle::new(
+                f32::from(px(self.scaled(ts.tab_update_button_font_size_px))),
+                text_color,
+            ),
+            1.0,
+        )
+        .id("tab-bar-update-ready")
+        .h(px(button_height))
+        .px(px(padding_x))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(gap))
+        .rounded(px(self.scaled(ts.tab_update_button_radius_px)))
+        .opacity(opacity)
+        .cursor(CursorStyle::Arrow)
+        .hover(move |style| style.opacity(hover_opacity).text_color(hover_text_color))
+        .child(crate::ui::decoration::icon(
+            crate::style::IconStyle::new(f32::from(px(icon_size)), icon_color),
+            SITE_SVG_PATH,
+        ))
+        .child(
+            self.prepared_update()
+                .map(|update| {
+                    crate::i18n::update_available_label(self.ui_language, Some(&update.version))
+                })
+                .unwrap_or_else(|| crate::i18n::update_available_label(self.ui_language, None)),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.show_prepared_update_dialog(cx);
+            }),
+        )
+        .into_any_element()
+    }
+
+    pub(crate) fn render_tab_bar_toggle_actions(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ts = &self.styles.tab_bar;
+        let inner_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
+        let mode = self.document_mode();
+        let (separator_width, separator_height, separator_gap) =
+            self.styles.tab_action_separator_metrics(self.ui_scale);
+
+        div()
+            .id("tab-bar-actions")
+            .h(px(inner_height))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(0.0))
+            .pr(px(self.scaled(ts.tab_item_padding_right_px)))
+            .when(self.prepared_update().is_some(), |this| {
+                this.child(self.render_update_ready_button(cx))
+            })
+            .when(
+                self.app_settings.simple_mode && self.active_tab_supports_text_buffer(),
+                |this| {
+                    this.child(self.render_tab_bar_action_button(
+                        "tab-bar-align-toggle",
+                        ALIGN_LEFT_MINI_SVG_PATH,
+                        if self.source_mode {
+                            !self.source_word_wrap
+                        } else {
+                            self.editor_left_aligned
+                        },
+                        true,
+                        None,
+                        if self.editor_uses_code_gutter() {
+                            self.t(crate::i18n::TextKey::ToolbarWrapTooltip)
+                        } else {
+                            self.t(crate::i18n::TextKey::ToolbarAlignTooltip)
+                        },
+                        Some(crate::editor::shortcut::hint("secondary-alt-l")),
+                        cx,
+                        |this, cx| this.toggle_editor_alignment(cx),
+                    ))
+                },
+            )
+            .when(self.active_tab_supports_text_buffer(), |this| {
+                this.child(self.render_tab_bar_action_button(
+                    "tab-bar-reading-mode-toggle",
+                    mode.icon_path(),
+                    mode != DocumentMode::Edit,
+                    true,
+                    Some(Self::cycle_document_mode_backwards),
+                    mode.tooltip(self.ui_language),
+                    None,
+                    cx,
+                    |this, cx| this.cycle_document_mode(cx),
+                ))
+            })
+            .when(self.app_settings.simple_mode, |this| {
+                this.child(self.render_tab_bar_action_button(
+                    "tab-bar-theme-toggle",
+                    MOUNTAIN_SVG_PATH,
+                    false,
+                    true,
+                    None,
+                    crate::i18n::theme_action_label(self.ui_language, self.theme_kind.is_dark()),
+                    None,
+                    cx,
+                    |this, cx| this.toggle_theme(cx),
+                ))
+            })
+            .when(
+                self.active_tab_supports_text_buffer() || self.app_settings.simple_mode,
+                |this| {
+                    this.child(
+                        div()
+                            .w(px(separator_width))
+                            .h(px(separator_height))
+                            .mx(px(separator_gap))
+                            .flex_none()
+                            .bg(ts.tab_bar_border_color),
+                    )
+                },
+            )
+            .when(
+                self.active_tab_supports_text_buffer() && !self.embedded_editor,
+                |this| {
+                    this.child(self.render_tab_bar_action_button(
+                        "tab-bar-minimap-toggle",
+                        MINIMAP_TOGGLE_SVG_PATH,
+                        self.app_settings.minimap_position.is_visible(),
+                        true,
+                        None,
+                        crate::i18n::minimap_action_label(
+                            self.ui_language,
+                            self.app_settings.minimap_position.is_visible(),
+                        ),
+                        None,
+                        cx,
+                        |this, cx| this.toggle_minimap_visibility(cx),
+                    ))
+                },
+            )
+            .when(
+                self.app_settings.simple_mode && self.active_tab_uses_markdown_editor(),
+                |this| {
+                    this.child(self.render_tab_bar_action_button(
+                        "tab-bar-outline-toggle",
+                        OUTLINE_TOGGLE_MINI_SVG_PATH,
+                        self.is_utility_panel_active(RightUtilityPanel::Outline),
+                        true,
+                        None,
+                        crate::i18n::outline_action_label(
+                            self.ui_language,
+                            self.is_utility_panel_active(RightUtilityPanel::Outline),
+                        ),
+                        Some(crate::editor::shortcut::hint(
+                            crate::platform::keys::TOGGLE_OUTLINE,
+                        )),
+                        cx,
+                        |this, cx| this.toggle_outline_visibility(cx),
+                    ))
+                },
+            )
+            .child(self.render_tab_bar_action_button(
+                "tab-bar-info-toggle",
+                INFO_PANEL_SVG_PATH,
+                self.is_utility_panel_active(RightUtilityPanel::Info),
+                true,
+                None,
+                self.t(crate::i18n::TextKey::FileInfo),
+                Some(crate::editor::shortcut::hint("secondary-alt-i")),
+                cx,
+                |this, cx| this.toggle_info_panel(cx),
+            ))
+            .when(crate::platform::capabilities::CHILD_PROCESSES, |this| {
+                this.child(self.render_tab_bar_action_button(
+                    "tab-bar-terminal-toggle",
+                    MENU_TERMINAL_SVG_PATH,
+                    self.has_terminal_tabs(),
+                    true,
+                    None,
+                    crate::i18n::terminal_label(self.ui_language),
+                    Some(crate::editor::shortcut::hint(
+                        crate::platform::keys::TOGGLE_TERMINAL_PANEL,
+                    )),
+                    cx,
+                    |this, cx| this.toggle_terminal_panel(cx),
+                ))
+            })
+            .into_any_element()
+    }
+
+    pub(crate) fn render_tab_bar(&self, pane_id: PaneId, cx: &mut Context<Self>) -> AnyElement {
+        let is_top_left_pane = pane_id == self.top_left_pane_id();
+        let is_top_right_pane = pane_id == self.top_right_pane_id();
+        let ts = &self.styles.tab_bar;
+        let inner_height = (self.tab_bar_height() - ts.tab_bar_border_width_px).max(0.0);
+        let end_drop_indicator_color = ts.tab_drop_indicator_color;
+        let end_drop_indicator_width = ts.tab_drop_indicator_width_px;
+        let current_tab_ids: Vec<String> = self.tabs.iter().map(|tab| tab.id.clone()).collect();
+        let settings_tab_id = self
+            .tabs
+            .iter()
+            .find(|tab| tab.kind == TabKind::Settings)
+            .map(|tab| tab.id.clone());
+        let mut tab_items: Vec<AnyElement> = self
+            .tabs
+            .iter()
+            .map(|tab| self.render_tab(pane_id, tab, cx))
+            .collect();
+
+        let new_hover_color = ts.tab_new_hover_text_color;
+        let new_hover_bg = ts.tab_item_hover_bg;
+        let end_drop_target_width = self.scaled(ts.tab_end_drop_target_width_px);
+        let first_tab_id = self.tabs.first().map(|tab| tab.id.clone());
+        let start_tab_ids = current_tab_ids.clone();
+        let start_settings_tab_id = settings_tab_id.clone();
+        let start_target = div()
+            .h(px(inner_height))
+            .w(px(0.0))
+            .flex_none()
+            .relative()
+            .child(
+                div()
+                    .id("tab-bar-start-drop-target")
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .h(px(inner_height))
+                    .w(px(end_drop_target_width))
+                    .drag_over::<DraggedTab>(move |style, dragged, _, _| {
+                        let Some(first_tab_id) = first_tab_id.as_deref() else {
+                            return style;
+                        };
+                        if dragged.source_pane_id != pane_id
+                            || Self::tab_drop_changes_order_for(
+                                &start_tab_ids,
+                                start_settings_tab_id.as_deref(),
+                                &dragged.tab_id,
+                                TabDropTarget::Before(first_tab_id),
+                            )
+                        {
+                            style
+                                .border_l(px(end_drop_indicator_width))
+                                .border_color(end_drop_indicator_color)
+                        } else {
+                            style
+                        }
+                    })
+                    .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                        this.tab_drag_split_target = None;
+                        if dragged.source_pane_id != pane_id
+                            || this.pane_id_for_tab(&dragged.tab_id) != Some(pane_id)
+                        {
+                            this.move_tab_to_pane(&dragged.tab_id, pane_id, Some(0), cx);
+                        } else {
+                            let dragged_tab_id = dragged.tab_id.clone();
+                            this.with_pane(pane_id, move |this| {
+                                if let Some(first_id) = this.tabs.first().map(|tab| tab.id.clone())
+                                {
+                                    this.reorder_tab_before(&dragged_tab_id, &first_id, cx);
+                                }
+                            });
+                        }
+                        this.tab_drag_candidate_id = None;
+                        this.tab_dragging_id = None;
+                    })),
+            )
+            .into_any_element();
+
+        let new_tab_button = tooltip::with_tooltip(
+            crate::ui::typography::label(
+                crate::style::TextStyle::new(
+                    f32::from(px(self.scaled(ts.tab_new_font_size_px))),
+                    ts.tab_new_text_color,
+                ),
+                1.0,
+            )
+            .h(px(inner_height))
+            .w(px(self.scaled(ts.tab_new_width_px)))
+            .flex_none()
+            .flex()
+            .justify_center()
+            .items_center()
+            .border_r(px(ts.tab_item_border_width_px))
+            .border_color(gpui::transparent_black())
+            .hover(move |style| {
+                style
+                    .text_color(new_hover_color)
+                    .bg(new_hover_bg)
+                    .border_color(ts.tab_item_border_color)
+            })
+            .child("+")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.create_scratch_tab(cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.open_terminal_tab_create_context_menu(event.position, cx);
+                }),
+            ),
+            cx.entity().clone(),
+            self.t(crate::i18n::TextKey::NewFile),
+            Some(crate::editor::shortcut::hint("secondary-t")),
+        );
+        let end_target = div()
+            .id("tab-bar-end-drop-target")
+            .h(px(inner_height))
+            .min_w(px(end_drop_target_width))
+            .flex_1()
+            .child(new_tab_button)
+            .drag_over::<DraggedTab>(move |style, dragged, _, _| {
+                if dragged.source_pane_id != pane_id
+                    || Self::tab_drop_changes_order_for(
+                        &current_tab_ids,
+                        settings_tab_id.as_deref(),
+                        &dragged.tab_id,
+                        TabDropTarget::End,
+                    )
+                {
+                    style
+                        .border_l(px(end_drop_indicator_width))
+                        .border_color(end_drop_indicator_color)
+                } else {
+                    style
+                }
+            })
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.tab_drag_split_target = None;
+                if dragged.source_pane_id != pane_id
+                    || this.pane_id_for_tab(&dragged.tab_id) != Some(pane_id)
+                {
+                    this.move_tab_to_pane(&dragged.tab_id, pane_id, None, cx);
+                    this.tab_drag_candidate_id = None;
+                    this.tab_dragging_id = None;
+                    return;
+                }
+                let dragged_tab_id = dragged.tab_id.clone();
+                this.with_pane(pane_id, move |this| {
+                    let current_tab_ids: Vec<String> =
+                        this.tabs.iter().map(|tab| tab.id.clone()).collect();
+                    let settings_tab_id = this
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.kind == TabKind::Settings)
+                        .map(|tab| tab.id.clone());
+                    if Self::tab_drop_changes_order_for(
+                        &current_tab_ids,
+                        settings_tab_id.as_deref(),
+                        &dragged_tab_id,
+                        TabDropTarget::End,
+                    ) {
+                        this.reorder_tab_to_end(&dragged_tab_id, cx);
+                    }
+                    this.tab_drag_candidate_id = None;
+                    this.tab_dragging_id = None;
+                });
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+            )
+            .into_any_element();
+
+        tab_items.insert(0, start_target);
+        tab_items.push(end_target);
+
+        let can_nav_back = self.can_navigate_tab_history_back();
+        let can_nav_forward = self.can_navigate_tab_history_forward();
+        let history_button_size = self.tab_bar_height();
+        let history_icon_size = self.scaled(ts.tab_history_btn_icon_size_px);
+        let history_button =
+            |id: &'static str,
+             icon_path: &'static str,
+             enabled: bool,
+             handler: fn(&mut Self, &mut Context<Self>)| {
+                div()
+                    .id(id)
+                    .w(px(history_button_size))
+                    .h(px(inner_height))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .group("tab-history-button")
+                    .bg(ts.tab_history_btn_bg)
+                    .opacity(if enabled {
+                        ts.tab_history_btn_enabled_opacity
+                    } else {
+                        ts.tab_history_btn_disabled_opacity
+                    })
+                    .cursor(CursorStyle::Arrow)
+                    .when(enabled, |this| {
+                        this.child(
+                            crate::ui::decoration::icon(
+                                crate::style::IconStyle::new(
+                                    f32::from(px(history_icon_size)),
+                                    ts.tab_history_btn_icon_color,
+                                ),
+                                icon_path,
+                            )
+                            .group_hover("tab-history-button", move |style| {
+                                style.text_color(ts.tab_history_btn_hover_icon_color)
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                handler(this, cx);
+                            }),
+                        )
+                    })
+                    .when(!enabled, |this| {
+                        this.child(crate::ui::decoration::icon(
+                            crate::style::IconStyle::new(
+                                f32::from(px(history_icon_size)),
+                                ts.tab_history_btn_icon_disabled_color,
+                            ),
+                            icon_path,
+                        ))
+                    })
+            };
+        let left_controls = div()
+            .id("tab-bar-left-controls")
+            .h(px(inner_height))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(0.0))
+            .border_r(px(self.scaled(ts.tab_history_group_border_width_px)))
+            .border_color(ts.tab_history_group_border_color)
+            .child(history_button(
+                "tab-bar-history-back",
+                "assets/icons/navigation/arrow-left.svg",
+                can_nav_back,
+                Self::navigate_tab_history_back,
+            ))
+            .child(history_button(
+                "tab-bar-history-forward",
+                "assets/icons/navigation/arrow-right.svg",
+                can_nav_forward,
+                Self::navigate_tab_history_forward,
+            ))
+            .into_any_element();
+        let leading_left_margin = if self.embedded_editor || !is_top_left_pane {
+            0.0
+        } else {
+            super::render::sidebar_button_tab_bar_inset(
+                self.window_controls_leading_inset(),
+                self.tab_bar_height(),
+                self.sidebar_width() + self.file_list_width() + self.workspace_search_panel_width(),
+            )
+        };
+        let left_controls_group = div()
+            .id("tab-bar-left-group")
+            .h(px(inner_height))
+            .flex_none()
+            .flex()
+            .items_center()
+            .ml(px(leading_left_margin))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+            )
+            .child(left_controls);
+        let action_chrome = div()
+            .id("tab-bar-actions-chrome")
+            .h(px(inner_height))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_end()
+            .when(
+                is_top_right_pane && !self.should_render_utility_panel(),
+                |this| this.child(self.render_tab_bar_toggle_actions(cx)),
+            )
+            // Leaves room for the caption buttons the window draws on top.
+            .when(is_top_right_pane, |this| {
+                this.pr(px(self.window_caption_trailing_inset()))
+            });
+
+        div()
+            .id("tab-bar")
+            .debug_selector(move || format!("tab-bar-{pane_id}"))
+            .relative()
+            .w_full()
+            .h(px(self.tab_bar_height()))
+            .flex()
+            .items_start()
+            .bg(ts.tab_bar_bg)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if event.dragging()
+                    && (this.tab_drag_candidate_id.is_some() || this.tab_dragging_id.is_some())
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.tab_drag_candidate_id = None;
+                    this.tab_drag_split_target = None;
+                    if this.tab_dragging_id.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.tab_drag_candidate_id = None;
+                    this.tab_drag_split_target = None;
+                    if this.tab_dragging_id.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(ts.tab_bar_border_width_px))
+                    .bg(ts.tab_bar_border_color),
+            )
+            .when(is_top_left_pane, |this| this.child(left_controls_group))
+            .child(
+                div()
+                    .id("tab-bar-scroll")
+                    .flex_1()
+                    .h_full()
+                    .min_w(px(0.0))
+                    .flex()
+                    .items_start()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.tab_bar_scroll_handle)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(Self::on_tab_bar_drag_space_mouse_down),
+                    )
+                    .children(tab_items)
+                    .child(div().flex_1().min_w(px(0.0)).h_full()),
+            )
+            .child(action_chrome)
+            .into_any_element()
+    }
+}
+
+fn middle_ellipsize_parts(text: &str, max_display_units: usize) -> (String, Option<String>) {
+    let graphemes = UnicodeSegmentation::graphemes(text, true).collect::<Vec<_>>();
+    let display_units = graphemes
+        .iter()
+        .map(|grapheme| usize::from(!grapheme.is_ascii()) + 1)
+        .collect::<Vec<_>>();
+    if display_units.iter().sum::<usize>() <= max_display_units || max_display_units < 4 {
+        return (text.to_string(), None);
+    }
+
+    let visible_units = max_display_units - 3;
+    let suffix_budget = (visible_units * 2).div_ceil(3);
+    let prefix_budget = visible_units - suffix_budget;
+    let prefix_len = display_units
+        .iter()
+        .scan(0usize, |used, width| {
+            *used += width;
+            Some(*used <= prefix_budget)
+        })
+        .take_while(|fits| *fits)
+        .count();
+    let suffix_len = display_units
+        .iter()
+        .rev()
+        .scan(0usize, |used, width| {
+            *used += width;
+            Some(*used <= suffix_budget)
+        })
+        .take_while(|fits| *fits)
+        .count();
+    let suffix_start = graphemes.len() - suffix_len;
+    (
+        graphemes[..prefix_len].concat(),
+        Some(graphemes[suffix_start..].concat()),
+    )
+}
+
+/// Returns the byte offset of the end of the first Markdown content line,
+/// skipping YAML front matter when present.
+fn first_markdown_content_line_end(text: &str) -> Option<usize> {
+    let mut offset = 0usize;
+    let mut lines = text.split_inclusive('\n').peekable();
+    if lines
+        .peek()
+        .map(|line| line.strip_suffix('\n').unwrap_or(line).trim())
+        == Some("---")
+    {
+        let line = lines.next()?;
+        offset += line.len();
+        for line in lines.by_ref() {
+            let trimmed_line = line.strip_suffix('\n').unwrap_or(line);
+            offset += line.len();
+            if trimmed_line.trim() == "---" {
+                break;
+            }
+        }
+    }
+
+    for line in lines {
+        let trimmed_line = line.strip_suffix('\n').unwrap_or(line);
+        if !trimmed_line.trim().is_empty() {
+            return Some(offset + trimmed_line.len());
+        }
+        offset += line.len();
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_preview_consumers_follow_parked_state_not_slot_owner() {
+        let mut root = PaneState::detached();
+        root.generated_preview_keys = HashSet::from(["focused".into(), "shared".into()]);
+        let mut panes = [Pane::new(0), Pane::new(1), Pane::new(2)];
+        panes[1].state.generated_preview_keys = HashSet::from(["other".into(), "shared".into()]);
+        let mut inactive = GeneratedPreviewTabCache::default();
+        inactive.keys.insert("inactive".into());
+        panes[2]
+            .state
+            .tab_generated_preview_cache
+            .insert("inactive-tab".into(), inactive);
+
+        let consumers = EditorView::other_pane_generated_preview_keys(&panes, 0);
+        assert_eq!(consumers, panes[1].state.generated_preview_keys);
+        assert!(!consumers.contains("focused"));
+        assert!(!consumers.contains("inactive"));
+
+        // Mirror with_pane(1): slot 1 now parks the focused pane, while slot 0
+        // remains the placeholder. Excluding the current pane ID would be wrong.
+        std::mem::swap(&mut root, &mut panes[1].state);
+        let consumers = EditorView::other_pane_generated_preview_keys(&panes, 0);
+        assert_eq!(
+            consumers,
+            HashSet::from(["focused".into(), "shared".into()])
+        );
+        assert!(!consumers.contains("other"));
+        assert!(panes[0].state.generated_preview_keys.is_empty());
+    }
+
+    #[test]
+    fn generated_preview_stash_clones_shared_and_moves_exclusive_resources() {
+        for shared in [false, true] {
+            let key = "preview".to_string();
+            let image = Arc::new(RenderImage::new([image::Frame::new(
+                image::RgbaImage::new(8, 4),
+            )]));
+            let svg: Arc<str> = Arc::from("last svg");
+            let mut live = GeneratedPreviewTabCache::default();
+            live.images.insert(key.clone(), Some(image.clone()));
+            live.svgs.insert(key.clone(), svg.clone());
+            live.overlays.insert(key.clone(), (100, image.clone()));
+            live.views.insert(key.clone(), ImageViewState::default());
+            let mut saved = GeneratedPreviewTabCache::default();
+
+            saved.images.insert(
+                key.clone(),
+                take_generated_preview_resource(&mut live.images, &key, shared).unwrap(),
+            );
+            saved.svgs.insert(
+                key.clone(),
+                take_generated_preview_resource(&mut live.svgs, &key, shared).unwrap(),
+            );
+            saved.overlays.insert(
+                key.clone(),
+                take_generated_preview_resource(&mut live.overlays, &key, shared).unwrap(),
+            );
+            saved.views.insert(
+                key.clone(),
+                take_generated_preview_resource(&mut live.views, &key, shared).unwrap(),
+            );
+
+            assert_eq!(live.images.contains_key(&key), shared);
+            assert_eq!(live.svgs.contains_key(&key), shared);
+            assert_eq!(live.overlays.contains_key(&key), shared);
+            assert_eq!(live.views.contains_key(&key), shared);
+            assert!(Arc::ptr_eq(saved.images[&key].as_ref().unwrap(), &image));
+            assert!(Arc::ptr_eq(&saved.overlays[&key].1, &image));
+            assert!(Arc::ptr_eq(&saved.svgs[&key], &svg));
+            live.svgs.insert(key.clone(), Arc::from("newer svg"));
+            assert_eq!(saved.svgs[&key].as_ref(), "last svg");
+        }
+    }
+
+    #[test]
+    fn generated_preview_restore_prefers_live_shared_bundle_not_old_overlay() {
+        let shared = "shared".to_string();
+        let exclusive = "exclusive".to_string();
+        let image = Arc::new(RenderImage::new([image::Frame::new(
+            image::RgbaImage::new(8, 4),
+        )]));
+        let mut live = GeneratedPreviewTabCache::default();
+        let mut saved = GeneratedPreviewTabCache::default();
+        // Even a cached failure is newer than the saved success. Replacement
+        // invalidates the old overlay; absence must not resurrect that overlay.
+        live.images.insert(shared.clone(), None);
+        live.svgs.insert(shared.clone(), Arc::from("newer svg"));
+        live.svgs
+            .insert(exclusive.clone(), Arc::from("unowned svg"));
+        for key in [&shared, &exclusive] {
+            saved.images.insert(key.clone(), Some(image.clone()));
+            saved.svgs.insert(key.clone(), Arc::from("last tab svg"));
+            saved.overlays.insert(key.clone(), (100, image.clone()));
+        }
+        let prefer_live_keys = HashSet::from([shared.clone()]);
+        restore_generated_preview_resources(&mut live.images, saved.images, &prefer_live_keys);
+        restore_generated_preview_resources(&mut live.svgs, saved.svgs, &prefer_live_keys);
+        restore_generated_preview_resources(&mut live.overlays, saved.overlays, &prefer_live_keys);
+
+        assert!(live.images[&shared].is_none());
+        assert_eq!(live.svgs[&shared].as_ref(), "newer svg");
+        assert!(!live.overlays.contains_key(&shared));
+        assert!(Arc::ptr_eq(
+            live.images[&exclusive].as_ref().unwrap(),
+            &image
+        ));
+        assert_eq!(live.svgs[&exclusive].as_ref(), "last tab svg");
+        assert!(live.overlays.contains_key(&exclusive));
+    }
+
+    #[test]
+    fn generated_preview_restore_uses_last_tab_resources_without_live_bundle() {
+        let key = "preview".to_string();
+        let mut live = GeneratedPreviewTabCache::default();
+        let mut saved = GeneratedPreviewTabCache::default();
+        saved.svgs.insert(key.clone(), Arc::from("last tab svg"));
+        restore_generated_preview_resources(&mut live.svgs, saved.svgs, &HashSet::new());
+        assert_eq!(live.svgs[&key].as_ref(), "last tab svg");
+    }
+
+    fn closed_editor_tab(text: &str, path: Option<PathBuf>) -> OpenTab {
+        OpenTab {
+            id: "tab-1".to_string(),
+            title: "sample".to_string(),
+            heading_title_cache: Default::default(),
+            kind: TabKind::Editor,
+            path,
+            file_kind: None,
+            editor_left_aligned: false,
+            reading_mode: false,
+            source_mode: false,
+            source_word_wrap: true,
+            snapshot: EditorSnapshot {
+                text: text.to_string(),
+                ..Default::default()
+            },
+            image_view: ImageViewState::default(),
+            is_preview: false,
+            is_dirty: false,
+            is_deleted: false,
+            is_pinned: false,
+            recovery: config_store::TabRecoveryState::default(),
+            history: history_store::TabHistory::default(),
+        }
+    }
+
+    #[test]
+    fn building_a_tab_uses_supplied_contents_without_reopening_its_source() {
+        let tab = EditorView::build_file_tab(
+            "test-tab".into(),
+            Path::new("/unavailable-share/script"),
+            b"#!/usr/bin/env python3\nprint('loaded bytes')\n",
+            false,
+            false,
+        );
+        assert!(matches!(tab.file_kind, Some(FileKind::Code { .. })));
+        assert!(tab.snapshot.text.contains("loaded bytes"));
+        assert_eq!(
+            tab.history.saved_text.as_deref(),
+            Some(tab.snapshot.text.as_str())
+        );
+    }
+
+    #[test]
+    fn legacy_moeka_files_open_as_exact_plain_text_without_json_parsing() {
+        for text in [
+            "",
+            "{ \"elements\": [], \"extra\": \"保留\" }\r\n",
+            "{ invalid JSON, still editable text",
+        ] {
+            let tab = EditorView::build_file_tab(
+                "test-tab".into(),
+                Path::new("legacy.moeka"),
+                text.as_bytes(),
+                false,
+                false,
+            );
+            assert_eq!(tab.file_kind, Some(FileKind::Text));
+            assert_eq!(tab.snapshot.text, text);
+            assert_eq!(tab.history.saved_text.as_deref(), Some(text));
+            assert!(!tab.is_dirty);
+            assert!(tab.recovery.text.is_none());
+        }
+    }
+
+    #[test]
+    fn reopening_resident_tab_preserves_source_and_prefers_it_over_reading() {
+        for reading_mode in [false, true] {
+            let mut closed = closed_editor_tab("source text", Some(PathBuf::from("note.md")));
+            closed.editor_left_aligned = true;
+            closed.reading_mode = reading_mode;
+            closed.source_mode = true;
+
+            let reopened = EditorView::tab_for_reopen("tab-reopened".into(), closed);
+
+            assert_eq!(reopened.id, "tab-reopened");
+            assert_eq!(reopened.snapshot.text, "source text");
+            assert!(reopened.editor_left_aligned);
+            assert!(reopened.source_mode);
+            assert!(!reopened.reading_mode);
+        }
+    }
+
+    #[test]
+    fn reopening_disk_backed_tab_restores_source_view_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        for reading_mode in [false, true] {
+            let mut tab = EditorView::build_file_tab(
+                "tab-reopen-source".into(),
+                &path,
+                b"# Reloaded from disk\n",
+                false,
+                false,
+            );
+            assert!(!tab.source_mode);
+            let view = config_store::TabViewState {
+                editor_left_aligned: true,
+                reading_mode,
+                source_mode: true,
+                ..Default::default()
+            };
+
+            EditorView::apply_reopened_tab_view(&mut tab, &view);
+
+            assert_eq!(tab.snapshot.text, "# Reloaded from disk\n");
+            assert!(tab.editor_left_aligned);
+            assert!(tab.source_mode);
+            assert!(!tab.reading_mode);
+        }
+    }
+
+    #[test]
+    fn reopening_tabs_preserves_source_word_wrap_independently_of_alignment() {
+        for source_word_wrap in [false, true] {
+            for left_aligned in [false, true] {
+                let mut closed = closed_editor_tab("draft", None);
+                closed.source_mode = true;
+                closed.source_word_wrap = source_word_wrap;
+                closed.editor_left_aligned = left_aligned;
+                let reopened = EditorView::tab_for_reopen("tab-reopened".into(), closed);
+                assert_eq!(reopened.source_word_wrap, source_word_wrap);
+                assert_eq!(reopened.editor_left_aligned, left_aligned);
+
+                let mut disk_tab = closed_editor_tab("disk", None);
+                let view = config_store::TabViewState {
+                    source_mode: true,
+                    source_word_wrap,
+                    editor_left_aligned: left_aligned,
+                    ..Default::default()
+                };
+                EditorView::apply_reopened_tab_view(&mut disk_tab, &view);
+                assert_eq!(disk_tab.source_word_wrap, source_word_wrap);
+                assert_eq!(disk_tab.editor_left_aligned, left_aligned);
+            }
+        }
+    }
+
+    #[test]
+    fn reopening_edit_and_reading_tabs_does_not_enable_source_mode() {
+        for reading_mode in [false, true] {
+            let mut closed = closed_editor_tab("draft", None);
+            closed.reading_mode = reading_mode;
+            let reopened = EditorView::tab_for_reopen("tab-reopened".into(), closed);
+            assert_eq!(reopened.reading_mode, reading_mode);
+            assert!(!reopened.source_mode);
+        }
+    }
+
+    #[test]
+    fn document_tab_titles_use_real_heading_text_not_metadata_or_code() {
+        assert_eq!(
+            first_document_heading(
+                "---\ntitle: metadata\n---\n```\n# not a heading\n```\n## First *real* `heading` ##\n# Later"
+            ),
+            Some("First real heading".into())
+        );
+        assert_eq!(
+            first_document_heading("Setext **title**\n====\n"),
+            Some("Setext title".into())
+        );
+        assert_eq!(
+            first_document_heading("$$\n# not a heading\n$$\n# Real"),
+            Some("Real".into())
+        );
+        assert_eq!(first_document_heading("ordinary prose\n"), None);
+        assert_eq!(first_document_heading("#\n# Later"), Some("Later".into()));
+        assert_eq!(
+            first_document_heading("# **Heading** {#section .wide}\n"),
+            Some("Heading".into())
+        );
+    }
+
+    #[cfg(feature = "gpui-test-support")]
+    #[gpui::test]
+    fn tab_titles_update_live_and_render_at_content_dependent_bounded_widths(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{AppContext as _, Entity, Render, Subscription};
+
+        struct TabHarness(Entity<EditorView>, Subscription);
+        impl Render for TabHarness {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let _ = &self.1;
+                self.0.update(cx, |editor, cx| {
+                    div().flex().children(
+                        editor
+                            .tabs
+                            .iter()
+                            .map(|tab| editor.render_tab(editor.current_pane_id(), tab, cx)),
+                    )
+                })
+            }
+        }
+        let editor = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut editor = EditorView::new_with_mode(cx, true, false, Some("# Short"), false);
+                editor.ui_scale = 1.25;
+                assert_eq!(editor.styles.tab_bar.tab_item_max_width_px, 240.0);
+                editor.tabs = [
+                    ("short", "# Short".to_string()),
+                    ("long", "# A much longer descriptive title".to_string()),
+                    ("huge", format!("# {}", "Long title ".repeat(100))),
+                ]
+                .into_iter()
+                .map(|(id, text)| {
+                    EditorView::build_file_tab(
+                        id.into(),
+                        Path::new(&format!("{id}.md")),
+                        text.as_bytes(),
+                        false,
+                        false,
+                    )
+                })
+                .collect();
+                editor.active_tab_id = Some("short".into());
+                editor.reparse();
+                editor
+            })
+        });
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            TabHarness(editor.clone(), cx.observe(&editor, |_, _, cx| cx.notify()))
+        });
+        let short = cx.debug_bounds("document-tab-short").unwrap().size.width;
+        let long = cx.debug_bounds("document-tab-long").unwrap().size.width;
+        let huge = cx.debug_bounds("document-tab-huge").unwrap().size.width;
+        assert!(
+            long > short,
+            "long title did not increase width: {short:?} -> {long:?}"
+        );
+        assert!(huge <= px(300.0), "tab exceeded scaled maximum: {huge:?}");
+        for source_mode in [false, true] {
+            for text in [
+                "# Short",
+                "# A longer live heading with **formatting**",
+                "Setext heading\n====",
+                "ordinary prose\n",
+                "```\n# not a heading\n```\n# Restored",
+            ] {
+                cx.update(|_, cx| {
+                    editor.update(cx, |editor, cx| {
+                        editor.source_mode = source_mode;
+                        editor.buffer.replace(0..editor.buffer.len(), text);
+                        editor.reparse();
+                        assert_eq!(
+                            editor.tab_display_title(&editor.tabs[0]).0,
+                            first_document_heading(text).unwrap_or_else(|| "short.md".into()),
+                            "mode={source_mode}, source={text:?}",
+                        );
+                        cx.notify();
+                    });
+                });
+                cx.run_until_parked();
+                let width = cx.debug_bounds("document-tab-short").unwrap().size.width;
+                assert!(width <= px(300.0));
+                if text.starts_with("# A longer") {
+                    assert!(width > short, "live title did not resize the rendered tab");
+                }
+            }
+        }
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, _| {
+                editor.source_mode = false;
+                editor.buffer.replace(0..editor.buffer.len(), "# Short");
+                editor.reparse();
+                assert_eq!(editor.tab_display_title(&editor.tabs[0]).0, "Short");
+                editor
+                    .buffer
+                    .replace(0..editor.buffer.len(), "# Updated *heading*");
+                editor.reparse();
+                assert_eq!(
+                    editor.tab_display_title(&editor.tabs[0]).0,
+                    "Updated heading"
+                );
+                assert_eq!(
+                    editor.tab_display_title(&editor.tabs[1]).0,
+                    "A much longer descriptive title"
+                );
+                editor.tabs[1].set_snapshot_text("# External update".into());
+                assert_eq!(
+                    editor.tab_display_title(&editor.tabs[1]).0,
+                    "External update"
+                );
+                editor.tabs[1].set_snapshot_text("No heading here".into());
+                assert_eq!(editor.tab_display_title(&editor.tabs[1]).0, "long.md");
+                editor.tabs[1].file_kind = Some(FileKind::Code {
+                    language: "Python".into(),
+                });
+                editor.tabs[1].set_snapshot_text("# Python comment".into());
+                assert_eq!(editor.tab_display_title(&editor.tabs[1]).0, "long.md");
+            })
+        });
+    }
+
+    #[cfg(feature = "gpui-test-support")]
+    #[gpui::test]
+    fn tab_title_does_not_wait_for_lazy_outline_rebuild(cx: &mut gpui::TestAppContext) {
+        let text = format!("# Initial\n{}", "body\n".repeat(LARGE_MARKDOWN_MIN_LINES));
+        let editor = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut editor = EditorView::new_with_mode(cx, true, false, Some(&text), false);
+                editor.tabs = vec![EditorView::build_file_tab(
+                    "large".into(),
+                    Path::new("large.md"),
+                    text.as_bytes(),
+                    false,
+                    false,
+                )];
+                editor.active_tab_id = Some("large".into());
+                editor.reparse();
+                editor
+            })
+        });
+        for source_mode in [false, true] {
+            editor.update(cx, |editor, _| {
+                editor.source_mode = source_mode;
+                for (prefix, expected) in [
+                    ("# Initial", "Initial"),
+                    ("# Changed immediately", "Changed immediately"),
+                    ("no heading", "large.md"),
+                    ("# 中文 **标题**", "中文 标题"),
+                ] {
+                    let end = editor.buffer.line_content(0).len();
+                    editor.buffer.replace(0..end, prefix);
+                    editor.reparse();
+                    assert!(editor.uses_lazy_markdown_decorations());
+                    editor.markdown_outline_index.borrow_mut().take();
+                    assert_eq!(editor.tab_display_title(&editor.tabs[0]).0, expected);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn long_tab_titles_keep_their_beginning_and_end() {
+        assert_eq!(
+            middle_ellipsize_parts("short.md", 12),
+            ("short.md".to_string(), None),
+        );
+        assert_eq!(
+            middle_ellipsize_parts("abcdefghijklmnop.md", 12),
+            ("abc".to_string(), Some("nop.md".to_string())),
+        );
+        assert_eq!(
+            middle_ellipsize_parts("中文组合字符标题.md", 12),
+            ("中".to_string(), Some("题.md".to_string())),
+        );
+    }
+
+    #[test]
+    fn a_large_saved_document_is_dropped_from_the_reopen_list() {
+        let text = "x".repeat(RECENTLY_CLOSED_RESIDENT_TEXT_LIMIT + 1);
+        let mut tab = closed_editor_tab(&text, Some(PathBuf::from("Cargo.toml")));
+        tab.history.saved_text = Some(text);
+
+        assert!(EditorView::closed_tab_can_reload_from_disk(&tab));
+    }
+
+    #[test]
+    fn documents_without_a_verified_saved_snapshot_keep_their_text() {
+        let text = "x".repeat(RECENTLY_CLOSED_RESIDENT_TEXT_LIMIT + 1);
+        let path = Some(PathBuf::from("Cargo.toml"));
+
+        let small = closed_editor_tab("short", path.clone());
+        assert!(!EditorView::closed_tab_can_reload_from_disk(&small));
+
+        let mut dirty = closed_editor_tab(&text, path.clone());
+        dirty.is_dirty = true;
+        assert!(!EditorView::closed_tab_can_reload_from_disk(&dirty));
+
+        let mut deleted = closed_editor_tab(&text, path);
+        deleted.is_deleted = true;
+        assert!(!EditorView::closed_tab_can_reload_from_disk(&deleted));
+
+        let untitled = closed_editor_tab(&text, None);
+        assert!(!EditorView::closed_tab_can_reload_from_disk(&untitled));
+
+        let missing = closed_editor_tab(&text, Some(PathBuf::from("no-such-file.md")));
+        assert!(!EditorView::closed_tab_can_reload_from_disk(&missing));
+    }
+}

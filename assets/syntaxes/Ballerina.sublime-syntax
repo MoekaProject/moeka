@@ -1,0 +1,33 @@
+%YAML 1.2
+---
+name: Ballerina
+file_extensions: [bal]
+scope: source.ballerina
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.ballerina
+    - match: '^\s*#.*$'
+      scope: comment.line.documentation.ballerina
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.ballerina
+        - match: '\\.'
+          scope: constant.character.escape.ballerina
+        - match: '"'
+          pop: true
+    - match: '`'
+      push:
+        - meta_scope: string.quoted.other.template.ballerina
+        - match: '`'
+          pop: true
+    - match: '\b(?:import|as|public|private|function|returns|return|type|record|object|class|service|resource|remote|client|listener|worker|start|wait|check|checkpanic|trap|panic|error|if|else|match|foreach|in|while|break|continue|transaction|commit|rollback|retry|lock|fork|isolated|final|const|var|configurable|on|fail|do|from|where|select|join|let|limit|order|by)\b'
+      scope: keyword.control.ballerina
+    - match: '\b(?:int|float|decimal|boolean|string|byte|json|xml|map|table|stream|future|typedesc|any|anydata|never|readonly|handle)\b'
+      scope: storage.type.ballerina
+    - match: '\b(?:true|false|null)\b'
+      scope: constant.language.ballerina
+    - match: '\b(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b'
+      scope: constant.numeric.ballerina
+    - match: '[=+*/%<>!&|^?:-]+'
+      scope: keyword.operator.ballerina

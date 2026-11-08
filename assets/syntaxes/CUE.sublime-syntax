@@ -1,0 +1,16 @@
+%YAML 1.2
+---
+name: CUE
+file_extensions: [cue]
+scope: source.cue
+contexts:
+  main:
+    - match: '\b(?:package|import|for|in|if|let)\b'
+      scope: keyword.control.cue
+    - match: '\b(?:bool|bytes|float|int|number|string)\b'
+      scope: storage.type.cue
+    - match: '\b(?:true|false|null)\b|_\|_'
+      scope: constant.language.cue
+    - match: '#?[A-Za-z_][\w]*(?=\??\s*:)'
+      scope: variable.other.member.cue
+    - include: scope:source.go

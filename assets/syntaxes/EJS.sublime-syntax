@@ -1,0 +1,20 @@
+%YAML 1.2
+---
+name: EJS
+file_extensions: [ejs]
+scope: text.html.ejs
+contexts:
+  main:
+    - match: '<%#'
+      push:
+        - meta_scope: comment.block.ejs
+        - match: '-?%>'
+          pop: true
+    - match: '<%[=_-]?'
+      scope: punctuation.section.embedded.begin.ejs
+      embed: scope:source.js
+      embed_scope: source.js.embedded.ejs
+      escape: '[_-]?%>'
+      escape_captures:
+        0: punctuation.section.embedded.end.ejs
+    - include: scope:text.html.basic

@@ -1,0 +1,27 @@
+%YAML 1.2
+---
+name: Visual Basic .NET
+file_extensions: [vb]
+scope: source.vbnet
+contexts:
+  main:
+    - match: "'(?=.)|(?i)\\bREM\\s"
+      push:
+        - meta_scope: comment.line.vbnet
+        - match: '$'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.vbnet
+        - match: '""'
+          scope: constant.character.escape.vbnet
+        - match: '"'
+          pop: true
+    - match: '(?i)\b(?:Imports|Namespace|Module|Class|Structure|Interface|Enum|End|Sub|Function|Property|Get|Set|Dim|As|New|Public|Private|Protected|Friend|Shared|Const|ReadOnly|Overrides|Overloads|MustOverride|Inherits|Implements|If|Then|Else|ElseIf|For|Each|In|To|Step|Next|While|Do|Loop|Until|Select|Case|Try|Catch|Finally|Throw|Return|Exit|Continue|Using|With|ByVal|ByRef|Optional|Async|Await|Yield|Iterator|And|Or|Not|AndAlso|OrElse|Is|IsNot|Mod)\b'
+      scope: keyword.control.vbnet
+    - match: '(?i)\b(?:Boolean|Byte|SByte|Short|UShort|Integer|UInteger|Long|ULong|Single|Double|Decimal|Char|String|Date|Object)\b'
+      scope: storage.type.vbnet
+    - match: '(?i)\b(?:True|False|Nothing|Me|MyBase|MyClass)\b'
+      scope: constant.language.vbnet
+    - match: '(?i)&[HOB][0-9A-F]+|\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b'
+      scope: constant.numeric.vbnet

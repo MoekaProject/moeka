@@ -1,0 +1,41 @@
+%YAML 1.2
+---
+name: OpenSCAD
+file_extensions: [scad]
+scope: source.openscad
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.openscad
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.openscad
+        - match: '\*/'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.openscad
+        - match: '\\.'
+          scope: constant.character.escape.openscad
+        - match: '"'
+          pop: true
+    - match: '\b(?:include|use)\b'
+      scope: keyword.control.import.openscad
+      push:
+        - match: '<[^>\n]*>'
+          scope: string.unquoted.import.openscad
+          pop: true
+        - match: '(?=\S)|$'
+          pop: true
+    - match: '\b(?:module|function|if|else|for|intersection_for|let|each|assert|echo)\b'
+      scope: keyword.control.openscad
+    - match: '\b(?:true|false|undef|PI)\b'
+      scope: constant.language.openscad
+    - match: '\$(?:fa|fs|fn|t|vpr|vpt|vpd|vpf|children|preview)\b'
+      scope: variable.language.openscad
+    - match: '\b(?:cube|sphere|cylinder|polyhedron|square|circle|polygon|text|surface|import|projection|translate|rotate|scale|resize|mirror|multmatrix|color|offset|hull|minkowski|union|difference|intersection|render|children|linear_extrude|rotate_extrude|sin|cos|tan|asin|acos|atan|atan2|abs|sign|floor|round|ceil|ln|log|pow|sqrt|exp|rands|min|max|norm|cross|len|str|chr|ord|concat|lookup|search|version|version_num|is_undef|is_bool|is_num|is_string|is_list|is_function)\b'
+      scope: support.function.openscad
+    - match: '(?<![A-Za-z_])(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\b'
+      scope: constant.numeric.openscad
+    - match: '==|!=|<=|>=|&&|\|\||[=+*/%<>!?:^#-]'
+      scope: keyword.operator.openscad

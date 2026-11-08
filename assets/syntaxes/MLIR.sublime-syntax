@@ -1,0 +1,37 @@
+%YAML 1.2
+---
+name: MLIR
+file_extensions: [mlir]
+scope: source.mlir
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.mlir
+    - match: '"'
+      push: string
+    - match: '%[A-Za-z0-9_$.-]+(?:#\d+)?'
+      scope: variable.other.ssa.mlir
+    - match: '@[A-Za-z0-9_$.-]+'
+      scope: entity.name.function.mlir
+    - match: '\^[A-Za-z0-9_$.-]+'
+      scope: entity.name.label.mlir
+    - match: '[!#][A-Za-z_][\w$.-]*'
+      scope: storage.type.dialect.mlir
+    - match: '\b[A-Za-z_]\w*\.[A-Za-z_][\w.]*'
+      scope: keyword.other.operation.mlir
+    - match: '\b(?:module|loc|attributes|dense|sparse|affine_map|affine_set)\b'
+      scope: keyword.control.mlir
+    - match: '\b(?:i\d+|si\d+|ui\d+|f16|f32|f64|f80|f128|bf16|index|tensor|vector|memref|complex|tuple|none)\b'
+      scope: storage.type.mlir
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.mlir
+    - match: '\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b'
+      scope: constant.numeric.mlir
+    - match: '->|='
+      scope: keyword.operator.mlir
+  string:
+    - meta_scope: string.quoted.double.mlir
+    - match: '\\.'
+      scope: constant.character.escape.mlir
+    - match: '"'
+      pop: true

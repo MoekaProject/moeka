@@ -1,0 +1,26 @@
+%YAML 1.2
+---
+name: Astro
+file_extensions: [astro]
+scope: text.html.astro
+contexts:
+  main:
+    - match: '^---\s*$'
+      scope: punctuation.section.frontmatter.astro
+      embed: scope:source.ts
+      embed_scope: source.ts.embedded.astro
+      escape: '^---\s*$'
+      escape_captures:
+        0: punctuation.section.frontmatter.astro
+    - match: '\{'
+      scope: punctuation.section.embedded.begin.astro
+      push: expression
+    - include: scope:text.html.basic
+  expression:
+    - meta_scope: source.ts.embedded.astro
+    - match: '\}'
+      scope: punctuation.section.embedded.end.astro
+      pop: true
+    - match: '\{'
+      push: expression
+    - include: scope:source.ts

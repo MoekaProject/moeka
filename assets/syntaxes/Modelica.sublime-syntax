@@ -1,0 +1,38 @@
+%YAML 1.2
+---
+name: Modelica
+file_extensions: [mo]
+scope: source.modelica
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.modelica
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.modelica
+        - match: '\*/'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.modelica
+        - match: '\\.'
+          scope: constant.character.escape.modelica
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: variable.other.quoted.modelica
+        - match: '\\.'
+          scope: constant.character.escape.modelica
+        - match: "'"
+          pop: true
+    - match: '\b(?:model|class|package|function|record|block|connector|type|operator|end|equation|algorithm|initial|parameter|constant|discrete|flow|stream|input|output|partial|replaceable|redeclare|extends|import|encapsulated|protected|public|final|inner|outer|annotation|external|if|then|else|elseif|for|in|loop|while|when|elsewhen|connect|der|return|break|and|or|not)\b'
+      scope: keyword.control.modelica
+    - match: '\b(?:Real|Integer|Boolean|String)\b'
+      scope: storage.type.modelica
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.modelica
+    - match: '\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b'
+      scope: constant.numeric.modelica
+    - match: '[=+*/<>:-]+'
+      scope: keyword.operator.modelica

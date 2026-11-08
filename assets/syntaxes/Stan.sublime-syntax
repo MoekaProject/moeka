@@ -1,0 +1,35 @@
+%YAML 1.2
+---
+name: Stan
+file_extensions: [stan]
+scope: source.stan
+contexts:
+  main:
+    - match: '//.*$|#(?!include\b).*$'
+      scope: comment.line.stan
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.stan
+        - match: '\*/'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.stan
+        - match: '\\.'
+          scope: constant.character.escape.stan
+        - match: '"'
+          pop: true
+    - match: '#include\b'
+      scope: keyword.control.import.stan
+    - match: '\b(?:functions|data|transformed|parameters|model|generated|quantities|for|in|while|if|else|break|continue|return|profile|reject|print|target|lower|upper|offset|multiplier)\b'
+      scope: keyword.control.stan
+    - match: '\b(?:int|real|complex|vector|row_vector|matrix|complex_vector|complex_row_vector|complex_matrix|simplex|unit_vector|ordered|positive_ordered|corr_matrix|cov_matrix|cholesky_factor_corr|cholesky_factor_cov|array|tuple|void)\b'
+      scope: storage.type.stan
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?:_lpdf|_lpmf|_lcdf|_lccdf|_rng)\b'
+      scope: support.function.distribution.stan
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: support.function.stan
+    - match: '(?<![A-Za-z_])(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\b'
+      scope: constant.numeric.stan
+    - match: '\+=|-=|\*=|/=|==|!=|<=|>=|&&|\|\||\.\*|\./|[=+*/%<>!~^|?:-]'
+      scope: keyword.operator.stan

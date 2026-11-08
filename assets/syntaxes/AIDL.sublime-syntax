@@ -1,0 +1,33 @@
+%YAML 1.2
+---
+name: AIDL
+file_extensions: [aidl]
+scope: source.aidl
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.aidl
+    - match: '/\*'
+      push: comment
+    - match: '"'
+      push: string
+    - match: '\b(?:package|import|interface|parcelable|union|enum|oneway|in|out|inout|const|cpp_header|ndk_header)\b'
+      scope: keyword.declaration.aidl
+    - match: '\b(?:void|boolean|byte|char|int|long|float|double|String|List|Map|IBinder|ParcelFileDescriptor)\b'
+      scope: storage.type.aidl
+    - match: '@[A-Za-z_]\w*'
+      scope: variable.annotation.aidl
+    - match: '\b(?:true|false|null)\b'
+      scope: constant.language.aidl
+    - match: '\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b'
+      scope: constant.numeric.aidl
+  string:
+    - meta_scope: string.quoted.double.aidl
+    - match: '\\.'
+      scope: constant.character.escape.aidl
+    - match: '"'
+      pop: true
+  comment:
+    - meta_scope: comment.block.aidl
+    - match: '\*/'
+      pop: true

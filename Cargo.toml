@@ -1,0 +1,156 @@
+[workspace]
+
+[package]
+name = "moeka"
+default-run = "moeka"
+version = "0.1.36"
+edition = "2024"
+rust-version = "1.97"
+description = "A local-first Markdown editor with live rendering, workspaces, and native desktop tools"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/MoekaProject/moeka"
+homepage = "https://moeka.app"
+readme = "README.md"
+publish = false
+
+[[bin]]
+name = "moeka"
+path = "src/main.rs"
+
+[features]
+# Mac App Store channel: drops the capabilities the sandbox forbids.
+mas = []
+# Opt in to GPUI's test platform for event-dispatch regression tests.
+gpui-test-support = ["gpui/test-support"]
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "9d9640d" }
+# Moeka embeds its own Windows manifest; keep GPUI's other default features.
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
+pulldown-cmark = { version = "0.13.0", default-features = false, features = [
+  "html",
+] }
+unicode-segmentation = "1.10"
+image = "0.25"
+lol_html = "2"
+jxl-oxide = { version = "0.12.6", default-features = false, features = ["image", "moxcms"] }
+syntect = { version = "5.2", default-features = false, features = [
+  "default-fancy",
+] }
+two-face = { version = "0.5", default-features = false, features = [
+  "syntect-fancy",
+] }
+notify = "8"
+rfd = "0.15"
+ureq = "2.12"
+regex = "1"
+percent-encoding = "2"
+directories = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sys-locale = "0.3"
+sysinfo = "0.31.4"
+pinyin = "0.10"
+trash = "5"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+emojis = "0.6"
+portable-pty = "0.9.0"
+mathjax-svg-rs = "0.4"
+ondine = { git = "https://github.com/wevm/ondine", rev = "6a1586e5af980e67c104239593ae931837157b8b", package = "compiler" }
+resvg = { version = "0.45", default-features = false, features = [
+  "text",
+  "system-fonts",
+  "memmap-fonts",
+] }
+usvg = { version = "0.45.1", default-features = false, features = [
+  "text",
+  "system-fonts",
+  "memmap-fonts",
+] }
+tantivy = "0.26.1"
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+pprof = "0.15"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"
+
+# macOS reaches the desktop through NSWorkspace instead, so that the App Store
+# build never spawns an `open` child process.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+opener = { version = "0.8", features = ["reveal"] }
+
+# Vendored so Windows builds can be cross-compiled from macOS: upstream only
+# runs its Windows build script (fxc shader compilation) when the *host* is
+# Windows. See packaging/windows/README.md.
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+block = "0.1"
+core-graphics = "0.24"
+raw-window-handle = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+raw-window-handle = "0.6"
+windows = { version = "0.61", features = [
+  "Win32_Graphics_Imaging",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Shell",
+] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+  "Win32_System_DataExchange",
+  "Win32_System_IO",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+zune-jpegxl = "0.5"
+zune-core = "0.5"
+
+# Optimize all dependencies in dev mode for better performance
+# while keeping the app itself at opt-level 1 for faster compile times
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# Release builds are used for both daily runs and macOS packages. Dependencies
+# remain fully optimized; only the application crate favors compile speed.
+[profile.release]
+lto = false
+codegen-units = 16
+incremental = true
+strip = true
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+lto = false
+codegen-units = 16

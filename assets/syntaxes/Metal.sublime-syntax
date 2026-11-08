@@ -1,0 +1,23 @@
+%YAML 1.2
+---
+name: Metal
+file_extensions: [metal]
+scope: source.metal
+contexts:
+  main:
+    - match: '\b(?:kernel|vertex|fragment|device|constant|thread|threadgroup|threadgroup_imageblock|ray_data|object_data|mesh|object)\b'
+      scope: storage.modifier.metal
+    - match: '\b(?:(?:bool|char|uchar|short|ushort|int|uint|long|ulong|half|float)(?:[2-4](?:x[2-4])?)?|texture(?:1d|2d|3d|cube)(?:_array|_ms|_ms_array)?|depth(?:2d|cube)(?:_array|_ms|_ms_array)?|sampler|atomic_(?:int|uint|bool)|packed_(?:float|half|int|uint)[2-4])\b'
+      scope: storage.type.metal
+    - match: '\[\['
+      push:
+        - meta_scope: meta.annotation.metal
+        - match: '\]\]'
+          pop: true
+        - match: '\b[A-Za-z_][A-Za-z0-9_]*\b'
+          scope: entity.other.attribute-name.metal
+        - match: '\b[0-9]+\b'
+          scope: constant.numeric.metal
+    - match: '\b(?:threadgroup_barrier|simdgroup_barrier|simd_[A-Za-z_]+|quad_[A-Za-z_]+|fast|precise)\b'
+      scope: support.function.metal
+    - include: scope:source.moeka.c-family

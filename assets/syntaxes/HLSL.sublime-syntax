@@ -1,0 +1,16 @@
+%YAML 1.2
+---
+name: HLSL
+file_extensions: [hlsl, hlsli, fxh]
+scope: source.hlsl
+contexts:
+  main:
+    - match: '\b(?:cbuffer|tbuffer|register|packoffset|technique|technique10|technique11|pass|sampler_state|row_major|column_major|groupshared|precise|in|out|inout|uniform|nointerpolation|linear|centroid|noperspective|sample|snorm|unorm|globallycoherent)\b'
+      scope: storage.modifier.hlsl
+    - match: '\b(?:(?:bool|int|uint|dword|half|float|double|min16float|min10float|min16int|min12int|min16uint)(?:[1-4](?:x[1-4])?)?|(?:RW)?(?:Texture(?:1D|2D|3D|Cube)(?:Array|MS|MSArray)?|Buffer|StructuredBuffer|ByteAddressBuffer)|(?:Append|Consume)StructuredBuffer|SamplerState|SamplerComparisonState|InputPatch|OutputPatch|PointStream|LineStream|TriangleStream)\b'
+      scope: storage.type.hlsl
+    - match: '\bSV_[A-Za-z0-9_]+\b'
+      scope: variable.language.hlsl
+    - match: '\b(?:lerp|saturate|mul|ddx|ddy|frac|rsqrt|asfloat|asint|asuint|clip|Interlocked[A-Za-z]+|GroupMemoryBarrierWithGroupSync)\b'
+      scope: support.function.hlsl
+    - include: scope:source.moeka.c-family

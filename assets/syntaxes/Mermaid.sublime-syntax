@@ -1,0 +1,29 @@
+%YAML 1.2
+---
+name: Mermaid
+file_extensions: [mmd, mermaid]
+scope: source.mermaid
+contexts:
+  main:
+    - match: '%%.*$'
+      scope: comment.line.percentage.mermaid
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.mermaid
+        - match: '"'
+          pop: true
+    - match: '`'
+      push:
+        - meta_scope: string.quoted.other.mermaid
+        - match: '`'
+          pop: true
+    - match: '^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|quadrantChart|requirementDiagram|gitGraph|mindmap|timeline|zenuml|sankey-beta|xychart-beta|block-beta|packet-beta|architecture-beta|kanban|radar-beta|treemap-beta)\b'
+      scope: keyword.declaration.mermaid
+    - match: '\b(?:subgraph|end|direction|participant|actor|activate|deactivate|autonumber|loop|alt|else|opt|par|and|critical|option|break|rect|Note|note|over|left|right|of|as|title|section|classDef|class|style|linkStyle|click|accTitle|accDescr|state)\b'
+      scope: keyword.control.mermaid
+    - match: '\b(?:TB|TD|BT|RL|LR)\b'
+      scope: constant.language.mermaid
+    - match: '[<|ox]?(?:--+|==+|-\.+-)[>|ox]?'
+      scope: keyword.operator.mermaid
+    - match: '#[0-9a-fA-F]{3,8}\b|\b[0-9]+(?:\.[0-9]+)?\b'
+      scope: constant.numeric.mermaid

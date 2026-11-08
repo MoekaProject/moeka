@@ -1,0 +1,43 @@
+%YAML 1.2
+---
+name: Liquid
+file_extensions: [liquid]
+scope: text.html.liquid
+contexts:
+  main:
+    - match: '\{%-?\s*comment\s*-?%\}'
+      push:
+        - meta_scope: comment.block.liquid
+        - match: '\{%-?\s*endcomment\s*-?%\}'
+          pop: true
+    - match: '\{%-?\s*raw\s*-?%\}'
+      push:
+        - meta_scope: string.unquoted.raw.liquid
+        - match: '\{%-?\s*endraw\s*-?%\}'
+          pop: true
+    - match: '\{\{'
+      scope: punctuation.section.embedded.begin.liquid
+      push:
+        - match: '-?\}\}'
+          pop: true
+        - include: expression
+    - match: '\{%'
+      scope: punctuation.section.embedded.begin.liquid
+      push:
+        - match: '-?%\}'
+          pop: true
+        - include: expression
+    - include: scope:text.html.basic
+  expression:
+    - match: '"[^"]*"|''[^'']*'''
+      scope: string.quoted.liquid
+    - match: '\b(?:assign|capture|endcapture|if|elsif|else|endif|unless|endunless|case|when|endcase|for|endfor|break|continue|cycle|tablerow|endtablerow|include|render|layout|section|echo|liquid|increment|decrement|in|contains|and|or)\b'
+      scope: keyword.control.liquid
+    - match: '\b(?:true|false|nil|null|empty|blank)\b'
+      scope: constant.language.liquid
+    - match: '\b\d+(?:\.\d+)?\b'
+      scope: constant.numeric.liquid
+    - match: '\b[A-Za-z_][\w.-]*'
+      scope: variable.other.liquid
+    - match: '[=<>!|:-]+'
+      scope: keyword.operator.liquid

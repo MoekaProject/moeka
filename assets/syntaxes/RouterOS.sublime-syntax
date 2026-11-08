@@ -1,0 +1,32 @@
+%YAML 1.2
+---
+name: RouterOS
+file_extensions: [rsc]
+scope: source.routeros
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.routeros
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.routeros
+        - match: '\\.'
+          scope: constant.character.escape.routeros
+        - match: '\$(?:[A-Za-z_][\w-]*|\d+)'
+          scope: variable.other.routeros
+        - match: '"'
+          pop: true
+    - match: ':(?:local|global|set|if|else|for|foreach|while|do|return|error|onerror|try|catch|put|log|execute|delay|len|pick|find|toarray|tostr|tonum|typeof|parse|resolve)\b'
+      scope: keyword.control.routeros
+    - match: '\$(?:[A-Za-z_][\w-]*|\d+)'
+      scope: variable.other.routeros
+    - match: '(?<!\w)/(?:[A-Za-z][\w-]*/?)+'
+      scope: entity.name.namespace.routeros
+    - match: '\b(?:add|set|get|remove|find|print|export|enable|disable|where|do|in|from|to|step|and|or)\b'
+      scope: keyword.control.routeros
+    - match: '\b(?:true|false|yes|no|nil)\b'
+      scope: constant.language.routeros
+    - match: '\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?\b|\b\d+(?:\.\d+)?(?:ms|s|m|h|d|w)?\b'
+      scope: constant.numeric.routeros
+    - match: '[=+*/<>!&|~-]+'
+      scope: keyword.operator.routeros

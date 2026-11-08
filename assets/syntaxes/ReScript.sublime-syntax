@@ -1,0 +1,57 @@
+%YAML 1.2
+---
+name: ReScript
+file_extensions: [res, resi]
+scope: source.rescript
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.rescript
+    - match: '/\*'
+      push: comment
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.rescript
+        - match: '\\.'
+          scope: constant.character.escape.rescript
+        - match: '"'
+          pop: true
+    - match: '`'
+      push:
+        - meta_scope: string.quoted.other.rescript
+        - match: '\\.'
+          scope: constant.character.escape.rescript
+        - match: '\$\{'
+          push: interpolation
+        - match: '`'
+          pop: true
+    - match: "'(?:\\\\.|[^'\\\\])'"
+      scope: string.quoted.single.rescript
+    - match: '\b(?:as|assert|async|await|catch|constraint|else|exception|external|for|if|in|include|lazy|let|module|mutable|nonrec|of|open|private|rec|switch|try|type|unpack|when|while|with)\b'
+      scope: keyword.control.rescript
+    - match: '\b(?:int|float|string|bool|char|unit|array|list|option|result|promise)\b'
+      scope: storage.type.rescript
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.rescript
+    - match: '@[A-Za-z_][A-Za-z0-9_.]*'
+      scope: entity.name.function.decorator.rescript
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.type.rescript
+    - match: '\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]+)?)\b'
+      scope: constant.numeric.rescript
+    - match: '=>|->|\|>|[=+*/%<>!&|?:~-]+'
+      scope: keyword.operator.rescript
+  comment:
+    - meta_scope: comment.block.rescript
+    - match: '/\*'
+      push: comment
+    - match: '\*/'
+      pop: true
+  interpolation:
+    - clear_scopes: 1
+    - meta_scope: meta.interpolation.rescript
+    - match: '\}'
+      pop: true
+    - match: '\{'
+      push: interpolation
+    - include: main

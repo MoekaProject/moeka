@@ -1,0 +1,29 @@
+%YAML 1.2
+---
+name: Nushell
+file_extensions: [nu]
+first_line_match: '^#!.*\bnu\b'
+scope: source.nushell
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.nushell
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.nushell
+        - match: '\\.'
+          scope: constant.character.escape.nushell
+        - match: '"'
+          pop: true
+    - match: "'[^']*'"
+      scope: string.quoted.single.nushell
+    - match: '\$[\w.]+'
+      scope: variable.other.nushell
+    - match: '\b(?:let|mut|const|def|export|extern|module|use|overlay|source|alias|if|else|match|for|in|while|loop|break|continue|return|try|catch|do|where)\b'
+      scope: keyword.control.nushell
+    - match: '\b(?:true|false|null)\b'
+      scope: constant.language.nushell
+    - match: '\b\d+(?:\.\d+)?(?:kb|mb|gb|sec|ms|ns)?\b'
+      scope: constant.numeric.nushell
+    - match: '[=+*/|<>!-]+'
+      scope: keyword.operator.nushell

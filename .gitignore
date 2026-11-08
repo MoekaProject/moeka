@@ -1,0 +1,32 @@
+# Logs
+logs
+*.log
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+target
+dist
+.cargo-home
+
+# Mac App Store provisioning profile: account-specific, fetched per machine
+packaging/macos/mas.provisionprofile
+
+# Local environment and signing material (examples may be shared after review)
+.env
+.env.*
+!.env.example
+!.env.sample
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile

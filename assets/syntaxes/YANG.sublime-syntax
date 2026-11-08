@@ -1,0 +1,34 @@
+%YAML 1.2
+---
+name: YANG
+file_extensions: [yang]
+scope: source.yang
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.yang
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.yang
+        - match: '\*/'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.yang
+        - match: '\\.'
+          scope: constant.character.escape.yang
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.yang
+        - match: "'"
+          pop: true
+    - match: '\b(?:module|submodule|yang-version|namespace|prefix|import|include|belongs-to|revision|revision-date|organization|contact|description|reference|container|leaf|leaf-list|list|key|type|typedef|grouping|uses|augment|deviation|feature|if-feature|identity|base|rpc|action|notification|input|output|choice|case|config|mandatory|default|presence|must|when|range|length|pattern|enum|bit|value|path|require-instance)\b'
+      scope: keyword.declaration.yang
+    - match: '\b(?:u?int(?:8|16|32|64)|decimal64|string|boolean|binary|empty|enumeration|bits|leafref|identityref|instance-identifier|union)\b'
+      scope: storage.type.yang
+    - match: '\b(?:true|false)\b'
+      scope: constant.language.yang
+    - match: '\b\d+\b'
+      scope: constant.numeric.yang

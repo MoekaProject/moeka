@@ -1,0 +1,39 @@
+%YAML 1.2
+---
+name: Agda
+file_extensions: [agda]
+scope: source.agda
+contexts:
+  main:
+    - match: '--.*$'
+      scope: comment.line.double-dash.agda
+    - match: '\{-#'
+      push: pragma
+    - match: '\{-'
+      push: comment
+    - match: '"'
+      push: string
+    - match: '\b(?:module|where|open|import|using|hiding|renaming|public|private|abstract|instance|macro|postulate|primitive|field|data|record|constructor|mutual|variable|let|in|with|rewrite|forall|infix|infixl|infixr|pattern|syntax|unquote|unquoteDecl|unquoteDef)\b'
+      scope: keyword.control.agda
+    - match: '\b(?:Set|Prop)(?:\d+)?\b'
+      scope: storage.type.agda
+    - match: '\b\d+\b'
+      scope: constant.numeric.agda
+    - match: '->|[=:|\\]'
+      scope: keyword.operator.agda
+  pragma:
+    - meta_scope: keyword.control.pragma.agda
+    - match: '#-\}'
+      pop: true
+  comment:
+    - meta_scope: comment.block.agda
+    - match: '\{-'
+      push: comment
+    - match: '-\}'
+      pop: true
+  string:
+    - meta_scope: string.quoted.double.agda
+    - match: '\\.'
+      scope: constant.character.escape.agda
+    - match: '"'
+      pop: true

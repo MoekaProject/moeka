@@ -1,0 +1,24 @@
+%YAML 1.2
+---
+name: DNS Zone
+file_extensions: [zone]
+scope: source.dns-zone
+contexts:
+  main:
+    - match: ';.*$'
+      scope: comment.line.semicolon.dns-zone
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.dns-zone
+        - match: '\\.'
+          scope: constant.character.escape.dns-zone
+        - match: '"'
+          pop: true
+    - match: '(?i)\$(?:ORIGIN|TTL|INCLUDE|GENERATE)\b'
+      scope: keyword.control.directive.dns-zone
+    - match: '(?i)\b(?:IN|CH|HS|A|AAAA|NS|SOA|MX|CNAME|DNAME|PTR|TXT|SRV|CAA|NAPTR|DS|DNSKEY|RRSIG|NSEC|NSEC3|TLSA|SSHFP|SVCB|HTTPS|LOC|CERT)\b'
+      scope: storage.type.dns-zone
+    - match: '(?i)\b\d+(?:[wdhms]\d*)*\b|\b(?:\d{1,3}\.){3}\d{1,3}\b'
+      scope: constant.numeric.dns-zone
+    - match: '@'
+      scope: variable.language.dns-zone

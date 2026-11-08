@@ -1,0 +1,44 @@
+#!/bin/bash
+# `psm` only preprocesses its GAS assembly (and defines the CFG_TARGET_* macros
+# that its `GLOBL`/`FUNCTION` macros expand to) when the target env is not MSVC.
+# Cross-compiling to Windows from macOS still selects the GAS source, so those
+# macros would reach the assembler unexpanded. Assemble `.s` inputs with the GNU
+# driver instead, supplying the flags psm skipped; everything else passes
+# straight through to clang-cl.
+set -euo pipefail
+
+real="$(xcrun -f clang)"
+
+for arg in "$@"; do
+  case "$arg" in
+    *.s) has_asm=1 ;;
+  esac
+done
+
+if [ -z "${has_asm:-}" ]; then
+  exec "$real" --driver-mode=cl "$@"
+fi
+
+target=""
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target=*) target="${1#--target=}"; args+=("$1") ;;
+    /imsvc)  shift; args+=(-isystem "$1") ;;
+    /imsvc*) args+=(-isystem "${1#/imsvc}") ;;
+    -Fo*) args+=(-o "${1#-Fo}") ;;
+    /Fo*) args+=(-o "${1#/Fo}") ;;
+    # cl-only spellings the GNU driver would misread (`-MD` means "write a
+    # depfile" there) or reject.
+    -nologo|-MD|-MT|-MDd|-MTd|-Brepro|-Z7|--) ;;
+    *) args+=("$1") ;;
+  esac
+  shift
+done
+
+exec "$real" \
+  -xassembler-with-cpp \
+  -DCFG_TARGET_OS_windows \
+  "-DCFG_TARGET_ARCH_${target%%-*}" \
+  -DCFG_TARGET_ENV_msvc \
+  "${args[@]}"

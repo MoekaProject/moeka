@@ -1,0 +1,50 @@
+%YAML 1.2
+---
+name: Nextflow
+file_extensions: [nf]
+scope: source.nextflow
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.nextflow
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.nextflow
+        - match: '\*/'
+          pop: true
+    - match: '"""'
+      push:
+        - meta_scope: string.quoted.triple.double.nextflow
+        - match: '"""'
+          pop: true
+        - match: '\$[A-Za-z_]\w*'
+          scope: variable.other.nextflow
+    - match: "'''"
+      push:
+        - meta_scope: string.quoted.triple.single.nextflow
+        - match: "'''"
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.nextflow
+        - match: '\\.'
+          scope: constant.character.escape.nextflow
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.nextflow
+        - match: '\\.'
+          scope: constant.character.escape.nextflow
+        - match: "'"
+          pop: true
+    - match: '\b(?:process|workflow|include|from|input|output|script|shell|exec|when|take|main|emit|publish|def|if|else|for|in|return|try|catch|throw|class|new|import|as|val|path|tuple|env|stdin|stdout|each|container|cpus|memory|time|publishDir|errorStrategy|tag|label)\b'
+      scope: keyword.control.nextflow
+    - match: '\b(?:params|Channel|channel|task|nextflow)\b'
+      scope: variable.language.nextflow
+    - match: '\b(?:true|false|null)\b'
+      scope: constant.language.nextflow
+    - match: '\b\d+(?:\.\d+)?\b'
+      scope: constant.numeric.nextflow
+    - match: '[=+*/%<>!&|?:-]+'
+      scope: keyword.operator.nextflow

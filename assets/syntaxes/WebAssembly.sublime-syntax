@@ -1,0 +1,36 @@
+%YAML 1.2
+---
+name: WebAssembly
+file_extensions: [wat, wast]
+scope: source.wat
+contexts:
+  main:
+    - match: ';;.*$'
+      scope: comment.line.double-semicolon.wat
+    - match: '\(;'
+      push: comment
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.wat
+        - match: '\\(?:[0-9a-fA-F]{2}|.)'
+          scope: constant.character.escape.wat
+        - match: '"'
+          pop: true
+    - match: '\$[^\s()"]+'
+      scope: variable.other.wat
+    - match: '\b(?:i32|i64|f32|f64|v128|local|global|memory|table|ref|struct|array)\.[A-Za-z0-9_]+'
+      scope: support.function.wat
+    - match: '\b(?:module|func|param|result|local|global|type|import|export|memory|table|data|elem|start|mut|rec|sub|struct|field|array|shared)\b'
+      scope: keyword.declaration.wat
+    - match: '\b(?:i32|i64|f32|f64|v128|funcref|externref|anyref|eqref|i31ref|structref|arrayref|ref|nullref)\b'
+      scope: storage.type.wat
+    - match: '\b(?:block|loop|if|then|else|end|br|br_if|br_table|return|call|call_indirect|drop|select|unreachable|nop|try|catch|throw|delegate)\b'
+      scope: keyword.control.wat
+    - match: '(?<![A-Za-z0-9_$])[+-]?(?:0x[0-9a-fA-F_]+(?:\.[0-9a-fA-F_]*)?(?:[pP][+-]?[0-9_]+)?|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9_]+)?|inf|nan(?::0x[0-9a-fA-F_]+)?)(?![A-Za-z0-9_])'
+      scope: constant.numeric.wat
+  comment:
+    - meta_scope: comment.block.wat
+    - match: '\(;'
+      push: comment
+    - match: ';\)'
+      pop: true

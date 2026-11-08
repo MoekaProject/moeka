@@ -1,0 +1,35 @@
+%YAML 1.2
+---
+name: Koka
+file_extensions: [kk, kki]
+scope: source.koka
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.koka
+    - match: '/\*'
+      push: comment
+    - match: '"'
+      push: string
+    - match: '\b(?:module|import|as|pub|private|fun|fn|val|var|type|struct|enum|alias|effect|handler|handle|with|return|resume|control|ctl|final|initially|finally|match|if|then|else|in|extern|abstract|open|extend|override|inline|rec|con)\b'
+      scope: keyword.control.koka
+    - match: '\b(?:int|int8|int16|int32|int64|float16|float32|float64|bool|char|string|list|maybe|unit|io|total|div|exn|console)\b'
+      scope: storage.type.koka
+    - match: '\b(?:True|False|Nothing|Just)\b'
+      scope: constant.language.koka
+    - match: '\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b'
+      scope: constant.numeric.koka
+    - match: '->|:=|[=<>!+*/%&|^-]+'
+      scope: keyword.operator.koka
+  string:
+    - meta_scope: string.quoted.double.koka
+    - match: '\\.'
+      scope: constant.character.escape.koka
+    - match: '"'
+      pop: true
+  comment:
+    - meta_scope: comment.block.koka
+    - match: '/\*'
+      push: comment
+    - match: '\*/'
+      pop: true

@@ -1,0 +1,31 @@
+%YAML 1.2
+---
+name: BIRD
+file_extensions: [bird]
+scope: source.bird
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.bird
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.bird
+        - match: '\*/'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.bird
+        - match: '\\.'
+          scope: constant.character.escape.bird
+        - match: '"'
+          pop: true
+    - match: '\b(?:router|id|protocol|template|filter|function|define|include|log|debug|table|channel|ipv4|ipv6|bgp|ospf|static|kernel|device|direct|rip|bfd|babel|route|via|import|export|all|none|accept|reject|if|then|else|return|case|print|local|neighbor|as|source|address|multihop|password|preference)\b'
+      scope: keyword.control.bird
+    - match: '\b(?:int|bool|string|ip|prefix|pair|quad|set|enum|clist|eclist|lclist|bgppath)\b'
+      scope: storage.type.bird
+    - match: '\b(?:true|false|on|off)\b'
+      scope: constant.language.bird
+    - match: '\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?\b|\b\d+\b'
+      scope: constant.numeric.bird
+    - match: '[=+*/<>!&|~-]+'
+      scope: keyword.operator.bird

@@ -1,0 +1,32 @@
+%YAML 1.2
+---
+name: MoonBit
+file_extensions: [mbt, mbti]
+scope: source.moonbit
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.moonbit
+    - match: '#[|$].*$'
+      scope: string.unquoted.multiline.moonbit
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.moonbit
+        - match: '\\.'
+          scope: constant.character.escape.moonbit
+        - match: '"'
+          pop: true
+    - match: "'(?:\\\\.|[^'\\\\])'"
+      scope: string.quoted.single.moonbit
+    - match: '\b(?:fn|let|mut|const|pub|priv|struct|enum|type|trait|impl|derive|match|if|else|for|while|loop|break|continue|return|try|catch|raise|guard|test|async|await|extern|as|is|in|with)\b'
+      scope: keyword.control.moonbit
+    - match: '@[A-Za-z_]\w*'
+      scope: entity.name.namespace.moonbit
+    - match: '\b(?:true|false|None|Some)\b'
+      scope: constant.language.moonbit
+    - match: '\b[A-Z]\w*\b'
+      scope: entity.name.type.moonbit
+    - match: '\b(?:0[xX][\da-fA-F_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)\b'
+      scope: constant.numeric.moonbit
+    - match: '->|=>|[=+*/%<>!&|^?:-]+'
+      scope: keyword.operator.moonbit

@@ -1,0 +1,21 @@
+%YAML 1.2
+---
+name: Prisma
+file_extensions: [prisma]
+scope: source.prisma
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.prisma
+    - match: '\b(?:model|enum|datasource|generator|type|view)\b'
+      scope: keyword.declaration.prisma
+    - match: '\b(?:String|Int|BigInt|Float|Decimal|Boolean|DateTime|Json|Bytes|Unsupported)\b'
+      scope: storage.type.prisma
+    - match: '@@?[\w.]+'
+      scope: storage.modifier.prisma
+    - match: '"(?:\\.|[^"\\])*"'
+      scope: string.quoted.double.prisma
+    - match: '\b(?:true|false|null)\b'
+      scope: constant.language.prisma
+    - match: '\b\d+(?:\.\d+)?\b'
+      scope: constant.numeric.prisma

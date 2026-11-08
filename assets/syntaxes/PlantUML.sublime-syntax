@@ -1,0 +1,31 @@
+%YAML 1.2
+---
+name: PlantUML
+file_extensions: [puml, plantuml, iuml, pu]
+scope: source.plantuml
+contexts:
+  main:
+    - match: "/'"
+      push:
+        - meta_scope: comment.block.plantuml
+        - match: "'/"
+          pop: true
+    - match: "'[^\n]*"
+      scope: comment.line.apostrophe.plantuml
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.plantuml
+        - match: '\\.'
+          scope: constant.character.escape.plantuml
+        - match: '"'
+          pop: true
+    - match: '^\s*@(?:start|end)[A-Za-z0-9_]+'
+      scope: keyword.declaration.plantuml
+    - match: '^\s*![A-Za-z_][A-Za-z0-9_]*'
+      scope: keyword.control.directive.plantuml
+    - match: '\b(?:actor|participant|boundary|control|entity|database|collections|queue|class|abstract|interface|enum|annotation|object|package|namespace|component|node|cloud|rectangle|artifact|folder|frame|card|usecase|state|note|legend|title|header|footer|skinparam|hide|show|remove|left|right|top|bottom|of|over|as|is|extends|implements|activate|deactivate|destroy|create|alt|else|opt|loop|par|break|critical|group|end|return|start|stop|if|then|endif|while|endwhile|repeat)\b'
+      scope: keyword.control.plantuml
+    - match: '[<|ox*]?(?:--+|\.\.+|==+)[>|ox*]?'
+      scope: keyword.operator.plantuml
+    - match: '#[A-Za-z0-9_]+\b|\b[0-9]+(?:\.[0-9]+)?\b'
+      scope: constant.numeric.plantuml

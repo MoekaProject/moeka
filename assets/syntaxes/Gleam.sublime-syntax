@@ -1,0 +1,24 @@
+%YAML 1.2
+---
+name: Gleam
+file_extensions: [gleam]
+scope: source.gleam
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.gleam
+    - match: '\b(?:as|assert|case|const|fn|if|import|let|opaque|panic|pub|todo|type|use)\b'
+      scope: keyword.control.gleam
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.type.gleam
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.gleam
+        - match: '\\.'
+          scope: constant.character.escape.gleam
+        - match: '"'
+          pop: true
+    - match: '\b\d[\d_]*(?:\.\d+)?\b'
+      scope: constant.numeric.gleam
+    - match: '\|>|->|<>|[=+*/!-]+'
+      scope: keyword.operator.gleam

@@ -1,0 +1,33 @@
+%YAML 1.2
+---
+name: WebIDL
+file_extensions: [webidl]
+scope: source.webidl
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.webidl
+    - match: '/\*'
+      push:
+        - meta_scope: comment.block.webidl
+        - match: '\*/'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.webidl
+        - match: '\\.'
+          scope: constant.character.escape.webidl
+        - match: '"'
+          pop: true
+    - match: '\b(?:interface|partial|mixin|namespace|dictionary|enum|typedef|callback|includes|implements|constructor|attribute|readonly|inherit|required|optional|static|stringifier|iterable|async|maplike|setlike|getter|setter|deleter|const)\b'
+      scope: keyword.declaration.webidl
+    - match: '\b(?:any|undefined|void|boolean|byte|octet|short|long|unsigned|float|double|unrestricted|DOMString|ByteString|USVString|object|symbol|sequence|record|Promise|FrozenArray|ObservableArray|ArrayBuffer|DataView|Int8Array|Uint8Array|Uint8ClampedArray|Int16Array|Uint16Array|Int32Array|Uint32Array|Float32Array|Float64Array|bigint)\b'
+      scope: storage.type.webidl
+    - match: '\b(?:true|false|null|Infinity|NaN)\b'
+      scope: constant.language.webidl
+    - match: '-?(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?)'
+      scope: constant.numeric.webidl
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.type.webidl
+    - match: '=|\.\.\.|\?'
+      scope: keyword.operator.webidl

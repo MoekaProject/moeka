@@ -1,0 +1,47 @@
+%YAML 1.2
+---
+name: Turtle
+file_extensions: [ttl, n3]
+scope: source.turtle
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.turtle
+    - match: '<[^<>\s]*>'
+      scope: string.unquoted.iri.turtle
+    - match: '(?i)@(?:prefix|base)\b|\b(?:PREFIX|BASE)\b'
+      scope: keyword.control.turtle
+    - match: '"""'
+      push:
+        - meta_scope: string.quoted.triple.double.turtle
+        - match: '\\.'
+          scope: constant.character.escape.turtle
+        - match: '"""'
+          pop: true
+    - match: "'''"
+      push:
+        - meta_scope: string.quoted.triple.single.turtle
+        - match: '\\.'
+          scope: constant.character.escape.turtle
+        - match: "'''"
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.turtle
+        - match: '\\.'
+          scope: constant.character.escape.turtle
+        - match: '"'
+          pop: true
+    - match: "'"
+      push:
+        - meta_scope: string.quoted.single.turtle
+        - match: '\\.'
+          scope: constant.character.escape.turtle
+        - match: "'"
+          pop: true
+    - match: '@[A-Za-z]+(?:-[A-Za-z0-9]+)*'
+      scope: constant.other.language-tag.turtle
+    - match: '\b(?:true|false|a)\b'
+      scope: constant.language.turtle
+    - match: '\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b'
+      scope: constant.numeric.turtle

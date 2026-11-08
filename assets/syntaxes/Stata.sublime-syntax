@@ -1,0 +1,40 @@
+%YAML 1.2
+---
+name: Stata
+file_extensions: [do, ado, mata]
+scope: source.stata
+contexts:
+  main:
+    - match: '//.*$|^\s*\*.*$'
+      scope: comment.line.stata
+    - match: '/\*'
+      push: comment
+    - match: '`"'
+      push: compound-string
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.stata
+        - match: '"'
+          pop: true
+    - match: "`[A-Za-z_]\\w*'"
+      scope: variable.other.local.stata
+    - match: '\$(?:[A-Za-z_]\w*|\{[^}]+\})'
+      scope: variable.other.global.stata
+    - match: '\b(?:generate|gen|replace|regress|reg|summarize|sum|describe|tabulate|tab|use|save|clear|import|export|merge|append|reshape|sort|bysort|by|if|in|foreach|forvalues|while|local|global|display|di|quietly|noisily|capture|program|define|end|return|ereturn|scalar|matrix|drop|keep|rename|label|set|log|do|run|mata)\b'
+      scope: keyword.control.stata
+    - match: '\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b'
+      scope: constant.numeric.stata
+    - match: '[=+*/<>!&|~-]+'
+      scope: keyword.operator.stata
+  compound-string:
+    - meta_scope: string.quoted.other.compound.stata
+    - match: '`"'
+      push: compound-string
+    - match: "\"'"
+      pop: true
+  comment:
+    - meta_scope: comment.block.stata
+    - match: '/\*'
+      push: comment
+    - match: '\*/'
+      pop: true

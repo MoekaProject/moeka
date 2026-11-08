@@ -1,0 +1,19 @@
+%YAML 1.2
+---
+name: Requirements
+file_extensions: [requirements.txt]
+scope: source.requirements
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.requirements
+    - match: '^\s*(?:-[rce]|--[\w-]+)\b'
+      scope: keyword.control.requirements
+    - match: '^[A-Za-z0-9][A-Za-z0-9_.-]*'
+      scope: entity.name.type.requirements
+    - match: '===|==|!=|~=|<=|>=|[<>;@]'
+      scope: keyword.operator.requirements
+    - match: '\b\d[\w.*+-]*'
+      scope: constant.numeric.requirements
+    - match: '"[^"]*"|''[^'']*'''
+      scope: string.quoted.requirements

@@ -1,0 +1,18 @@
+%YAML 1.2
+---
+name: CUDA
+file_extensions: [cu, cuh]
+scope: source.cuda
+contexts:
+  main:
+    - match: '\b(?:__global__|__device__|__host__|__shared__|__constant__|__managed__|__restrict__|__launch_bounds__|__noinline__|__forceinline__)\b'
+      scope: storage.modifier.cuda
+    - match: '\b(?:threadIdx|blockIdx|blockDim|gridDim|warpSize)\b'
+      scope: variable.language.cuda
+    - match: '\b(?:dim3|cudaError_t|cudaStream_t|cudaEvent_t|cudaTextureObject_t|cudaSurfaceObject_t|(?:u?int|float|double|char|short|long|uchar|ushort|uint|ulong)[1-4])\b'
+      scope: storage.type.cuda
+    - match: '\b(?:cuda[A-Z]\w*|__syncthreads|__syncwarp|__threadfence(?:_block|_system)?|__shfl(?:_up|_down|_xor)?_sync|atomic(?:Add|Sub|Exch|Min|Max|Inc|Dec|CAS|And|Or|Xor))\b'
+      scope: support.function.cuda
+    - match: '<<<|>>>'
+      scope: keyword.operator.cuda
+    - include: scope:source.moeka.c-family
