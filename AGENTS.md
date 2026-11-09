@@ -74,3 +74,5 @@ Stable publication updates the [public Tap](https://github.com/MoekaProject/home
 ### Recovery
 
 Preserve signed artifacts, drafts, and tags. Reconcile remote state before retrying writes; network errors do not establish absence. Resume the failed step, never overwrite attachments or move published tags. Retry transient reads at most three times; stop on permission, integrity, or unidentified outcomes. Resume known notarization submissions and complete staple, signature, and Gatekeeper checks. Published versions, including `v0.1.12`, must not be republished. Release-note or Tap failures need only their own retry.
+
+If GitHub HTTPS transport fails but authenticated SSH returns the same repository refs, use a per-process Git URL rewrite to SSH. Preserve global configuration and all repository, permission, and integrity checks.
