@@ -84,6 +84,33 @@ class CommunityChecksTest
     refute_empty CommunityChecks.workflow(unsafe, 'test')
   end
 
+  def test_signed_candidates_keep_credentials_out_of_builds_and_never_publish
+    path = File.expand_path('../.github/workflows/signed-macos.yml', __dir__)
+    document = CommunityChecks.yaml_file(path)
+    assert_empty CommunityChecks.workflow(document, path)
+    assert_equal ['workflow_dispatch'], (document['on'] || document[true]).keys
+    assert_equal false, document.fetch('concurrency').fetch('cancel-in-progress')
+    jobs = document.fetch('jobs')
+    assert_equal %w[build sign], jobs.keys
+    assert_equal 'build', jobs.fetch('sign').fetch('needs')
+    assert_equal 'release-signing', jobs.fetch('sign').fetch('environment')
+    jobs.each_value do |job|
+      assert_equal "github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'", job.fetch('if')
+      checkout = job.fetch('steps').find { |step| step.fetch('uses', '').start_with?('actions/checkout@') }
+      assert_equal '${{ github.sha }}', checkout.fetch('with').fetch('ref')
+    end
+    assert_empty jobs.fetch('build').to_s.scan(/secrets\./)
+    steps = jobs.fetch('sign').fetch('steps')
+    credential_steps = steps.select { |step| step.to_s.include?('secrets.') }
+    assert_equal 1, credential_steps.length
+    assert_equal 'bash scripts/ci-macos-signing.sh setup', credential_steps.first.fetch('run')
+    cleanup = steps.find { |step| step['run'] == 'bash scripts/ci-macos-signing.sh cleanup' }
+    assert_equal 'always()', cleanup.fetch('if')
+    assert_empty document.to_s.scan(/make publish|gh release|git push|PUBLIC_RELEASE_TOKEN/)
+    uploads = steps.select { |step| step.fetch('uses', '').start_with?('actions/upload-artifact@') }
+    assert_equal ['${{ runner.temp }}/moeka-notary-results/', 'dist/'], uploads.map { |step| step.fetch('with').fetch('path') }
+  end
+
   def test_local_links_and_heading_fragments
     Dir.mktmpdir('moeka-community-check-') do |root|
       File.write(File.join(root, 'guide.md'), "# Build and test\n\n## Build and test\n")

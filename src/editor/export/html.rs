@@ -266,7 +266,7 @@ fn image_data_url(
 ) -> Result<String> {
     crate::platform::fs_task::check_deadline()?;
     let mut bytes = Vec::new();
-    let extension;
+    let mut extension;
     if let Some(data) = target.strip_prefix("data:") {
         let (kind, encoded) = data
             .split_once(',')
@@ -312,6 +312,10 @@ fn image_data_url(
                 workspace_root,
                 workspace_roots,
             )?;
+            extension = resolved
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(str::to_string);
             std::fs::File::open(&resolved)
                 .with_context(|| crate::i18n::runtime::rt!(ReadFile, resolved.display()))?
                 .take(MAX_IMAGE_BYTES + 1)
@@ -322,29 +326,7 @@ fn image_data_url(
         bytes.len() as u64 <= MAX_IMAGE_BYTES,
         crate::i18n::runtime::RuntimeText::ImageTooLarge.to_string()
     );
-    let image = if extension
-        .as_deref()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
-    {
-        let rendered = super::helpers::load_render_image_from_svg_with_scale(
-            std::str::from_utf8(&bytes)?,
-            1.0,
-        )?;
-        let size = rendered.size(0);
-        let mut rgba = rendered
-            .as_bytes(0)
-            .context(crate::i18n::runtime::RuntimeText::InvalidOutput.to_string())?
-            .to_vec();
-        for pixel in rgba.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
-        }
-        image::DynamicImage::ImageRgba8(
-            image::RgbaImage::from_raw(size.width.0.try_into()?, size.height.0.try_into()?, rgba)
-                .context(crate::i18n::runtime::RuntimeText::InvalidDimensions.to_string())?,
-        )
-    } else {
-        crate::platform::image_decode::decode(&bytes, extension.as_deref())?
-    };
+    let image = super::helpers::decode_image_rgba(&bytes, extension.as_deref())?;
     let mut png = Cursor::new(Vec::new());
     image.write_to(&mut png, image::ImageFormat::Png)?;
     Ok(format!(
@@ -572,5 +554,238 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn export_float_images_use_the_same_pixels_as_editor_previews() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("note.md");
+        let image = image::DynamicImage::ImageRgb32F(image::Rgb32FImage::from_pixel(
+            4,
+            3,
+            image::Rgb([0.25, 0.5, 0.75]),
+        ));
+        for (extension, format) in [
+            ("hdr", image::ImageFormat::Hdr),
+            ("exr", image::ImageFormat::OpenExr),
+        ] {
+            let mut encoded = Cursor::new(Vec::new());
+            image.write_to(&mut encoded, format).unwrap();
+            let path = directory.path().join(format!("image.{extension}"));
+            std::fs::write(&path, encoded.get_ref()).unwrap();
+            let preview = super::super::helpers::load_render_image_from_path(&path).unwrap();
+            let html = embed_images(
+                &format!("<img src=\"image.{extension}\">"),
+                Some(&source),
+                directory.path(),
+                &[],
+            )
+            .unwrap();
+            let exported = embedded_image(&html);
+            assert_eq!(exported.dimensions(), (4, 3));
+            let mut bgra = exported.into_raw();
+            for pixel in bgra.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            assert_eq!(bgra.as_slice(), preview.as_bytes(0).unwrap());
+        }
+    }
+
+    fn export_format_fixture(extension: &str) -> Vec<u8> {
+        if extension == "pbm" {
+            return b"P4\n4 3\n\x50\xa0\x50".to_vec();
+        }
+        if extension == "pgm" {
+            let mut encoded = b"P5\n4 3\n255\n".to_vec();
+            encoded.extend_from_slice(&[96; 12]);
+            return encoded;
+        }
+        if extension == "ppm" {
+            let mut encoded = b"P6\n4 3\n255\n".to_vec();
+            encoded.extend_from_slice(&[32, 96, 160].repeat(12));
+            return encoded;
+        }
+        if extension == "svg" {
+            return br##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="3"><rect width="4" height="3" fill="#2060a0"/></svg>"##.to_vec();
+        }
+        if extension == "jxl" {
+            use zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions};
+            let pixels = [32, 96, 160, 255].repeat(12);
+            let mut encoded = Vec::new();
+            zune_jpegxl::JxlSimpleEncoder::new(
+                &pixels,
+                EncoderOptions::new(4, 3, ColorSpace::RGBA, BitDepth::Eight),
+            )
+            .encode(&mut encoded)
+            .unwrap();
+            return encoded;
+        }
+        if extension == "dds" {
+            let mut encoded = vec![0u8; 128];
+            encoded[..4].copy_from_slice(b"DDS ");
+            for (offset, value) in [
+                (4, 124u32),
+                (8, 0x81007),
+                (12, 4),
+                (16, 4),
+                (20, 8),
+                (76, 32),
+                (80, 4),
+                (108, 0x1000),
+            ] {
+                encoded[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            encoded[84..88].copy_from_slice(b"DXT1");
+            encoded.extend_from_slice(&[0, 0xf8, 0, 0, 0, 0, 0, 0]);
+            return encoded;
+        }
+        if matches!(extension, "heic" | "heif" | "hif") {
+            #[cfg(target_os = "macos")]
+            return crate::platform::image_decode::encode_test_heic(6);
+            #[cfg(not(target_os = "macos"))]
+            panic!("HEIF fixture encoding requires ImageIO");
+        }
+        let format = match extension {
+            "apng" => image::ImageFormat::Png,
+            "jpe" | "jfif" => image::ImageFormat::Jpeg,
+            "targa" => image::ImageFormat::Tga,
+            _ => image::ImageFormat::from_extension(extension).unwrap(),
+        };
+        let pixels = image::RgbaImage::from_pixel(4, 3, image::Rgba([32, 96, 160, 255]));
+        let source = image::DynamicImage::ImageRgba8(pixels);
+        let source = match format {
+            image::ImageFormat::Jpeg | image::ImageFormat::Pnm | image::ImageFormat::Avif => {
+                image::DynamicImage::ImageRgb8(source.to_rgb8())
+            }
+            image::ImageFormat::Farbfeld => image::DynamicImage::ImageRgba16(source.to_rgba16()),
+            image::ImageFormat::Hdr | image::ImageFormat::OpenExr => {
+                image::DynamicImage::ImageRgb32F(source.to_rgb32f())
+            }
+            _ => source,
+        };
+        let mut encoded = Cursor::new(Vec::new());
+        source.write_to(&mut encoded, format).unwrap();
+        encoded.into_inner()
+    }
+
+    #[test]
+    fn every_supported_image_format_exports_editor_pixels_as_browser_compatible_png() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("note.md");
+        for extension in crate::platform::image_decode::IMAGE_EXTENSIONS {
+            // System codecs are optional on Windows/Linux. ImageIO fixtures
+            // exercise HEIF/AVIF natively on macOS rather than claiming support
+            // from renamed PNG bytes.
+            #[cfg(not(target_os = "macos"))]
+            if matches!(*extension, "heic" | "heif" | "hif" | "avif") {
+                continue;
+            }
+            let bytes = export_format_fixture(extension);
+            let path = directory.path().join(format!("fixture.{extension}"));
+            std::fs::write(&path, &bytes).unwrap();
+            let preview = super::super::helpers::load_render_image_from_path(&path)
+                .unwrap_or_else(|error| panic!("{extension} preview: {error:#}"));
+            let mime = if *extension == "svg" {
+                "svg+xml"
+            } else {
+                extension
+            };
+            let data_url = format!(
+                "data:image/{mime};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(&bytes)
+            );
+            for target in [format!("fixture.{extension}"), data_url] {
+                let html = embed_images(
+                    &format!("<img src=\"{target}\">"),
+                    Some(&source),
+                    directory.path(),
+                    &[],
+                )
+                .unwrap_or_else(|error| panic!("{extension} export: {error:#}"));
+                let exported = embedded_image(&html);
+                let size = preview.size(0);
+                assert_eq!(
+                    exported.dimensions(),
+                    (
+                        u32::try_from(size.width.0).unwrap(),
+                        u32::try_from(size.height.0).unwrap()
+                    ),
+                    "{extension}"
+                );
+                let mut pixels = exported.into_raw();
+                for pixel in pixels.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                }
+                assert_eq!(
+                    pixels.as_slice(),
+                    preview.as_bytes(0).unwrap(),
+                    "{extension}"
+                );
+                if matches!(*extension, "heic" | "heif" | "hif") {
+                    assert_eq!((size.width.0, size.height.0), (48, 64), "HEIF orientation");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn export_uses_resolved_extension_and_normalizes_sixteen_bit_alpha() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("note.md");
+        for extension in ["svg", "tga"] {
+            std::fs::write(
+                directory.path().join(format!("image.{extension}")),
+                export_format_fixture(extension),
+            )
+            .unwrap();
+            let html = embed_images(
+                &format!("<img src=\"image%2E{extension}\">"),
+                Some(&source),
+                directory.path(),
+                &[],
+            )
+            .unwrap();
+            assert_eq!(embedded_image(&html).dimensions(), (4, 3));
+        }
+        let pixels =
+            image::ImageBuffer::from_pixel(4, 3, image::Rgba([8000u16, 24000, 40000, 32768]));
+        let source_pixels = image::DynamicImage::ImageRgba16(pixels);
+        for format in [image::ImageFormat::Png, image::ImageFormat::Tiff] {
+            let mut bytes = Cursor::new(Vec::new());
+            source_pixels.write_to(&mut bytes, format).unwrap();
+            let extension = format.extensions_str()[0];
+            std::fs::write(
+                directory.path().join(format!("image.{extension}")),
+                bytes.get_ref(),
+            )
+            .unwrap();
+            let html = embed_images(
+                &format!("<img src=\"image.{extension}\">"),
+                Some(&source),
+                directory.path(),
+                &[],
+            )
+            .unwrap();
+            assert_eq!(embedded_image(&html), source_pixels.to_rgba8());
+        }
+    }
+
+    #[test]
+    fn corrupt_images_fail_export_instead_of_producing_broken_images() {
+        let directory = tempfile::tempdir().unwrap();
+        for extension in crate::platform::image_decode::IMAGE_EXTENSIONS {
+            let name = format!("bad.{extension}");
+            std::fs::write(directory.path().join(&name), b"not an image").unwrap();
+            assert!(
+                embed_images(
+                    &format!("<img src=\"{name}\">"),
+                    Some(&directory.path().join("note.md")),
+                    directory.path(),
+                    &[],
+                )
+                .is_err(),
+                "{extension}"
+            );
+        }
     }
 }

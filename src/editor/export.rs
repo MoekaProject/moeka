@@ -1238,7 +1238,10 @@ impl EditorView {
         #[cfg(not(target_os = "macos"))]
         let ui_language = self.ui_language;
         let layout = ExportLayout::from_settings(&self.app_settings);
-        let workspace_root = self.sidebar_root.clone();
+        let workspace_root = source_file_path
+            .as_deref()
+            .and_then(|path| self.workspace_for_document_path(path))
+            .unwrap_or_else(|| self.sidebar_root.clone());
         let workspace_roots = self.workspaces.clone();
         let typography_css = html::editor_typography_css(&self.styles.editor);
         let preview_font_families = helpers::GeneratedPreviewFontFamilies {

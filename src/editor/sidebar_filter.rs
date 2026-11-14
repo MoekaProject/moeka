@@ -27,6 +27,22 @@ pub(super) struct SidebarFilter {
     pub(super) items: Rc<Vec<SidebarItem>>,
 }
 
+impl SidebarFilter {
+    pub(super) fn finish_request(&mut self, request: &Arc<AtomicBool>) {
+        if Arc::ptr_eq(&self.cancel, request) {
+            self.running = false;
+        }
+    }
+
+    pub(super) fn suspend(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.generation = self.generation.wrapping_add(1);
+        self.debounce = None;
+        self.requested_epoch = None;
+        self.index = None;
+    }
+}
+
 fn scan_filter_index(
     root: &std::path::Path,
     sort: SidebarSortMode,
@@ -301,6 +317,7 @@ impl EditorView {
             .map(|(_, index)| index.clone());
         let cancel = Arc::new(AtomicBool::new(false));
         self.sidebar_filter.cancel = cancel.clone();
+        let request = cancel.clone();
         self.sidebar_filter.running = true;
         cx.spawn(async move |this, cx| {
             let scan_root = root.clone();
@@ -330,6 +347,12 @@ impl EditorView {
             )
             .await;
             this.update(cx, |this, cx| {
+                if !Arc::ptr_eq(&this.sidebar_filter.cancel, &request) {
+                    if let Some(state) = this.workspace_states.get_mut(&root) {
+                        state.tree.finish_filter_request(&request);
+                    }
+                    return;
+                }
                 this.sidebar_filter.running = false;
                 let current = this.sidebar_root == root
                     && this.sidebar_directory_epoch == epoch
@@ -344,10 +367,6 @@ impl EditorView {
                             } else {
                                 this.sidebar_filter.rebuild_visible();
                             }
-                            this.pending_sidebar_scroll_anchor = None;
-                            this.pending_sidebar_scroll_top.set(None);
-                            this.sidebar_scroll_handle
-                                .set_offset(gpui::point(px(0.0), px(0.0)));
                             this.clear_sidebar_fs_error("Filter sidebar files", &root);
                         }
                         Ok(None) => {}
@@ -380,6 +399,10 @@ impl EditorView {
             .map(|input| input.read(cx).text().trim().to_lowercase())
             .unwrap_or_default();
         if self.sidebar_filter.query != query {
+            self.pending_sidebar_scroll_anchor = None;
+            self.pending_sidebar_scroll_top.set(None);
+            self.sidebar_scroll_handle
+                .set_offset(gpui::point(px(0.0), px(0.0)));
             self.sidebar_filter.query = query;
             self.schedule_sidebar_filter(cx);
         }
@@ -450,10 +473,15 @@ impl EditorView {
         let placeholder = self.t(crate::i18n::TextKey::SidebarFilterPlaceholder);
         let input = cx.new(|cx| crate::text_input::TextInput::new(styles, placeholder, cx));
         self.sidebar_filter.input = Some(input.clone());
-        cx.subscribe(&input, |this, _, event, cx| match event {
-            crate::text_input::TextInputEvent::Changed => this.update_sidebar_filter_query(cx),
-            crate::text_input::TextInputEvent::Escape => this.clear_sidebar_filter_text(cx),
-            _ => {}
+        cx.subscribe(&input, |this, input, event, cx| {
+            if this.sidebar_filter.input.as_ref() != Some(&input) {
+                return;
+            }
+            match event {
+                crate::text_input::TextInputEvent::Changed => this.update_sidebar_filter_query(cx),
+                crate::text_input::TextInputEvent::Escape => this.clear_sidebar_filter_text(cx),
+                _ => {}
+            }
         })
         .detach();
     }
@@ -462,6 +490,73 @@ impl EditorView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "gpui-test-support")]
+    #[gpui::test]
+    fn workspace_filter_keeps_input_results_and_scroll_without_reusing_another_request(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+        let directory = tempfile::tempdir().unwrap();
+        let roots = [directory.path().join("a"), directory.path().join("b")];
+        for root in &roots {
+            std::fs::create_dir(root).unwrap();
+        }
+        let editor = cx
+            .update(|cx| cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some(""), false)));
+        let (input, results, request) = editor.update(cx, |editor, cx| {
+            editor.workspaces = roots.to_vec();
+            editor.sidebar_root = roots[0].clone();
+            editor.ensure_sidebar_filter_input(cx);
+            let input = editor.sidebar_filter.input.clone().unwrap();
+            input.update(cx, |input, cx| input.set_text("note", cx));
+            editor.sidebar_filter.query = "note".into();
+            editor.sidebar_filter.items = Rc::new(vec![SidebarItem {
+                name: "note.md".into(),
+                path: roots[0].join("note.md"),
+                depth: 1,
+                is_dir: false,
+                is_expanded: false,
+            }]);
+            editor.sidebar_filter.running = true;
+            let request = editor.sidebar_filter.cancel.clone();
+            let results = editor.sidebar_filter.items.clone();
+            editor.pending_sidebar_scroll_top.set(None);
+            editor
+                .sidebar_scroll_handle
+                .set_offset(gpui::point(px(0.0), px(-50.0)));
+            editor.switch_workspace(roots[1].clone(), cx);
+            editor.ensure_sidebar_filter_input(cx);
+            editor.sidebar_filter.running = true;
+            assert_ne!(editor.sidebar_filter.input.as_ref(), Some(&input));
+            editor
+                .workspace_states
+                .get_mut(&roots[0])
+                .unwrap()
+                .tree
+                .finish_filter_request(&request);
+            assert!(
+                editor.sidebar_filter.running,
+                "a hidden request must not release the current worker"
+            );
+            (input, results, request)
+        });
+        input.update(cx, |_, cx| {
+            cx.emit(crate::text_input::TextInputEvent::Changed)
+        });
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert!(!editor.sidebar_filter_active());
+            editor.switch_workspace(roots[0].clone(), cx);
+            assert_eq!(editor.sidebar_filter.input.as_ref(), Some(&input));
+            assert_eq!(input.read(cx).text(), "note");
+            assert_eq!(editor.sidebar_filter.query, "note");
+            assert!(Rc::ptr_eq(&editor.sidebar_filter.items, &results));
+            assert!(!editor.sidebar_filter.running);
+            assert!(request.load(Ordering::Relaxed));
+            assert_eq!(editor.sidebar_scroll_handle.offset().y, px(-50.0));
+        });
+    }
 
     #[test]
     fn filter_highlights_preserve_original_unicode_byte_ranges() {
@@ -673,9 +768,19 @@ mod tests {
         let (_, window_cx) = cx.add_window_view(|_, _| FilterHarness(editor.clone()));
         window_cx.run_until_parked();
         for (query, expected) in [
-            (" DESPUÉS ", vec!["workspace/DESPUÉS.md"]),
+            (
+                " DESPUÉS ",
+                vec!["workspace/DESPUÉS.md", "another/DESPUÉS.md"],
+            ),
             ("中文", vec!["workspace/中文.txt"]),
-            (".MD", vec!["workspace/DESPUÉS.md", "workspace/other.md"]),
+            (
+                ".MD",
+                vec![
+                    "workspace/DESPUÉS.md",
+                    "workspace/other.md",
+                    "another/DESPUÉS.md",
+                ],
+            ),
             ("absent", vec![]),
             (
                 "   ",
@@ -683,6 +788,7 @@ mod tests {
                     "workspace/DESPUÉS.md",
                     "workspace/中文.txt",
                     "workspace/other.md",
+                    "another/DESPUÉS.md",
                 ],
             ),
         ] {
@@ -740,7 +846,7 @@ mod tests {
                 assert!(!editor.sidebar_filter_has_text(cx));
                 assert!(!editor.sidebar_filter_active());
                 assert!(editor.sidebar_filter.debounce.is_none());
-                assert_eq!(editor.visible_starred_sidebar_files().len(), 3);
+                assert_eq!(editor.visible_starred_sidebar_files().len(), 4);
             });
             window_cx.update(|_, cx| {
                 editor.update(cx, |editor, _| {
@@ -774,7 +880,7 @@ mod tests {
                 assert_eq!(editor.sidebar_filter_active(), blur);
                 if !blur {
                     assert!(editor.sidebar_filter.debounce.is_none());
-                    assert_eq!(editor.visible_starred_sidebar_files().len(), 3);
+                    assert_eq!(editor.visible_starred_sidebar_files().len(), 4);
                 }
                 assert_eq!(input.read(cx).focus_handle.is_focused(window), !blur);
             });

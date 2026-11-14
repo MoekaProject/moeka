@@ -154,6 +154,7 @@ impl EditorView {
             Default::default(),
             self.ui_scale,
         )
+        .debug_selector(|| id.to_string())
         .child(crate::ui::decoration::icon(
             crate::style::IconStyle::new(
                 f32::from(px(self.scaled(ss.sidebar_header_action_icon_size_px))),
@@ -211,182 +212,34 @@ impl EditorView {
         tooltip::with_tooltip(button, cx.entity().clone(), tooltip_title, shortcut)
     }
 
-    fn render_sidebar_header(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_workspace_actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let ss = &self.styles.sidebar;
-        let root_name = self.sidebar_root_name().to_uppercase();
-        let root_file_count = self
-            .file_list_visible
-            .then(|| {
-                self.sidebar_dir_file_counts
-                    .get(&self.sidebar_root)
-                    .copied()
-            })
-            .flatten()
-            .filter(|count| *count > 0);
-        let is_selected = self.is_sidebar_item_selected(&self.sidebar_root);
-        let header_drag_over_bg = ss.sidebar_item_selected_bg;
-        let root_drag_over = self
-            .sidebar_drag_hover_target
-            .as_ref()
-            .is_some_and(|target| target == &self.sidebar_root);
-        crate::ui::chrome::navigation_header(
-            self.styles
-                .navigation_header(false, is_selected, root_drag_over),
-            self.ui_scale,
-        )
-        .child(crate::ui::decoration::icon(
-            crate::style::IconStyle::new(
-                f32::from(px(self.scaled(ss.sidebar_header_root_icon_size_px))),
-                ss.sidebar_header_icon_color,
-            ),
-            ROOT_SVG_PATH,
-        ))
-        .child(
-            crate::ui::typography::label(
-                crate::style::TextStyle::new(
-                    f32::from(px(self.scaled(ss.sidebar_header_font_size_px))),
-                    if is_selected {
-                        ss.sidebar_item_selected_text_color
-                    } else {
-                        ss.sidebar_header_text_color
-                    },
-                ),
-                1.0,
-            )
-            .flex_1()
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .truncate()
-            .child(root_name),
-        )
-        .when_some(root_file_count, |this, count| {
-            this.child(self.render_sidebar_count_badge(count, false, 0.0))
-        })
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(self.scaled(ss.sidebar_header_action_gap_px)))
-                .child(self.render_sidebar_header_action_button(
-                    "sidebar-header-search",
-                    FILETREE_SEARCH_SVG_PATH,
-                    crate::i18n::sidebar_action_label(self.ui_language, "search"),
-                    Some(crate::editor::shortcut::hint("secondary-shift-f")),
-                    cx,
-                    |this, _event, window, cx| {
-                        this.toggle_workspace_search(window, cx);
-                    },
-                ))
-                .child(self.render_sidebar_header_action_button(
-                    "sidebar-header-sort",
-                    FILETREE_SORT_SVG_PATH,
-                    crate::i18n::sidebar_action_label(self.ui_language, "sort"),
-                    None,
-                    cx,
-                    |this, event, _window, cx| {
-                        this.open_sidebar_sort_menu(event.position, cx);
-                    },
-                ))
-                .child(self.render_sidebar_header_action_button(
-                    "sidebar-header-create",
-                    FILETREE_ADD_SVG_PATH,
-                    crate::i18n::sidebar_action_label(self.ui_language, "create"),
-                    None,
-                    cx,
-                    |this, event, _window, cx| {
-                        this.open_sidebar_create_menu(event.position, cx);
-                    },
-                )),
-        )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                let root = this.sidebar_root.clone();
-                this.sidebar_select_item(&root, false, false);
-                this.focused_sidebar_path = Some(root.clone());
-                this.set_file_list_dir_for_entry(&root, true, cx);
-                cx.notify();
-            }),
-        )
-        .on_mouse_down(
-            MouseButton::Right,
-            cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-                this.open_sidebar_context_menu(this.sidebar_root.clone(), true, event.position, cx);
-            }),
-        )
-        .drag_over::<DraggedSidebarItems>({
-            let root = self.sidebar_root.clone();
-            move |style, dragged, _, _| {
-                if Self::sidebar_drop_would_move(&dragged.paths, &root) {
-                    style.bg(header_drag_over_bg)
-                } else {
-                    style
-                }
-            }
-        })
-        .drag_over::<ExternalPaths>({
-            let root = self.sidebar_root.clone();
-            move |style, dragged, _, _| {
-                if Self::sidebar_drop_would_copy(dragged.paths(), &root) {
-                    style.bg(header_drag_over_bg)
-                } else {
-                    style
-                }
-            }
-        })
-        .on_drop({
-            let root = self.sidebar_root.clone();
-            cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
-                let paths = dragged.paths.clone();
-                this.clear_sidebar_drag_state(cx);
-                this.move_sidebar_items(paths, root.clone(), cx);
-            })
-        })
-        .on_drop({
-            let root = self.sidebar_root.clone();
-            cx.listener(move |this, dragged: &ExternalPaths, _, cx| {
-                let paths = dragged.paths().to_vec();
-                this.clear_sidebar_drag_state(cx);
-                this.copy_external_paths_into_dir(&paths, root.clone(), cx);
-            })
-        })
-        .on_drag_move({
-            let root = self.sidebar_root.clone();
-            cx.listener(
-                move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
-                    if event.bounds.contains(&event.event.position) {
-                        this.update_sidebar_drag_autoscroll(event.event.position, cx);
-                        let dragged = event.drag(cx);
-                        let valid_move = Self::sidebar_drop_would_move(&dragged.paths, &root);
-                        if valid_move {
-                            this.update_sidebar_drag_expand_hover_dir(None, cx);
-                            this.update_sidebar_drag_target(Some(root.clone()), cx);
-                        } else {
-                            this.clear_sidebar_drag_hover(cx);
-                        }
-                    }
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(ss.sidebar_header_action_gap_px)))
+            .child(self.render_sidebar_header_action_button(
+                "sidebar-header-sort",
+                FILETREE_SORT_SVG_PATH,
+                crate::i18n::sidebar_action_label(self.ui_language, "sort"),
+                None,
+                cx,
+                |this, event, _window, cx| {
+                    this.open_sidebar_sort_menu(event.position, cx);
                 },
-            )
-        })
-        .on_drag_move({
-            let root = self.sidebar_root.clone();
-            cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                if event.bounds.contains(&event.event.position) {
-                    this.update_sidebar_drag_autoscroll(event.event.position, cx);
-                    let dragged = event.drag(cx);
-                    let valid_copy = Self::sidebar_drop_would_copy(dragged.paths(), &root);
-                    if valid_copy {
-                        this.update_sidebar_drag_expand_hover_dir(None, cx);
-                        this.update_sidebar_drag_target(Some(root.clone()), cx);
-                    } else {
-                        this.clear_sidebar_drag_hover(cx);
-                    }
-                }
-            })
-        })
-        .into_any_element()
+            ))
+            .child(self.render_sidebar_header_action_button(
+                "sidebar-header-create",
+                FILETREE_ADD_SVG_PATH,
+                crate::i18n::sidebar_action_label(self.ui_language, "create"),
+                None,
+                cx,
+                |this, event, _window, cx| {
+                    this.open_sidebar_create_menu(event.position, cx);
+                },
+            ))
+            .into_any_element()
     }
 
     fn render_starred_sidebar_section(
@@ -448,6 +301,8 @@ impl EditorView {
             );
 
         div()
+            .id("sidebar-starred-section")
+            .debug_selector(|| "sidebar-starred-section".into())
             .w_full()
             .flex_none()
             .flex()
@@ -456,50 +311,57 @@ impl EditorView {
             .when(
                 !is_collapsed || self.sidebar_starred_motion.is_some(),
                 |this| {
-                    let has_root = !self.sidebar_root.as_os_str().is_empty();
-                    let prefix = if has_root {
-                        self.sidebar_scroll_prefix_height(true)
-                            - self.sidebar_starred_section_height(true)
-                    } else {
-                        self.sidebar_scroll_prefix_height(false)
-                            + self.scaled(ss.sidebar_header_height_px)
-                    };
                     let visible = super::list_viewport::fixed_list_window(
-                        &self.sidebar_scroll_handle,
-                        self.last_window_height,
-                        prefix,
+                        &self.sidebar_starred_scroll_handle,
+                        self.sidebar_starred_list_height(),
+                        0.0,
                         self.sidebar_item_height_px(),
                         starred_files.len(),
                         8,
                         16,
                     );
-                    this.child(div().h(px(visible.top_spacer_px)).flex_none())
-                        .children(
-                            starred_files
-                                .iter()
-                                .enumerate()
-                                .skip(visible.render.start)
-                                .take(visible.render.len())
-                                .map(|(index, path)| {
-                                    let row = self.render_starred_sidebar_item(path.clone(), cx);
-                                    if let Some(reveal) = self.starred_reveal() {
-                                        let row = div()
-                                            .w_full()
-                                            .flex_none()
-                                            .child(row)
-                                            .when(
-                                                is_collapsed,
-                                                crate::ui::interaction::inert_activation,
+                    this.child(
+                        div()
+                            .id("sidebar-starred-list")
+                            .debug_selector(|| "sidebar-starred-list".into())
+                            .h(px(self.sidebar_starred_list_height()))
+                            .flex_none()
+                            .min_h(px(0.0))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.sidebar_starred_scroll_handle)
+                            .child(div().h(px(visible.top_spacer_px)).flex_none())
+                            .children(
+                                starred_files
+                                    .iter()
+                                    .enumerate()
+                                    .skip(visible.render.start)
+                                    .take(visible.render.len())
+                                    .map(|(index, path)| {
+                                        let row =
+                                            self.render_starred_sidebar_item(path.clone(), cx);
+                                        if let Some(reveal) = self.starred_reveal() {
+                                            let row = div()
+                                                .w_full()
+                                                .flex_none()
+                                                .child(row)
+                                                .when(
+                                                    is_collapsed,
+                                                    crate::ui::interaction::inert_activation,
+                                                )
+                                                .into_any_element();
+                                            reveal.render_row(
+                                                index,
+                                                self.sidebar_item_height_px(),
+                                                row,
                                             )
-                                            .into_any_element();
-                                        reveal.render_row(index, self.sidebar_item_height_px(), row)
-                                    } else {
-                                        row
-                                    }
-                                })
-                                .collect::<Vec<_>>(),
-                        )
-                        .child(div().h(px(visible.bottom_spacer_px)).flex_none())
+                                        } else {
+                                            row
+                                        }
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                            .child(div().h(px(visible.bottom_spacer_px)).flex_none()),
+                    )
                 },
             )
             .into_any_element()
@@ -517,7 +379,8 @@ impl EditorView {
 
         let ss = &self.styles.sidebar;
         let is_selected = self.is_sidebar_item_selected(&path);
-        let is_focused = self.focused_sidebar_path.as_deref() == Some(path.as_path());
+        let is_focused = self.focused_sidebar_path.as_deref() == Some(path.as_path())
+            && self.focused_starred_path.as_deref() == Some(path.as_path());
         let normalized_path = Self::normalize_sidebar_path(&path);
         let icon_color = if is_selected {
             ss.sidebar_item_selected_icon_color
@@ -568,6 +431,7 @@ impl EditorView {
                     "sidebar-starred-{}",
                     path.display()
                 )))
+                .debug_selector(|| format!("sidebar-starred-{}", path.display()))
                 .child(
                     div()
                         .w_full()
@@ -638,12 +502,16 @@ impl EditorView {
                         let mods = event.modifiers();
                         let secondary = mods.secondary();
                         let has_modifier = secondary || mods.shift;
-                        this.sidebar_select_item(&click_path, mods.shift, secondary);
+                        if !has_modifier {
+                            this.activate_starred_workspace(&click_path, cx);
+                        }
+                        this.select_starred_sidebar_item(&click_path, mods.shift, secondary);
                         if !has_modifier {
                             this.set_file_list_dir_for_entry(&click_path, false, cx);
                             this.suppress_next_sidebar_sync_path = Some(click_path.clone());
                             if event.click_count() >= 2 {
                                 this.focused_sidebar_path = None;
+                                this.focused_workspace_root = None;
                                 this.open_path_in_permanent_tab(click_path.clone(), true, cx);
                                 this.move_cursor_to_first_line_end();
                                 this.request_editor_focus(cx);
@@ -665,7 +533,7 @@ impl EditorView {
                         window.prevent_default();
                         cx.stop_propagation();
                         if !this.selected_sidebar_paths.contains(&context_menu_path) {
-                            this.sidebar_select_item(&context_menu_path, false, false);
+                            this.select_starred_sidebar_item(&context_menu_path, false, false);
                         }
                         this.focused_sidebar_path = Some(context_menu_path.clone());
                         this.open_starred_sidebar_context_menu(
@@ -690,7 +558,7 @@ impl EditorView {
         let shift = ss.sidebar_item_left_shift_px;
         let is_root_level = depth == 0;
         let left_padding = if is_root_level {
-            self.scaled(self.styles.workspace_switcher.ws_bar_padding_x_px)
+            self.scaled(self.styles.sidebar.sidebar_root_padding_x_px)
         } else {
             self.scaled(
                 (ss.sidebar_item_indent_base_px + depth as f32 * ss.sidebar_item_indent_step_px
@@ -785,7 +653,7 @@ impl EditorView {
         let shift = ss.sidebar_item_left_shift_px;
         let is_root_level = item.depth == 0;
         let left_padding = if is_root_level {
-            self.scaled(self.styles.workspace_switcher.ws_bar_padding_x_px)
+            self.scaled(self.styles.sidebar.sidebar_root_padding_x_px)
         } else {
             self.scaled(
                 (ss.sidebar_item_indent_base_px
@@ -817,7 +685,8 @@ impl EditorView {
         } else {
             ss.sidebar_item_text_color
         };
-        let is_focused = self.focused_sidebar_path.as_deref() == Some(path.as_path());
+        let is_focused = self.focused_sidebar_path.as_deref() == Some(path.as_path())
+            && self.focused_starred_path.is_none();
 
         let guide_color = ss.sidebar_indent_guide_color;
         let guide_width = ss.sidebar_indent_guide_width_px;
@@ -929,6 +798,7 @@ impl EditorView {
             self.ui_scale,
         )
         .id(SharedString::from(format!("sidebar-{}", path.display())))
+        .debug_selector(|| format!("sidebar-{}", path.display()))
         .children(guides)
         .child(
             div()
@@ -994,6 +864,7 @@ impl EditorView {
                             this.suppress_next_sidebar_sync_path = Some(path.clone());
                             if event.click_count() >= 2 {
                                 this.focused_sidebar_path = None;
+                                this.focused_workspace_root = None;
                                 this.open_path_in_permanent_tab(path.clone(), true, cx);
                                 this.move_cursor_to_first_line_end();
                                 this.request_editor_focus(cx);
@@ -1137,6 +1008,10 @@ impl EditorView {
     }
 
     pub(crate) fn render_sidebar(&mut self, refresh: bool, cx: &mut Context<Self>) -> AnyElement {
+        if !cx.has_active_drag() {
+            self.workspace_drop_target = None;
+            self.workspace_drag_scroll = None;
+        }
         let has_root = !self.sidebar_root.as_os_str().is_empty();
         if has_root {
             self.ensure_sidebar_filter_input(cx);
@@ -1154,7 +1029,6 @@ impl EditorView {
         }
         let starred_files = self.visible_starred_sidebar_files();
         self.prepare_starred_motion(&starred_files);
-        let show_workspace_bar = true;
         let items = if has_root {
             Some(self.sidebar_items())
         } else {
@@ -1226,7 +1100,33 @@ impl EditorView {
                 div().w_full().flex().items_center().justify_end().child(
                     div()
                         .occlude()
+                        .flex()
+                        .items_center()
                         .pr(px(self.scaled(ss.sidebar_top_button_padding_right_px)))
+                        .child(self.render_sidebar_header_action_button(
+                            "sidebar-settings",
+                            "assets/icons/appearance/setting.svg",
+                            self.t(crate::i18n::TextKey::SettingsTitle),
+                            None,
+                            cx,
+                            |this, _, _, cx| this.open_settings_tab(cx),
+                        ))
+                        .child(self.render_sidebar_header_action_button(
+                            "sidebar-help",
+                            DOC_SVG_PATH,
+                            self.t(crate::i18n::TextKey::HelpManual),
+                            None,
+                            cx,
+                            |this, _, _, cx| this.open_welcome_tab(cx),
+                        ))
+                        .child(self.render_sidebar_header_action_button(
+                            "sidebar-add-workspace",
+                            FILETREE_ADD_SVG_PATH,
+                            self.t(crate::i18n::TextKey::OpenFolder),
+                            None,
+                            cx,
+                            |this, _, _, cx| this.pick_workspace_folder(cx),
+                        ))
                         .child(self.render_sidebar_top_button(
                             "sidebar-top-file-list-toggle",
                             "assets/icons/workspace/file-list-toggle.svg",
@@ -1251,7 +1151,6 @@ impl EditorView {
                 }),
             );
 
-        let header = self.render_sidebar_header(cx);
         let mut tree_items: Vec<AnyElement> = Vec::new();
 
         if let Some(error) = &self.sidebar_error {
@@ -1351,6 +1250,19 @@ impl EditorView {
             {
                 self.resolve_pending_sidebar_scroll_anchor(&items);
             }
+            // Restore before virtualization and prepaint, not after rows have
+            // already captured their paint and hit-test positions.
+            if let Some(top) = self.pending_sidebar_scroll_top.get() {
+                let offset = self.sidebar_scroll_handle.offset();
+                self.sidebar_scroll_handle
+                    .set_offset(gpui::point(offset.x, px(-top)));
+                if self.sidebar_directory_loading.is_empty()
+                    && !self.sidebar_directory_refresh_pending
+                    && !self.sidebar_items_dirty
+                {
+                    self.pending_sidebar_scroll_top.set(None);
+                }
+            }
             let render_all_items = self.sidebar_edit.is_some() && !self.sidebar_edit_in_file_list;
             let (items, tree_motion) = self.sidebar_tree_frame(items);
             let item_guide_levels = self.sidebar_motion_guide_levels(&items);
@@ -1390,7 +1302,7 @@ impl EditorView {
                 }
             } else {
                 let item_height = self.sidebar_item_height_px();
-                let prefix_height = self.sidebar_scroll_prefix_height(true);
+                let prefix_height = 0.0;
                 let bottom_spacer = self.scaled(ss.sidebar_bottom_spacer_height_px);
                 let content_height =
                     prefix_height + items.len() as f32 * item_height + bottom_spacer;
@@ -1490,20 +1402,6 @@ impl EditorView {
             }
         }
 
-        if has_root {
-            tree_items.insert(0, header);
-        }
-        if let Some(reveal) = self.starred_reveal() {
-            let offset = reveal.offset(self.sidebar_item_height_px());
-            tree_items = tree_items
-                .into_iter()
-                .map(|row| crate::ui::motion::slide(row, offset, None).into_any_element())
-                .collect();
-        }
-        if has_root || !starred_files.is_empty() {
-            tree_items.insert(0, self.render_starred_sidebar_section(&starred_files, cx));
-        }
-
         tree_items.push(
             div()
                 .w_full()
@@ -1512,8 +1410,6 @@ impl EditorView {
                 .into_any_element(),
         );
 
-        let scroll_y = -f32::from(self.sidebar_scroll_handle.offset().y);
-        let sticky_headers_visible = has_root && scroll_y > 0.5;
         let sidebar_scrollbar = self.render_scrollbar_for_handle(
             PanelScrollbarKind::Sidebar,
             &self.sidebar_scroll_handle,
@@ -1522,7 +1418,6 @@ impl EditorView {
             self.scaled(self.styles.self_drawn.scrollbar.right_margin_px),
             cx,
         );
-
         div()
             .id("sidebar")
             .w(px(self.sidebar_layout_width()))
@@ -1542,291 +1437,156 @@ impl EditorView {
             })
             .child(top_spacer)
             .when(has_root, |this| this.child(self.render_sidebar_filter(cx)))
+            .when(has_root || !starred_files.is_empty(), |this| {
+                this.child(self.render_starred_sidebar_section(&starred_files, cx))
+            })
+            .child(self.render_workspace_roots(true, cx))
+            .when(has_root, |this| {
+                this.child(self.render_workspace_root(self.sidebar_root.clone(), cx))
+            })
             .child(
                 div()
-                    .id("sidebar-tree")
+                    .id("sidebar-tree-region")
+                    .debug_selector(|| "sidebar-tree-region".into())
+                    .relative()
                     .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.sidebar_scroll_handle)
-                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                        if this.sidebar_starred_motion.take().is_some() {
-                            cx.notify();
-                        }
-                        this.pending_sidebar_scroll_top.set(None);
-                        this.pending_sidebar_scroll_anchor = None;
-                        this.pending_sidebar_reveal_path = None;
-                        this.reveal_panel_scrollbar(PanelScrollbarKind::Sidebar, cx);
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.focused_sidebar_path = None;
-                            this.clear_sidebar_drag_state(cx);
-                            cx.notify();
-                        }),
+                    .min_h(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id("sidebar-tree")
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.sidebar_scroll_handle)
+                            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                                if this.sidebar_starred_motion.take().is_some() {
+                                    cx.notify();
+                                }
+                                this.pending_sidebar_scroll_top.set(None);
+                                this.pending_sidebar_scroll_anchor = None;
+                                this.pending_sidebar_reveal_path = None;
+                                this.reveal_panel_scrollbar(PanelScrollbarKind::Sidebar, cx);
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.focused_sidebar_path = None;
+                                    this.focused_workspace_root = None;
+                                    this.clear_sidebar_drag_state(cx);
+                                    cx.notify();
+                                }),
+                            )
+                            .on_mouse_down(MouseButton::Right, {
+                                let root = self.sidebar_root.clone();
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    window.prevent_default();
+                                    cx.stop_propagation();
+                                    this.open_sidebar_context_menu(
+                                        root.clone(),
+                                        true,
+                                        event.position,
+                                        cx,
+                                    );
+                                })
+                            })
+                            .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)
+                            .drag_over::<ExternalPaths>(move |style, _, _, _| style)
+                            .on_drag_move({
+                                let root = self.sidebar_root.clone();
+                                cx.listener(
+                                    move |this,
+                                          event: &DragMoveEvent<DraggedSidebarItems>,
+                                          _,
+                                          cx| {
+                                        if event.bounds.contains(&event.event.position) {
+                                            this.update_sidebar_drag_autoscroll(
+                                                event.event.position,
+                                                cx,
+                                            );
+
+                                            if this.sidebar_drag_child_handled_same_event(
+                                                event.event.position,
+                                                &root,
+                                            ) {
+                                                return;
+                                            }
+
+                                            let dragged = event.drag(cx);
+                                            let valid_move = Self::sidebar_drop_would_move(
+                                                &dragged.paths,
+                                                &root,
+                                            );
+                                            if !valid_move {
+                                                this.clear_sidebar_drag_hover(cx);
+                                                return;
+                                            }
+                                            if this.sidebar_drag_has_child_target(&root) {
+                                                return;
+                                            }
+                                            this.update_sidebar_drag_expand_hover_dir(None, cx);
+                                            this.update_sidebar_drag_target(Some(root.clone()), cx);
+                                        }
+                                    },
+                                )
+                            })
+                            .on_drag_move({
+                                let root = self.sidebar_root.clone();
+                                cx.listener(
+                                    move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                                        if event.bounds.contains(&event.event.position) {
+                                            this.update_sidebar_drag_autoscroll(
+                                                event.event.position,
+                                                cx,
+                                            );
+
+                                            if this.sidebar_drag_child_handled_same_event(
+                                                event.event.position,
+                                                &root,
+                                            ) {
+                                                return;
+                                            }
+
+                                            let dragged = event.drag(cx);
+                                            let valid_copy = Self::sidebar_drop_would_copy(
+                                                dragged.paths(),
+                                                &root,
+                                            );
+                                            if !valid_copy {
+                                                this.clear_sidebar_drag_hover(cx);
+                                                return;
+                                            }
+                                            if this.sidebar_drag_has_child_target(&root) {
+                                                return;
+                                            }
+                                            this.update_sidebar_drag_expand_hover_dir(None, cx);
+                                            this.update_sidebar_drag_target(Some(root.clone()), cx);
+                                        }
+                                    },
+                                )
+                            })
+                            .on_drop({
+                                let root = self.sidebar_root.clone();
+                                cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
+                                    let paths = dragged.paths.clone();
+                                    this.clear_sidebar_drag_state(cx);
+                                    this.move_sidebar_items(paths, root.clone(), cx);
+                                })
+                            })
+                            .on_drop({
+                                let root = self.sidebar_root.clone();
+                                cx.listener(move |this, dragged: &ExternalPaths, _, cx| {
+                                    let paths = dragged.paths().to_vec();
+                                    this.clear_sidebar_drag_state(cx);
+                                    this.copy_external_paths_into_dir(&paths, root.clone(), cx);
+                                })
+                            })
+                            .children(tree_items),
                     )
-                    .on_mouse_down(MouseButton::Right, {
-                        let root = self.sidebar_root.clone();
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                            this.open_sidebar_context_menu(root.clone(), true, event.position, cx);
-                        })
-                    })
-                    .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)
-                    .drag_over::<ExternalPaths>(move |style, _, _, _| style)
-                    .on_drag_move({
-                        let root = self.sidebar_root.clone();
-                        cx.listener(
-                            move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
-                                if event.bounds.contains(&event.event.position) {
-                                    this.update_sidebar_drag_autoscroll(event.event.position, cx);
-
-                                    if this.sidebar_drag_child_handled_same_event(
-                                        event.event.position,
-                                        &root,
-                                    ) {
-                                        return;
-                                    }
-
-                                    let dragged = event.drag(cx);
-                                    let valid_move =
-                                        Self::sidebar_drop_would_move(&dragged.paths, &root);
-                                    if !valid_move {
-                                        this.clear_sidebar_drag_hover(cx);
-                                        return;
-                                    }
-                                    if this.sidebar_drag_has_child_target(&root) {
-                                        return;
-                                    }
-                                    this.update_sidebar_drag_expand_hover_dir(None, cx);
-                                    this.update_sidebar_drag_target(Some(root.clone()), cx);
-                                }
-                            },
-                        )
-                    })
-                    .on_drag_move({
-                        let root = self.sidebar_root.clone();
-                        cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                            if event.bounds.contains(&event.event.position) {
-                                this.update_sidebar_drag_autoscroll(event.event.position, cx);
-
-                                if this.sidebar_drag_child_handled_same_event(
-                                    event.event.position,
-                                    &root,
-                                ) {
-                                    return;
-                                }
-
-                                let dragged = event.drag(cx);
-                                let valid_copy =
-                                    Self::sidebar_drop_would_copy(dragged.paths(), &root);
-                                if !valid_copy {
-                                    this.clear_sidebar_drag_hover(cx);
-                                    return;
-                                }
-                                if this.sidebar_drag_has_child_target(&root) {
-                                    return;
-                                }
-                                this.update_sidebar_drag_expand_hover_dir(None, cx);
-                                this.update_sidebar_drag_target(Some(root.clone()), cx);
-                            }
-                        })
-                    })
-                    .on_drop({
-                        let root = self.sidebar_root.clone();
-                        cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
-                            let paths = dragged.paths.clone();
-                            this.clear_sidebar_drag_state(cx);
-                            this.move_sidebar_items(paths, root.clone(), cx);
-                        })
-                    })
-                    .on_drop({
-                        let root = self.sidebar_root.clone();
-                        cx.listener(move |this, dragged: &ExternalPaths, _, cx| {
-                            let paths = dragged.paths().to_vec();
-                            this.clear_sidebar_drag_state(cx);
-                            this.copy_external_paths_into_dir(&paths, root.clone(), cx);
-                        })
-                    })
-                    .children(tree_items),
+                    .when_some(sidebar_scrollbar, |this, scrollbar| this.child(scrollbar)),
             )
-            .when(sticky_headers_visible, |this: gpui::Stateful<gpui::Div>| {
-                this.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top(px(
-                            self.tab_bar_height() + self.scaled(ss.sidebar_header_height_px)
-                        ))
-                        .w_full()
-                        .bg(ss.sidebar_bg)
-                        .child(self.render_starred_sidebar_section(&starred_files, cx))
-                        .child(self.render_sidebar_header(cx)),
-                )
-            })
-            .when(show_workspace_bar, |this: gpui::Stateful<gpui::Div>| {
-                this.child(self.render_workspace_bar(cx))
-            })
-            .when_some(sidebar_scrollbar, |this, scrollbar| this.child(scrollbar))
-            .into_any_element()
-    }
-
-    fn render_workspace_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let wss = &self.styles.workspace_switcher;
-        let ss = &self.styles.sidebar;
-        let ws_name = self.sidebar_root_name().to_uppercase();
-        let hover_bg = wss.ws_bar_hover_bg;
-        let root_drag_over = self
-            .sidebar_drag_hover_target
-            .as_ref()
-            .is_some_and(|target| target == &self.sidebar_root);
-
-        let bar = div()
-            .id("workspace-bar")
-            .w_full()
-            .h(px(self.status_bar_height()))
-            .flex_none()
-            .flex()
-            .items_center()
-            .px(px(self.scaled(wss.ws_bar_padding_x_px)))
-            .gap(px(self.scaled(wss.ws_bar_gap_px)))
-            .bg(if root_drag_over {
-                hover_bg
-            } else {
-                wss.ws_bar_bg
-            })
-            .border_t(px(self.ui_border_width(1.0)))
-            .border_color(wss.ws_bar_border_color)
-            .cursor(CursorStyle::Arrow)
-            .hover(move |s| s.bg(hover_bg))
-            .child(crate::ui::decoration::icon(
-                crate::style::IconStyle::new(
-                    f32::from(px(self.scaled(ss.sidebar_header_root_icon_size_px))),
-                    ss.sidebar_header_icon_color,
-                ),
-                WORKSPACE_EXPAND_SVG_PATH,
-            ))
-            .child(
-                crate::ui::typography::label(
-                    crate::style::TextStyle::new(
-                        f32::from(px(self.scaled(ss.sidebar_header_font_size_px))),
-                        ss.sidebar_header_text_color,
-                    ),
-                    1.0,
-                )
-                .flex_1()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .truncate()
-                .child(ws_name),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.open_workspace_menu(event.position, cx);
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.open_workspace_menu(event.position, cx);
-                }),
-            )
-            .drag_over::<DraggedSidebarItems>({
-                let root = self.sidebar_root.clone();
-                move |style, dragged, _, _| {
-                    if Self::sidebar_drop_would_move(&dragged.paths, &root) {
-                        style.bg(hover_bg)
-                    } else {
-                        style
-                    }
-                }
-            })
-            .drag_over::<ExternalPaths>({
-                let root = self.sidebar_root.clone();
-                move |style, dragged, _, _| {
-                    if Self::sidebar_drop_would_copy(dragged.paths(), &root) {
-                        style.bg(hover_bg)
-                    } else {
-                        style
-                    }
-                }
-            })
-            .on_drag_move({
-                let root = self.sidebar_root.clone();
-                cx.listener(
-                    move |this, event: &DragMoveEvent<DraggedSidebarItems>, _, cx| {
-                        if event.bounds.contains(&event.event.position) {
-                            this.update_sidebar_drag_autoscroll(event.event.position, cx);
-                            let dragged = event.drag(cx);
-                            let valid_move = Self::sidebar_drop_would_move(&dragged.paths, &root);
-                            if valid_move {
-                                this.update_sidebar_drag_expand_hover_dir(None, cx);
-                                this.update_sidebar_drag_target(Some(root.clone()), cx);
-                            } else {
-                                this.clear_sidebar_drag_hover(cx);
-                            }
-                        }
-                    },
-                )
-            })
-            .on_drag_move({
-                let root = self.sidebar_root.clone();
-                cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                    if event.bounds.contains(&event.event.position) {
-                        this.update_sidebar_drag_autoscroll(event.event.position, cx);
-                        let dragged = event.drag(cx);
-                        let valid_copy = Self::sidebar_drop_would_copy(dragged.paths(), &root);
-                        if valid_copy {
-                            this.update_sidebar_drag_expand_hover_dir(None, cx);
-                            this.update_sidebar_drag_target(Some(root.clone()), cx);
-                        } else {
-                            this.clear_sidebar_drag_hover(cx);
-                        }
-                    }
-                })
-            })
-            .on_drop({
-                let root = self.sidebar_root.clone();
-                cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
-                    let paths = dragged.paths.clone();
-                    this.clear_sidebar_drag_state(cx);
-                    this.move_sidebar_items(paths, root.clone(), cx);
-                })
-            })
-            .on_drop({
-                let root = self.sidebar_root.clone();
-                cx.listener(move |this, dragged: &ExternalPaths, _, cx| {
-                    let paths = dragged.paths().to_vec();
-                    this.clear_sidebar_drag_state(cx);
-                    this.copy_external_paths_into_dir(&paths, root.clone(), cx);
-                })
-            })
-            .into_any_element();
-        let bounds_cell = self.workspace_bar_bounds.clone();
-        let refresh_ready = self.sidebar_directory_loading.is_empty() && !self.sidebar_items_dirty;
-        let pending_scroll_top = self.pending_sidebar_scroll_top.clone();
-        let sidebar_scroll_handle = self.sidebar_scroll_handle.clone();
-        div()
-            .w_full()
-            .h(px(self.status_bar_height()))
-            .flex_none()
-            .on_children_prepainted(move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
-                bounds_cell.set(bounds.first().copied());
-                if refresh_ready && let Some(scroll_top) = pending_scroll_top.take() {
-                    let max_scroll = f32::from(sidebar_scroll_handle.max_offset().height);
-                    let offset = sidebar_scroll_handle.offset();
-                    let target_y = -scroll_top.min(max_scroll);
-                    if (f32::from(offset.y) - target_y).abs() >= 0.5 {
-                        sidebar_scroll_handle.set_offset(gpui::point(offset.x, px(target_y)));
-                    }
-                }
-            })
-            .child(bar)
+            .child(self.render_workspace_roots(false, cx))
             .into_any_element()
     }
 }

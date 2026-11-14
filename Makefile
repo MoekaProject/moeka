@@ -251,6 +251,7 @@ publish-check:
 
 test-publish-release:
 	@bash scripts/test-publish-release.sh
+	@bash scripts/test-ci-macos-signing.sh
 	@python3 scripts/test-prepare-linux-sysroot.py
 
 # Only the publishing helper calls this, after the read-only safety checks.

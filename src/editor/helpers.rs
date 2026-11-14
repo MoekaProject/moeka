@@ -11893,18 +11893,39 @@ fn load_render_image_from_bytes(
     bytes: &[u8],
     extension: Option<&str>,
 ) -> anyhow::Result<RenderImage> {
-    if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("svg")) {
-        return load_render_image_from_svg_with_scale(std::str::from_utf8(bytes)?, 1.0);
-    }
-    let dynamic = crate::platform::image_decode::decode(bytes, extension)?;
-    let mut buffer = dynamic.to_rgba8();
-
+    let mut buffer = decode_image_rgba(bytes, extension)?;
     for pixel in buffer.chunks_exact_mut(4) {
         pixel.swap(0, 2);
     }
+    Ok(RenderImage::new([Frame::new(buffer)]))
+}
 
-    let frame = Frame::new(buffer);
-    Ok(RenderImage::new([frame]))
+pub(crate) fn decode_image_rgba(
+    bytes: &[u8],
+    extension: Option<&str>,
+) -> anyhow::Result<image::RgbaImage> {
+    if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("svg")) {
+        let rendered = load_render_image_from_svg_with_scale(std::str::from_utf8(bytes)?, 1.0)?;
+        let size = rendered.size(0);
+        let mut pixels = rendered
+            .as_bytes(0)
+            .ok_or_else(|| {
+                anyhow::anyhow!(crate::i18n::runtime::RuntimeText::InvalidOutput.to_string())
+            })?
+            .to_vec();
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        return image::RgbaImage::from_raw(
+            size.width.0.try_into()?,
+            size.height.0.try_into()?,
+            pixels,
+        )
+        .ok_or_else(|| {
+            anyhow::anyhow!(crate::i18n::runtime::RuntimeText::InvalidDimensions.to_string())
+        });
+    }
+    Ok(crate::platform::image_decode::decode(bytes, extension)?.to_rgba8())
 }
 
 #[cfg(test)]
@@ -13072,15 +13093,6 @@ fn escape_svg_text(text: &str) -> String {
 }
 
 pub(crate) fn load_render_image_from_path(path: &PathBuf) -> anyhow::Result<RenderImage> {
-    if path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
-    {
-        let svg = std::fs::read_to_string(path)?;
-        return load_render_image_from_svg_with_scale(&svg, 1.0);
-    }
-
     let bytes = std::fs::read(path)?;
     load_render_image_from_bytes(
         &bytes,

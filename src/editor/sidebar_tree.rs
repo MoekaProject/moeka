@@ -315,7 +315,7 @@ impl EditorView {
             let scroll_top = (-f32::from(self.sidebar_scroll_handle.offset().y)).max(0.0);
             self.pending_sidebar_scroll_top.set(Some(scroll_top));
             let item_height = self.sidebar_item_height_px();
-            let prefix_height = self.sidebar_scroll_prefix_height(true);
+            let prefix_height = 0.0;
             let items = self.sidebar_items_cache.clone();
             if !items.is_empty() && item_height > 0.0 {
                 let anchor_index = (((scroll_top - prefix_height).max(0.0) / item_height).floor()
@@ -457,6 +457,9 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_sidebar_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if path == self.sidebar_root {
+            return;
+        }
         if self.sidebar_filter_active() {
             self.toggle_filtered_directory(path, cx);
             return;

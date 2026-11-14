@@ -518,7 +518,7 @@ impl EditorView {
     }
 
     pub(crate) fn sidebar_scrollbar_track_height(&self) -> f32 {
-        (self.last_window_height - self.status_bar_height()).max(1.0)
+        f32::from(self.sidebar_scroll_handle.bounds().size.height).max(1.0)
     }
 
     pub(crate) fn chat_terminal_scrollbar_track_height(&self) -> f32 {

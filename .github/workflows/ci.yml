@@ -48,6 +48,7 @@ jobs:
           node-version: '22'
       - run: node scripts/check-assets.mjs
       - run: bash scripts/test-publish-release.sh
+      - run: bash scripts/test-ci-macos-signing.sh
       - run: bash scripts/test-publish-homebrew.sh
 
   secrets:

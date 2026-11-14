@@ -13,6 +13,9 @@ mod native;
 #[path = "image_decode/windows.rs"]
 mod native;
 
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use native::encode_test_heic;
+
 pub(crate) const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "apng", "jpg", "jpeg", "jpe", "jfif", "gif", "webp", "bmp", "ico", "tif", "tiff",
     "avif", "svg", "heic", "heif", "hif", "dds", "exr", "ff", "hdr", "pbm", "pgm", "ppm", "pam",

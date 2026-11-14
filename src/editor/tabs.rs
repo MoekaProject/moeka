@@ -311,16 +311,26 @@ impl EditorView {
 
     pub(crate) fn request_editor_focus(&mut self, cx: &mut Context<Self>) {
         self.focused_sidebar_path = None;
+        self.focused_workspace_root = None;
         self.pending_editor_focus = true;
         cx.notify();
-
+        let pane = self.current_pane_id();
+        let tab = self.active_tab_id.clone();
+        let root = self.sidebar_root.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(16))
                 .await;
 
             let _ = this.update(cx, |this, cx| {
-                this.focused_sidebar_path = None;
+                if this.current_pane_id() != pane
+                    || this.active_tab_id != tab
+                    || this.sidebar_root != root
+                    || this.focused_sidebar_path.is_some()
+                    || this.focused_workspace_root.is_some()
+                {
+                    return;
+                }
                 this.pending_editor_focus = true;
                 cx.notify();
             });
@@ -341,6 +351,7 @@ impl EditorView {
         }
 
         self.focused_sidebar_path = None;
+        self.focused_workspace_root = None;
         window.prevent_default();
         cx.stop_propagation();
 
@@ -1094,6 +1105,9 @@ impl EditorView {
     }
 
     pub(crate) fn close_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        if self.approve_workspace_tab_close(tab_id, cx) {
+            return;
+        }
         self.cancel_auto_save_for_tab(tab_id);
         // The tab may live in another pane (e.g. queued closes after a pane
         // was refocused); move focus there first so the close logic below
@@ -1557,10 +1571,15 @@ impl EditorView {
     }
 
     pub(crate) fn open_settings_tab(&mut self, cx: &mut Context<Self>) {
-        // Singleton: if a settings tab already exists (in any pane), switch to it
+        // Each workspace owns its settings tab; the settings themselves remain shared.
         let existing_owner = self
             .all_tabs()
-            .find(|tab| tab.kind == TabKind::Settings)
+            .find(|tab| {
+                tab.kind == TabKind::Settings
+                    && self
+                        .pane_id_for_tab(&tab.id)
+                        .is_some_and(|pane| self.pane_layout.contains(pane))
+            })
             .map(|tab| tab.id.clone())
             .and_then(|id| self.pane_id_for_tab(&id));
         if let Some(owner) = existing_owner {
@@ -1609,6 +1628,55 @@ impl EditorView {
     }
 
     // ── Tab rendering ───────────────────────────────────────────────
+
+    #[cfg(any(windows, test))]
+    fn native_window_title(&self) -> String {
+        let app_name = crate::i18n::application_display_name(self.ui_language);
+        let Some(tab) = self
+            .active_tab_id
+            .as_ref()
+            .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
+        else {
+            return app_name.to_string();
+        };
+        let (display, _) = self.tab_display_title(tab);
+        let path = tab
+            .path
+            .as_deref()
+            .or_else(|| session_store::restoring_path(self, &tab.id));
+        let filename = path
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy());
+        let label = match filename {
+            Some(filename) if filename != display => format!("{display} — {filename}"),
+            _ => display,
+        };
+        let label = label
+            .chars()
+            .map(|ch| if ch.is_control() { ' ' } else { ch })
+            .collect::<String>();
+        let label = label.trim();
+        if label.is_empty() {
+            app_name.to_string()
+        } else {
+            format!(
+                "{}{label} — {app_name}",
+                if tab.is_dirty { "*" } else { "" }
+            )
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    pub(super) fn sync_native_window_title(&mut self, window: &mut gpui::Window) {
+        if self.embedded_editor {
+            return;
+        }
+        let title = self.native_window_title();
+        if self.last_native_window_title.as_ref() != Some(&title) {
+            window.set_window_title(&title);
+            self.last_native_window_title = Some(title);
+        }
+    }
 
     fn tab_display_title(&self, tab: &OpenTab) -> (String, bool) {
         let heading = (tab.kind == TabKind::Editor
@@ -3271,6 +3339,164 @@ mod tests {
             first_document_heading("# **Heading** {#section .wide}\n"),
             Some("Heading".into())
         );
+    }
+
+    #[cfg(feature = "gpui-test-support")]
+    #[gpui::test]
+    fn native_window_titles_follow_tabs_edits_and_special_views(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext as _, Entity, Render, Subscription};
+        struct TitleHarness(Entity<EditorView>, Subscription);
+        impl Render for TitleHarness {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let _ = &self.1;
+                self.0
+                    .update(cx, |editor, _| editor.sync_native_window_title(window));
+                div()
+            }
+        }
+        let editor = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut editor = EditorView::new_with_mode(cx, true, false, Some("# First"), false);
+                editor.embedded_editor = false;
+                editor.ui_language = UiLanguage::English;
+                editor.tabs = vec![
+                    EditorView::build_file_tab(
+                        "first".into(),
+                        Path::new("first.md"),
+                        b"# First",
+                        false,
+                        false,
+                    ),
+                    EditorView::build_file_tab(
+                        "second".into(),
+                        Path::new("second.txt"),
+                        b"plain",
+                        false,
+                        false,
+                    ),
+                ];
+                editor.active_tab_id = Some("first".into());
+                editor.reparse();
+                editor
+            })
+        });
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            TitleHarness(editor.clone(), cx.observe(&editor, |_, _, cx| cx.notify()))
+        });
+        assert_eq!(
+            cx.window_title().as_deref(),
+            Some("First — first.md — Moeka")
+        );
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.buffer.replace(0..editor.buffer.len(), "# 修改标题");
+                editor.tabs[0].is_dirty = true;
+                editor.reparse();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.window_title().as_deref(),
+            Some("*修改标题 — first.md — Moeka")
+        );
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.tabs[0].is_dirty = false;
+                editor.tabs[0].path = Some(PathBuf::from("renamed.md"));
+                editor.ui_language = UiLanguage::ChineseSimplified;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.window_title().as_deref(),
+            Some("修改标题 — renamed.md — 小语文稿")
+        );
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.activate_tab_by_index_without_persist(1, cx)
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.window_title().as_deref(), Some("second.txt — 小语文稿"));
+        for (kind, title) in [(TabKind::Settings, "设置"), (TabKind::Editor, "未命名")] {
+            cx.update(|_, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.tabs[1].kind = kind;
+                    editor.tabs[1].path = None;
+                    editor.tabs[1].title = title.into();
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            assert_eq!(cx.window_title(), Some(format!("{title} — 小语文稿")));
+        }
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.tabs.clear();
+                editor.active_tab_id = None;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.window_title().as_deref(), Some("小语文稿"));
+    }
+
+    #[cfg(feature = "gpui-test-support")]
+    #[gpui::test]
+    fn native_window_title_uses_focused_pane_and_skips_embedded_editors(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+        let editor = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut editor = EditorView::new_with_mode(cx, true, false, Some("# First"), false);
+                editor.ui_language = UiLanguage::English;
+                editor.tabs = vec![EditorView::build_file_tab(
+                    "first".into(),
+                    Path::new("first.md"),
+                    b"# First",
+                    false,
+                    false,
+                )];
+                editor.active_tab_id = Some("first".into());
+                editor.reparse();
+                editor
+            })
+        });
+        editor.update(cx, |editor, cx| {
+            let mut second = Pane::new(editor.next_pane_id);
+            editor.next_pane_id += 1;
+            second.state.tabs.push(EditorView::build_file_tab(
+                "second".into(),
+                Path::new("second.txt"),
+                b"Second",
+                false,
+                false,
+            ));
+            let second_id = second.id;
+            editor.panes.push(second);
+            assert!(editor.pane_layout.split(
+                editor.focused_pane_id,
+                second_id,
+                SplitDirection::Right
+            ));
+            assert_eq!(editor.native_window_title(), "First — first.md — Moeka");
+            editor.focus_pane(second_id, cx);
+            editor.activate_tab_by_index_without_persist(0, cx);
+            assert_eq!(editor.native_window_title(), "second.txt — Moeka");
+            editor.tabs[0].path = None;
+            editor.tabs[0].title = "Terminal\0\nSession".into();
+            assert!(!editor.native_window_title().contains('\0'));
+            assert!(!editor.native_window_title().contains('\n'));
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            window.set_window_title("Host window");
+            editor.update(cx, |editor, _| editor.sync_native_window_title(window));
+            crate::text_input::TextInput::new(editor.read(cx).styles.text_input.clone(), "", cx)
+        });
+        assert_eq!(cx.window_title().as_deref(), Some("Host window"));
     }
 
     #[cfg(feature = "gpui-test-support")]

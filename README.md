@@ -12,6 +12,7 @@ Moeka is a local-first Markdown editor built with Rust and GPUI for macOS, Windo
 - **Rich Markdown, live**: Edit, Reading, and Source modes with tables, task lists, LaTeX math, Mermaid diagrams, and syntax highlighting.
 - **Powerful editing**: multiple cursors, regex search, a command palette, tabs, split panes, outlines, and minimap navigation.
 - **Local-first knowledge**: organize workspaces, Wiki links, and attachments with full-text search, autosave, session recovery, and persistent undo.
+- **Multiple workspaces**: reorder workspace roots in one FileTree, with one workspace expanded at a time and the other roots kept above or below its scrolling file list. A shared starred-files section above all workspaces provides cross-workspace access. Switching preserves each workspace's FileTree selection, scroll position and loaded directories, as well as tabs, split panes, unsaved edits, and running terminals; workspace layouts restore on restart.
 - **Agent collaboration**: the standard desktop build integrates installed Codex, Claude Code, GitHub Copilot, and Gemini CLI tools with document context.
 - **Beautiful exports**: share Markdown, HTML, PDF, and PNG with document formatting, code, formulas, and diagrams.
 - **A personal writing space**: expressive themes, flexible typography, multilingual UI, and a focused minimal mode.

@@ -1587,6 +1587,7 @@ impl EditorView {
                     // file in the FileTree so the two panes stay linked.
                     if event.click_count() >= 2 {
                         this.focused_sidebar_path = None;
+                        this.focused_workspace_root = None;
                         this.open_path_in_permanent_tab(click_path.clone(), true, cx);
                         this.move_cursor_to_first_line_end();
                         this.request_editor_focus(cx);

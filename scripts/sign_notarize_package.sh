@@ -17,28 +17,41 @@ signing_identity="$8"
 notary_profile="$9"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 source "$script_dir/release-network.sh"
-temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/moeka-notary.XXXXXX")"
+if [[ -n "${NOTARY_OUTPUT_DIR:-}" ]]; then
+  mkdir -p "$NOTARY_OUTPUT_DIR"
+  temp_dir="$(mktemp -d "$NOTARY_OUTPUT_DIR/submission.XXXXXX")"
+else
+  temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/moeka-notary.XXXXXX")"
+fi
 notary_zip="$temp_dir/notary.zip"
 
 cleanup() {
-  rm -rf "$temp_dir"
+  if [[ -z "${NOTARY_OUTPUT_DIR:-}" ]]; then
+    rm -rf "$temp_dir"
+  else
+    echo "Retained notarization archive and results in $temp_dir"
+  fi
 }
 trap cleanup EXIT
 
 [[ -d "$app_path" ]] || { echo "missing app bundle: $app_path" >&2; exit 1; }
 [[ -n "$signing_identity" ]] || { echo "Developer ID Application identity is empty" >&2; exit 1; }
 
-codesign \
-  --force \
-  --timestamp \
-  --options runtime \
-  --sign "$signing_identity" \
-  "$app_path"
+signing_args=(--force --timestamp --options runtime --sign "$signing_identity")
+notary_args=(--keychain-profile "$notary_profile")
+if [[ -n "${SIGNING_KEYCHAIN:-}" ]]; then
+  signing_args+=(--keychain "$SIGNING_KEYCHAIN")
+fi
+if [[ -n "${NOTARY_KEYCHAIN:-}" ]]; then
+  notary_args+=(--keychain "$NOTARY_KEYCHAIN")
+fi
+
+codesign "${signing_args[@]}" "$app_path"
 
 codesign --verify --deep --strict --verbose=2 "$app_path"
 
 ditto -c -k --sequesterRsrc --keepParent "$app_path" "$notary_zip"
-if xcrun notarytool submit "$notary_zip" --keychain-profile "$notary_profile" --no-s3-acceleration --wait --timeout 15m \
+if xcrun notarytool submit "$notary_zip" "${notary_args[@]}" --no-s3-acceleration --wait --timeout 15m \
     >"$temp_dir/notary-out" 2>"$temp_dir/notary-error"; then
   cat "$temp_dir/notary-out"
   cat "$temp_dir/notary-error" >&2
@@ -57,7 +70,7 @@ else
   fi
   command -v jq >/dev/null || { echo "jq is required to verify the existing notarization submission." >&2; exit 1; }
   echo "Waiting for existing notarization submission $id; not resubmitting." >&2
-  release_retry_read xcrun notarytool wait "$id" --keychain-profile "$notary_profile" --output-format json --timeout 15m \
+  release_retry_read xcrun notarytool wait "$id" "${notary_args[@]}" --output-format json --timeout 15m \
       >"$temp_dir/notary-result.json"
   jq -e --arg id "$id" '.id == $id and .status == "Accepted"' "$temp_dir/notary-result.json" >/dev/null \
       || { echo "Existing notarization submission was not accepted." >&2; exit 1; }

@@ -36,7 +36,7 @@ impl EditorView {
         if !self.command_palette_pane_mode {
             return Vec::new();
         }
-        self.pane_ids()
+        self.visible_pane_ids()
             .into_iter()
             .enumerate()
             .filter(|(_, pane)| *pane != self.current_pane_id())

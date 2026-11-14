@@ -385,6 +385,9 @@ tool=${0##*/}
 printf '%s %s\n' "$tool" "$*" >>"$NOTARY_CALLS"
 case "$tool" in
     xcrun)
+        if [[ "$1" == notarytool && -n "${EXPECTED_NOTARY_KEYCHAIN:-}" ]]; then
+            [[ " $* " == *" --keychain $EXPECTED_NOTARY_KEYCHAIN "* ]] || exit 96
+        fi
         if [[ "$1 $2" == 'notarytool submit' ]]; then
             [[ " $* " == *' --no-s3-acceleration '* && " $* " == *' --wait '* && " $* " == *' --timeout 15m '* ]] || exit 97
             if [[ "${NOTARY_SCENARIO:-}" == submit-lost || "${NOTARY_SCENARIO:-}" == wait-invalid ]]; then
@@ -416,7 +419,11 @@ case "$tool" in
         [[ "$1 $2" == 'stapler staple' || "$1 $2" == 'stapler validate' ]] || exit 98;;
     ditto) touch "${!#}";;
     create_dmg.sh) touch "$2";;
-    codesign|spctl) :;;
+    codesign)
+        if [[ "$1" == --force && -n "${EXPECTED_SIGNING_KEYCHAIN:-}" ]]; then
+            [[ " $* " == *" --keychain $EXPECTED_SIGNING_KEYCHAIN "* ]] || exit 96
+        fi;;
+    spctl) :;;
     *) exit 99;;
 esac
 MOCK
@@ -471,4 +478,29 @@ for notary_result in 0 1 138; do
     fi
     printf 'PASS notarization pipeline: exit %s\n' "$notary_result"
 done
-printf 'All offline release safety tests passed (%s publishing fixtures + 8 notarization fixtures).\n' "$count"
+for scenario in submit-lost submit-unknown; do
+    calls="$notary_fixture/keychain-calls-$scenario"
+    output="$notary_fixture/keychain-output-$scenario"
+    recovery="$notary_fixture/recovery-$scenario"
+    status=0
+    SIGNING_KEYCHAIN="$work/temporary signing.keychain-db" \
+    NOTARY_KEYCHAIN="$work/temporary notary.keychain-db" \
+    EXPECTED_SIGNING_KEYCHAIN="$work/temporary signing.keychain-db" \
+    EXPECTED_NOTARY_KEYCHAIN="$work/temporary notary.keychain-db" \
+    NOTARY_OUTPUT_DIR="$recovery" \
+    NOTARY_CALLS="$calls" NOTARY_RESULT=0 NOTARY_SCENARIO="$scenario" PATH="$notary_fixture/bin:$PATH" \
+        bash "$notary_fixture/sign_notarize_package.sh" \
+        "$notary_fixture/Moeka.app" "$output/staging" "$output/Moeka.dmg" \
+        "$output/Moeka.zip" Moeka Moeka unused-background fake-identity fake-profile \
+        >"$notary_fixture/keychain-log-$scenario" 2>&1 || status=$?
+    if [[ "$scenario" == submit-lost ]]; then
+        [[ "$status" == 0 ]] || { cat "$notary_fixture/keychain-log-$scenario"; exit 1; }
+    else
+        [[ "$status" != 0 && ! -e "$output" ]] || exit 1
+    fi
+    [[ "$(find "$recovery" -name notary.zip | wc -l | tr -d ' ')" == 1 ]]
+    [[ "$(find "$recovery" -name notary-error | wc -l | tr -d ' ')" == 1 ]]
+    [[ "$(grep -c '^xcrun notarytool submit ' "$calls")" == 1 ]]
+    printf 'PASS isolated keychains and preserved recovery: %s\n' "$scenario"
+done
+printf 'All offline release safety tests passed (%s publishing fixtures + 10 notarization fixtures).\n' "$count"

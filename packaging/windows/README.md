@@ -34,7 +34,20 @@ make windows
 
 Run both executables on Windows; a Windows 11 ARM VM can also test x64 through emulation.
 
+Taskbar previews and Alt+Tab represent real application windows, not individual
+editor tabs. Check that each window's system title follows its focused document
+(including Markdown heading and filename), dirty/saved state, tab and split-pane
+changes, workspace switches, and interface language. Settings, help and terminal
+tabs should use their tab titles; an empty window uses the application name.
+Opening more tabs in one window must not add taskbar previews.
+
 PDF/PNG export requires Microsoft Edge WebView2 Runtime. Its loader is statically linked, while rendering runs in an isolated helper with a temporary profile.
+
+HTML/PDF/PNG embed images as PNG using the editor's decoded RGBA pixels, including
+high-bit-depth and floating-point sources. Verify HEIC/HEIF/AVIF with the required
+Windows image codecs installed, plus SVG, JPEG XL, TIFF and HDR/EXR; compare
+orientation, transparency and colors with the editor. Missing system codecs or
+corrupt images must produce an explicit error, not a broken exported image.
 
 Set `MOEKA_EXPORT_SMOKE_DIR` to an empty disposable directory and launch `Moeka.exe`. The application exports the built-in gallery to HTML/PDF/PNG and exits. Inspect text formatting, tables, formulas, diagrams, images, and the final paragraph. Cross-compilation alone does not validate native behavior.
 

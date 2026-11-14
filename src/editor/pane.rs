@@ -711,6 +711,10 @@ impl EditorView {
         self.swap_pane_state(&mut state);
         // The pane's slot temporarily holds the focused pane's live state.
         self.panes[index].state = state;
+        let root = self
+            .workspace_for_pane(pane_id)
+            .unwrap_or_else(|| self.sidebar_root.clone());
+        self.swapped_workspace_root = Some(std::mem::replace(&mut self.sidebar_root, root));
         self.swapped_pane_id = Some(pane_id);
         true
     }
@@ -726,6 +730,9 @@ impl EditorView {
         let mut state = std::mem::replace(&mut self.panes[index].state, PaneState::detached());
         self.swap_pane_state(&mut state);
         self.panes[index].state = state;
+        if let Some(root) = self.swapped_workspace_root.take() {
+            self.sidebar_root = root;
+        }
         self.swapped_pane_id = None;
     }
 
@@ -746,6 +753,11 @@ impl EditorView {
 
     /// Moves keyboard focus (and the root document state) to `pane_id`.
     pub(crate) fn focus_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        if !self.pane_layout.contains(pane_id)
+            && let Some(root) = self.workspace_for_pane(pane_id)
+        {
+            self.switch_workspace(root, cx);
+        }
         if pane_id == self.focused_pane_id {
             return;
         }
@@ -863,7 +875,8 @@ impl EditorView {
             tab.kind == TabKind::Editor
                 && tab
                     .path
-                    .as_ref()
+                    .as_deref()
+                    .or_else(|| session_store::restoring_path(self, &tab.id))
                     .is_some_and(|tab_path| crate::platform::paths::same_file_path(tab_path, path))
         };
         if self.tabs.iter().any(matches_path) {
@@ -1036,7 +1049,7 @@ impl EditorView {
     /// Removes `pane_id` from the layout when it holds no tabs (and is not the
     /// last remaining pane), focusing a neighbour if it was focused.
     pub(crate) fn remove_pane_if_empty(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
-        if self.panes.len() <= 1 || self.pane_index(pane_id).is_none() {
+        if self.pane_layout.leaf_count() <= 1 || !self.pane_layout.contains(pane_id) {
             return;
         }
         if self.pane_tab_count(pane_id) > 0 {

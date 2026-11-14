@@ -34,7 +34,7 @@ git diff --check
 - Validate input, IME, panes, persistence, and exports on the target platform. Report commands, results, and unverified behavior; compilation and test-platform checks do not replace native UI testing.
 - For local profiling on Unix, use `MOEKA_PROFILE=1 MOEKA_PROFILE_CPU=1 MOEKA_PROFILE_INTERVAL_MS=250 cargo run --release --locked` with disposable documents.
 - Run `node scripts/check-assets.mjs` for icon changes; `ruby scripts/test-check-community.rb` and `ruby scripts/check-community.rb` for contributor metadata/docs; `make test-publish-release` and, when relevant, `make test-publish-homebrew` for release scripts. Never test with a real publish command.
-- CI stays read-only and secret-free, pins third-party actions to commit SHAs, and disables persistent checkout credentials. Candidate builds are separate from official releases.
+- Contributor CI and unsigned candidate builds stay read-only and secret-free. The manually dispatched `signed-macos.yml` workflow is restricted to `main` in `MoekaProject/moeka`; only its isolated signing job uses the `release-signing` environment. It produces signed candidates, never tags, releases, or Homebrew writes. Pin third-party actions to commit SHAs and disable persistent checkout credentials.
 
 ## Architecture
 
@@ -63,7 +63,7 @@ Publish only when explicitly requested, using the [Makefile](Makefile) and exist
 1. Confirm `main` tracks `origin/main`, inspect pending changes, and complete relevant validation. Increment PATCH in `Cargo.toml` and the root `Cargo.lock` package without updating dependencies.
 2. Before source publication, review the exact history, branches, tags, LFS, pending files, and retained artifacts for private data; rotate exposed credentials. Verify external build access, fork-safe CI, repository rules, private reporting, and [license/corresponding-source obligations](THIRD_PARTY_NOTICES.md#distribution-review). Visibility and history publication need explicit approval.
 3. Commit authorized release changes and push to the private origin. Confirm a clean worktree and matching local/tracking/remote `main`; keep sources and HEAD fixed during builds.
-4. Run `make publish-check TAG=vX.Y.Z`, then `make publish vX.Y.Z` and verify its exit result. Build, sign, notarize, staple, and validate locally; Actions produce candidates only. Use `make publish-beta vX.Y.Z` only for requested prereleases.
+4. Run `make publish-check TAG=vX.Y.Z`, then `make publish vX.Y.Z` and verify its exit result. Official publication remains local; Actions produce candidates only (unsigned by default, signed macOS candidates via the isolated environment workflow). See [macOS candidate signing](packaging/macos/README.md). Use `make publish-beta vX.Y.Z` only for requested prereleases.
 5. Publish binaries to `MoekaProject/community`; source tags stay on private origin and public tags use community's own history. Publish serially, verifying all eight attachments: two macOS DMGs and dual-architecture ZIPs for macOS, Windows, and Linux. Check sizes and SHA-256; download and compare byte-for-byte when a remote digest is unavailable.
 6. Set `GH_PAGER=cat` and specify the repository in GitHub commands. Add English `Features`, `Fixes`, and `Improvements` notes; verify draft/prerelease flags, version, attachments, and stable Tap. Return the Release link and Chinese notes.
 

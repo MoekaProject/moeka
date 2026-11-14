@@ -70,7 +70,6 @@ pub struct Styles {
     pub image_preview: ImagePreviewStyles,
     pub dialog: DialogStyles,
     pub notification: NotificationStyles,
-    pub workspace_switcher: WorkspaceSwitcherStyles,
     pub text_input: TextInputStyles,
     pub search: SearchStyles,
     pub workspace_search: WorkspaceSearchStyles,
@@ -969,7 +968,7 @@ impl Styles {
 
     pub fn menu_item(&self, destructive: bool) -> ListItemStyle {
         let mut c = self.context_menu.item().control;
-        c.gap_px = self.workspace_switcher.ws_menu_item_action_icon_gap_px;
+        c.gap_px = self.context_menu.menu_item_action_gap_px;
         if destructive {
             c.normal.foreground = self.context_menu.menu_item_danger_text_color;
             c.hover.foreground = c.normal.foreground;
@@ -1764,6 +1763,9 @@ pub struct SidebarStyles {
     // File tree item
     pub sidebar_item_height_px: f32,
     pub sidebar_item_indent_base_px: f32,
+    pub sidebar_root_padding_x_px: f32,
+    pub sidebar_root_region_max_fraction: f32,
+    pub sidebar_min_tree_rows: f32,
     pub sidebar_item_indent_step_px: f32,
     pub sidebar_item_left_shift_px: f32,
     pub sidebar_item_padding_right_px: f32,
@@ -2421,6 +2423,10 @@ pub struct NotificationStyles {
 
 #[derive(Clone)]
 pub struct ContextMenuStyles {
+    pub menu_item_action_gap_px: f32,
+    pub menu_item_check_size_px: f32,
+    pub menu_item_check_color: Hsla,
+    pub menu_item_action_icon_color: Hsla,
     pub item_presentation: ItemPresentation,
     // Container
     pub menu_bg: Hsla,
@@ -2468,27 +2474,6 @@ pub struct ContextMenuStyles {
     pub menu_format_width_px: f32,
     pub menu_export_width_px: f32,
     pub menu_tab_width_px: f32,
-}
-
-// ── Workspace Switcher ──────────────────────────────────────────────
-
-pub struct WorkspaceSwitcherStyles {
-    pub ws_bar_bg: Hsla,
-    pub ws_bar_border_color: Hsla,
-    pub ws_bar_padding_x_px: f32,
-    pub ws_bar_gap_px: f32,
-    pub ws_bar_hover_bg: Hsla,
-    // Workspace menu items
-    pub ws_menu_width_px: f32,
-    pub ws_menu_item_check_size_px: f32,
-    pub ws_menu_item_check_color: Hsla,
-    pub ws_menu_item_action_icon_size_px: f32,
-    pub ws_menu_item_action_icon_color: Hsla,
-    pub ws_menu_item_action_icon_gap_px: f32,
-    pub ws_menu_item_close_size_px: f32,
-    pub ws_menu_item_close_color: Hsla,
-    pub ws_menu_item_close_hover_color: Hsla,
-    pub ws_menu_item_close_hover_bg: Hsla,
 }
 
 // ── TextInput ───────────────────────────────────────────────────────
@@ -2849,6 +2834,10 @@ impl Styles {
         let mut ui = UiStyles::new(settings_theme, spec);
         ui.colors = switch_theme.application_ui_palette();
         let mut menu = ContextMenuStyles {
+            menu_item_action_gap_px: 10.0,
+            menu_item_check_size_px: 12.0,
+            menu_item_check_color: menu_theme.text_secondary,
+            menu_item_action_icon_color: menu_theme.text_secondary,
             item_presentation: ui.spec.composition.item,
             menu_bg: menu_theme.bg_primary,
             menu_border_width_px: 1.0,
@@ -3090,6 +3079,9 @@ impl Styles {
                 sidebar_header_action_hover_opacity: 1.0,
                 sidebar_item_height_px: 26.0,
                 sidebar_item_indent_base_px: 24.0,
+                sidebar_root_padding_x_px: 14.0,
+                sidebar_root_region_max_fraction: 0.25,
+                sidebar_min_tree_rows: 3.0,
                 sidebar_item_indent_step_px: 16.0,
                 sidebar_item_left_shift_px: 10.0,
                 sidebar_item_padding_right_px: 8.0,
@@ -3654,23 +3646,6 @@ impl Styles {
                 notification_dismiss_after_ms: 5000,
                 notification_max_visible: 4,
             },
-            workspace_switcher: WorkspaceSwitcherStyles {
-                ws_bar_bg: gpui::transparent_black(),
-                ws_bar_border_color: sidebar_theme.border_secondary,
-                ws_bar_padding_x_px: 14.0,
-                ws_bar_gap_px: 6.0,
-                ws_bar_hover_bg: sidebar_theme.bg_hover,
-                ws_menu_width_px: 220.0,
-                ws_menu_item_check_size_px: 12.0,
-                ws_menu_item_check_color: menu_theme.text_secondary,
-                ws_menu_item_action_icon_size_px: 14.0,
-                ws_menu_item_action_icon_color: menu_theme.text_secondary,
-                ws_menu_item_action_icon_gap_px: 10.0,
-                ws_menu_item_close_size_px: 14.0,
-                ws_menu_item_close_color: menu_theme.text_secondary,
-                ws_menu_item_close_hover_color: menu_theme.text_primary,
-                ws_menu_item_close_hover_bg: menu_theme.bg_hover,
-            },
             text_input: TextInputStyles {
                 text_input_focus_ring: RingStyle {
                     color: gpui::transparent_black(),
@@ -4052,6 +4027,28 @@ mod tests {
                     styles.settings_panel.settings_secondary_text_color
                 },
             );
+        }
+    }
+
+    #[test]
+    fn workspace_root_text_uses_sidebar_colors_instead_of_canvas_inheritance() {
+        for kind in [ThemeKind::OneDark, ThemeKind::PaperWhite] {
+            let theme = kind.build();
+            let mut styles = Styles::from_theme_with_options(&theme, &theme, false);
+            styles.sidebar.sidebar_item_font_size_px = 19.0;
+            styles.sidebar.sidebar_item_text_color = theme.link;
+            styles.sidebar.sidebar_item_selected_text_color = theme.text_warning;
+            assert_ne!(theme.link, theme.text_warning);
+            assert_eq!(styles.workspace_root_label(false).color, theme.link);
+            assert_eq!(styles.workspace_root_label(true).color, theme.text_warning);
+            assert_eq!(styles.workspace_root_label(false).size_px, 19.0);
+            assert_eq!(styles.workspace_root_label(true).size_px, 19.0);
+            styles.sidebar.sidebar_resize_indicator_color = theme.link;
+            styles.sidebar.sidebar_resize_indicator_width_px = 2.5;
+            let separator = styles.workspace_roots_separator();
+            assert_eq!(separator.color, theme.link);
+            assert_eq!(separator.thickness_px, 2.5);
+            assert!(!separator.scale_thickness);
         }
     }
 
@@ -4979,6 +4976,26 @@ impl Styles {
             row.selected_elevation = Some(ElevationStyle::raised(self.sidebar.sidebar_bg.l < 0.5));
         }
         row
+    }
+
+    pub fn workspace_root_label(&self, active: bool) -> TextStyle {
+        TextStyle::new(
+            self.sidebar.sidebar_item_font_size_px,
+            if active {
+                self.sidebar.sidebar_item_selected_text_color
+            } else {
+                self.sidebar.sidebar_item_text_color
+            },
+        )
+    }
+
+    pub fn workspace_roots_separator(&self) -> SeparatorStyle {
+        SeparatorStyle {
+            color: self.sidebar.sidebar_resize_indicator_color,
+            thickness_px: self.sidebar.sidebar_resize_indicator_width_px,
+            margin_px: 0.0,
+            scale_thickness: false,
+        }
     }
 
     pub fn sidebar_count_badge(&self) -> BadgeStyle {
@@ -5934,22 +5951,6 @@ impl Styles {
         row.control.normal.foreground = self.format_toolbar.format_toolbar_icon_color;
         row.control.hover.foreground = row.control.normal.foreground;
         row
-    }
-    pub fn workspace_close_button(&self) -> ControlStyle {
-        let s = &self.workspace_switcher;
-        let mut c = self.ui.control;
-        c.height_px = s.ws_menu_item_close_size_px;
-        c.radius_px = c.height_px * 0.5;
-        c.padding_x_px = 0.0;
-        c.font_size_px = self.ui_font_size_px - 3.0;
-        c.normal.foreground = s.ws_menu_item_close_color;
-        c.hover = ControlColors {
-            foreground: s.ws_menu_item_close_hover_color,
-            background: s.ws_menu_item_close_hover_bg,
-            ..c.normal
-        };
-        c.pressed = c.hover;
-        c
     }
     pub fn table_size_grid(&self) -> SelectionGridStyle {
         let m = &self.context_menu;
