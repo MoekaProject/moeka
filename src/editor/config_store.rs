@@ -108,6 +108,8 @@ pub(crate) struct SessionsFile {
     pub workspaces: WorkspaceConfig,
     #[serde(default)]
     pub sessions: SessionConfig,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub workspace_sessions: BTreeMap<PathBuf, SessionConfig>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
@@ -260,6 +262,7 @@ impl Default for SessionsFile {
             version: default_schema_version(),
             workspaces: WorkspaceConfig::default(),
             sessions: SessionConfig::default(),
+            workspace_sessions: BTreeMap::new(),
         }
     }
 }

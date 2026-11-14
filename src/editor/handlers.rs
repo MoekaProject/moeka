@@ -1106,8 +1106,9 @@ impl EditorView {
             cx.notify();
             return;
         }
-        if self.focused_sidebar_path.is_some() {
+        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
             self.focused_sidebar_path = None;
+            self.focused_workspace_root = None;
             cx.notify();
             return;
         }
@@ -1545,7 +1546,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.focused_sidebar_path.is_some() {
+        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
             self.sidebar_delete_focused(cx);
             return;
         }
@@ -1699,7 +1700,7 @@ impl EditorView {
         if self.move_line_diff_selection_horizontal(false, false, cx) {
             return;
         }
-        if self.focused_sidebar_path.is_some() {
+        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
             self.sidebar_nav_left(cx);
             return;
         }
@@ -1769,7 +1770,7 @@ impl EditorView {
         if self.move_line_diff_selection_horizontal(true, false, cx) {
             return;
         }
-        if self.focused_sidebar_path.is_some() {
+        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
             self.sidebar_nav_right(cx);
             return;
         }
@@ -1825,7 +1826,7 @@ impl EditorView {
         }
         self.table_handles.selection = None;
         self.table_cell_selection = None;
-        if self.focused_sidebar_path.is_some() {
+        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
             self.sidebar_nav_up(cx);
             return;
         }
@@ -1908,7 +1909,7 @@ impl EditorView {
         }
         self.table_handles.selection = None;
         self.table_cell_selection = None;
-        if self.focused_sidebar_path.is_some() {
+        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
             self.sidebar_nav_down(cx);
             return;
         }
@@ -2307,7 +2308,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
-        if self.focused_sidebar_path.is_some() {
+        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
             if self.sidebar_edit.is_some() {
                 self.commit_sidebar_edit(cx);
             } else {
@@ -4728,12 +4729,19 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.focused_workspace_root.is_some() {
+            return;
+        }
         if let Some(path) = self
             .focused_sidebar_path
             .clone()
             .filter(|path| path != &self.sidebar_root)
         {
-            self.start_rename(path, window, cx);
+            if self.focused_starred_path.as_ref() == Some(&path) {
+                self.start_starred_rename(path, window, cx);
+            } else {
+                self.start_rename(path, window, cx);
+            }
         }
     }
 
@@ -4759,7 +4767,9 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         if self.tabs.is_empty() {
-            window.remove_window();
+            if self.all_tabs().next().is_none() {
+                window.remove_window();
+            }
         } else {
             self.close_active_tab(cx);
         }

@@ -4,60 +4,22 @@ use super::*;
 
 impl EditorView {
     pub(crate) fn sidebar_nav_up(&mut self, cx: &mut Context<Self>) {
-        let items = self.sidebar_items();
-        if items.is_empty() {
-            return;
-        }
-        let new_path = if let Some(ref path) = self.focused_sidebar_path {
-            if let Some(idx) = items.iter().position(|item| &item.path == path) {
-                if idx > 0 {
-                    Some(items[idx - 1].path.clone())
-                } else {
-                    Some(items[0].path.clone())
-                }
-            } else {
-                Some(items[0].path.clone())
-            }
-        } else {
-            items.last().map(|item| item.path.clone())
-        };
-        if let Some(index) = new_path
-            .as_ref()
-            .and_then(|path| items.iter().position(|item| &item.path == path))
-            && self.ensure_sidebar_item_minimally_visible(index, items.len())
-        {
-            cx.notify();
-        }
-        self.focused_sidebar_path = new_path;
-        cx.notify();
+        self.navigate_workspace_tree(-1, cx);
     }
 
     pub(crate) fn sidebar_nav_down(&mut self, cx: &mut Context<Self>) {
-        let items = self.sidebar_items();
-        if items.is_empty() {
-            return;
-        }
-        let new_path = if let Some(ref path) = self.focused_sidebar_path {
-            if let Some(idx) = items.iter().position(|item| &item.path == path) {
-                Some(items[(idx + 1).min(items.len() - 1)].path.clone())
-            } else {
-                Some(items[0].path.clone())
-            }
-        } else {
-            Some(items[0].path.clone())
-        };
-        if let Some(index) = new_path
-            .as_ref()
-            .and_then(|path| items.iter().position(|item| &item.path == path))
-            && self.ensure_sidebar_item_minimally_visible(index, items.len())
-        {
-            cx.notify();
-        }
-        self.focused_sidebar_path = new_path;
-        cx.notify();
+        self.navigate_workspace_tree(1, cx);
     }
 
     pub(crate) fn sidebar_nav_left(&mut self, cx: &mut Context<Self>) {
+        if self.focused_starred_path.as_ref() == self.focused_sidebar_path.as_ref()
+            && self.focused_starred_path.is_some()
+        {
+            return;
+        }
+        if self.focused_workspace_root.is_some() {
+            return;
+        }
         let path = match self.focused_sidebar_path.clone() {
             Some(path) => path,
             None => return,
@@ -66,9 +28,12 @@ impl EditorView {
         if self.sidebar_cached_path_is_dir(&path) == Some(true) && is_expanded {
             self.toggle_sidebar_directory(path, cx);
         } else if let Some(parent) = path.parent()
-            && parent != self.sidebar_root
             && parent.starts_with(&self.sidebar_root)
         {
+            if parent == self.sidebar_root {
+                self.focus_workspace_row(parent.to_path_buf(), cx);
+                return;
+            }
             self.focused_sidebar_path = Some(parent.to_path_buf());
             let items = self.sidebar_items();
             if let Some(index) = items.iter().position(|item| item.path == parent)
@@ -81,6 +46,27 @@ impl EditorView {
     }
 
     pub(crate) fn sidebar_nav_right(&mut self, cx: &mut Context<Self>) {
+        if self.focused_starred_path.as_ref() == self.focused_sidebar_path.as_ref()
+            && self.focused_starred_path.is_some()
+        {
+            self.sidebar_confirm_focused(cx);
+            return;
+        }
+        if let Some(root) = self.focused_workspace_root.clone() {
+            if root == self.sidebar_root {
+                let items = self.sidebar_items();
+                if let Some(first) = items.first() {
+                    self.focused_sidebar_path = Some(first.path.clone());
+                    self.focused_workspace_root = None;
+                    self.ensure_sidebar_item_minimally_visible(0, items.len());
+                    cx.notify();
+                }
+            } else {
+                self.switch_workspace(root.clone(), cx);
+                self.focus_workspace_row(root, cx);
+            }
+            return;
+        }
         let path = match self.focused_sidebar_path.clone() {
             Some(path) => path,
             None => return,
@@ -105,6 +91,18 @@ impl EditorView {
     }
 
     pub(crate) fn sidebar_confirm_focused(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.focused_starred_path.clone()
+            && self.focused_sidebar_path.as_ref() == Some(&path)
+        {
+            self.activate_starred_workspace(&path, cx);
+            self.open_sidebar_file(path, cx);
+            return;
+        }
+        if let Some(root) = self.focused_workspace_root.clone() {
+            self.switch_workspace(root.clone(), cx);
+            self.focus_workspace_row(root, cx);
+            return;
+        }
         let path = match self.focused_sidebar_path.clone() {
             Some(path) => path,
             None => return,
@@ -122,6 +120,9 @@ impl EditorView {
     }
 
     pub(crate) fn sidebar_delete_focused(&mut self, cx: &mut Context<Self>) {
+        if self.focused_workspace_root.is_some() {
+            return;
+        }
         let path = match self.focused_sidebar_path.clone() {
             Some(path) => path,
             None => return,

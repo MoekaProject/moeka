@@ -730,6 +730,7 @@ impl EditorView {
                     }
                     this.focus_pane(pane_id, cx);
                     this.focused_sidebar_path = None;
+                    this.focused_workspace_root = None;
                     window.focus(&this.focus_handle);
                     let (Some(bounds), Some(projection)) =
                         (this.minimap_state.bounds, this.minimap_state.projection)

@@ -116,39 +116,148 @@ pub(crate) fn persist_session(editor: &EditorView) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config = &mut *cached;
     config.workspaces.roots = editor.workspaces.clone();
-    config.workspaces.active_root = if editor.sidebar_root.as_os_str().is_empty() {
+    config.workspaces.active_root = if editor.active_workspace_root().as_os_str().is_empty() {
         None
     } else {
-        Some(editor.sidebar_root.clone())
+        Some(editor.active_workspace_root().to_path_buf())
     };
     config
         .workspaces
         .bookmarks
         .retain(|root, _| editor.workspaces.contains(root));
-    let leaf_ids = editor.pane_layout.leaf_ids();
-    let focused_pane_leaf = leaf_ids.iter().position(|id| *id == editor.focused_pane_id);
-    let session = SessionConfig {
-        active_tab_id: editor.active_tab_id.clone(),
-        next_tab_id: Some(editor.next_tab_id),
-        // Legacy flat list: the currently focused pane's tabs.
-        tabs: editor
-            .tabs
-            .iter()
-            .map(|tab| session_tab_to_record(editor, tab))
-            .collect(),
-        pane_layout: Some(pane_layout_to_record(editor, &editor.pane_layout)),
-        focused_pane_leaf,
-    };
+    let session = workspace_session_record(editor, &editor.pane_layout, editor.focused_pane_id);
     // Startup/theme refreshes can operate on the default welcome tab before a
     // real restored session is ready. Preserve a previously saved work session
     // instead of overwriting it with that placeholder state.
     if !is_default_welcome_session(editor) || !session_contains_nonwelcome_tabs(&config.sessions) {
-        config.sessions = session;
+        config.sessions = session.clone();
+        config.workspace_sessions = editor
+            .workspace_states
+            .iter()
+            .map(|(root, state)| {
+                (
+                    root.clone(),
+                    workspace_session_record(editor, &state.layout, state.focused_pane),
+                )
+            })
+            .collect();
+        config
+            .workspace_sessions
+            .insert(editor.active_workspace_root().to_path_buf(), session);
     }
     let snapshot = config.clone();
     let _ = session_writer().send(SessionWrite::Save(snapshot.clone()));
     drop(cached);
     persist_workspace_bookmarks(&snapshot.workspaces);
+}
+
+fn workspace_session_record(
+    editor: &EditorView,
+    layout: &PaneLayout,
+    focused: PaneId,
+) -> SessionConfig {
+    let layout_record = pane_layout_to_record(editor, layout);
+    let focused_record = pane_layout_to_record(editor, &PaneLayout::Leaf(focused));
+    let PaneLayoutRecord::Leaf {
+        tabs,
+        active_tab_id,
+    } = focused_record
+    else {
+        unreachable!()
+    };
+    SessionConfig {
+        active_tab_id,
+        next_tab_id: Some(editor.next_tab_id),
+        tabs,
+        pane_layout: Some(layout_record),
+        focused_pane_leaf: layout.leaf_ids().iter().position(|id| *id == focused),
+    }
+}
+
+#[cfg(all(test, feature = "gpui-test-support"))]
+#[gpui::test]
+fn workspace_sessions_restore_hidden_layouts_without_loading_them(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let directory = tempfile::tempdir().unwrap();
+    let roots: Vec<_> = ["a", "b"]
+        .iter()
+        .map(|name| directory.path().join(name))
+        .collect();
+    for root in &roots {
+        std::fs::create_dir(root).unwrap();
+    }
+    let session = |number: usize| {
+        let root = &roots[number];
+        let tabs: Vec<_> = (0..2)
+            .map(|index| TabSessionRecord {
+                id: format!("tab-{}", number * 2 + index + 1),
+                kind: "editor".into(),
+                title: format!("draft-{index}"),
+                path: Some(root.join(format!("draft-{index}.md"))),
+                file_kind: Some("markdown".into()),
+                recovery: TabRecoveryState {
+                    text: Some(format!("draft-{number}-{index}")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .collect();
+        SessionConfig {
+            active_tab_id: Some(tabs[1].id.clone()),
+            next_tab_id: Some(5),
+            tabs: vec![tabs[1].clone()],
+            pane_layout: Some(PaneLayoutRecord::Split {
+                axis: "horizontal".into(),
+                flexes: vec![0.75, 1.25],
+                children: tabs
+                    .into_iter()
+                    .map(|tab| PaneLayoutRecord::Leaf {
+                        active_tab_id: Some(tab.id.clone()),
+                        tabs: vec![tab],
+                    })
+                    .collect(),
+            }),
+            focused_pane_leaf: Some(1),
+        }
+    };
+    let config = config_store::SessionsFile {
+        workspaces: config_store::WorkspaceConfig {
+            roots: roots.clone(),
+            active_root: Some(roots[0].clone()),
+            ..Default::default()
+        },
+        sessions: session(0),
+        workspace_sessions: std::collections::BTreeMap::from([
+            (roots[0].clone(), session(0)),
+            (roots[1].clone(), session(1)),
+        ]),
+        ..Default::default()
+    };
+    let yaml = serde_yaml::to_string(&config).unwrap();
+    let config: config_store::SessionsFile = serde_yaml::from_str(&yaml).unwrap();
+    let editor =
+        cx.update(|cx| cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some(""), false)));
+    editor.update(cx, |editor, cx| {
+        restore_session_config(editor, config, cx);
+        assert_eq!(editor.workspaces, roots);
+        assert_eq!(editor.visible_pane_ids().len(), 2);
+        assert_eq!(editor.pane_ids().len(), 4);
+        assert_eq!(
+            editor.pane_ids().into_iter().collect::<HashSet<_>>().len(),
+            4
+        );
+        assert!(!editor.session_restore.pending["tab-3"].loading);
+        assert!(!editor.session_restore.pending["tab-4"].loading);
+        let state = &editor.workspace_states[&roots[1]];
+        let saved = workspace_session_record(editor, &state.layout, state.focused_pane);
+        assert_eq!(saved, session(1));
+        editor.switch_workspace(roots[1].clone(), cx);
+        assert_eq!(editor.active_tab_id.as_deref(), Some("tab-4"));
+        assert_eq!(editor.buffer.text(), "draft-1-1");
+        assert_eq!(editor.visible_pane_ids().len(), 2);
+        assert!(editor.session_restore.pending["tab-4"].loading);
+        assert!(editor.next_tab_id >= 5);
+    });
 }
 
 fn with_bookmark_pool<T>(f: impl FnOnce() -> T) -> T {
@@ -293,6 +402,19 @@ pub(crate) fn restore_session(editor: &mut EditorView, cx: &mut Context<EditorVi
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    restore_session_config(editor, config, cx);
+}
+
+fn restore_session_config(
+    editor: &mut EditorView,
+    mut config: config_store::SessionsFile,
+    cx: &mut Context<EditorView>,
+) {
+    let active_root = config.workspaces.active_root.clone().unwrap_or_default();
+    if let Some(session) = config.workspace_sessions.remove(&active_root) {
+        config.sessions = session;
+    }
+    editor.workspace_states.clear();
     editor.workspaces = config.workspaces.roots.clone();
     for root in &editor.workspaces {
         fs_task::register_workspace_root(root);
@@ -353,6 +475,52 @@ pub(crate) fn restore_session(editor: &mut EditorView, cx: &mut Context<EditorVi
     } else {
         records = config.sessions.tabs.clone();
     }
+    for (root, session) in config.workspace_sessions {
+        if !root.as_os_str().is_empty() && !editor.workspaces.contains(&root) {
+            continue;
+        }
+        let record = session.pane_layout.unwrap_or(PaneLayoutRecord::Leaf {
+            tabs: session.tabs,
+            active_tab_id: session.active_tab_id,
+        });
+        let mut parked = Vec::new();
+        let Some(mut layout) = build_pane_layout(editor.ui_language, &record, &mut parked) else {
+            continue;
+        };
+        let offset = editor.next_pane_id;
+        fn offset_layout(layout: &mut PaneLayout, offset: usize) {
+            match layout {
+                PaneLayout::Leaf(id) => *id += offset,
+                PaneLayout::Split { children, .. } => {
+                    for child in children {
+                        offset_layout(child, offset);
+                    }
+                }
+            }
+        }
+        offset_layout(&mut layout, offset);
+        for pane in &mut parked {
+            pane.id += offset;
+        }
+        editor.next_pane_id += parked.len();
+        let focused = session
+            .focused_pane_leaf
+            .and_then(|index| layout.leaf_ids().get(index).copied())
+            .unwrap_or_else(|| layout.first_leaf());
+        let mut state = workspace::WorkspaceState::new(&root, layout.clone(), focused);
+        state.needs_hydration = true;
+        editor.workspace_states.insert(root.clone(), state);
+        editor.panes.extend(parked);
+        collect(&record, &mut records);
+        editor.next_tab_id = editor.next_tab_id.max(session.next_tab_id.unwrap_or(0));
+    }
+    editor.next_tab_id = editor.next_tab_id.max(
+        editor
+            .all_tabs()
+            .filter_map(|tab| tab.id.strip_prefix("tab-")?.parse::<usize>().ok())
+            .max()
+            .map_or(1, |id| id + 1),
+    );
     for record in records {
         if record.kind == "editor" && editor.pane_id_for_tab(&record.id).is_some() {
             let initial_text = editor
@@ -420,6 +588,12 @@ fn schedule_pending_restores(
     let mut ids = editor
         .all_tabs()
         .filter(|tab| {
+            if !editor
+                .pane_id_for_tab(&tab.id)
+                .is_some_and(|pane| editor.pane_layout.contains(pane))
+            {
+                return false;
+            }
             editor
                 .session_restore
                 .pending
@@ -440,6 +614,13 @@ fn schedule_pending_restores(
     for id in ids {
         schedule_tab_restore(editor, &id, cx);
     }
+}
+
+pub(crate) fn schedule_visible_workspace_restores(
+    editor: &mut EditorView,
+    cx: &mut Context<EditorView>,
+) {
+    schedule_pending_restores(editor, None, cx);
 }
 
 fn schedule_workspace_access(editor: &mut EditorView, root: PathBuf, cx: &mut Context<EditorView>) {
@@ -538,6 +719,19 @@ fn relocate_restoring_workspace(
             fs_task::register_workspace_root(workspace);
         }
     }
+    let states = std::mem::take(&mut editor.workspace_states);
+    for (root, mut state) in states {
+        let relocate = |path: PathBuf| {
+            path.strip_prefix(from)
+                .map(|relative| to.join(relative))
+                .unwrap_or_else(|_| path.clone())
+        };
+        state.expanded_dirs = state.expanded_dirs.into_iter().map(&relocate).collect();
+        state.selected_paths = state.selected_paths.into_iter().map(&relocate).collect();
+        state.focused_path = state.focused_path.map(&relocate);
+        state.file_list_dir = relocate(state.file_list_dir);
+        editor.workspace_states.insert(relocate(root), state);
+    }
     let access = std::mem::take(&mut editor.session_restore.workspace_access);
     for (root, state) in access {
         let relocated = root
@@ -564,7 +758,11 @@ fn relocate_restoring_workspace(
         }
     }
     if editor.sidebar_root == from {
-        editor.switch_workspace(to.to_path_buf(), cx);
+        editor.sidebar_root = to.to_path_buf();
+        editor.file_list_dir = to.to_path_buf();
+        editor.expanded_dirs = HashSet::from([to.to_path_buf()]);
+        editor.invalidate_sidebar_items_cache();
+        editor.start_watching(cx);
     }
     persist_session(editor);
 }
@@ -888,6 +1086,12 @@ fn build_pane_layout(
 
 /// Loads the (root-swapped-in) pane's active tab snapshot into the live
 /// document fields; mirrors the legacy restore tail.
+pub(crate) fn hydrate_visible_workspace(editor: &mut EditorView) {
+    for pane in editor.visible_pane_ids() {
+        editor.with_pane(pane, hydrate_active_tab_state);
+    }
+}
+
 fn hydrate_active_tab_state(editor: &mut EditorView) {
     let Some(index) = editor.active_tab_index() else {
         return;

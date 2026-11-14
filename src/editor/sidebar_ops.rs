@@ -82,6 +82,22 @@ impl EditorView {
 
     pub(super) fn sidebar_select_item(&mut self, path: &Path, shift: bool, cmd: bool) {
         let items = self.sidebar_items();
+        let paths = items
+            .iter()
+            .map(|item| item.path.clone())
+            .collect::<Vec<_>>();
+        self.select_sidebar_paths(path, shift, cmd, &paths);
+    }
+
+    pub(super) fn select_starred_sidebar_item(&mut self, path: &Path, shift: bool, cmd: bool) {
+        let paths = self.visible_starred_sidebar_files();
+        self.select_sidebar_paths(path, shift, cmd, &paths);
+        self.focused_starred_path = Some(path.to_path_buf());
+    }
+
+    fn select_sidebar_paths(&mut self, path: &Path, shift: bool, cmd: bool, paths: &[PathBuf]) {
+        self.focused_workspace_root = None;
+        self.focused_starred_path = None;
         let path_buf = path.to_path_buf();
 
         if shift {
@@ -89,8 +105,8 @@ impl EditorView {
                 .sidebar_selection_anchor
                 .clone()
                 .unwrap_or_else(|| path_buf.clone());
-            let anchor_idx = items.iter().position(|item| item.path == anchor);
-            let target_idx = items.iter().position(|item| item.path == path_buf);
+            let anchor_idx = paths.iter().position(|item| item == &anchor);
+            let target_idx = paths.iter().position(|item| item == &path_buf);
             if let (Some(anchor_index), Some(target_index)) = (anchor_idx, target_idx) {
                 let (start, end) = if anchor_index <= target_index {
                     (anchor_index, target_index)
@@ -101,8 +117,7 @@ impl EditorView {
                     self.selected_sidebar_paths.clear();
                 }
                 for index in start..=end {
-                    self.selected_sidebar_paths
-                        .insert(items[index].path.clone());
+                    self.selected_sidebar_paths.insert(paths[index].clone());
                 }
             } else {
                 if !cmd {
@@ -174,6 +189,9 @@ impl EditorView {
         target_dir: PathBuf,
         cx: &mut Context<Self>,
     ) {
+        if self.reject_workspace_root_mutation(&paths, cx) {
+            return;
+        }
         let rewrite_context = self.capture_workspace_rewrite_context();
         let target_dir = Self::normalize_sidebar_path(&target_dir);
         let moves = paths

@@ -64,7 +64,6 @@ pub(crate) const MENU_GEMINI_SVG_PATH: &str = "assets/icons/menu/gemini.svg";
 pub(crate) const FOLDER_OPEN_SVG_PATH: &str = "assets/icons/filetree/folder-open.svg";
 pub(crate) const FOLDER_CLOSED_SVG_PATH: &str = "assets/icons/filetree/folder-closed.svg";
 pub(crate) const MARKDOWN_SVG_PATH: &str = "assets/icons/filetree/markdown.svg";
-pub(crate) const WORKSPACE_EXPAND_SVG_PATH: &str = "assets/icons/filetree/workspace-expand.svg";
 pub(crate) const OUTLINE_TOGGLE_SVG_PATH: &str = "assets/icons/editor/outline-toggle.svg";
 pub(crate) const OUTLINE_TOGGLE_MINI_SVG_PATH: &str = "assets/icons/editor/outline-toggle-mini.svg";
 pub(crate) const MINIMAP_TOGGLE_SVG_PATH: &str = "assets/icons/editor/minimap.svg";

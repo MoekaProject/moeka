@@ -31,17 +31,14 @@ unsafe extern "C" {
 }
 
 #[cfg(test)]
-#[test]
-fn imageio_decodes_real_heic_pixels() {
+pub(crate) fn encode_test_heic(orientation: u32) -> Vec<u8> {
     use std::io::Cursor;
-
     let original = image::RgbaImage::from_pixel(64, 48, image::Rgba([40, 100, 180, 255]));
     let mut png = Cursor::new(Vec::new());
     original
         .write_to(&mut png, image::ImageFormat::Png)
         .unwrap();
-    unsafe {
-        let pool: *mut objc::runtime::Object = msg_send![class!(NSAutoreleasePool), new];
+    objc::rc::autoreleasepool(|| unsafe {
         let data: *mut objc::runtime::Object = msg_send![class!(NSData), dataWithBytes: png.get_ref().as_ptr() length: png.get_ref().len()];
         let source = Owned::new(
             CGImageSourceCreateWithData(data.cast(), ptr::null()),
@@ -53,39 +50,38 @@ fn imageio_decodes_real_heic_pixels() {
             "decode fixture",
         )
         .unwrap();
-        for orientation in [1u32, 6] {
-            let output: *mut objc::runtime::Object = msg_send![class!(NSMutableData), data];
-            let heic: *mut objc::runtime::Object =
-                msg_send![class!(NSString), stringWithUTF8String: c"public.heic".as_ptr()];
-            let destination = Owned::new(
-                CGImageDestinationCreateWithData(output.cast(), heic.cast(), 1, ptr::null()),
-                "create HEIC fixture",
-            )
-            .unwrap();
-            let properties: *mut objc::runtime::Object =
-                msg_send![class!(NSMutableDictionary), dictionary];
-            let rotation: *mut objc::runtime::Object =
-                msg_send![class!(NSNumber), numberWithUnsignedInt: orientation];
-            let _: () =
-                msg_send![properties, setObject: rotation forKey: kCGImagePropertyOrientation];
-            CGImageDestinationAddImage(destination.0, image.0, properties.cast());
-            assert!(CGImageDestinationFinalize(destination.0));
-            let length: usize = msg_send![output, length];
-            let bytes: *const u8 = msg_send![output, bytes];
-            let decoded = super::decode(std::slice::from_raw_parts(bytes, length), Some("heic"))
-                .unwrap()
-                .to_rgba8();
-            let expected = if orientation == 6 { (48, 64) } else { (64, 48) };
-            assert_eq!(decoded.dimensions(), expected);
-            for channel in 0..3 {
-                assert!(
-                    decoded.get_pixel(24, 24)[channel]
-                        .abs_diff(original.get_pixel(24, 24)[channel])
-                        < 12
-                );
-            }
+        let output: *mut objc::runtime::Object = msg_send![class!(NSMutableData), data];
+        let heic: *mut objc::runtime::Object =
+            msg_send![class!(NSString), stringWithUTF8String: c"public.heic".as_ptr()];
+        let destination = Owned::new(
+            CGImageDestinationCreateWithData(output.cast(), heic.cast(), 1, ptr::null()),
+            "create HEIC fixture",
+        )
+        .unwrap();
+        let properties: *mut objc::runtime::Object =
+            msg_send![class!(NSMutableDictionary), dictionary];
+        let rotation: *mut objc::runtime::Object =
+            msg_send![class!(NSNumber), numberWithUnsignedInt: orientation];
+        let _: () = msg_send![properties, setObject: rotation forKey: kCGImagePropertyOrientation];
+        CGImageDestinationAddImage(destination.0, image.0, properties.cast());
+        assert!(CGImageDestinationFinalize(destination.0));
+        let length: usize = msg_send![output, length];
+        let bytes: *const u8 = msg_send![output, bytes];
+        std::slice::from_raw_parts(bytes, length).to_vec()
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn imageio_decodes_real_heic_pixels() {
+    for orientation in [1u32, 6] {
+        let encoded = encode_test_heic(orientation);
+        let decoded = super::decode(&encoded, Some("heic")).unwrap().to_rgba8();
+        let expected = if orientation == 6 { (48, 64) } else { (64, 48) };
+        assert_eq!(decoded.dimensions(), expected);
+        for channel in 0..3 {
+            assert!(decoded.get_pixel(24, 24)[channel].abs_diff([40, 100, 180][channel]) < 12);
         }
-        let _: () = msg_send![pool, drain];
     }
 }
 

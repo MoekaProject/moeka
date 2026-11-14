@@ -3230,12 +3230,12 @@ impl EditorView {
             );
         }
         let ms = &self.styles.context_menu;
-        let wss = &self.styles.workspace_switcher;
+        let icon_styles = &self.styles.context_menu;
         let item_id = SharedString::from(format!("menu-item-{}", label));
         let (icon_col_w, _gap) = menu_icon_column_metrics(
             ms.menu_format_icon_size_px,
-            wss.ws_menu_item_check_size_px,
-            wss.ws_menu_item_action_icon_gap_px,
+            icon_styles.menu_item_check_size_px,
+            icon_styles.menu_item_action_gap_px,
         );
         let icon_col_w = self.scaled(icon_col_w);
         crate::ui::list::list_item(
@@ -3299,12 +3299,12 @@ impl EditorView {
     ) -> AnyElement {
         let multiline_label = label.contains('\n');
         let ms = &self.styles.context_menu;
-        let wss = &self.styles.workspace_switcher;
+        let icon_styles = &self.styles.context_menu;
         let item_id = SharedString::from(format!("menu-item-{}", label));
         let (icon_col_w, _gap) = menu_icon_column_metrics(
             ms.menu_format_icon_size_px,
-            wss.ws_menu_item_check_size_px,
-            wss.ws_menu_item_action_icon_gap_px,
+            icon_styles.menu_item_check_size_px,
+            icon_styles.menu_item_action_gap_px,
         );
         let icon_size = self.scaled(ms.menu_format_icon_size_px);
         let icon_col_w = self.scaled(icon_col_w);
@@ -3330,7 +3330,7 @@ impl EditorView {
                         svg()
                             .path(icon_path)
                             .size(px(icon_size))
-                            .text_color(wss.ws_menu_item_action_icon_color),
+                            .text_color(icon_styles.menu_item_action_icon_color),
                     ),
             )
             .child(if multiline_label {
@@ -3382,8 +3382,8 @@ impl EditorView {
         cx: &mut Context<Self>,
         handler: impl Fn(&mut Self, &mut gpui::Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
-        let wss = &self.styles.workspace_switcher;
-        let icon_size = self.scaled(wss.ws_menu_item_check_size_px);
+        let icon_styles = &self.styles.context_menu;
+        let icon_size = self.scaled(icon_styles.menu_item_check_size_px);
         crate::ui::list::list_item(
             self.styles.menu_item(false),
             Default::default(),
@@ -3402,7 +3402,7 @@ impl EditorView {
                         svg()
                             .path(CHECK_SVG_PATH)
                             .size(px(icon_size))
-                            .text_color(wss.ws_menu_item_check_color),
+                            .text_color(icon_styles.menu_item_check_color),
                     )
                 }),
         )
@@ -3429,14 +3429,14 @@ impl EditorView {
         handler: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> AnyElement {
         let ms = &self.styles.context_menu;
-        let wss = &self.styles.workspace_switcher;
+        let icon_styles = &self.styles.context_menu;
         let enabled = disabled_reason.is_none();
         let icon_size = self.scaled(ms.menu_format_icon_size_px);
-        let check_size = self.scaled(wss.ws_menu_item_check_size_px);
+        let check_size = self.scaled(icon_styles.menu_item_check_size_px);
         let (icon_col_w, gap) = menu_icon_column_metrics(
             ms.menu_format_icon_size_px,
-            wss.ws_menu_item_check_size_px,
-            wss.ws_menu_item_action_icon_gap_px,
+            icon_styles.menu_item_check_size_px,
+            icon_styles.menu_item_action_gap_px,
         );
         let mut row_style = ms.item();
         row_style.control.gap_px = gap;
@@ -3467,7 +3467,7 @@ impl EditorView {
                     svg()
                         .path(front_matter_type_icon(target))
                         .size(px(icon_size))
-                        .text_color(wss.ws_menu_item_action_icon_color),
+                        .text_color(icon_styles.menu_item_action_icon_color),
                 ),
         )
         .child(
@@ -3496,7 +3496,7 @@ impl EditorView {
                         svg()
                             .path(CHECK_SVG_PATH)
                             .size(px(check_size))
-                            .text_color(wss.ws_menu_item_check_color),
+                            .text_color(icon_styles.menu_item_check_color),
                     )
                 }),
         )
@@ -3663,7 +3663,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ms = &self.styles.context_menu;
-        let wss = &self.styles.workspace_switcher;
+        let icon_styles = &self.styles.context_menu;
         let is_open = self.context_submenu.as_ref() == Some(&submenu_kind);
         let icon_size = self.scaled(ms.menu_format_icon_size_px);
         // Export lives in the sidebar-style menus, the rest in the format menu;
@@ -3671,8 +3671,8 @@ impl EditorView {
         let (icon_col_w, icon_gap) = if matches!(submenu_kind, ContextMenuKind::Export { .. }) {
             let (column, gap) = menu_icon_column_metrics(
                 ms.menu_format_icon_size_px,
-                wss.ws_menu_item_check_size_px,
-                wss.ws_menu_item_action_icon_gap_px,
+                icon_styles.menu_item_check_size_px,
+                icon_styles.menu_item_action_gap_px,
             );
             (self.scaled(column), self.scaled(gap))
         } else {
@@ -3784,10 +3784,11 @@ impl EditorView {
         &self,
         path: PathBuf,
         is_dir: bool,
+        workspace_root: bool,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let has_clipboard = self.file_clipboard.is_some();
-        let is_root = is_dir && path == self.sidebar_root;
+        let is_root = workspace_root || is_dir && path == self.sidebar_root;
         let parent_dir = if is_dir {
             path.clone()
         } else {
@@ -3806,6 +3807,7 @@ impl EditorView {
                     false,
                     cx,
                     move |this, window, cx| {
+                        this.switch_workspace(pd.clone(), cx);
                         this.start_create_file(pd.clone(), window, cx);
                     },
                 ));
@@ -3817,6 +3819,7 @@ impl EditorView {
                     false,
                     cx,
                     move |this, window, cx| {
+                        this.switch_workspace(pd.clone(), cx);
                         this.start_create_dir(pd.clone(), window, cx);
                     },
                 ));
@@ -3838,12 +3841,13 @@ impl EditorView {
                     false,
                     cx,
                     move |this, _, cx| {
+                        this.switch_workspace(pd.clone(), cx);
                         this.paste_into_dir(pd.clone(), cx);
                     },
                 ));
                 items.push(self.render_context_menu_separator());
             }
-            if !self.expanded_dirs.is_empty() {
+            if path == self.sidebar_root && !self.expanded_dirs.is_empty() {
                 items.push(self.render_context_menu_item(
                     self.t(crate::i18n::TextKey::CollapseAllDirectories),
                     false,
@@ -3853,15 +3857,29 @@ impl EditorView {
                     },
                 ));
             }
+            let expand_root = path.clone();
             items.push(self.render_context_menu_item(
                 self.t(crate::i18n::TextKey::ExpandAllDirectories),
                 false,
                 cx,
                 move |this, _, cx| {
+                    this.switch_workspace(expand_root.clone(), cx);
                     this.expand_all_dirs(cx);
                 },
             ));
             items.push(self.render_context_menu_separator());
+            let search_root = path.clone();
+            items.push(self.render_context_menu_item(
+                crate::i18n::sidebar_action_label(self.ui_language, "search"),
+                false,
+                cx,
+                move |this, window, cx| {
+                    this.switch_workspace(search_root.clone(), cx);
+                    if !this.workspace_search_visible {
+                        this.toggle_workspace_search(window, cx);
+                    }
+                },
+            ));
             if let Some(copy_path_text) = self.sidebar_paths_copy_text(&path, false) {
                 items.push(self.render_context_menu_item(
                     self.t(crate::i18n::TextKey::CopyPath),
@@ -3891,6 +3909,7 @@ impl EditorView {
                     cx,
                     move |this, _, cx| {
                         this.close_context_menu(cx);
+                        this.switch_workspace(chat_path.clone(), cx);
                         this.add_path_to_chat(&chat_path, cx);
                     },
                 ));
@@ -5543,38 +5562,6 @@ impl EditorView {
         self.context_menu_panel_layout_with_anchor(position, width, estimated_menu_height, 0.0)
     }
 
-    fn button_context_menu_panel_layout(
-        &self,
-        anchor: Bounds<Pixels>,
-        width: f32,
-        estimated_menu_height: f32,
-    ) -> ContextMenuPanelLayout {
-        let margin = self.scaled(self.styles.anchored_popup_margin_px);
-        let placement = helpers::anchored_popup_placement(
-            self.last_window_width,
-            self.last_window_height,
-            anchor,
-            width,
-            estimated_menu_height,
-            false,
-            self.scaled(self.styles.anchored_popup_gap_px),
-            margin,
-        );
-        let (estimated_top, bottom_anchor) = match placement.vertical {
-            helpers::AnchoredPopupVertical::Above { bottom } => (0.0, Some(bottom)),
-            helpers::AnchoredPopupVertical::Below { top } => (top, None),
-        };
-        ContextMenuPanelLayout {
-            left: placement.left,
-            estimated_top,
-            max_height: placement.max_height,
-            bottom_anchor,
-            overlay_width: self.last_window_width,
-            overlay_height: self.last_window_height,
-            margin,
-        }
-    }
-
     fn context_menu_panel_layout_with_anchor(
         &self,
         position: Point<Pixels>,
@@ -6314,8 +6301,12 @@ impl EditorView {
         };
 
         let (items, width) = match &menu.kind {
+            ContextMenuKind::WorkspaceRoot { path } => (
+                self.render_sidebar_context_menu(path.clone(), true, true, cx),
+                self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+            ),
             ContextMenuKind::Sidebar { path, is_dir } => (
-                self.render_sidebar_context_menu(path.clone(), *is_dir, cx),
+                self.render_sidebar_context_menu(path.clone(), *is_dir, false, cx),
                 self.scaled(self.styles.context_menu.menu_sidebar_width_px),
             ),
             ContextMenuKind::SidebarStarred { path } => (
@@ -6440,7 +6431,7 @@ impl EditorView {
                 let label = |key| crate::i18n::front_matter_type_label(self.ui_language, key);
 
                 let ms = &self.styles.context_menu;
-                let wss = &self.styles.workspace_switcher;
+                let icon_styles = &self.styles.context_menu;
                 let text_width = front_matter::TYPES
                     .iter()
                     .map(|ty| {
@@ -6452,8 +6443,8 @@ impl EditorView {
                     .fold(0.0, f32::max);
                 let (icon_col_w, gap) = menu_icon_column_metrics(
                     ms.menu_format_icon_size_px,
-                    wss.ws_menu_item_check_size_px,
-                    wss.ws_menu_item_action_icon_gap_px,
+                    icon_styles.menu_item_check_size_px,
+                    icon_styles.menu_item_action_gap_px,
                 );
                 let width = (text_width
                     + self.scaled(
@@ -6461,7 +6452,7 @@ impl EditorView {
                             + 2.0 * ms.menu_item_padding_x_px
                             + icon_col_w
                             + 2.0 * gap
-                            + wss.ws_menu_item_check_size_px,
+                            + icon_styles.menu_item_check_size_px,
                     ))
                 .ceil();
                 let mut items = Vec::with_capacity(front_matter::TYPES.len());
@@ -6801,132 +6792,6 @@ impl EditorView {
                     ),
                 )
             }
-            ContextMenuKind::Workspace => {
-                let mut items = Vec::new();
-                let wss = &self.styles.workspace_switcher;
-                let current_root = self.sidebar_root.clone();
-                let check_color = wss.ws_menu_item_check_color;
-                let check_size = self.scaled(wss.ws_menu_item_check_size_px);
-                let ms = &self.styles.context_menu;
-
-                for workspace in self.workspaces.clone() {
-                    let ws_name = workspace
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| workspace.display().to_string())
-                        .to_uppercase();
-                    let is_current = workspace == current_root;
-                    let ws_switch = workspace.clone();
-                    let ws_close = workspace.clone();
-                    let item_id = SharedString::from(format!("ws-{}", ws_name));
-                    let close_btn_id = SharedString::from(format!("ws-close-{}", ws_name));
-
-                    items.push(
-                        crate::ui::list::list_item(ms.item(), Default::default(), self.ui_scale)
-                            .id(item_id)
-                            .gap(px(self.scaled(wss.ws_menu_item_action_icon_gap_px)))
-                            .child(
-                                div()
-                                    .w(px(check_size))
-                                    .h(px(check_size))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .flex_none()
-                                    .when(is_current, |this| {
-                                        this.child(
-                                            svg()
-                                                .path(CHECK_SVG_PATH)
-                                                .size(px(check_size))
-                                                .text_color(check_color),
-                                        )
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .overflow_hidden()
-                                    .truncate()
-                                    .child(ws_name),
-                            )
-                            .child(
-                                crate::ui::button::icon_button(
-                                    close_btn_id,
-                                    self.styles.workspace_close_button(),
-                                    Default::default(),
-                                    self.ui_scale,
-                                )
-                                .child("✕")
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, window, cx| {
-                                        window.prevent_default();
-                                        cx.stop_propagation();
-                                        this.suppress_editor_mouse_up_for_current_menu_event(cx);
-                                        this.close_workspace(&ws_close, cx);
-                                    }),
-                                )
-                                .on_mouse_up(
-                                    MouseButton::Left,
-                                    cx.listener(|_, _, window, cx| {
-                                        window.prevent_default();
-                                        cx.stop_propagation();
-                                    }),
-                                ),
-                            )
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
-                                    window.prevent_default();
-                                    cx.stop_propagation();
-                                    this.suppress_editor_mouse_up_for_current_menu_event(cx);
-                                    this.close_context_menu(cx);
-                                    this.switch_workspace(ws_switch.clone(), cx);
-                                }),
-                            )
-                            .on_mouse_up(
-                                MouseButton::Left,
-                                cx.listener(|_, _, window, cx| {
-                                    window.prevent_default();
-                                    cx.stop_propagation();
-                                }),
-                            )
-                            .into_any_element(),
-                    );
-                }
-                items.push(self.render_context_menu_separator());
-                items.push(self.render_context_menu_item_with_icon(
-                    self.t(crate::i18n::TextKey::OpenFolder),
-                    "assets/icons/filetree/all.svg",
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.pick_workspace_folder(cx);
-                    },
-                ));
-                items.push(self.render_context_menu_item_with_icon(
-                    self.t(crate::i18n::TextKey::AppSettingsMenu),
-                    "assets/icons/appearance/setting.svg",
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.open_settings_tab(cx);
-                    },
-                ));
-                items.push(self.render_context_menu_item_with_icon(
-                    self.t(crate::i18n::TextKey::HelpManual),
-                    DOC_SVG_PATH,
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.open_welcome_tab(cx);
-                    },
-                ));
-                (items, self.scaled(wss.ws_menu_width_px))
-            }
             ContextMenuKind::TableBorder {
                 table_start_line,
                 is_column,
@@ -7032,20 +6897,6 @@ impl EditorView {
                 overlay_height,
                 margin,
             }
-        } else if matches!(menu.kind, ContextMenuKind::Workspace) {
-            self.workspace_bar_bounds
-                .get()
-                .map(|anchor| {
-                    self.button_context_menu_panel_layout(anchor, width, estimated_menu_height)
-                })
-                .unwrap_or_else(|| {
-                    self.context_menu_panel_layout_with_anchor(
-                        anchor_position,
-                        width,
-                        estimated_menu_height,
-                        anchor_height,
-                    )
-                })
         } else {
             self.context_menu_panel_layout_with_anchor(
                 anchor_position,

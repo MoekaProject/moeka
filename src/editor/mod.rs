@@ -84,7 +84,9 @@ mod tooltip;
 mod types;
 mod updater;
 mod whitespace;
+mod workspace;
 mod workspace_search;
+mod workspace_tree;
 
 pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
 pub(crate) use assets::*;
@@ -365,6 +367,9 @@ pub(crate) struct ContextSubmenuAim {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ContextMenuKind {
+    WorkspaceRoot {
+        path: PathBuf,
+    },
     Sidebar {
         path: PathBuf,
         is_dir: bool,
@@ -396,7 +401,6 @@ pub(crate) enum ContextMenuKind {
     Tab {
         tab_id: String,
     },
-    Workspace,
     Image,
     Table {
         table_start_line: usize,
@@ -2385,7 +2389,14 @@ pub struct EditorView {
     pub(crate) generated_preview_views: HashMap<String, ImageViewState>,
     pub(crate) generated_preview_drag_state: Option<GeneratedPreviewDragState>,
     pub(crate) sidebar_root: PathBuf,
-    pub(crate) workspace_bar_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    pub(crate) workspace_states: HashMap<PathBuf, workspace::WorkspaceState>,
+    pub(crate) swapped_workspace_root: Option<PathBuf>,
+    pub(crate) focused_workspace_root: Option<PathBuf>,
+    pub(crate) workspace_top_scroll: ScrollHandle,
+    pub(crate) workspace_bottom_scroll: ScrollHandle,
+    pub(crate) workspace_drop_target: Option<(PathBuf, bool)>,
+    pub(crate) workspace_drag_scroll: Option<(bool, Task<()>)>,
+    pub(crate) workspace_close: Option<workspace::WorkspaceClose>,
     pub(crate) expanded_dirs: HashSet<PathBuf>,
     /// All selected sidebar paths.
     pub(crate) selected_sidebar_paths: HashSet<PathBuf>,
@@ -2585,6 +2596,8 @@ pub struct EditorView {
     pub(crate) sidebar_sort_mode: SidebarSortMode,
     pub(crate) file_list_display_mode: FileListDisplayMode,
     pub(crate) sidebar_starred_collapsed: bool,
+    pub(crate) sidebar_starred_scroll_handle: ScrollHandle,
+    pub(crate) focused_starred_path: Option<PathBuf>,
     /// Drag-hover target directory, used only for highlighting.
     pub(crate) sidebar_drag_hover_target: Option<PathBuf>,
     /// Drag-hover directory awaiting delayed expansion.
@@ -2897,6 +2910,8 @@ pub struct EditorView {
     /// Last observed OS appearance, used to drive `ThemeMode::Auto`.
     pub(crate) system_appearance: Option<gpui::WindowAppearance>,
     pub(crate) window_is_fullscreen: bool,
+    #[cfg(any(windows, test))]
+    pub(super) last_native_window_title: Option<String>,
     pub(crate) ui_language: UiLanguage,
     pub(crate) app_settings: AppSettings,
     motion_overlays: motion::OverlayViews,
@@ -3199,7 +3214,6 @@ impl EditorView {
             generated_preview_views: HashMap::new(),
             generated_preview_drag_state: None,
             sidebar_root: sidebar_root.clone(),
-            workspace_bar_bounds: Rc::new(Cell::new(None)),
             expanded_dirs,
             selected_sidebar_paths: HashSet::new(),
             current_file_path: None,
@@ -3385,6 +3399,8 @@ impl EditorView {
             sidebar_sort_mode: app_settings.sidebar_sort_mode(),
             file_list_display_mode: app_settings.file_list_display_mode(),
             sidebar_starred_collapsed: false,
+            sidebar_starred_scroll_handle: ScrollHandle::new(),
+            focused_starred_path: None,
             sidebar_drag_hover_target: None,
             sidebar_drag_expand_hover_dir: None,
             sidebar_drag_child_hover_position: None,
@@ -3438,6 +3454,14 @@ impl EditorView {
             sidebar_edit_in_file_list: false,
             file_list_menu_origin: false,
             workspaces: Vec::new(),
+            workspace_states: HashMap::new(),
+            swapped_workspace_root: None,
+            focused_workspace_root: None,
+            workspace_top_scroll: ScrollHandle::new(),
+            workspace_bottom_scroll: ScrollHandle::new(),
+            workspace_drop_target: None,
+            workspace_drag_scroll: None,
+            workspace_close: None,
             _watcher_task: None,
             temp_save_tasks: HashMap::new(),
             temp_save_epochs: HashMap::new(),
@@ -3642,6 +3666,8 @@ impl EditorView {
             update_check_is_manual: false,
             system_appearance: None,
             window_is_fullscreen: false,
+            #[cfg(any(windows, test))]
+            last_native_window_title: None,
             ui_language,
             app_settings,
             motion_overlays: Default::default(),
@@ -6287,6 +6313,7 @@ impl EditorView {
     }
 
     pub(crate) fn dismiss_dialog(&mut self, cx: &mut Context<Self>) {
+        self.workspace_close = None;
         self.dialog = None;
         self.pending_close_tab_ids.clear();
         self.restore_tab_after_close(cx);
@@ -6299,6 +6326,9 @@ impl EditorView {
         };
         match dialog.action {
             DialogAction::CloseTabUnsaved { tab_id } => {
+                if self.approve_workspace_tab_close(&tab_id, cx) {
+                    return;
+                }
                 let found = self
                     .all_tabs_mut()
                     .find(|t| t.id == tab_id)
@@ -6407,6 +6437,7 @@ impl EditorView {
                             .await;
                         let Some(path) = maybe_path else {
                             this.update(cx, |editor, cx| {
+                                editor.workspace_close = None;
                                 editor.pending_close_tab_ids.clear();
                                 editor.persist_recovery_for_tab(&tab_id);
                                 editor.restore_tab_after_close(cx);
@@ -6430,6 +6461,7 @@ impl EditorView {
                     token.observe_result(&result);
                     this.update(cx, |editor, cx| {
                         if !token.is_latest() || matches!(result, Ok(false)) {
+                            editor.workspace_close = None;
                             editor.pending_close_tab_ids.clear();
                             editor.persist_recovery_for_tab(&tab_id);
                             editor.restore_tab_after_close(cx);
@@ -6437,6 +6469,7 @@ impl EditorView {
                             return;
                         }
                         if let Err(error) = result {
+                            editor.workspace_close = None;
                             editor.pending_close_tab_ids.clear();
                             editor.notify_document_save_failed(&tab_id, &path, &error, cx);
                             editor.restore_tab_after_close(cx);
@@ -6472,6 +6505,7 @@ impl EditorView {
                             editor.tabs[index].history.saved_text = Some(saved_text.clone());
                             editor.refresh_line_diff();
                             if !unchanged {
+                                editor.workspace_close = None;
                                 editor.tabs[index].is_dirty = true;
                                 return false;
                             }

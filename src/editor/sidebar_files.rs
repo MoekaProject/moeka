@@ -200,6 +200,9 @@ impl EditorView {
     }
 
     pub(crate) fn delete_paths_to_trash(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if self.reject_workspace_root_mutation(paths, cx) {
+            return;
+        }
         let paths = paths.to_vec();
         self.context_menu = None;
         cx.notify();
@@ -289,6 +292,7 @@ impl EditorView {
             .is_some_and(|focused| deleted.iter().any(|path| focused.starts_with(path)))
         {
             self.focused_sidebar_path = None;
+            self.focused_workspace_root = None;
         }
         if self
             .sidebar_selection_anchor
@@ -312,6 +316,9 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.reject_workspace_root_mutation(std::slice::from_ref(&path), cx) {
+            return;
+        }
         self.begin_sidebar_rename(path, false, window, cx);
     }
 
@@ -321,6 +328,8 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.activate_starred_workspace(&path, cx);
+        self.ensure_starred_path_visible(&path);
         self.begin_sidebar_rename(path, true, window, cx);
     }
 
@@ -860,6 +869,12 @@ impl EditorView {
             .flatten();
         self.context_menu = None;
         if clipboard.is_cut {
+            if self.reject_workspace_root_mutation(
+                &clipboard.paths.iter().cloned().collect::<Vec<_>>(),
+                cx,
+            ) {
+                return;
+            }
             self.file_clipboard = None;
         }
         cx.notify();
@@ -1065,6 +1080,21 @@ impl EditorView {
     }
 
     pub(crate) fn switch_workspace(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if path == self.sidebar_root {
+            return;
+        }
+        let reveal_sidebar = !self.sidebar_visible;
+        debug_assert!(self.swapped_pane_id.is_none());
+        let adopt_unscoped = self.sidebar_root.as_os_str().is_empty()
+            && !path.as_os_str().is_empty()
+            && !self.workspace_states.contains_key(&path);
+        self.park_workspace();
+        self.focused_starred_path = None;
+        if adopt_unscoped && let Some(mut state) = self.workspace_states.remove(Path::new("")) {
+            state.file_list_dir = path.clone();
+            state.expanded_dirs = HashSet::from([path.clone()]);
+            self.workspace_states.insert(path.clone(), state);
+        }
         fs_task::register_workspace_root(&path);
         self.sidebar_root = path.clone();
         self.reset_sidebar_filter(cx);
@@ -1096,6 +1126,7 @@ impl EditorView {
         self.expanded_dirs.insert(path);
         self.selected_sidebar_paths.clear();
         self.focused_sidebar_path = None;
+        self.focused_workspace_root = None;
         self.sidebar_selection_anchor = None;
         self.sidebar_error = None;
         // This is intentional navigation to a different root: unlike a
@@ -1112,13 +1143,28 @@ impl EditorView {
         self.file_list_scroll_handle
             .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         self.context_menu = None;
+        self.activate_workspace_state(cx);
         self.start_watching(cx);
-        self.sync_sidebar_width_animation(cx);
+        if reveal_sidebar {
+            self.sync_sidebar_width_animation(cx);
+        }
         cx.notify();
         session_store::persist_session(self);
     }
 
     pub(crate) fn close_workspace(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.request_close_workspace(path, cx);
+    }
+
+    pub(crate) fn finish_close_workspace(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let removed_panes = if self.sidebar_root == path {
+            self.visible_pane_ids()
+        } else {
+            self.workspace_states
+                .get(path)
+                .map(|state| state.layout.leaf_ids())
+                .unwrap_or_default()
+        };
         let closing_idx = self
             .workspaces
             .iter()
@@ -1126,13 +1172,21 @@ impl EditorView {
         self.workspaces.retain(|workspace| workspace != path);
         crate::platform::security_scope::stop_access(path);
         if self.workspaces.is_empty() {
-            self.sidebar_root = PathBuf::new();
+            self.switch_workspace(PathBuf::new(), cx);
+            self.workspace_states.remove(path);
+            self.panes.retain(|pane| !removed_panes.contains(&pane.id));
+            self.pane_bounds.retain(|id, _| !removed_panes.contains(id));
+            self.pane_editor_content_views
+                .retain(|id, _| !removed_panes.contains(id));
+            self.pane_caret_overlay_views
+                .retain(|id, _| !removed_panes.contains(id));
             self.reset_sidebar_filter(cx);
             self.sidebar_visible = false;
             self.sidebar_resizing = false;
             self.expanded_dirs.clear();
             self.selected_sidebar_paths.clear();
             self.focused_sidebar_path = None;
+            self.focused_workspace_root = None;
             self.sidebar_selection_anchor = None;
             self.sidebar_error = None;
             self.invalidate_sidebar_items_cache();
@@ -1156,6 +1210,13 @@ impl EditorView {
             self.context_menu = None;
             cx.notify();
         }
+        self.workspace_states.remove(path);
+        self.panes.retain(|pane| !removed_panes.contains(&pane.id));
+        self.pane_bounds.retain(|id, _| !removed_panes.contains(id));
+        self.pane_editor_content_views
+            .retain(|id, _| !removed_panes.contains(id));
+        self.pane_caret_overlay_views
+            .retain(|id, _| !removed_panes.contains(id));
         session_store::persist_session(self);
     }
 }

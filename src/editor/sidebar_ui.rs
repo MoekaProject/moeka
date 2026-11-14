@@ -30,14 +30,6 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn open_workspace_menu(
-        &mut self,
-        position: gpui::Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_sidebar_root_menu(position, ContextMenuKind::Workspace, false, cx);
-    }
-
     pub(crate) fn open_sidebar_sort_menu(
         &mut self,
         position: gpui::Point<gpui::Pixels>,

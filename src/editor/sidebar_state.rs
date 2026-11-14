@@ -13,13 +13,11 @@ struct SettingsWrites {
 
 impl gpui::Global for SettingsWrites {}
 
-fn visible_starred_paths(root: &Path, stars: &[PathBuf]) -> Vec<PathBuf> {
-    let root = EditorView::normalize_sidebar_path(root);
+fn visible_starred_paths(stars: &[PathBuf]) -> Vec<PathBuf> {
     let mut seen = std::collections::HashSet::new();
     stars
         .iter()
         .map(|path| EditorView::normalize_sidebar_path(path))
-        .filter(|path| !root.as_os_str().is_empty() && path.starts_with(&root))
         .filter(|path| seen.insert(path.clone()))
         .collect()
 }
@@ -88,8 +86,11 @@ mod tests {
         let root = PathBuf::from("offline-workspace");
         let star = root.join("unavailable.md");
         let stars = vec![star.clone(), star.clone(), PathBuf::from("other/note.md")];
-        assert_eq!(super::visible_starred_paths(&root, &stars), vec![star]);
-        assert!(super::visible_starred_paths(std::path::Path::new(""), &stars).is_empty());
+        assert_eq!(
+            super::visible_starred_paths(&stars),
+            vec![star, PathBuf::from("other/note.md")]
+        );
+        assert!(super::visible_starred_paths(&[]).is_empty());
         assert_eq!(stars.len(), 3);
     }
 
@@ -192,7 +193,7 @@ impl EditorView {
     }
 
     pub(super) fn visible_starred_sidebar_files(&self) -> Vec<PathBuf> {
-        visible_starred_paths(&self.sidebar_root, &self.app_settings.starred_files)
+        visible_starred_paths(&self.app_settings.starred_files)
             .into_iter()
             .filter(|path| self.sidebar_cached_path_is_dir(path) != Some(true))
             .filter(|path| {
@@ -207,40 +208,58 @@ impl EditorView {
     }
 
     pub(super) fn sidebar_starred_section_height(&self, has_root: bool) -> f32 {
-        if !has_root {
+        if !has_root && self.sidebar_visible_starred_count() == 0 {
             return 0.0;
         }
-
-        let header_height = self.scaled(self.styles.sidebar.sidebar_header_height_px);
-        let item_count = if self.sidebar_starred_collapsed && self.sidebar_starred_motion.is_none()
-        {
-            0
-        } else {
-            self.sidebar_visible_starred_count()
-        };
-        header_height + item_count as f32 * self.sidebar_item_height_px()
+        self.scaled(self.styles.sidebar.sidebar_header_height_px)
+            + self.sidebar_starred_list_height()
     }
 
     pub(super) fn sidebar_visible_starred_count(&self) -> usize {
         self.visible_starred_sidebar_files().len()
     }
 
-    pub(super) fn sidebar_scroll_prefix_height(&self, has_root: bool) -> f32 {
-        let sidebar_styles = &self.styles.sidebar;
-        let logo_height = if self.app_settings.simple_mode {
-            0.0
-        } else {
-            self.scaled(
-                sidebar_styles.sidebar_logo_size_px
-                    + 2.0 * sidebar_styles.sidebar_logo_padding_y_px,
-            )
+    pub(super) fn sidebar_starred_list_height(&self) -> f32 {
+        if self.sidebar_starred_collapsed && self.sidebar_starred_motion.is_none() {
+            return 0.0;
+        }
+        let row_height = self.sidebar_item_height_px();
+        let content = self.sidebar_visible_starred_count() as f32 * row_height
+            + self
+                .starred_reveal()
+                .map_or(0.0, |reveal| reveal.offset(row_height));
+        let available = (self.last_window_height
+            - self.tab_bar_height()
+            - self.scaled(self.styles.sidebar.sidebar_header_height_px) * 2.0
+            - row_height * (1.0 + self.styles.sidebar.sidebar_min_tree_rows))
+            .max(0.0);
+        content.max(0.0).min(
+            available
+                * self
+                    .styles
+                    .sidebar
+                    .sidebar_root_region_max_fraction
+                    .clamp(0.0, 0.5),
+        )
+    }
+
+    pub(super) fn ensure_starred_path_visible(&self, path: &Path) {
+        let paths = self.visible_starred_sidebar_files();
+        let Some(index) = paths.iter().position(|item| item == path) else {
+            return;
         };
-        if has_root {
-            logo_height
-                + self.sidebar_starred_section_height(has_root)
-                + self.scaled(sidebar_styles.sidebar_header_height_px)
-        } else {
-            logo_height
+        let height = self.sidebar_starred_list_height();
+        let row = self.sidebar_item_height_px();
+        let offset = self.sidebar_starred_scroll_handle.offset();
+        if let Some(top) = minimal_scroll_top_for_item(
+            -f32::from(offset.y),
+            height,
+            index as f32 * row,
+            (index + 1) as f32 * row,
+            (paths.len() as f32 * row - height).max(0.0),
+        ) {
+            self.sidebar_starred_scroll_handle
+                .set_offset(gpui::point(offset.x, px(-top)));
         }
     }
 
@@ -262,7 +281,7 @@ impl EditorView {
         let offset = self.sidebar_scroll_handle.offset();
         let scroll_top = -f32::from(offset.y);
         let item_height = self.sidebar_item_height_px();
-        let prefix_height = self.sidebar_scroll_prefix_height(true);
+        let prefix_height = 0.0;
         let item_top = prefix_height + index as f32 * item_height;
         let item_bottom = item_top + item_height;
         let bottom_spacer_height = self.scaled(self.styles.sidebar.sidebar_bottom_spacer_height_px);
@@ -297,7 +316,7 @@ impl EditorView {
 
         let offset = self.sidebar_scroll_handle.offset();
         let item_height = self.sidebar_item_height_px();
-        let prefix_height = self.sidebar_scroll_prefix_height(true);
+        let prefix_height = 0.0;
         let item_top = prefix_height + index as f32 * item_height;
         let bottom_spacer_height = self.scaled(self.styles.sidebar.sidebar_bottom_spacer_height_px);
         let content_height = prefix_height + item_count as f32 * item_height + bottom_spacer_height;
@@ -320,7 +339,7 @@ impl EditorView {
         }
 
         let item_height = self.sidebar_item_height_px();
-        let prefix_height = self.sidebar_scroll_prefix_height(true);
+        let prefix_height = 0.0;
         let bottom_spacer_height = self.scaled(self.styles.sidebar.sidebar_bottom_spacer_height_px);
         let content_height =
             prefix_height + items.len() as f32 * item_height + bottom_spacer_height;
@@ -520,6 +539,7 @@ impl EditorView {
     }
 
     pub(crate) fn clear_sidebar_drag_state(&mut self, cx: &mut Context<Self>) {
+        self.workspace_drop_target = None;
         self.sidebar_drag_child_hover_position = None;
         self.sidebar_drag_scroll_task = None;
         self.clear_sidebar_drag_hover(cx);
@@ -536,7 +556,13 @@ impl EditorView {
         centered: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(root) = self.workspace_root_for_path(&path) else {
+        let root = if !show_sidebar {
+            (!self.sidebar_root.as_os_str().is_empty() && path.starts_with(&self.sidebar_root))
+                .then(|| self.sidebar_root.clone())
+        } else {
+            self.workspace_root_for_path(&path)
+        };
+        let Some(root) = root else {
             return;
         };
 
@@ -658,6 +684,7 @@ impl EditorView {
             .detach();
         } else {
             self.focused_sidebar_path = None;
+            self.focused_workspace_root = None;
         }
 
         cx.notify();

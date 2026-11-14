@@ -685,13 +685,15 @@ impl Render for EditorView {
         if self.focus_handle.is_focused(window) && self.active_tab_supports_text_buffer() {
             window.invalidate_character_coordinates();
         }
+        #[cfg(any(windows, all(test, feature = "gpui-test-support")))]
+        self.sync_native_window_title(window);
         let resizing = self.sidebar_resizing
             || self.file_list_resizing
             || self.workspace_search_resizing
             || self.utility_panel_resizing
             || self.pane_resize_drag.is_some();
         let pointer_dragging = resizing || self.code_block_horizontal_scrollbar_drag.is_some();
-        let show_empty_workspace = self.panes.len() == 1 && self.tabs.is_empty();
+        let show_empty_workspace = self.pane_layout.leaf_count() == 1 && self.tabs.is_empty();
         let ws = &self.styles.window;
         #[cfg(target_os = "linux")]
         let root_window_radius = if self.client_side_window_decorations {
@@ -873,16 +875,15 @@ impl Render for EditorView {
                             editor.update(cx, |this, cx| {
                                 if this.modal_overlay_is_open()
                                     || this.preview_overlay.is_some()
-                                    || this.panes.len() < 2
+                                    || this.pane_layout.leaf_count() < 2
                                 {
                                     return;
                                 }
-                                let target =
-                                    this.panes.iter().map(|pane| pane.id).find(|pane_id| {
-                                        this.pane_bounds
-                                            .get(pane_id)
-                                            .is_some_and(|bounds| bounds.contains(&event.position))
-                                    });
+                                let target = this.visible_pane_ids().into_iter().find(|pane_id| {
+                                    this.pane_bounds
+                                        .get(pane_id)
+                                        .is_some_and(|bounds| bounds.contains(&event.position))
+                                });
                                 if let Some(pane_id) = target {
                                     this.focus_pane(pane_id, cx);
                                 }
@@ -940,11 +941,13 @@ impl Render for EditorView {
             self.ui_scale,
         )
         .id("editor-root")
-        .key_context(if self.focused_sidebar_path.is_some() {
-            "MarkdownEditor Sidebar"
-        } else {
-            "MarkdownEditor"
-        })
+        .key_context(
+            if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
+                "MarkdownEditor Sidebar"
+            } else {
+                "MarkdownEditor"
+            },
+        )
         .track_focus(&self.focus_handle(cx))
         .capture_action(cx.listener(|this, _: &crate::actions::Escape, _, cx| {
             this.clear_search_inputs(cx);

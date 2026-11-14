@@ -594,7 +594,7 @@ impl EditorView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, event, window, cx| {
-                            this.focused_sidebar_path = None;
+                            this.focused_sidebar_path = None; this.focused_workspace_root = None;
                             this.on_mouse_down(event, window, cx);
                         }),
                     )
@@ -656,7 +656,7 @@ impl EditorView {
                     .on_drop(cx.listener(
                         move |this, dragged: &DraggedSidebarItems, _, cx| {
                             this.clear_sidebar_drag_state(cx);
-                            this.focused_sidebar_path = None;
+                            this.focused_sidebar_path = None; this.focused_workspace_root = None;
                             this.focus_pane(pane_id, cx);
                             this.insert_sidebar_items_as_wiki_links(&dragged.paths, cx);
                         },

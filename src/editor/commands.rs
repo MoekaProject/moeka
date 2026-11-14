@@ -497,7 +497,7 @@ impl EditorView {
             editor: cx.entity_id(),
             language: self.ui_language,
             workspaces: self.workspaces.clone(),
-            panes: self.pane_ids(),
+            panes: self.visible_pane_ids(),
             pinned,
         };
         let registry = cx.default_global::<MenuEditors>();
@@ -556,7 +556,7 @@ impl EditorView {
             );
             return;
         };
-        if !valid_origin || !self.pane_ids().contains(&pane) {
+        if !valid_origin || !self.visible_pane_ids().contains(&pane) {
             self.notify_error(
                 i18n::menu_command_label(self.ui_language, "command_target_changed"),
                 cx,
@@ -692,7 +692,7 @@ impl EditorView {
                 require(has_tab, "requires_document")
             }
             C::NextTab | C::PreviousTab => require(self.tabs.len() > 1, "requires_other_tab"),
-            C::FocusNextPane => require(self.pane_ids().len() > 1, "requires_other_pane"),
+            C::FocusNextPane => require(self.visible_pane_ids().len() > 1, "requires_other_pane"),
             C::Find => require(text || terminal, "requires_text"),
             C::FindInFiles | C::QuickOpen => require(root, "requires_workspace"),
             C::Bold
@@ -874,9 +874,10 @@ impl EditorView {
                         "command_unavailable",
                     ),
                     E::SplitLeft | E::SplitUp => require(has_tab, "requires_document"),
-                    E::MoveTab => {
-                        require(has_tab && self.pane_ids().len() > 1, "requires_other_pane")
-                    }
+                    E::MoveTab => require(
+                        has_tab && self.visible_pane_ids().len() > 1,
+                        "requires_other_pane",
+                    ),
                     E::Back => require(self.can_navigate_tab_history_back(), "command_unavailable"),
                     E::Forward => require(
                         self.can_navigate_tab_history_forward(),
