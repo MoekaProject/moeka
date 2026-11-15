@@ -64,7 +64,10 @@ rechecks that remote main still matches the dispatch SHA.
    caches generates excessive cache API traffic. Only this
    repository's main branch writes caches; PRs restore them read-only. Runner
    families, macOS SDKs, target triples and test/production dependency sets remain
-   separate. On the three primary CI targets, production restores the dependency
+   separate. Disposable hosted runners retain only the repository's active Rust
+   toolchain: rust-cache otherwise fingerprints unused preinstalled compilers and
+   misses compatible caches when runner images carry different stable versions.
+   On the three primary CI targets, production restores the dependency
    superset written by the full test job instead of keeping a second large archive.
    Other architectures retain their production caches. Trusted jobs may save
    compiled dependencies after a test failure; PRs never write either cache.

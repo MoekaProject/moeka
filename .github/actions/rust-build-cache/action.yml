@@ -62,6 +62,23 @@ runs:
             echo "SCCACHE_GHA_RW_MODE=READ_ONLY"
           fi
         } >> "$GITHUB_ENV"
+    - name: Normalize the disposable runner's Rust toolchains
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ "$RUNNER_ENVIRONMENT" != github-hosted ]]; then
+          echo "Toolchain normalization requires a disposable GitHub-hosted runner." >&2
+          exit 1
+        fi
+        toolchain="$(rustup show active-toolchain)"
+        toolchain="${toolchain%% *}"
+        : "${toolchain:?No active repository toolchain}"
+        rustup default "$toolchain"
+        while read -r installed _; do
+          if [[ "$installed" != "$toolchain" ]]; then
+            rustup toolchain uninstall "$installed"
+          fi
+        done < <(rustup toolchain list)
     - name: Install pinned compiler cache
       uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
       with:

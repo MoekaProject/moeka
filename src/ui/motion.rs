@@ -10,6 +10,57 @@ pub(crate) use gpui::{ScalarTransition as Transition, ease_out_quart as ease_out
 pub(crate) const CARET_FADE_FRAMES: usize = 4;
 pub(crate) const CARET_FADE_FRAME_INTERVAL: Duration = Duration::from_millis(35);
 
+#[cfg(all(test, feature = "gpui-test-support"))]
+pub(crate) mod test_clock {
+    use super::*;
+    use std::{cell::Cell, marker::PhantomData, rc::Rc};
+
+    thread_local! {
+        static NOW: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+
+    pub(crate) struct Clock {
+        previous: Option<Instant>,
+        _thread: PhantomData<Rc<()>>,
+    }
+
+    impl Clock {
+        pub(crate) fn new() -> Self {
+            Self {
+                previous: NOW.replace(Some(Instant::now())),
+                _thread: PhantomData,
+            }
+        }
+
+        pub(crate) fn advance(&self, duration: Duration) {
+            NOW.set(Some(
+                NOW.get().expect("active transition test clock") + duration,
+            ));
+        }
+    }
+
+    impl Drop for Clock {
+        fn drop(&mut self) {
+            NOW.set(self.previous);
+        }
+    }
+
+    pub(super) fn now() -> Instant {
+        NOW.get().unwrap_or_else(Instant::now)
+    }
+}
+
+fn transition_now() -> Instant {
+    #[cfg(all(test, feature = "gpui-test-support"))]
+    {
+        test_clock::now()
+    }
+    #[cfg(not(all(test, feature = "gpui-test-support")))]
+    {
+        Instant::now()
+    }
+}
+
 pub(crate) fn caret_fade_opacity(from: f32, to: f32, frame: usize, frame_count: usize) -> f32 {
     let progress = frame.min(frame_count) as f32 / frame_count.max(1) as f32;
     let eased = progress * progress * (3.0 - 2.0 * progress);
@@ -48,7 +99,7 @@ pub(crate) fn value_transition(
     };
     window.with_global_id(id.into(), |id, window| {
         window.with_element_state(id, |state: Option<Transition>, window| {
-            let now = Instant::now();
+            let now = transition_now();
             let mut state = state.unwrap_or_else(|| Transition::settled(target, now));
             state.retarget(target, duration, now);
             if state.running(now) {

@@ -296,6 +296,7 @@ mod line_diff_feedback_tests {
     fn line_diff_restore_hover_animates_painted_text_and_only_text_is_clickable(
         cx: &mut gpui::TestAppContext,
     ) {
+        let clock = crate::ui::motion::test_clock::Clock::new();
         let editor = cx.update(|cx| {
             cx.new(|cx| {
                 let mut editor =
@@ -370,7 +371,7 @@ mod line_diff_feedback_tests {
         cx.simulate_mouse_move(bounds.center(), None, Default::default());
         cx.run_until_parked();
         assert!(paints.borrow().len() > frames_before);
-        std::thread::sleep(Duration::from_millis(80));
+        clock.advance(Duration::from_millis(80));
         cx.update(|window, cx| {
             window.refresh();
             window.draw(cx).clear();
@@ -381,7 +382,7 @@ mod line_diff_feedback_tests {
             midway.a > normal.a && midway.a < hover.a,
             "normal={normal:?}, midway={midway:?}, hover={hover:?}"
         );
-        std::thread::sleep(Duration::from_millis(230));
+        clock.advance(Duration::from_millis(230));
         cx.update(|window, cx| {
             window.refresh();
             window.draw(cx).clear();
@@ -397,7 +398,7 @@ mod line_diff_feedback_tests {
             Default::default(),
         );
         cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(230));
+        clock.advance(Duration::from_millis(230));
         cx.update(|window, cx| {
             window.refresh();
             window.draw(cx).clear();
@@ -419,6 +420,7 @@ mod line_diff_feedback_tests {
     fn line_diff_feedback_animates_hover_dimming_and_reversal_and_snaps_reduced_motion(
         cx: &mut gpui::TestAppContext,
     ) {
+        let clock = crate::ui::motion::test_clock::Clock::new();
         let editor = cx.update(|cx| {
             cx.new(|cx| {
                 let mut editor = EditorView::new_with_mode(cx, true, false, Some("text"), false);
@@ -442,7 +444,7 @@ mod line_diff_feedback_tests {
         cx.run_until_parked();
         assert!(values.borrow().0 < 0.5);
         assert!(values.borrow().1 > 0.3);
-        std::thread::sleep(Duration::from_millis(80));
+        clock.advance(Duration::from_millis(80));
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         let midway = *values.borrow();
@@ -453,7 +455,7 @@ mod line_diff_feedback_tests {
         cx.run_until_parked();
         assert!((values.borrow().0 - midway.0).abs() < 0.1);
         assert!((values.borrow().1 - midway.1).abs() < 0.1);
-        std::thread::sleep(Duration::from_millis(230));
+        clock.advance(Duration::from_millis(230));
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         assert_eq!(*values.borrow(), (0.0, 0.9));
