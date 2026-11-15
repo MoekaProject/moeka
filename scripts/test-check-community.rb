@@ -120,6 +120,10 @@ class CommunityChecksTest
     assert_equal %w[macos portable], jobs.fetch('publish').fetch('needs')
     assert_equal 'publish', jobs.fetch('homebrew').fetch('needs')
     assert_equal './.github/workflows/signed-macos.yml', jobs.fetch('macos').fetch('uses')
+    assert_equal %w[APPLE_APP_SPECIFIC_PASSWORD APPLE_ID MACOS_CERTIFICATE_BASE64 MACOS_CERTIFICATE_PASSWORD],
+                 jobs.fetch('macos').fetch('secrets').keys.sort
+    assert_equal 'release-signing', jobs.fetch('preflight').fetch('environment')
+    assert_equal 'preflight', jobs.fetch('portable').fetch('needs')
     assert_empty jobs.fetch('portable').to_s.scan(/secrets\./)
     assert_empty jobs.fetch('publish').to_s.scan(/MACOS_CERTIFICATE|APPLE_APP_SPECIFIC_PASSWORD|make signed|cargo build/)
     assert_equal({ 'contents' => 'write' }, jobs.fetch('publish').fetch('permissions'))

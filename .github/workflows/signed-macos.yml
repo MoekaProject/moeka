@@ -6,6 +6,15 @@ on:
       version:
         required: true
         type: string
+    secrets:
+      MACOS_CERTIFICATE_BASE64:
+        required: true
+      MACOS_CERTIFICATE_PASSWORD:
+        required: true
+      APPLE_ID:
+        required: true
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: true
   workflow_dispatch:
     inputs:
       version:

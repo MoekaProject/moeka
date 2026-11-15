@@ -22,7 +22,8 @@ concurrency:
 jobs:
   preflight:
     if: github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: macos-15
+    environment: release-signing
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -41,12 +42,29 @@ jobs:
           gh auth setup-git
           test -f "packaging/release-notes/v$VERSION.md"
           bash scripts/publish-release.sh check "v$VERSION"
+      - name: Validate Apple credentials before building any release artifacts
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          DEVELOPER_ID_APPLICATION: ${{ vars.DEVELOPER_ID_APPLICATION }}
+        run: bash scripts/ci-macos-signing.sh setup
+      - name: Remove validation credentials
+        if: always()
+        run: bash scripts/ci-macos-signing.sh cleanup
 
   macos:
     needs: preflight
     uses: ./.github/workflows/signed-macos.yml
     with:
       version: ${{ inputs.version }}
+    secrets:
+      MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
 
   portable:
     needs: preflight

@@ -41,10 +41,14 @@ for this Developer ID distribution workflow. Base64 is not encryption.
    automatically in CI.
 2. Open **Actions > Signed macOS candidates (no publishing) > Run workflow**.
    Select `main` and enter the exact Cargo version without `v`, e.g. `0.1.38`.
-3. Both unsigned app builds finish before the signing jobs run on fresh hosted
+3. The official workflow first validates certificate/notary credentials on a
+   disposable macOS runner and deletes that keychain before any builds start.
+   Both unsigned app builds finish before the signing jobs run on fresh hosted
    macOS runners. Signing checks the archive hash, app version, CPU architecture,
    certificate identity and notarization credentials. All jobs use the same
    dispatch commit SHA; no dependency cache is restored in the signing job.
+   The caller explicitly passes the four secret names declared by
+   `workflow_call`; the signing job's environment supplies their values.
 4. Download the two `signed-candidate-macos-*` artifacts. Each includes a DMG,
    ZIP, `SHA256SUMS`, and `build-info.txt` containing the source SHA and run ID.
    Verify hashes, app signatures, stapled tickets, Gatekeeper assessment and
