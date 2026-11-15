@@ -23,6 +23,7 @@ runs:
       env:
         TARGET: ${{ inputs.target }}
         IMAGE: ${{ inputs.environment }}
+        LANE: ${{ inputs.lane }}
         READ_ONLY: ${{ inputs.read-only }}
       run: |
         set -euo pipefail
@@ -36,10 +37,22 @@ runs:
         if [[ "$RUNNER_OS" == macOS ]]; then
           sdk="$(xcrun --sdk macosx --show-sdk-version)"
         fi
+        dependency_write="$writable"
+        cache_lane=default
+        case "$TARGET" in
+          aarch64-apple-darwin|x86_64-pc-windows-msvc|x86_64-unknown-linux-gnu)
+            cache_lane=gpui-tests
+            if [[ "$LANE" != gpui-tests ]]; then
+              dependency_write=false
+            fi
+            ;;
+        esac
         {
           echo "CARGO_INCREMENTAL=0"
           echo "CARGO_BUILD_TARGET=$TARGET"
           echo "MOEKA_CACHE_WRITE=$writable"
+          echo "MOEKA_DEPENDENCY_CACHE_WRITE=$dependency_write"
+          echo "MOEKA_CACHE_LANE=$cache_lane"
           echo "MOEKA_CACHE_ENVIRONMENT=$IMAGE-$sdk"
           echo "SCCACHE_GHA_ENABLED=true"
           echo "SCCACHE_GHA_VERSION=moeka-compiler-v1-$IMAGE-$sdk-$TARGET"
@@ -57,9 +70,15 @@ runs:
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       with:
         prefix-key: moeka-build-v2
-        shared-key: ${{ env.MOEKA_CACHE_ENVIRONMENT }}-${{ inputs.target }}-${{ inputs.lane }}
-        save-if: ${{ env.MOEKA_CACHE_WRITE }}
+        shared-key: ${{ env.MOEKA_CACHE_ENVIRONMENT }}-${{ inputs.target }}-${{ env.MOEKA_CACHE_LANE }}
+        save-if: ${{ env.MOEKA_DEPENDENCY_CACHE_WRITE }}
+        cache-on-failure: true
         cache-bin: false
     - name: Enable compiler cache
       shell: bash
-      run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+      run: |
+        set -euo pipefail
+        wrapper="$RUNNER_TEMP/moeka-rustc-cache"
+        if [[ "$RUNNER_OS" == Windows ]]; then wrapper="$wrapper.exe"; fi
+        rustc --edition=2024 "$GITHUB_ACTION_PATH/rustc-cache.rs" -o "$wrapper"
+        echo "RUSTC_WRAPPER=$wrapper" >> "$GITHUB_ENV"

@@ -59,10 +59,16 @@ rechecks that remote main still matches the dispatch SHA.
 
    Build jobs share target-specific dependency caches with CI and unsigned
    candidates. Content-addressed sccache also retains compilation of the vendored
-   GPUI path dependency, which the dependency cache excludes. Only this
+   GPUI path dependency, which the dependency cache excludes. A small Rust compiler
+   wrapper routes only GPUI through sccache: duplicating every dependency in both
+   caches generates excessive cache API traffic. Only this
    repository's main branch writes caches; PRs restore them read-only. Runner
    families, macOS SDKs, target triples and test/production dependency sets remain
-   separate. All production builds retain the release profile and locked
+   separate. On the three primary CI targets, production restores the dependency
+   superset written by the full test job instead of keeping a second large archive.
+   Other architectures retain their production caches. Trusted jobs may save
+   compiled dependencies after a test failure; PRs never write either cache.
+   All production builds retain the release profile and locked
    dependencies. Signing uses fresh cache-free runners, with both architectures
    signing independently in parallel after their unsigned builds complete.
 

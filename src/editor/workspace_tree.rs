@@ -218,9 +218,9 @@ mod tests {
             })
         });
         cx.run_until_parked();
-        let row = cx
-            .debug_bounds("sidebar-workspace/folder-20")
-            .expect("restored visible row");
+        let selector =
+            Box::leak(format!("sidebar-{}", root.join("folder-20").display()).into_boxed_str());
+        let row = cx.debug_bounds(selector).expect("restored visible row");
         cx.update(|_, cx| {
             editor.update(cx, |editor, _| {
                 let expected = editor.sidebar_scroll_handle.bounds().origin.y

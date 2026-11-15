@@ -172,6 +172,7 @@ class CommunityChecksTest
           'GITHUB_REPOSITORY' => repository, 'GITHUB_REF' => ref,
           'GITHUB_EVENT_NAME' => event, 'READ_ONLY' => read_only,
           'RUNNER_OS' => 'Linux', 'IMAGE' => 'ubuntu-22.04',
+          'LANE' => 'gpui-tests',
           'TARGET' => 'x86_64-unknown-linux-gnu', 'GITHUB_ENV' => output
         }
         stdout, stderr, status = Open3.capture3(environment, 'bash', '-c',
@@ -179,8 +180,22 @@ class CommunityChecksTest
         raise "Cache policy failed: #{stdout}#{stderr}" unless status.success?
         lines = File.readlines(output, chomp: true)
         assert_equal true, lines.include?("MOEKA_CACHE_WRITE=#{writable}")
+        assert_equal true, lines.include?("MOEKA_DEPENDENCY_CACHE_WRITE=#{writable}")
         assert_equal true, lines.include?("SCCACHE_GHA_RW_MODE=#{writable ? 'READ_WRITE' : 'READ_ONLY'}")
       end
+      output = File.join(root, 'production-environment')
+      environment = {
+        'GITHUB_REPOSITORY' => 'MoekaProject/moeka', 'GITHUB_REF' => 'refs/heads/main',
+        'GITHUB_EVENT_NAME' => 'push', 'READ_ONLY' => 'false', 'LANE' => 'default',
+        'RUNNER_OS' => 'Linux', 'IMAGE' => 'ubuntu-22.04',
+        'TARGET' => 'x86_64-unknown-linux-gnu', 'GITHUB_ENV' => output
+      }
+      _, stderr, status = Open3.capture3(environment, 'bash', '-c',
+        "rustc() { :; }; rustup() { :; };\n#{steps.first.fetch('run')}")
+      raise stderr unless status.success?
+      lines = File.readlines(output, chomp: true)
+      assert_equal true, lines.include?('MOEKA_CACHE_LANE=gpui-tests')
+      assert_equal true, lines.include?('MOEKA_DEPENDENCY_CACHE_WRITE=false')
     end
   end
 
