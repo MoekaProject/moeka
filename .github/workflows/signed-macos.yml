@@ -104,7 +104,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/moeka-app"
           ditto -x -k candidate/unsigned-app.zip "$RUNNER_TEMP/moeka-app"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$RUNNER_TEMP/moeka-app/Moeka.app/Contents/Info.plist")" = "$EXPECTED_VERSION"
-          lipo -verify_arch "$ARCH" "$RUNNER_TEMP/moeka-app/Moeka.app/Contents/MacOS/moeka"
+          lipo "$RUNNER_TEMP/moeka-app/Moeka.app/Contents/MacOS/moeka" -verify_arch "$ARCH"
       - name: Install temporary signing and notarization credentials
         env:
           MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
