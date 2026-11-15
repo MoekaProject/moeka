@@ -7,6 +7,11 @@ on:
   pull_request:
   merge_group:
   workflow_dispatch:
+    inputs:
+      pr_profile:
+        description: Benchmark the PR job matrix with read-only caches
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -20,10 +25,32 @@ jobs:
     name: Contributor metadata and workflows
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      native: ${{ steps.changes.outputs.native }}
+      windows: ${{ steps.matrix.outputs.windows }}
+      linux: ${{ steps.matrix.outputs.linux }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Select native checks without suppressing required statuses
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: ruby scripts/ci-changes.rb >> "$GITHUB_OUTPUT"
+      - name: Select package architectures
+        id: matrix
+        env:
+          FULL: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.pr_profile != true) }}
+        run: |
+          if [[ "$FULL" == true ]]; then
+            echo 'windows=[{"arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"},{"arch":"arm64","runner":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]' >> "$GITHUB_OUTPUT"
+            echo 'linux=[{"arch":"x86_64","runner":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"},{"arch":"arm64","runner":"ubuntu-22.04-arm","target":"aarch64-unknown-linux-gnu"}]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'windows=[{"arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]' >> "$GITHUB_OUTPUT"
+            echo 'linux=[{"arch":"x86_64","runner":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"}]' >> "$GITHUB_OUTPUT"
+          fi
       - name: Test contributor metadata checks
         run: ruby scripts/test-check-community.rb
       - name: Check issue forms, local documentation links, and workflow policy
@@ -75,12 +102,23 @@ jobs:
 
   check:
     name: Build, lint and test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    needs: community
+    if: needs.community.outputs.native == 'true'
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        include:
+          - os: macos-latest
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -118,10 +156,12 @@ jobs:
             libxkbcommon-x11-dev \
             pkg-config
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: ./.github/actions/rust-build-cache
         with:
-          key: ${{ matrix.os }}
+          target: ${{ matrix.target }}
+          environment: ${{ matrix.runner }}
+          lane: gpui-tests
+          read-only: ${{ inputs.pr_profile || false }}
 
       - name: Check formatting
         if: matrix.os == 'macos-latest'
@@ -130,30 +170,32 @@ jobs:
       - name: Clippy
         run: cargo clippy --release --locked --all-targets
 
-      - name: Build application
-        run: cargo build --release --locked
-
-      - name: Test
+      - name: Full test suite including GPUI events
         env:
           XDG_CONFIG_HOME: ${{ runner.temp }}/moeka-tests/config
           XDG_CACHE_HOME: ${{ runner.temp }}/moeka-tests/cache
           APPDATA: ${{ runner.temp }}/moeka-tests/config
           LOCALAPPDATA: ${{ runner.temp }}/moeka-tests/cache
-        run: cargo test --release --locked
+        run: cargo test --release --locked --features gpui-test-support
 
-      - name: GPUI event regression tests
-        env:
-          XDG_CONFIG_HOME: ${{ runner.temp }}/moeka-gpui-tests/config
-          XDG_CACHE_HOME: ${{ runner.temp }}/moeka-gpui-tests/cache
-          APPDATA: ${{ runner.temp }}/moeka-gpui-tests/config
-          LOCALAPPDATA: ${{ runner.temp }}/moeka-gpui-tests/cache
-        run: >-
-          cargo test --release --locked --features gpui-test-support --bin moeka --
-          --quiet command_ native_menu application_menu settings_header ui_messages
-          preview_overlay_dispatches_magnify_and_scroll outline_state_follows_the_active_tab minimap
-
+  macos-production:
+    name: macOS production build and capability gates
+    needs: community
+    if: needs.community.outputs.native == 'true'
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust-build-cache
+        with:
+          target: aarch64-apple-darwin
+          environment: macos-15
+          read-only: ${{ inputs.pr_profile || false }}
+      - name: Build default-feature application
+        run: cargo build --release --locked
       - name: Check Mac App Store capability gates
-        if: matrix.os == 'macos-latest'
         run: cargo check --release --locked --features mas
 
   # `make windows` cross-builds the shipped binaries; this job is the native
@@ -162,15 +204,12 @@ jobs:
     name: Windows portable package (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
-    if: github.event_name == 'push'
+    needs: community
+    if: needs.community.outputs.native == 'true'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x86_64
-            runner: windows-latest
-          - arch: arm64
-            runner: windows-11-arm
+        include: ${{ fromJSON(needs.community.outputs.windows) }}
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -182,15 +221,17 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: ./.github/actions/rust-build-cache
         with:
-          key: windows-package-${{ matrix.arch }}
+          target: ${{ matrix.target }}
+          environment: ${{ matrix.runner }}
+          read-only: ${{ inputs.pr_profile || false }}
 
       - name: Build
         run: cargo build --release --locked
 
       - name: Test terminal input
+        if: matrix.arch == 'arm64'
         env:
           APPDATA: ${{ runner.temp }}/moeka-terminal-tests/config
           LOCALAPPDATA: ${{ runner.temp }}/moeka-terminal-tests/cache
@@ -201,7 +242,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
-          Copy-Item target/release/moeka.exe dist/windows/Moeka.exe
+          Copy-Item target/${{ matrix.target }}/release/moeka.exe dist/windows/Moeka.exe
           Copy-Item LICENSE, THIRD_PARTY_NOTICES.md dist/windows/
           if (Test-Path licenses) { Copy-Item -Recurse licenses dist/windows/ }
 
@@ -216,17 +257,12 @@ jobs:
     name: Linux portable package (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
-    if: github.event_name == 'push'
+    needs: community
+    if: needs.community.outputs.native == 'true'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x86_64
-            target: x86_64-unknown-linux-gnu
-            runner: ubuntu-22.04
-          - arch: arm64
-            target: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04-arm
+        include: ${{ fromJSON(needs.community.outputs.linux) }}
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -260,10 +296,11 @@ jobs:
             patchelf \
             pkg-config
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: ./.github/actions/rust-build-cache
         with:
-          key: linux-package-${{ matrix.arch }}
+          target: ${{ matrix.target }}
+          environment: ${{ matrix.runner }}
+          read-only: ${{ inputs.pr_profile || false }}
 
       - name: Build package
         run: CARGO_INCREMENTAL=0 make linux-${{ matrix.arch }}
@@ -274,3 +311,17 @@ jobs:
           name: Moeka-linux-${{ matrix.arch }}
           path: dist/Moeka-linux-${{ matrix.arch }}.zip
           if-no-files-found: error
+          compression-level: 0
+
+  result:
+    name: CI result
+    if: always()
+    needs: [community, release-safety, secrets, check, macos-production, windows-package, linux-package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require successful selected checks
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")'

@@ -1,0 +1,65 @@
+name: Trusted Rust build cache
+description: Cache dependency artifacts and content-addressed Rust compilation, never signing material
+inputs:
+  target:
+    required: true
+    description: Explicit Rust target triple
+  environment:
+    required: true
+    description: Runner image family (including the Linux ABI baseline)
+  lane:
+    required: false
+    default: default
+    description: Production or GPUI test dependency feature set
+  read-only:
+    required: false
+    default: 'false'
+    description: Force read-only cache use for PR-equivalent benchmarks
+runs:
+  using: composite
+  steps:
+    - name: Configure target and trusted cache policy
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        IMAGE: ${{ inputs.environment }}
+        READ_ONLY: ${{ inputs.read-only }}
+      run: |
+        set -euo pipefail
+        rustc --version
+        rustup target add "$TARGET"
+        writable=false
+        if [[ "$GITHUB_REPOSITORY" == MoekaProject/moeka && "$GITHUB_REF" == refs/heads/main && "$GITHUB_EVENT_NAME" != pull_request && "$READ_ONLY" != true ]]; then
+          writable=true
+        fi
+        sdk=none
+        if [[ "$RUNNER_OS" == macOS ]]; then
+          sdk="$(xcrun --sdk macosx --show-sdk-version)"
+        fi
+        {
+          echo "CARGO_INCREMENTAL=0"
+          echo "CARGO_BUILD_TARGET=$TARGET"
+          echo "MOEKA_CACHE_WRITE=$writable"
+          echo "MOEKA_CACHE_ENVIRONMENT=$IMAGE-$sdk"
+          echo "SCCACHE_GHA_ENABLED=true"
+          echo "SCCACHE_GHA_VERSION=moeka-compiler-v1-$IMAGE-$sdk-$TARGET"
+          if [[ "$writable" == true ]]; then
+            echo "SCCACHE_GHA_RW_MODE=READ_WRITE"
+          else
+            echo "SCCACHE_GHA_RW_MODE=READ_ONLY"
+          fi
+        } >> "$GITHUB_ENV"
+    - name: Install pinned compiler cache
+      uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+      with:
+        version: v0.19.0
+    - name: Restore compatible dependency artifacts
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      with:
+        prefix-key: moeka-build-v2
+        shared-key: ${{ env.MOEKA_CACHE_ENVIRONMENT }}-${{ inputs.target }}-${{ inputs.lane }}
+        save-if: ${{ env.MOEKA_CACHE_WRITE }}
+        cache-bin: false
+    - name: Enable compiler cache
+      shell: bash
+      run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"

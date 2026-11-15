@@ -11,6 +11,10 @@ on:
         description: Publish as a prerelease without updating Homebrew
         type: boolean
         default: false
+      candidate_only:
+        description: Run the full build/signing pipeline and verify artifacts without publishing or updating tags/Cask
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,13 +39,16 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           GH_TOKEN: ${{ github.token }}
+          CANDIDATE_ONLY: ${{ inputs.candidate_only }}
         run: |
           set -euo pipefail
           python3 scripts/release-artifacts.py version --version "$VERSION"
           : "${GH_TOKEN:?Missing GITHUB_TOKEN}"
           gh auth setup-git
           test -f "packaging/release-notes/v$VERSION.md"
-          bash scripts/publish-release.sh check "v$VERSION"
+          if [[ "$CANDIDATE_ONLY" != true ]]; then
+            bash scripts/publish-release.sh check "v$VERSION"
+          fi
       - name: Validate Apple credentials before building any release artifacts
         env:
           MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
@@ -96,13 +103,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Install pinned Rust target
-        env:
-          TARGET: ${{ matrix.target }}
-        shell: bash
-        run: |
-          rustc --version
-          rustup target add "$TARGET"
       - name: Install Linux build dependencies
         if: matrix.platform == 'linux'
         run: |
@@ -111,6 +111,10 @@ jobs:
             libvulkan-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev \
             libxcb-shm0-dev libxcb-xfixes0-dev libxcb-xkb-dev libxcb1-dev \
             libxkbcommon-dev libxkbcommon-x11-dev patchelf pkg-config
+      - uses: ./.github/actions/rust-build-cache
+        with:
+          target: ${{ matrix.target }}
+          environment: ${{ matrix.runner }}
       - name: Build Linux package
         if: matrix.platform == 'linux'
         env:
@@ -148,10 +152,36 @@ jobs:
             dist/manifest.json
           if-no-files-found: error
           retention-days: 30
+          compression-level: 0
+
+  verify-candidate:
+    needs: [macos, portable]
+    if: inputs.candidate_only && github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: signed-candidate-macos-*-${{ github.sha }}
+          path: incoming/macos
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-package-*-${{ github.sha }}
+          path: incoming/portable
+      - name: Verify all candidate artifacts without publication
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python3 scripts/release-artifacts.py collect --version "$VERSION" --source incoming
+          python3 scripts/release-artifacts.py verify --version "$VERSION"
 
   publish:
     needs: [macos, portable]
-    if: github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
+    if: inputs.candidate_only != true && github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     # This job creates the source tag and Release; it never changes main.
@@ -195,7 +225,7 @@ jobs:
 
   homebrew:
     needs: publish
-    if: inputs.prerelease == false && github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
+    if: inputs.candidate_only != true && inputs.prerelease == false && github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

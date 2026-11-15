@@ -1,6 +1,8 @@
 #!/usr/bin/env ruby
 require 'tmpdir'
 require_relative 'check-community'
+require_relative 'ci-changes'
+require 'json'
 
 class CommunityChecksTest
   def assert_empty(value)
@@ -101,6 +103,7 @@ class CommunityChecksTest
     end
     assert_empty jobs.fetch('build').to_s.scan(/secrets\./)
     steps = jobs.fetch('sign').fetch('steps')
+    assert_empty steps.to_s.scan(/rust-build-cache|sccache|rust-cache/)
     credential_steps = steps.select { |step| step.to_s.include?('secrets.') }
     assert_equal 1, credential_steps.length
     assert_equal 'bash scripts/ci-macos-signing.sh setup', credential_steps.first.fetch('run')
@@ -138,6 +141,79 @@ class CommunityChecksTest
     unsafe = Marshal.load(Marshal.dump(document))
     unsafe['jobs']['homebrew']['needs'] = 'preflight'
     refute_empty CommunityChecks.workflow(unsafe, path)
+    unsafe = Marshal.load(Marshal.dump(document))
+    unsafe['jobs']['publish']['if'].sub!('inputs.candidate_only != true && ', '')
+    refute_empty CommunityChecks.workflow(unsafe, path)
+    assert_equal %w[macos portable], jobs.fetch('verify-candidate').fetch('needs')
+    assert_empty jobs.fetch('verify-candidate').to_s.scan(/secrets\.|contents.*write|gh release|git push/)
+    %w[preflight publish homebrew verify-candidate].each do |name|
+      assert_empty jobs.fetch(name).to_s.scan(/rust-build-cache|sccache|rust-cache/)
+    end
+  end
+
+  def test_compiler_cache_is_read_only_outside_trusted_main
+    path = File.expand_path('../.github/actions/rust-build-cache/action.yml', __dir__)
+    action = CommunityChecks.yaml_file(path)
+    steps = action.fetch('runs').fetch('steps')
+    assert_empty CommunityChecks.action_steps(steps, path)
+    refute_empty CommunityChecks.action_steps([{ 'uses' => 'mozilla-actions/sccache-action@v0.0.9' }], path)
+    cases = [
+      ['MoekaProject/moeka', 'refs/heads/main', 'push', 'false', true],
+      ['MoekaProject/moeka', 'refs/heads/main', 'workflow_dispatch', 'true', false],
+      ['MoekaProject/moeka', 'refs/heads/main', 'pull_request', 'false', false],
+      ['MoekaProject/moeka', 'refs/pull/1/merge', 'pull_request', 'false', false],
+      ['example/fork', 'refs/heads/main', 'push', 'false', false]
+    ]
+    Dir.mktmpdir('moeka-cache-policy-') do |root|
+      cases.each do |repository, ref, event, read_only, writable|
+        output = File.join(root, 'environment')
+        File.write(output, '')
+        environment = {
+          'GITHUB_REPOSITORY' => repository, 'GITHUB_REF' => ref,
+          'GITHUB_EVENT_NAME' => event, 'READ_ONLY' => read_only,
+          'RUNNER_OS' => 'Linux', 'IMAGE' => 'ubuntu-22.04',
+          'TARGET' => 'x86_64-unknown-linux-gnu', 'GITHUB_ENV' => output
+        }
+        stdout, stderr, status = Open3.capture3(environment, 'bash', '-c',
+          "rustc() { :; }; rustup() { :; };\n#{steps.first.fetch('run')}")
+        raise "Cache policy failed: #{stdout}#{stderr}" unless status.success?
+        lines = File.readlines(output, chomp: true)
+        assert_equal true, lines.include?("MOEKA_CACHE_WRITE=#{writable}")
+        assert_equal true, lines.include?("SCCACHE_GHA_RW_MODE=#{writable ? 'READ_WRITE' : 'READ_ONLY'}")
+      end
+    end
+  end
+
+  def test_ci_selects_native_changes_and_pr_matrix_without_hiding_failures
+    assert_equal false, CiChanges.native?(%w[README.md Casks/moeka.rb packaging/release-notes/v0.1.38.md])
+    %w[src/main.rs Cargo.lock build.rs Makefile vendor/gpui/src/app.rs assets/icon.png docs/help-en.md .github/workflows/ci.yml scripts/ci-changes.rb].each do |path|
+      assert_equal true, CiChanges.native?(['README.md', path])
+    end
+    assert_equal nil, CiChanges.changed_paths('0' * 40)
+    path = File.expand_path('../.github/workflows/ci.yml', __dir__)
+    jobs = CommunityChecks.yaml_file(path).fetch('jobs')
+    selector = jobs.fetch('community').fetch('steps').find { |step| step['id'] == 'matrix' }
+    Dir.mktmpdir('moeka-ci-matrix-') do |root|
+      %w[true false].each do |full|
+        output = File.join(root, 'matrix')
+        File.write(output, '')
+        stdout, stderr, status = Open3.capture3({ 'FULL' => full, 'GITHUB_OUTPUT' => output },
+          'bash', '-c', selector.fetch('run'))
+        raise "Matrix selection failed: #{stdout}#{stderr}" unless status.success?
+        File.readlines(output).each do |line|
+          entries = JSON.parse(line.split('=', 2).last)
+          assert_equal(full == 'true' ? %w[x86_64 arm64] : %w[x86_64], entries.map { |entry| entry.fetch('arch') })
+        end
+      end
+    end
+    result = jobs.fetch('result')
+    assert_equal 'always()', result.fetch('if')
+    results_check = result.fetch('steps').first.fetch('run')
+    [%w[success skipped], %w[success success], %w[failure skipped], %w[cancelled success]].each do |results|
+      needs = results.each_with_index.to_h { |value, i| [i.to_s, { 'result' => value }] }
+      _, _, status = Open3.capture3({ 'RESULTS' => JSON.generate(needs) }, 'bash', '-c', results_check)
+      assert_equal(results.all? { |value| %w[success skipped].include?(value) }, status.success?)
+    end
   end
 
   def test_local_links_and_heading_fragments

@@ -35,6 +35,7 @@ git diff --check
 - For local profiling on Unix, use `MOEKA_PROFILE=1 MOEKA_PROFILE_CPU=1 MOEKA_PROFILE_INTERVAL_MS=250 cargo run --release --locked` with disposable documents.
 - Run `node scripts/check-assets.mjs` for icon changes; `ruby scripts/test-check-community.rb` and `ruby scripts/check-community.rb` for contributor metadata/docs; `make test-publish-release` and, when relevant, `make test-publish-homebrew` for release scripts. Never test with a real publish command.
 - Contributor CI and unsigned candidate builds stay read-only and secret-free. Official releases use the manually dispatched `publish.yml` workflow on `main` in `MoekaProject/moeka`. Only its isolated credential preflight and reusable macOS signing job use `release-signing`; only the publish and Homebrew jobs have contents write access via the repository's `GITHUB_TOKEN`, for the source tag/Release and Cask-only main update respectively. No cross-repository release token is required. Pin third-party actions to commit SHAs and disable persistent checkout credentials.
+- CI runs the full `gpui-test-support` suite once, alongside separate default-feature production builds. Build caches share explicit targets and compatible runner/SDK families; only trusted main runs write caches. Never restore build caches in signing or publication jobs. Use the always-reporting `CI result` check for branch protection; documentation/Cask-only changes skip native jobs, not metadata, release-safety or secret checks.
 
 ## Architecture
 

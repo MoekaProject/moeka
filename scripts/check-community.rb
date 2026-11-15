@@ -79,6 +79,7 @@ module CommunityChecks
       if job.fetch('permissions', {}).values.include?('write')
         main_only = "github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'"
         expected_condition = job_name == 'homebrew' ? "inputs.prerelease == false && #{main_only}" : main_only
+        expected_condition = "inputs.candidate_only != true && #{expected_condition}"
         official_release_job = File.basename(name) == 'publish.yml' &&
                            %w[publish homebrew].include?(job_name) &&
                            document['name'] == 'Publish official release' &&
@@ -89,15 +90,21 @@ module CommunityChecks
                             (job_name == 'homebrew' && job['needs'] == 'publish'))
         errors << "#{name}/#{job_name}: only reviewed publication and Cask jobs may request contents write access" unless official_release_job
       end
-      job.fetch('steps', []).each do |step|
-        action = step['uses']
-        next unless action
-        unless action.start_with?('./') || action.match?(/\A[^@\s]+@[0-9a-f]{40}\z/)
-          errors << "#{name}/#{job_name}: action must use an immutable commit SHA: #{action}"
-        end
-        if action.start_with?('actions/checkout@') && step.fetch('with', {})['persist-credentials'] != false
-          errors << "#{name}/#{job_name}: checkout must not persist credentials"
-        end
+      errors.concat(action_steps(job.fetch('steps', []), "#{name}/#{job_name}"))
+    end
+    errors
+  end
+
+  def action_steps(steps, name)
+    errors = []
+    steps.each do |step|
+      action = step['uses']
+      next unless action
+      unless action.start_with?('./') || action.match?(/\A[^@\s]+@[0-9a-f]{40}\z/)
+        errors << "#{name}: action must use an immutable commit SHA: #{action}"
+      end
+      if action.start_with?('actions/checkout@') && step.fetch('with', {})['persist-credentials'] != false
+        errors << "#{name}: checkout must not persist credentials"
       end
     end
     errors
@@ -154,6 +161,9 @@ module CommunityChecks
     end
     Dir.glob(File.join(root, '.github/workflows/*.yml')).sort.each do |path|
       errors.concat(workflow(yaml_file(path), path))
+    end
+    Dir.glob(File.join(root, '.github/actions/*/action.yml')).sort.each do |path|
+      errors.concat(action_steps(yaml_file(path).fetch('runs').fetch('steps'), path))
     end
     documents = Dir.glob(File.join(root, '*.md')) +
       Dir.glob(File.join(root, 'packaging/**/*.md')) +

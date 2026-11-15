@@ -56,14 +56,16 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           python3 scripts/release-artifacts.py version --version "$EXPECTED_VERSION"
-      - name: Build without signing credentials or dependency caches
+      - uses: ./.github/actions/rust-build-cache
+        with:
+          target: ${{ matrix.target }}
+          environment: macos-15
+      - name: Build without signing credentials
         env:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          rustc --version
-          rustup target add "$TARGET"
-          make app TARGET="$TARGET"
+          make app TARGET="$TARGET" BINARY_PATH="target/$TARGET/release/moeka" CARGO_TARGET_ARG="--target $TARGET"
           mkdir -p candidate
           ditto -c -k --sequesterRsrc --keepParent "target/macos/$TARGET/Moeka.app" candidate/unsigned-app.zip
           shasum -a 256 candidate/unsigned-app.zip > candidate/SHA256SUMS
@@ -73,6 +75,7 @@ jobs:
           path: candidate/
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
 
   sign:
     needs: build
@@ -83,7 +86,6 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         arch: [arm64, x86_64]
     steps:
@@ -160,6 +162,7 @@ jobs:
           path: ${{ runner.temp }}/moeka-notary-results/
           if-no-files-found: ignore
           retention-days: 14
+          compression-level: 0
       - name: Upload verified signed candidates
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -167,3 +170,4 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0

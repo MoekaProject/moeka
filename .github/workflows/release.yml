@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build:
     name: Unsigned macOS ${{ matrix.arch }}
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -29,17 +29,16 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Install the pinned Rust toolchain
-        run: |
-          rustc --version
-          rustup target add "${{ matrix.target }}"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: ./.github/actions/rust-build-cache
         with:
-          key: candidate-${{ matrix.target }}
+          target: ${{ matrix.target }}
+          environment: macos-15
       - name: Build unsigned app and DMG
         run: |
           make dmg-one \
             TARGET=${{ matrix.target }} \
+            BINARY_PATH=target/${{ matrix.target }}/release/moeka \
+            CARGO_TARGET_ARG="--target ${{ matrix.target }}" \
             DMG_PATH=dist/Moeka-macos-${{ matrix.arch }}.dmg \
             VOLUME_NAME=Moeka-${{ matrix.arch }}-candidate
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -48,6 +47,7 @@ jobs:
           path: dist/Moeka-macos-${{ matrix.arch }}.dmg
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0
 
   build_linux:
     name: Unsigned Linux ${{ matrix.arch }}
@@ -79,9 +79,10 @@ jobs:
             libvulkan-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev \
             libxcb-shm0-dev libxcb-xfixes0-dev libxcb-xkb-dev libxcb1-dev \
             libxkbcommon-dev libxkbcommon-x11-dev patchelf pkg-config
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: ./.github/actions/rust-build-cache
         with:
-          key: candidate-linux-${{ matrix.arch }}
+          target: ${{ matrix.target }}
+          environment: ${{ matrix.runner }}
       - name: Build package
         run: CARGO_INCREMENTAL=0 make linux-${{ matrix.arch }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -90,6 +91,7 @@ jobs:
           path: dist/Moeka-linux-${{ matrix.arch }}.zip
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0
 
   build_windows:
     name: Unsigned Windows ${{ matrix.arch }}
@@ -101,24 +103,25 @@ jobs:
         include:
           - arch: x86_64
             runner: windows-latest
+            target: x86_64-pc-windows-msvc
           - arch: arm64
             runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Install the pinned Rust toolchain
-        run: rustc --version
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: ./.github/actions/rust-build-cache
         with:
-          key: candidate-windows-${{ matrix.arch }}
+          target: ${{ matrix.target }}
+          environment: ${{ matrix.runner }}
       - name: Build package
         shell: pwsh
         run: |
           cargo build --release --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
-          Copy-Item target/release/moeka.exe dist/windows/Moeka.exe
+          Copy-Item target/${{ matrix.target }}/release/moeka.exe dist/windows/Moeka.exe
           Copy-Item LICENSE, THIRD_PARTY_NOTICES.md dist/windows/
           if (Test-Path licenses) { Copy-Item -Recurse licenses dist/windows/ }
           Compress-Archive -Path dist/windows/* -DestinationPath dist/Moeka-windows-${{ matrix.arch }}.zip
@@ -128,3 +131,4 @@ jobs:
           path: dist/Moeka-windows-${{ matrix.arch }}.zip
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0

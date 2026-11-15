@@ -84,7 +84,7 @@ run_case() {
             {name:"Moeka-macos-x86_64.dmg", state:"uploaded", size:17, digest:("sha256:" + $intel)}
         ]
     }' >"$FIXTURE/release.json"
-    sed 's/version "0.1.37"/version "0.1.11"/' "$root/Casks/moeka.rb" >"$FIXTURE/seed/Casks/moeka.rb"
+    sed -E 's/^([[:space:]]*version ")[^"]+(")/\10.1.11\2/' "$root/Casks/moeka.rb" >"$FIXTURE/seed/Casks/moeka.rb"
     case "$SCENARIO" in
         draft) filter='.draft = true';;
         prerelease) filter='.prerelease = true';;

@@ -55,6 +55,39 @@ rechecks that remote main still matches the dispatch SHA.
    a separate job. Prereleases do not. This Cask-only commit does not move the
    source tag and does not discard concurrent source commits.
 
+   ## Performance validation
+
+   Build jobs share target-specific dependency caches with CI and unsigned
+   candidates. Content-addressed sccache also retains compilation of the vendored
+   GPUI path dependency, which the dependency cache excludes. Only this
+   repository's main branch writes caches; PRs restore them read-only. Runner
+   families, macOS SDKs, target triples and test/production dependency sets remain
+   separate. All production builds retain the release profile and locked
+   dependencies. Signing uses fresh cache-free runners, with both architectures
+   signing independently in parallel after their unsigned builds complete.
+
+   To benchmark the complete build, signing and artifact-verification pipeline
+   without creating a Release, moving a tag or updating the Cask:
+
+   ```sh
+   GH_PAGER=cat gh workflow run publish.yml --repo MoekaProject/moeka --ref main \
+     -f version=0.1.38 -F candidate_only=true
+   ```
+
+   This mode may use an already-published version, but its outputs are **candidates
+   only** and must not replace published assets. It still uses Apple credentials,
+   creates notarization submissions and retains recovery artifacts; the usual
+   notarization retry restrictions apply. Run a new dispatch only after the
+   previous run's outcome is known. Compare runs on the same source SHA, including
+   cache restore/save time, compiler-cache hit statistics and job durations. The
+   publication and Cask jobs are skipped, so report their omitted overhead rather
+   than describing a candidate benchmark as a real publication.
+
+   For PR-equivalent timing, dispatch `ci.yml` on the same main SHA with
+   `pr_profile=true`. This selects the PR matrix and forces read-only caches.
+   Documentation/Cask-only diffs still run metadata, secret and release-safety
+   checks; configure the always-reporting `CI result` as the required check.
+
 ## Recovery
 
 - Rerun **failed jobs**, not all jobs, after investigating a transient publishing
