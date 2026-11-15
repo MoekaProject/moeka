@@ -31,7 +31,10 @@ Add these environment variables:
 | `APPLE_TEAM_ID` | Ten-character Apple Developer Team ID |
 | `DEVELOPER_ID_APPLICATION` | Exact `Developer ID Application: Name (TEAM_ID)` identity from that P12 |
 
-The temporary keychain password is generated per job and masked. No API key,
+The temporary keychain password is generated per job and masked. Its keychain is
+added to the runner's search list while signing; cleanup restores the original
+list. Preflight signs a disposable copy of a system executable to verify private
+key access, without notarizing or publishing that probe. No API key,
 provisioning profile, repository-write token, or local login keychain is needed
 for this Developer ID distribution workflow. Base64 is not encryption.
 
