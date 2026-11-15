@@ -3,9 +3,9 @@ cask "moeka" do
 
   # Bootstrap from the last published release; CI replaces this with the first
   # verified release in this repository, without inventing unpublished hashes.
-  version "0.1.37"
-  sha256 arm:   "843242cefe353d70529a204762c30828a2bd1a2c3a3bce3572481411a78b5ef7",
-         intel: "6e082fc42c9b1ff3469408a5648fd5b35258f6c9736faab4b88e5311f6b79a47"
+  version "0.1.38"
+  sha256 arm:   "580186c0028f7378f07cce05a22815e79b53e554a1b8e29a1e04ad34512dfe15",
+         intel: "ce5c32eceeb592a737228455b45b7d2760c4a48bdcdd9d9cba96765c7fa236bc"
 
   release_repository = version.to_s == "0.1.37" ? "community" : "moeka"
   url "https://github.com/MoekaProject/#{release_repository}/releases/download/v#{version}/Moeka-macos-#{arch}.dmg"
