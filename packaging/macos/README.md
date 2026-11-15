@@ -1,10 +1,11 @@
 # Signed macOS CI candidates
 
 The existing `release.yml` workflow still creates unsigned candidates without
-secrets. `signed-macos.yml` is a separate, manually dispatched workflow for signed
-and notarized macOS DMG/ZIP candidates. It never pushes tags, creates a GitHub
-Release, or modifies Homebrew. Official publication continues through the local
-[release helper](../../scripts/publish-release.sh).
+secrets. `signed-macos.yml` can be run manually for signed candidates or called
+by the [official release workflow](../../.github/workflows/publish.yml). Its jobs
+never push tags, create a GitHub Release, or modify Homebrew; the official workflow
+performs those operations only after all six platform builds pass verification.
+No official build or signing step runs locally.
 
 ## Environment setup
 
@@ -70,8 +71,9 @@ The workflow refuses signing on a rerun attempt to avoid blindly resubmitting an
 archive after a timeout or lost response. Query the original submission with
 `notarytool info`/`wait` using its ID. On `Accepted`, extract the original archive
 and staple/validate it rather than re-signing or resubmitting it. Resolve unknown
-outcomes before requesting a new candidate run. Local publishing recovery and
-published-version immutability rules remain unchanged.
+outcomes before requesting a new candidate run. Rerunning only a failed publish
+or Homebrew job reuses successful build jobs rather than signing again.
+Published-version immutability rules remain unchanged.
 
 For local use, `SIGNING_KEYCHAIN` and `NOTARY_KEYCHAIN` are optional; omitting them
 preserves the existing keychain lookup. `NOTARY_OUTPUT_DIR` optionally retains

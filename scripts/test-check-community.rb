@@ -88,7 +88,7 @@ class CommunityChecksTest
     path = File.expand_path('../.github/workflows/signed-macos.yml', __dir__)
     document = CommunityChecks.yaml_file(path)
     assert_empty CommunityChecks.workflow(document, path)
-    assert_equal ['workflow_dispatch'], (document['on'] || document[true]).keys
+    assert_equal %w[workflow_call workflow_dispatch], (document['on'] || document[true]).keys
     assert_equal false, document.fetch('concurrency').fetch('cancel-in-progress')
     jobs = document.fetch('jobs')
     assert_equal %w[build sign], jobs.keys
@@ -109,6 +109,26 @@ class CommunityChecksTest
     assert_empty document.to_s.scan(/make publish|gh release|git push|PUBLIC_RELEASE_TOKEN/)
     uploads = steps.select { |step| step.fetch('uses', '').start_with?('actions/upload-artifact@') }
     assert_equal ['${{ runner.temp }}/moeka-notary-results/', 'dist/'], uploads.map { |step| step.fetch('with').fetch('path') }
+  end
+
+  def test_official_release_gates_writes_and_separates_signing_from_publication
+    path = File.expand_path('../.github/workflows/publish.yml', __dir__)
+    document = CommunityChecks.yaml_file(path)
+    assert_empty CommunityChecks.workflow(document, path)
+    assert_equal ['workflow_dispatch'], (document['on'] || document[true]).keys
+    jobs = document.fetch('jobs')
+    assert_equal %w[macos portable], jobs.fetch('publish').fetch('needs')
+    assert_equal 'publish', jobs.fetch('homebrew').fetch('needs')
+    assert_equal './.github/workflows/signed-macos.yml', jobs.fetch('macos').fetch('uses')
+    assert_empty jobs.fetch('portable').to_s.scan(/secrets\./)
+    assert_empty jobs.fetch('publish').to_s.scan(/MACOS_CERTIFICATE|APPLE_APP_SPECIFIC_PASSWORD|make signed|cargo build/)
+    assert_equal({ 'contents' => 'write' }, jobs.fetch('publish').fetch('permissions'))
+    unsafe = Marshal.load(Marshal.dump(document))
+    unsafe['jobs']['publish']['if'] = 'true'
+    refute_empty CommunityChecks.workflow(unsafe, path)
+    unsafe = Marshal.load(Marshal.dump(document))
+    unsafe['jobs']['portable']['permissions'] = { 'contents' => 'write' }
+    refute_empty CommunityChecks.workflow(unsafe, path)
   end
 
   def test_local_links_and_heading_fragments

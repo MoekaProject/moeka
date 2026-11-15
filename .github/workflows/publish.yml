@@ -1,0 +1,202 @@
+name: Publish official release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Committed version, without v (e.g. 0.1.38)'
+        required: true
+        type: string
+      prerelease:
+        description: Publish as a prerelease without updating Homebrew
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: official-release
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate committed version and remote release state
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.MOEKA_PUBLIC_RELEASE_TOKEN }}
+          SOURCE_REPO_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release-artifacts.py version --version "$VERSION"
+          : "${GH_TOKEN:?Missing MOEKA_PUBLIC_RELEASE_TOKEN}"
+          test -f "packaging/release-notes/v$VERSION.md"
+          bash scripts/publish-release.sh check "v$VERSION"
+          if [[ "$PRERELEASE" != true ]]; then
+            gh api repos/MoekaProject/homebrew-moeka --jq '[.full_name, .permissions.push] | @tsv' |
+              grep -Fx $'MoekaProject/homebrew-moeka\ttrue'
+          fi
+
+  macos:
+    needs: preflight
+    uses: ./.github/workflows/signed-macos.yml
+    with:
+      version: ${{ inputs.version }}
+
+  portable:
+    needs: preflight
+    name: Build ${{ matrix.platform }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            arch: x86_64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - platform: linux
+            arch: arm64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - platform: windows
+            arch: x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - platform: windows
+            arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install pinned Rust target
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          rustc --version
+          rustup target add "$TARGET"
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake libasound2-dev libfontconfig-dev libssl-dev \
+            libvulkan-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-shm0-dev libxcb-xfixes0-dev libxcb-xkb-dev libxcb1-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev patchelf pkg-config
+      - name: Build Linux package
+        if: matrix.platform == 'linux'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: CARGO_INCREMENTAL=0 make "linux-$ARCH"
+      - name: Build Windows package (no Authenticode certificate configured)
+        if: matrix.platform == 'windows'
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        shell: pwsh
+        run: |
+          cargo build --release --locked --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
+          Copy-Item "target/$env:TARGET/release/moeka.exe" dist/windows/Moeka.exe
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md dist/windows/
+          Copy-Item -Recurse licenses dist/windows/
+          Compress-Archive -Path dist/windows/* -DestinationPath "dist/Moeka-windows-$env:ARCH.zip"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Record artifact provenance
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+        run: python scripts/release-artifacts.py record --version "$VERSION" --platform "$PLATFORM" --arch "$ARCH"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-package-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            dist/Moeka-${{ matrix.platform }}-${{ matrix.arch }}.zip
+            dist/manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: [macos, portable]
+    if: github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # Only this job can create the source tag; it never changes main.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: signed-candidate-macos-*-${{ github.sha }}
+          path: incoming/macos
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-package-*-${{ github.sha }}
+          path: incoming/portable
+      - name: Verify all six platform groups and eight attachments
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release-artifacts.py collect --version "$VERSION" --source incoming
+          rm -r incoming
+      - name: Publish verified artifacts without building or signing
+        env:
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          GH_TOKEN: ${{ secrets.MOEKA_PUBLIC_RELEASE_TOKEN }}
+          SOURCE_REPO_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mode=publish
+          if [[ "$PRERELEASE" == true ]]; then mode=publish-beta; fi
+          bash scripts/publish-release.sh "$mode" "v$VERSION"
+          printf 'Release: https://github.com/MoekaProject/community/releases/tag/v%s\n' "$VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+  homebrew:
+    needs: publish
+    if: inputs.prerelease == false && github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Update Tap only after stable release publication
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.MOEKA_PUBLIC_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+          bash scripts/publish-homebrew.sh "v$VERSION"

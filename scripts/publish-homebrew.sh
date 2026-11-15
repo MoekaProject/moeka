@@ -10,6 +10,10 @@ mode=${2:-publish}
     || die 'Usage: publish-homebrew.sh vX.Y.Z [check|publish]'
 [[ "$tag" != v0.1.12 ]] || die 'v0.1.12 is protected.'
 [[ "$mode" == check || "$mode" == publish ]] || die 'Expected check or publish.'
+if [[ "$mode" == publish ]]; then
+    [[ "${GITHUB_ACTIONS:-}" == true && "${GITHUB_REPOSITORY:-}" == MoekaProject/moeka \
+        && "${GITHUB_REF:-}" == refs/heads/main ]] || die 'Homebrew publication runs only in the official Actions workflow.'
+fi
 for tool in git gh jq shasum ruby; do
     command -v "$tool" >/dev/null || die "Missing tool: $tool"
 done

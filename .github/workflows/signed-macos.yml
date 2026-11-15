@@ -1,6 +1,11 @@
 name: Signed macOS candidates (no publishing)
 
 on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       version:
@@ -41,20 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          python3 - <<'PY'
-          import os
-          import re
-          import tomllib
-          from pathlib import Path
-          expected = os.environ["EXPECTED_VERSION"]
-          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", expected):
-              raise SystemExit("Expected a version such as 0.1.38")
-          manifest = tomllib.loads(Path("Cargo.toml").read_text())
-          lock = tomllib.loads(Path("Cargo.lock").read_text())
-          packages = [p for p in lock["package"] if p["name"] == "moeka" and "source" not in p]
-          if manifest["package"]["version"] != expected or len(packages) != 1 or packages[0]["version"] != expected:
-              raise SystemExit("Version does not match Cargo.toml and Cargo.lock")
-          PY
+          python3 scripts/release-artifacts.py version --version "$EXPECTED_VERSION"
       - name: Build without signing credentials or dependency caches
         env:
           TARGET: ${{ matrix.target }}
@@ -147,6 +139,7 @@ jobs:
           printf 'version=%s\nsource_sha=%s\nrun_id=%s\narch=%s\n' \
             "$VERSION" "$SOURCE_SHA" "$GITHUB_RUN_ID" "$ARCH" > dist/build-info.txt
           (cd dist && shasum -a 256 "Moeka-macos-$ARCH.dmg" "Moeka-macos-$ARCH.zip" > SHA256SUMS)
+          python3 scripts/release-artifacts.py record --version "$VERSION" --platform macos --arch "$ARCH"
       - name: Remove signing credentials
         if: always()
         run: bash scripts/ci-macos-signing.sh cleanup

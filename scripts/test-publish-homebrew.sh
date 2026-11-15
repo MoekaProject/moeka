@@ -114,7 +114,8 @@ run_case() {
     "$REAL_GIT" clone --quiet --bare "$FIXTURE/seed" "$FIXTURE/remote.git"
     local before after status=0
     before=$("$REAL_GIT" --git-dir="$FIXTURE/remote.git" rev-parse main)
-    (cd "$FIXTURE" && GIT_PAGER=interactive-pager PAGER=interactive-pager GH_PAGER=interactive-pager \
+    (cd "$FIXTURE" && GITHUB_ACTIONS=true GITHUB_REPOSITORY=MoekaProject/moeka GITHUB_REF=refs/heads/main \
+        GIT_PAGER=interactive-pager PAGER=interactive-pager GH_PAGER=interactive-pager \
         GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=pager.diff GIT_CONFIG_VALUE_0=true \
         bash "$root/scripts/publish-homebrew.sh" "$tag" "$mode") >"$FIXTURE/output" 2>&1 || status=$?
     if [[ "$expected" == success && "$status" != 0 || "$expected" == failure && "$status" == 0 ]]; then
@@ -166,21 +167,24 @@ cat >"$work/bin/bash" <<'MOCK'
 #!/bin/bash
 set -euo pipefail
 printf '%s\n' "$*" >>"$FIXTURE/make-calls"
-case "$*" in
-    'scripts/publish-release.sh check v0.1.29 MoekaProject/community') ;;
-    'scripts/publish-release.sh publish v0.1.29 MoekaProject/community')
-        [[ "$SCENARIO" != release-fails ]];;
-    'scripts/publish-release.sh publish-beta v0.1.29 MoekaProject/community') ;;
-    'scripts/publish-homebrew.sh v0.1.29')
-        [[ "$SCENARIO" != homebrew-fails ]];;
-    *) echo "Unexpected publish command: $*" >&2; exit 99;;
-esac
+echo "Local make publish must not invoke a release/build/sign helper" >&2
+exit 99
 MOCK
-chmod +x "$work/bin/bash"
+cat >"$work/bin/gh" <<'MOCK'
+#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$FIXTURE/make-calls"
+expected=false
+[[ "$SCENARIO" != beta ]] || expected=true
+[[ "$*" == "workflow run publish.yml --repo MoekaProject/moeka --ref main -f version=0.1.29 -f prerelease=$expected" ]]
+[[ "$SCENARIO" != dispatch-fails ]]
+MOCK
+chmod +x "$work/bin/bash" "$work/bin/gh"
 export FIXTURE="$work/make-wiring"
 mkdir -p "$FIXTURE"
 ln -s "$root/Makefile" "$FIXTURE/Makefile"
-for SCENARIO in wired release-fails homebrew-fails beta; do
+printf '[package]\nversion = "0.1.29"\n' >"$FIXTURE/Cargo.toml"
+for SCENARIO in wired dispatch-fails beta; do
     export SCENARIO
     : >"$FIXTURE/make-calls"
     goal=publish
@@ -192,14 +196,14 @@ for SCENARIO in wired release-fails homebrew-fails beta; do
     else
         [[ "$status" != 0 ]] || { echo "Expected make failure: $SCENARIO" >&2; exit 1; }
     fi
-    if [[ "$SCENARIO" == wired || "$SCENARIO" == homebrew-fails ]]; then
-        grep -qx 'scripts/publish-homebrew.sh v0.1.29' "$FIXTURE/make-calls"
-    else
-        ! grep -q '^scripts/publish-homebrew.sh ' "$FIXTURE/make-calls"
-    fi
-    if [[ "$SCENARIO" == homebrew-fails ]]; then
-        grep -q 'Retry only: make publish-homebrew TAG=v0.1.29' "$FIXTURE/make-output"
-    fi
+    ! grep -q '^scripts/' "$FIXTURE/make-calls"
+    [[ "$(wc -l <"$FIXTURE/make-calls" | tr -d ' ')" == 1 ]]
     printf 'PASS: make wiring %s\n' "$SCENARIO"
 done
+: >"$FIXTURE/make-calls"
+if (cd "$FIXTURE" && make publish TAG=v0.1.30) >"$FIXTURE/make-output" 2>&1; then
+    echo 'Mismatched version dispatched' >&2; exit 1
+fi
+[[ ! -s "$FIXTURE/make-calls" ]]
+echo 'PASS: make refuses a mismatched release version before dispatch'
 echo 'All Homebrew publishing tests passed.'

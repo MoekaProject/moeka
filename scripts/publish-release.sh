@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Official releases are local-only. Invoke through make publish / publish-check.
+# Official publication consumes verified artifacts in GitHub Actions only.
 set -euo pipefail
 export GH_HOST=github.com
 export GH_PAGER=cat GIT_PAGER=cat PAGER=cat
@@ -14,6 +14,11 @@ repo=${3:-MoekaProject/community}
 [[ "$repo" == MoekaProject/community ]] || die 'Official releases must stay in MoekaProject/community.'
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'Expected a stable vX.Y.Z tag.'
 [[ "$tag" != v0.1.12 ]] || die 'v0.1.12 is protected; never modify or republish it.'
+if [[ "$mode" != check ]]; then
+    [[ "${GITHUB_ACTIONS:-}" == true && "${GITHUB_REPOSITORY:-}" == MoekaProject/moeka \
+        && "${GITHUB_REF:-}" == refs/heads/main ]] \
+        || die 'Official publication runs in GitHub Actions on main only; use make publish to dispatch it.'
+fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 source "$root/scripts/release-network.sh"
@@ -35,6 +40,15 @@ release_id=
 release_state=absent
 head=
 public_head=
+
+source_git() {
+    if [[ -n "${SOURCE_REPO_TOKEN:-}" ]]; then
+        GH_TOKEN="$SOURCE_REPO_TOKEN" git -c credential.helper= \
+            -c 'credential.helper=!gh auth git-credential' "$@"
+    else
+        git "$@"
+    fi
+}
 
 # --include supplies the actual HTTP status, not a substring of an error message.
 # Only a positively observed HTTP 404 means absence; all other errors stop us.
@@ -71,7 +85,11 @@ read_release() {
 
 remote_tag_commit() {
     local remote=$1 expected=$2 refs direct peeled
-    refs=$(release_retry_read git ls-remote "$remote" "refs/tags/$tag" "refs/tags/$tag^{}") || die "Cannot read tag from $remote"
+    if [[ "$remote" == origin ]]; then
+        refs=$(release_retry_read source_git ls-remote "$remote" "refs/tags/$tag" "refs/tags/$tag^{}") || die "Cannot read tag from $remote"
+    else
+        refs=$(release_retry_read git ls-remote "$remote" "refs/tags/$tag" "refs/tags/$tag^{}") || die "Cannot read tag from $remote"
+    fi
     direct=$(awk -v ref="refs/tags/$tag" '$2 == ref {print $1}' <<< "$refs")
     peeled=$(awk -v ref="refs/tags/$tag^{}" '$2 == ref {print $1}' <<< "$refs")
     if [[ -n "$refs" ]]; then
@@ -85,13 +103,18 @@ local_checks() {
     local version branch upstream remote_main commit file tree_state
     tree_state=$(git status --porcelain=v1 --untracked-files=all) || die 'Cannot inspect working tree.'
     [[ -z "$tree_state" ]] || die 'Working tree is dirty, including untracked files.'
-    branch=$(git symbolic-ref --quiet --short HEAD) || die 'Detached HEAD is not publishable.'
-    [[ "$branch" == main ]] || die 'Publish from main only.'
-    upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}') || die 'main needs origin/main as upstream.'
-    [[ "$upstream" == origin/main ]] || die 'main must track origin/main.'
     head=$(git rev-parse --verify 'HEAD^{commit}')
-    [[ "$(git rev-parse '@{upstream}')" == "$head" ]] || die 'HEAD differs from upstream; sync main separately (no automatic branch push).'
-    remote_main=$(release_retry_read git ls-remote --exit-code origin refs/heads/main) || die 'Cannot verify live origin/main.'
+    if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+        [[ "${GITHUB_REPOSITORY:-}" == MoekaProject/moeka && "${GITHUB_REF:-}" == refs/heads/main \
+            && "${GITHUB_SHA:-}" == "$head" ]] || die 'CI must check out its exact main dispatch SHA.'
+    else
+        branch=$(git symbolic-ref --quiet --short HEAD) || die 'Detached HEAD is not publishable.'
+        [[ "$branch" == main ]] || die 'Publish from main only.'
+        upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}') || die 'main needs origin/main as upstream.'
+        [[ "$upstream" == origin/main ]] || die 'main must track origin/main.'
+        [[ "$(git rev-parse '@{upstream}')" == "$head" ]] || die 'HEAD differs from upstream; sync main separately (no automatic branch push).'
+    fi
+    remote_main=$(release_retry_read source_git ls-remote --exit-code origin refs/heads/main) || die 'Cannot verify live origin/main.'
     [[ "$remote_main" == "$head"$'\trefs/heads/main' ]] || die 'Live origin/main differs from HEAD.'
     version=$(awk -F '"' '/^\[package\]/ {package=1; next} /^\[/ {package=0} package && /^version = / {print $2; exit}' Cargo.toml)
     [[ "$tag" == "v$version" ]] || die 'Tag/version mismatch with Cargo.toml.'
@@ -138,17 +161,15 @@ assets=(Moeka-macos-arm64.dmg Moeka-macos-x86_64.dmg
         Moeka-windows-arm64.zip Moeka-windows-x86_64.zip
     Moeka-linux-arm64.zip Moeka-linux-x86_64.zip)
     [[ ! -L dist ]] || die 'Unsafe dist symlink.'
-mkdir -p dist
-
-if [[ "$initial_state" == absent ]]; then
-    make publish-tools-check
-    make signed-release
-    make windows
-    make linux
-else
+python3 scripts/release-artifacts.py verify --version "${tag#v}" \
+    || die 'CI release artifacts failed provenance verification.'
+notes_file="packaging/release-notes/$tag.md"
+[[ -s "$notes_file" && ! -L "$notes_file" ]] || die 'Committed release notes are required.'
+git cat-file -e "HEAD:$notes_file" || die 'Release notes must be committed.'
+if [[ "$initial_state" == draft ]]; then
     printf 'Resuming draft %s without rebuilding; retaining original dist bytes.\n' "$release_id"
 fi
-# Builds may take hours: recheck everything before touching any refs or release.
+# Build jobs have already finished: recheck before touching any refs or release.
 check
 [[ "$head" == "$original_head" ]] || die 'HEAD changed during the build.'
 [[ "$release_state" == "$initial_state" ]] || die 'Release state changed during the build; retry after review.'
@@ -159,13 +180,16 @@ done
 if ! git show-ref --verify --quiet "refs/tags/$tag"; then
     git tag -a "$tag" "$head" -m "Release $tag" # New annotated tag only; no force.
 fi
-# The source tag stays in the private origin. The public community tag points
+# The source tag stays in origin. The community tag points
 # to community's own main commit, so GitHub's automatic source archives contain
 # only the public community repository rather than Moeka application source.
 remote_ref=$(remote_tag_commit origin "$head")
+source_push() {
+    source_git push origin "refs/tags/$tag:refs/tags/$tag"
+}
 if [[ -z "$remote_ref" ]]; then
     for attempt in 1 2 3; do
-        if git push origin "refs/tags/$tag:refs/tags/$tag" >"$tmp/write-out" 2>"$tmp/write-error"; then
+        if source_push >"$tmp/write-out" 2>"$tmp/write-error"; then
             cat "$tmp/write-out"; cat "$tmp/write-error" >&2
             break
         fi
@@ -196,10 +220,8 @@ if [[ "$initial_state" == draft ]]; then
     [[ "$release_id" == "$initial_id" ]] || die 'Original draft was removed or replaced; it will not be recreated.'
 fi
 if [[ "$release_state" == absent ]]; then
-    notes=$(git for-each-ref "refs/tags/$tag" --format='%(contents)')
-    [[ -n "$notes" ]] || notes="Release $tag"
     if gh release create "$tag" --repo "$repo" --verify-tag --target "$public_head" \
-        --title "$tag" --notes "$notes" --draft >"$tmp/write-out" 2>"$tmp/write-error"; then
+        --title "$tag" --notes-file "$notes_file" --draft >"$tmp/write-out" 2>"$tmp/write-error"; then
         cat "$tmp/write-out"; cat "$tmp/write-error" >&2
     else
         read_release
@@ -317,6 +339,22 @@ for attempt in 1 2 3; do
     release_retry_wait "$attempt" "$tmp/write-out" "$tmp/write-error" \
         || die 'Release publication failed; original draft was preserved.'
 done
+row=$(release_retry_read gh api --method GET "$api/releases/$draft_id" \
+    --jq '[.id, .tag_name, .draft, .prerelease, .target_commitish] | @tsv') \
+    || die 'Release may be published, but final verification failed; do not republish.'
+IFS=$'\t' read -r observed_id observed_tag observed_draft observed_prerelease observed_target extra <<< "$row"
+expected_prerelease=false
+[[ "$mode" != publish-beta ]] || expected_prerelease=true
+[[ "$observed_id" == "$draft_id" && "$observed_tag" == "$tag" && "$observed_draft" == false \
+    && "$observed_prerelease" == "$expected_prerelease" && "$observed_target" == "$public_head" \
+    && -z "${extra:-}" ]] || die 'Published release identity or flags did not match.'
+load_assets
+for asset in "${assets[@]}"; do verify_asset "$asset"; done
+if [[ "$mode" != publish-beta ]]; then
+    latest_id=$(release_retry_read gh api --method GET "$api/releases/latest" --jq '.id') \
+        || die 'Release published but latest status could not be verified.'
+    [[ "$latest_id" == "$draft_id" ]] || die 'Release published but not the latest release.'
+fi
 if [[ "$mode" == publish-beta ]]; then
     printf 'Published beta %s in %s. Assets will not be replaced by this script.\n' "$tag" "$repo"
 else

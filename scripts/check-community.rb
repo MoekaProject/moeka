@@ -77,7 +77,14 @@ module CommunityChecks
 
     jobs.each do |job_name, job|
       if job.fetch('permissions', {}).values.include?('write')
-        errors << "#{name}/#{job_name}: contributor workflows must not request write permissions"
+        official_tag_job = File.basename(name) == 'publish.yml' &&
+                           job_name == 'publish' &&
+                           document['name'] == 'Publish official release' &&
+                           Array(events) == ['workflow_dispatch'] &&
+                           job['if'] == "github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'" &&
+                           job['permissions'] == { 'contents' => 'write' } &&
+                           job['needs'] == %w[macos portable]
+        errors << "#{name}/#{job_name}: only the reviewed official publish job may request source-tag write access" unless official_tag_job
       end
       job.fetch('steps', []).each do |step|
         action = step['uses']

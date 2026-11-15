@@ -71,18 +71,8 @@ cat >"$work/bin/make" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'make %s\n' "$*" >>"$FIXTURE/calls"
-case "$*" in
-    publish-tools-check) ;;
-    signed-release)
-        for arch in arm64 x86_64; do
-            printf 'signed DMG %s\n' "$arch" >"dist/Moeka-macos-$arch.dmg"
-            printf 'signed ZIP %s\n' "$arch" >"dist/Moeka-macos-$arch.zip"
-        done;;
-    windows|linux)
-        for arch in arm64 x86_64; do printf '%s %s\n' "$1" "$arch" >"dist/Moeka-$1-$arch.zip"; done
-        if [[ "$1" == linux && "$SCENARIO" == published-during-build ]]; then echo published >"$FIXTURE/state"; fi;;
-    *) echo "UNEXPECTED make: $*" >&2; exit 99;;
-esac
+echo "Publication must not build or sign locally" >&2
+exit 99
 MOCK
 
 cat >"$work/bin/gh" <<'MOCK'
@@ -145,7 +135,7 @@ if [[ "$1" == api ]]; then
             if [[ "$SCENARIO" == hidden-draft ]]; then printf '123\ttrue\tv9.8.7\t%s\n' "$PUBLIC_FIXTURE"; fi;;
         "$api/releases/123")
             draft=true; [[ "$state" != published ]] || draft=false
-            prerelease=false; [[ "$SCENARIO" != edit-lost-beta ]] || prerelease=true
+            prerelease=false; [[ "$SCENARIO" != edit-lost-beta && "$SCENARIO" != beta ]] || prerelease=true
             printf '123\tv9.8.7\t%s\t%s\t%s\n' "$draft" "$prerelease" "$PUBLIC_FIXTURE";;
         "$api/releases/latest")
             if [[ "$SCENARIO" == edit-lost-not-latest ]]; then echo 456; else echo 123; fi;;
@@ -221,15 +211,43 @@ count=0
 fixture() {
     count=$((count + 1))
     export FIXTURE="$work/case-$count" SCENARIO=$1
-    unset BRANCH_FIXTURE UPSTREAM_FIXTURE
-    mkdir -p "$FIXTURE/"{scripts,packaging,git-common,remote}
+    unset BRANCH_FIXTURE UPSTREAM_FIXTURE GITHUB_ACTIONS SOURCE_REPO_TOKEN
+    mkdir -p "$FIXTURE/"{scripts,packaging/release-notes,git-common,remote}
     cp "$helper" "$FIXTURE/scripts/publish-release.sh"
     cp "${helper%/*}/release-network.sh" "$FIXTURE/scripts/release-network.sh"
-    printf '[package]\nversion = "9.8.7"\n' >"$FIXTURE/Cargo.toml"
-    touch "$FIXTURE/LICENSE" "$FIXTURE/THIRD_PARTY_NOTICES.md" "$FIXTURE/Cargo.lock" "$FIXTURE/calls"
+    cp "${helper%/*}/release-artifacts.py" "$FIXTURE/scripts/release-artifacts.py"
+    printf '[package]\nname = "moeka"\nversion = "9.8.7"\n' >"$FIXTURE/Cargo.toml"
+    printf '[[package]]\nname = "moeka"\nversion = "9.8.7"\n' >"$FIXTURE/Cargo.lock"
+    printf '## Features\n\nFixture release.\n\n## Fixes\n\nFixture.\n\n## Improvements\n\nFixture.\n' >"$FIXTURE/packaging/release-notes/v9.8.7.md"
+    touch "$FIXTURE/LICENSE" "$FIXTURE/THIRD_PARTY_NOTICES.md" "$FIXTURE/calls"
+    (
+        cd "$FIXTURE"
+        export GITHUB_SHA="$HEAD_FIXTURE" GITHUB_RUN_ID=1234
+        for platform in macos windows linux; do
+            for arch in arm64 x86_64; do
+                directory="input/$platform-$arch"
+                mkdir -p "$directory"
+                printf '%s %s\n' "$platform" "$arch" >"$directory/Moeka-$platform-$arch.zip"
+                if [[ "$platform" == macos ]]; then
+                    printf 'signed DMG %s\n' "$arch" >"$directory/Moeka-$platform-$arch.dmg"
+                fi
+                python3 scripts/release-artifacts.py record --version 9.8.7 --platform "$platform" --arch "$arch" --directory "$directory" >/dev/null
+            done
+        done
+        python3 scripts/release-artifacts.py collect --version 9.8.7 --source input >/dev/null
+        rm -r input
+    )
     echo absent >"$FIXTURE/state"
 }
-invoke() { bash "$FIXTURE/scripts/publish-release.sh" "$@" >"$FIXTURE/output" 2>&1; }
+invoke() {
+    if [[ "$1" == check ]]; then
+        bash "$FIXTURE/scripts/publish-release.sh" "$@" >"$FIXTURE/output" 2>&1
+    else
+        GITHUB_ACTIONS=true GITHUB_REPOSITORY=MoekaProject/moeka GITHUB_REF=refs/heads/main \
+            GITHUB_SHA="$HEAD_FIXTURE" GITHUB_RUN_ID=1234 \
+            bash "$FIXTURE/scripts/publish-release.sh" "$@" >"$FIXTURE/output" 2>&1
+    fi
+}
 fail() { echo "FAIL: $*" >&2; cat "$FIXTURE/output" >&2; exit 1; }
 reject() {
     local message=$1; shift
@@ -312,11 +330,13 @@ for scenario in absent existing-tag hidden-draft; do
     printf 'PASS read-only: %s\n' "$scenario"
 done
 
-fixture published-during-build
-if invoke publish v9.8.7; then fail 'Published-during-build accepted'; fi
-grep -Fq 'already published' "$FIXTURE/output" || fail 'Missing late refusal'
-if grep -Eq '^(git (push|tag )|gh release )' "$FIXTURE/calls"; then fail 'Late check mutated refs/release'; fi
-echo 'PASS build-to-publish recheck'
+fixture missing-manifest
+rm "$FIXTURE/dist/release-manifest.json"
+reject 'failed provenance verification' publish v9.8.7
+fixture local-publish
+if bash "$FIXTURE/scripts/publish-release.sh" publish v9.8.7 >"$FIXTURE/output" 2>&1; then fail 'Local publication accepted'; fi
+grep -q 'Official publication runs in GitHub Actions' "$FIXTURE/output" || fail 'Missing CI-only guard'
+echo 'PASS CI-only publication and manifest requirement'
 
 for scenario in success no-digest existing-tag; do
     fixture "$scenario"
@@ -360,7 +380,7 @@ cp "$FIXTURE/dist/Moeka-macos-arm64.dmg" "$FIXTURE/original.dmg"
 echo changed >>"$FIXTURE/dist/Moeka-macos-arm64.dmg"
 : >"$FIXTURE/calls"
 export SCENARIO=changed-draft
-reject 'Remote size mismatch' publish v9.8.7
+reject 'failed provenance verification' publish v9.8.7
 cp "$FIXTURE/original.dmg" "$FIXTURE/dist/Moeka-macos-arm64.dmg"
 : >"$FIXTURE/calls"
 export SCENARIO=removed-draft

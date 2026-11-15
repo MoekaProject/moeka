@@ -219,6 +219,8 @@ linux-one:
 	cp "$(LINUX_UNINSTALL_SCRIPT)" "$$package/uninstall.sh"; \
 	chmod +x "$$package/uninstall.sh"; \
 	cp "$(LINUX_README)" "$$package/README.txt"; \
+	cp LICENSE THIRD_PARTY_NOTICES.md "$$package/"; \
+	cp -R licenses "$$package/"; \
 	cp "$(LINUX_ICON_SOURCE)" "$$package/app.moeka.moeka.png"; \
 	archive="$(CURDIR)/$(DIST_DIR)/$(APP_DISPLAY_NAME)-linux-$(LINUX_SUFFIX).zip"; \
 	rm -f "$$archive"; \
@@ -226,15 +228,13 @@ linux-one:
 	rm -rf "$$stage"; \
 	echo "Created $$archive"
 
-publish: publish-check
-	@bash scripts/publish-release.sh publish "$(TAG)" "$(RELEASE_REPO)"
-	@$(MAKE) publish-homebrew TAG="$(TAG)" || { \
-		echo "The application release is already published. Retry only: make publish-homebrew TAG=$(TAG)" >&2; \
-		exit 1; \
-	}
+publish:
+	@test "$(TAG)" = "v$(VERSION)" || { echo "TAG must match Cargo.toml: v$(VERSION)" >&2; exit 1; }
+	@GH_PAGER=cat gh workflow run publish.yml --repo MoekaProject/moeka --ref main -f version="$(VERSION)" -f prerelease=false
 
 .PHONY: publish-homebrew homebrew-check test-publish-homebrew
 publish-homebrew:
+	@test "$${GITHUB_ACTIONS:-}" = true || { echo "Rerun only the Homebrew job in the official release workflow." >&2; exit 1; }
 	@bash scripts/publish-homebrew.sh "$(TAG)"
 
 homebrew-check:
@@ -243,8 +243,9 @@ homebrew-check:
 test-publish-homebrew:
 	@bash scripts/test-publish-homebrew.sh
 
-publish-beta: publish-check
-	@bash scripts/publish-release.sh publish-beta "$(TAG)" "$(RELEASE_REPO)"
+publish-beta:
+	@test "$(TAG)" = "v$(VERSION)" || { echo "TAG must match Cargo.toml: v$(VERSION)" >&2; exit 1; }
+	@GH_PAGER=cat gh workflow run publish.yml --repo MoekaProject/moeka --ref main -f version="$(VERSION)" -f prerelease=true
 
 publish-check:
 	@bash scripts/publish-release.sh check "$(TAG)" "$(RELEASE_REPO)"
@@ -253,8 +254,9 @@ test-publish-release:
 	@bash scripts/test-publish-release.sh
 	@bash scripts/test-ci-macos-signing.sh
 	@python3 scripts/test-prepare-linux-sysroot.py
+	@python3 scripts/test-release-artifacts.py
 
-# Only the publishing helper calls this, after the read-only safety checks.
+# Optional local diagnostics; official release builds run only in Actions.
 publish-tools-check:
 	@for tool in zig cargo-zigbuild python3 ar zstd patchelf jq; do \
 		command -v "$$tool" >/dev/null || { echo "$$tool is required for Linux cross-compilation"; exit 1; }; \
@@ -393,6 +395,8 @@ $(APP_DIR): build-release $(INFO_PLIST_TEMPLATE) $(ICON_FILE)
 		--exclude '.DS_Store' \
 		docs "$(RESOURCES_DIR)/"
 	@cp -R packaging/macos/*.lproj "$(RESOURCES_DIR)/"
+	@cp LICENSE THIRD_PARTY_NOTICES.md "$(RESOURCES_DIR)/"
+	@cp -R licenses "$(RESOURCES_DIR)/"
 	@sed \
 		-e 's|__APP_EXECUTABLE__|$(APP_NAME)|g' \
 		-e 's|__APP_NAME__|$(APP_DISPLAY_NAME)|g' \
