@@ -9,9 +9,9 @@ export GIT_TERMINAL_PROMPT=0
 die() { printf 'Release refused: %s\n' "$*" >&2; exit 1; }
 mode=${1:-}
 tag=${2:-}
-repo=${3:-MoekaProject/community}
-[[ $# -le 3 && ( "$mode" == check || "$mode" == publish || "$mode" == publish-beta ) ]] || die 'Usage: publish-release.sh check|publish|publish-beta vX.Y.Z [MoekaProject/community]'
-[[ "$repo" == MoekaProject/community ]] || die 'Official releases must stay in MoekaProject/community.'
+repo=${3:-MoekaProject/moeka}
+[[ $# -le 3 && ( "$mode" == check || "$mode" == publish || "$mode" == publish-beta ) ]] || die 'Usage: publish-release.sh check|publish|publish-beta vX.Y.Z [MoekaProject/moeka]'
+[[ "$repo" == MoekaProject/moeka ]] || die 'Official releases must stay in MoekaProject/moeka.'
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'Expected a stable vX.Y.Z tag.'
 [[ "$tag" != v0.1.12 ]] || die 'v0.1.12 is protected; never modify or republish it.'
 if [[ "$mode" != check ]]; then
@@ -35,20 +35,9 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 api="repos/$repo"
-destination="https://github.com/$repo.git"
 release_id=
 release_state=absent
 head=
-public_head=
-
-source_git() {
-    if [[ -n "${SOURCE_REPO_TOKEN:-}" ]]; then
-        GH_TOKEN="$SOURCE_REPO_TOKEN" git -c credential.helper= \
-            -c 'credential.helper=!gh auth git-credential' "$@"
-    else
-        git "$@"
-    fi
-}
 
 # --include supplies the actual HTTP status, not a substring of an error message.
 # Only a positively observed HTTP 404 means absence; all other errors stop us.
@@ -78,18 +67,14 @@ read_release() {
     IFS=$'\t' read -r id draft remote_tag target extra <<< "$row"
     [[ "$id" =~ ^[0-9]+$ && "$remote_tag" == "$tag" && -z "$extra" ]] || die 'Malformed release response.'
     [[ "$draft" == true ]] || die 'Release is already published (or has invalid draft state); assets are immutable.'
-    [[ "$target" == "$public_head" ]] || die 'Existing draft target does not match community main; manual review required.'
+    [[ "$target" == "$head" ]] || die 'Existing draft target does not match the release source; manual review required.'
     release_id=$id
     release_state=draft
 }
 
 remote_tag_commit() {
     local remote=$1 expected=$2 refs direct peeled
-    if [[ "$remote" == origin ]]; then
-        refs=$(release_retry_read source_git ls-remote "$remote" "refs/tags/$tag" "refs/tags/$tag^{}") || die "Cannot read tag from $remote"
-    else
-        refs=$(release_retry_read git ls-remote "$remote" "refs/tags/$tag" "refs/tags/$tag^{}") || die "Cannot read tag from $remote"
-    fi
+    refs=$(release_retry_read git ls-remote "$remote" "refs/tags/$tag" "refs/tags/$tag^{}") || die "Cannot read tag from $remote"
     direct=$(awk -v ref="refs/tags/$tag" '$2 == ref {print $1}' <<< "$refs")
     peeled=$(awk -v ref="refs/tags/$tag^{}" '$2 == ref {print $1}' <<< "$refs")
     if [[ -n "$refs" ]]; then
@@ -114,7 +99,7 @@ local_checks() {
         [[ "$upstream" == origin/main ]] || die 'main must track origin/main.'
         [[ "$(git rev-parse '@{upstream}')" == "$head" ]] || die 'HEAD differs from upstream; sync main separately (no automatic branch push).'
     fi
-    remote_main=$(release_retry_read source_git ls-remote --exit-code origin refs/heads/main) || die 'Cannot verify live origin/main.'
+    remote_main=$(release_retry_read git ls-remote --exit-code origin refs/heads/main) || die 'Cannot verify live origin/main.'
     [[ "$remote_main" == "$head"$'\trefs/heads/main' ]] || die 'Live origin/main differs from HEAD.'
     version=$(awk -F '"' '/^\[package\]/ {package=1; next} /^\[/ {package=0} package && /^version = / {print $2; exit}' Cargo.toml)
     [[ "$tag" == "v$version" ]] || die 'Tag/version mismatch with Cargo.toml.'
@@ -132,14 +117,10 @@ local_checks() {
 check() {
     local permission
     local_checks
-    # Without write access GitHub may hide a draft behind 404. Require the
-    # repository identity and permission before interpreting release absence.
-    permission=$(release_retry_read gh api --method GET "$api" --jq '[.full_name, .permissions.push] | @tsv') || die 'Cannot authenticate release repository access.'
-    [[ "$permission" == "$repo"$'\ttrue' ]] || die 'Authenticated contents-write access is needed to see and resume drafts.'
-    public_head=$(release_retry_read gh api --method GET "$api/git/ref/heads/main" --jq '.object.sha') \
-        || die 'Cannot read community main.'
-    [[ "$public_head" =~ ^[0-9a-f]{40}$ ]] || die 'Malformed community main ref.'
-    remote_tag_commit "$destination" "$public_head" >/dev/null
+    # Preflight uses contents:read; the publishing job receives contents:write
+    # and repeats this check before any mutation, including draft discovery.
+    permission=$(release_retry_read gh api --method GET "$api" --jq '.full_name') || die 'Cannot authenticate release repository access.'
+    [[ "$permission" == "$repo" ]] || die 'Authenticated repository access is required.'
     read_release
 }
 
@@ -180,16 +161,11 @@ done
 if ! git show-ref --verify --quiet "refs/tags/$tag"; then
     git tag -a "$tag" "$head" -m "Release $tag" # New annotated tag only; no force.
 fi
-# The source tag stays in origin. The community tag points
-# to community's own main commit, so GitHub's automatic source archives contain
-# only the public community repository rather than Moeka application source.
+# One source tag identifies both the binaries and GitHub's source archives.
 remote_ref=$(remote_tag_commit origin "$head")
-source_push() {
-    source_git push origin "refs/tags/$tag:refs/tags/$tag"
-}
 if [[ -z "$remote_ref" ]]; then
     for attempt in 1 2 3; do
-        if source_push >"$tmp/write-out" 2>"$tmp/write-error"; then
+        if git push origin "refs/tags/$tag:refs/tags/$tag" >"$tmp/write-out" 2>"$tmp/write-error"; then
             cat "$tmp/write-out"; cat "$tmp/write-error" >&2
             break
         fi
@@ -200,27 +176,13 @@ if [[ -z "$remote_ref" ]]; then
     done
 fi
 remote_ref=$(remote_tag_commit origin "$head")
-[[ -n "$remote_ref" ]] || die 'Private source tag was not visible after push.'
-public_ref=$(remote_tag_commit "$destination" "$public_head")
-if [[ -z "$public_ref" ]]; then
-    for attempt in 1 2 3; do
-        if gh api --method POST "$api/git/refs" -f ref="refs/tags/$tag" -f sha="$public_head" >"$tmp/write-out" 2>"$tmp/write-error"; then
-            break
-        fi
-        public_ref=$(remote_tag_commit "$destination" "$public_head")
-        [[ -z "$public_ref" ]] || break
-        release_retry_wait "$attempt" "$tmp/write-out" "$tmp/write-error" \
-            || die 'Cannot create community release tag.'
-    done
-fi
-public_ref=$(remote_tag_commit "$destination" "$public_head")
-[[ -n "$public_ref" ]] || die 'Community release tag was not visible after creation.'
+[[ -n "$remote_ref" ]] || die 'Source tag was not visible after push.'
 read_release
 if [[ "$initial_state" == draft ]]; then
     [[ "$release_id" == "$initial_id" ]] || die 'Original draft was removed or replaced; it will not be recreated.'
 fi
 if [[ "$release_state" == absent ]]; then
-    if gh release create "$tag" --repo "$repo" --verify-tag --target "$public_head" \
+    if gh release create "$tag" --repo "$repo" --verify-tag --target "$head" \
         --title "$tag" --notes-file "$notes_file" --draft >"$tmp/write-out" 2>"$tmp/write-error"; then
         cat "$tmp/write-out"; cat "$tmp/write-error" >&2
     else
@@ -318,7 +280,7 @@ for attempt in 1 2 3; do
         --jq '[.id, .tag_name, .draft, .prerelease, .target_commitish] | @tsv') \
         || die 'Cannot determine whether the release was published; inspect it before retrying.'
     IFS=$'\t' read -r observed_id observed_tag observed_draft observed_prerelease observed_target extra <<< "$row"
-    [[ "$observed_id" == "$draft_id" && "$observed_tag" == "$tag" && "$observed_target" == "$public_head" && -z "${extra:-}" ]] \
+    [[ "$observed_id" == "$draft_id" && "$observed_tag" == "$tag" && "$observed_target" == "$head" && -z "${extra:-}" ]] \
         || die 'Release identity changed during publication; inspect it manually.'
     if [[ "$observed_draft" == false ]]; then
         expected_prerelease=false
@@ -346,7 +308,7 @@ IFS=$'\t' read -r observed_id observed_tag observed_draft observed_prerelease ob
 expected_prerelease=false
 [[ "$mode" != publish-beta ]] || expected_prerelease=true
 [[ "$observed_id" == "$draft_id" && "$observed_tag" == "$tag" && "$observed_draft" == false \
-    && "$observed_prerelease" == "$expected_prerelease" && "$observed_target" == "$public_head" \
+    && "$observed_prerelease" == "$expected_prerelease" && "$observed_target" == "$head" \
     && -z "${extra:-}" ]] || die 'Published release identity or flags did not match.'
 load_assets
 for asset in "${assets[@]}"; do verify_asset "$asset"; done

@@ -2,7 +2,7 @@
 
 Moeka is a local-first Markdown editor built with Rust and GPUI for macOS, Windows, and Linux.
 
-[Website](https://moeka.app) · [Download](https://github.com/MoekaProject/community/releases) · [User guide](docs/help-en.md)
+[Website](https://moeka.app) · [Download](https://github.com/MoekaProject/moeka/releases) · [User guide](docs/help-en.md)
 
 ![Moeka Project](https://moeka.app/images/website.png)
 
@@ -16,6 +16,15 @@ Moeka is a local-first Markdown editor built with Rust and GPUI for macOS, Windo
 - **Agent collaboration**: the standard desktop build integrates installed Codex, Claude Code, GitHub Copilot, and Gemini CLI tools with document context.
 - **Beautiful exports**: share Markdown, HTML, PDF, and PNG with document formatting, code, formulas, and diagrams.
 - **A personal writing space**: expressive themes, flexible typography, multilingual UI, and a focused minimal mode.
+
+## Install on macOS
+
+For the macOS app via Homebrew:
+
+```sh
+brew tap --custom-remote MoekaProject/moeka https://github.com/MoekaProject/moeka
+brew install --cask moekaproject/moeka/moeka
+```
 
 ## Build from source
 

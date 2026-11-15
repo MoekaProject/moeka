@@ -12,8 +12,7 @@ use serde::Deserialize;
 
 use super::{Dialog, DialogAction, EditorView, config_paths};
 
-const LATEST_RELEASE_URL: &str =
-    "https://api.github.com/repos/MoekaProject/community/releases/latest";
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/MoekaProject/moeka/releases/latest";
 const USER_AGENT: &str = "MoekaUpdater/1.0";
 const UPDATE_POLL_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
 
@@ -239,7 +238,7 @@ fn check_and_download_update() -> Result<Option<PreparedUpdate>, String> {
     let release_url = release
         .html_url
         .clone()
-        .unwrap_or_else(|| "https://github.com/MoekaProject/community/releases/latest".to_string());
+        .unwrap_or_else(|| "https://github.com/MoekaProject/moeka/releases/latest".to_string());
 
     // Without a matching asset the update is still worth announcing; the user
     // is sent to the release page rather than left on an outdated build.

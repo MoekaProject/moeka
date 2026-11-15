@@ -33,19 +33,14 @@ jobs:
       - name: Validate committed version and remote release state
         env:
           VERSION: ${{ inputs.version }}
-          GH_TOKEN: ${{ secrets.MOEKA_PUBLIC_RELEASE_TOKEN }}
-          SOURCE_REPO_TOKEN: ${{ github.token }}
-          PRERELEASE: ${{ inputs.prerelease }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           python3 scripts/release-artifacts.py version --version "$VERSION"
-          : "${GH_TOKEN:?Missing MOEKA_PUBLIC_RELEASE_TOKEN}"
+          : "${GH_TOKEN:?Missing GITHUB_TOKEN}"
+          gh auth setup-git
           test -f "packaging/release-notes/v$VERSION.md"
           bash scripts/publish-release.sh check "v$VERSION"
-          if [[ "$PRERELEASE" != true ]]; then
-            gh api repos/MoekaProject/homebrew-moeka --jq '[.full_name, .permissions.push] | @tsv' |
-              grep -Fx $'MoekaProject/homebrew-moeka\ttrue'
-          fi
 
   macos:
     needs: preflight
@@ -141,7 +136,7 @@ jobs:
     if: github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    # Only this job can create the source tag; it never changes main.
+    # This job creates the source tag and Release; it never changes main.
     permissions:
       contents: write
     steps:
@@ -169,22 +164,24 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           PRERELEASE: ${{ inputs.prerelease }}
-          GH_TOKEN: ${{ secrets.MOEKA_PUBLIC_RELEASE_TOKEN }}
-          SOURCE_REPO_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
           mode=publish
           if [[ "$PRERELEASE" == true ]]; then mode=publish-beta; fi
           bash scripts/publish-release.sh "$mode" "v$VERSION"
-          printf 'Release: https://github.com/MoekaProject/community/releases/tag/v%s\n' "$VERSION" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Release: https://github.com/MoekaProject/moeka/releases/tag/v%s\n' "$VERSION" >> "$GITHUB_STEP_SUMMARY"
 
   homebrew:
     needs: publish
     if: inputs.prerelease == false && github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -193,7 +190,7 @@ jobs:
       - name: Update Tap only after stable release publication
         env:
           VERSION: ${{ inputs.version }}
-          GH_TOKEN: ${{ secrets.MOEKA_PUBLIC_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config --global user.name "github-actions[bot]"

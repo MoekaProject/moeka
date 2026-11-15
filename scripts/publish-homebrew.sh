@@ -17,8 +17,8 @@ fi
 for tool in git gh jq shasum ruby; do
     command -v "$tool" >/dev/null || die "Missing tool: $tool"
 done
-repo=MoekaProject/community
-tap=https://github.com/MoekaProject/homebrew-moeka.git
+repo=MoekaProject/moeka
+tap=https://github.com/MoekaProject/moeka.git
 version=${tag#v}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -41,7 +41,7 @@ for arch in arm64 x86_64; do
     ' "$work/release.json" >/dev/null || die "Missing, duplicate or invalid asset: $name"
 done
 
-# Only the public tap is cloned or pushed; private source history never enters it.
+# Clone current main so the Cask commit retains all source changes.
 clone_tap() {
     rm -rf "$work/tap"
     git clone --quiet --single-branch --branch main "$tap" "$work/tap"
@@ -119,4 +119,4 @@ for attempt in 1 2 3; do
 done
 remote=$(release_retry_read git ls-remote --exit-code origin refs/heads/main)
 [[ "$remote" == "$head"$'\trefs/heads/main' ]] || die 'Cannot confirm published tap HEAD; inspect remote state before retrying.'
-printf 'Published Homebrew %s in MoekaProject/homebrew-moeka.\n' "$tag"
+printf 'Published Homebrew %s in MoekaProject/moeka.\n' "$tag"

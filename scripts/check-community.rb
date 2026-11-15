@@ -77,14 +77,17 @@ module CommunityChecks
 
     jobs.each do |job_name, job|
       if job.fetch('permissions', {}).values.include?('write')
-        official_tag_job = File.basename(name) == 'publish.yml' &&
-                           job_name == 'publish' &&
+        main_only = "github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'"
+        expected_condition = job_name == 'homebrew' ? "inputs.prerelease == false && #{main_only}" : main_only
+        official_release_job = File.basename(name) == 'publish.yml' &&
+                           %w[publish homebrew].include?(job_name) &&
                            document['name'] == 'Publish official release' &&
                            Array(events) == ['workflow_dispatch'] &&
-                           job['if'] == "github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'" &&
+                           job['if'] == expected_condition &&
                            job['permissions'] == { 'contents' => 'write' } &&
-                           job['needs'] == %w[macos portable]
-        errors << "#{name}/#{job_name}: only the reviewed official publish job may request source-tag write access" unless official_tag_job
+                           ((job_name == 'publish' && job['needs'] == %w[macos portable]) ||
+                            (job_name == 'homebrew' && job['needs'] == 'publish'))
+        errors << "#{name}/#{job_name}: only reviewed publication and Cask jobs may request contents write access" unless official_release_job
       end
       job.fetch('steps', []).each do |step|
         action = step['uses']

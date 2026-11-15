@@ -12,7 +12,6 @@ chmod +x "$work/bin/sleep"
 helper=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/publish-release.sh
 export HEAD_FIXTURE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 export OTHER_FIXTURE=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-export PUBLIC_FIXTURE=cccccccccccccccccccccccccccccccccccccccc
 export PATH="$work/bin:$PATH"
 
 cat >"$work/bin/git" <<'MOCK'
@@ -46,9 +45,7 @@ case "$1" in
             else printf '%s\trefs/heads/main\n' "$HEAD_FIXTURE"; fi
         elif [[ "$SCENARIO" == remote-tag-mismatch ]]; then
             printf '%s\trefs/tags/v9.8.7\n' "$OTHER_FIXTURE"
-        elif [[ "$*" == *MoekaProject/community* && -f "$FIXTURE/public-tag" ]]; then
-            printf '%s\trefs/tags/v9.8.7\n' "$PUBLIC_FIXTURE"
-        elif [[ "$*" != *MoekaProject/community* && -f "$FIXTURE/private-tag" ]]; then
+        elif [[ -f "$FIXTURE/source-tag" ]]; then
             printf '%s\trefs/tags/v9.8.7\n%s\trefs/tags/v9.8.7^{}\n' "$OTHER_FIXTURE" "$HEAD_FIXTURE"
         fi;;
     cat-file) :;;
@@ -58,7 +55,7 @@ case "$1" in
         touch "$FIXTURE/local-tag";;
     push)
         [[ "$*" == 'push origin refs/tags/v9.8.7:refs/tags/v9.8.7' && "$*" != *force* ]] || exit 91
-        touch "$FIXTURE/private-tag"
+        touch "$FIXTURE/source-tag"
         if [[ "$SCENARIO" == push-response-lost && ! -f "$FIXTURE/push-lost" ]]; then
             touch "$FIXTURE/push-lost"; echo 'connection reset' >&2; exit 1
         fi;;
@@ -80,14 +77,8 @@ cat >"$work/bin/gh" <<'MOCK'
 set -euo pipefail
 printf 'gh %s\n' "$*" >>"$FIXTURE/calls"
 state=$(cat "$FIXTURE/state")
-api=repos/MoekaProject/community
+api=repos/MoekaProject/moeka
 if [[ "$1" == api ]]; then
-    if [[ "$*" == *'--method POST'* && "$*" == *"$api/git/refs"* ]]; then
-        [[ "$*" == *'ref=refs/tags/v9.8.7'* && "$*" == *"sha=$PUBLIC_FIXTURE"* ]] || exit 97
-        touch "$FIXTURE/public-tag"
-        if [[ "$SCENARIO" == public-tag-response-lost ]]; then echo 'connection reset' >&2; exit 1; fi
-        exit 0
-    fi
     shift
     endpoint= include=false query=
     while [[ $# -gt 0 ]]; do
@@ -102,9 +93,8 @@ if [[ "$1" == api ]]; then
     done
     case "$endpoint" in
         "$api")
-            if [[ "$SCENARIO" == no-permission ]]; then printf 'MoekaProject/community\tfalse\n';
-            else printf 'MoekaProject/community\ttrue\n'; fi;;
-        "$api/git/ref/heads/main") printf '%s\n' "$PUBLIC_FIXTURE";;
+            if [[ "$SCENARIO" == no-permission ]]; then printf 'other/repo\n';
+            else printf 'MoekaProject/moeka\n'; fi;;
         "$api/releases/tags/v9.8.7")
             [[ "$include" == true && "$query" == '[.id, .draft, .tag_name, .target_commitish] | @tsv' ]] || exit 98
             if [[ "$SCENARIO" == read-transient && ! -f "$FIXTURE/read-retried" ]]; then
@@ -125,18 +115,18 @@ if [[ "$1" == api ]]; then
             if [[ "$state" == absent ]]; then printf 'HTTP/2.0 404 Not Found\r\n\r\n'; exit 1; fi
             printf 'HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n'
             draft=true; [[ "$state" != published ]] || draft=false
-            target=$PUBLIC_FIXTURE; [[ "$SCENARIO" != draft-target-mismatch ]] || target=$OTHER_FIXTURE
+            target=$HEAD_FIXTURE; [[ "$SCENARIO" != draft-target-mismatch ]] || target=$OTHER_FIXTURE
             printf '123\t%s\tv9.8.7\t%s\n' "$draft" "$target";;
         "$api/releases?per_page=100")
             if [[ "$SCENARIO" == list-network ]]; then exit 1; fi
             if [[ "$SCENARIO" == list-transient && ! -f "$FIXTURE/list-retried" ]]; then
                 touch "$FIXTURE/list-retried"; echo partial; echo 'unexpected EOF' >&2; exit 1
             fi
-            if [[ "$SCENARIO" == hidden-draft ]]; then printf '123\ttrue\tv9.8.7\t%s\n' "$PUBLIC_FIXTURE"; fi;;
+            if [[ "$SCENARIO" == hidden-draft ]]; then printf '123\ttrue\tv9.8.7\t%s\n' "$HEAD_FIXTURE"; fi;;
         "$api/releases/123")
             draft=true; [[ "$state" != published ]] || draft=false
             prerelease=false; [[ "$SCENARIO" != edit-lost-beta && "$SCENARIO" != beta ]] || prerelease=true
-            printf '123\tv9.8.7\t%s\t%s\t%s\n' "$draft" "$prerelease" "$PUBLIC_FIXTURE";;
+            printf '123\tv9.8.7\t%s\t%s\t%s\n' "$draft" "$prerelease" "$HEAD_FIXTURE";;
         "$api/releases/latest")
             if [[ "$SCENARIO" == edit-lost-not-latest ]]; then echo 456; else echo 123; fi;;
         "$api/releases/123/assets?per_page=100")
@@ -165,7 +155,7 @@ elif [[ "$1" == release ]]; then
     [[ "$*" != *--clobber* && "$*" != *delete* ]] || exit 96
     case "$2" in
         create)
-            [[ "$state" == absent && "$*" == *--draft* && "$*" == *--verify-tag* && "$*" == *"--target $PUBLIC_FIXTURE"* ]] || exit 95
+            [[ "$state" == absent && "$*" == *--draft* && "$*" == *--verify-tag* && "$*" == *"--target $HEAD_FIXTURE"* ]] || exit 95
             if [[ "$SCENARIO" == create-unknown ]]; then echo 'connection reset' >&2; exit 1; fi
             echo draft >"$FIXTURE/state"
             if [[ "$SCENARIO" == create-response-lost ]]; then echo 'unexpected EOF' >&2; exit 1; fi;;
@@ -211,7 +201,7 @@ count=0
 fixture() {
     count=$((count + 1))
     export FIXTURE="$work/case-$count" SCENARIO=$1
-    unset BRANCH_FIXTURE UPSTREAM_FIXTURE GITHUB_ACTIONS SOURCE_REPO_TOKEN
+    unset BRANCH_FIXTURE UPSTREAM_FIXTURE GITHUB_ACTIONS
     mkdir -p "$FIXTURE/"{scripts,packaging/release-notes,git-common,remote}
     cp "$helper" "$FIXTURE/scripts/publish-release.sh"
     cp "${helper%/*}/release-network.sh" "$FIXTURE/scripts/release-network.sh"
@@ -277,7 +267,7 @@ fixture forbidden; reject 'Cannot determine release state' publish v9.8.7
 fixture server-error; reject 'Cannot determine release state' publish v9.8.7
 fixture malformed; reject 'Malformed release response' publish v9.8.7
 fixture list-network; reject 'Cannot list drafts' publish v9.8.7
-fixture no-permission; reject 'contents-write access' publish v9.8.7
+fixture no-permission; reject 'Authenticated repository access' publish v9.8.7
 fixture draft-target-mismatch; echo draft >"$FIXTURE/state"; reject 'draft target' publish v9.8.7
 fixture read-exhausted; reject 'Cannot determine release state' check v9.8.7
 [[ "$(grep -c -- '--include' "$FIXTURE/calls")" == 3 ]] || fail 'Read retry must stop after three attempts'
@@ -306,7 +296,7 @@ if invoke publish v9.8.7; then fail 'Unknown draft creation outcome accepted'; f
 grep -q 'Draft creation outcome is uncertain' "$FIXTURE/output" || fail 'Missing uncertain creation error'
 echo 'PASS uncertain draft creation stops safely'
 
-for scenario in push-response-lost public-tag-response-lost create-response-lost upload-transient upload-response-lost edit-transient edit-response-lost; do
+for scenario in push-response-lost create-response-lost upload-transient upload-response-lost edit-transient edit-response-lost; do
     fixture "$scenario"
     invoke publish v9.8.7 || fail "Reconciled publish failed: $scenario"
     [[ "$(cat "$FIXTURE/state")" == published ]] || fail 'Release did not publish'
@@ -316,9 +306,6 @@ for scenario in push-response-lost public-tag-response-lost create-response-lost
     fi
     if [[ "$scenario" == edit-response-lost ]]; then
         [[ "$(grep -c '^gh release edit ' "$FIXTURE/calls")" == 1 ]] || fail 'Published release was edited again'
-    fi
-    if [[ "$scenario" == public-tag-response-lost ]]; then
-        [[ "$(grep -c '^gh api --method POST .*git/refs' "$FIXTURE/calls")" == 1 ]] || fail 'Existing public tag was recreated'
     fi
     printf 'PASS reconciled transient write: %s\n' "$scenario"
 done
@@ -346,8 +333,9 @@ for scenario in success no-digest existing-tag; do
     [[ "$(grep -c '^gh release create ' "$FIXTURE/calls")" == 1 ]] || fail 'Expected one draft'
     [[ "$(grep -c '^gh release edit ' "$FIXTURE/calls")" == 1 ]] || fail 'Expected one final publish'
     [[ ! -e "$FIXTURE/dist/Moeka-v9.8.7-source.tar.gz" && ! -e "$FIXTURE/dist/SHA256SUMS" ]] || fail 'Source-related assets must not be created'
-    if grep -Eq '^git push .*MoekaProject/community|^git archive ' "$FIXTURE/calls"; then fail 'Private source was exposed to community'; fi
-    [[ -f "$FIXTURE/public-tag" ]] || fail 'Community binary release tag was not created'
+    if grep -Eq 'MoekaProject/community|homebrew-moeka|^gh api --method POST .*git/refs' "$FIXTURE/calls"; then fail 'Publisher touched a retired release destination'; fi
+    [[ -f "$FIXTURE/source-tag" ]] || fail 'Source release tag was not created'
+    [[ "$(grep -c '^git push ' "$FIXTURE/calls")" == 1 ]] || fail 'Expected one source-tag push'
     if [[ "$scenario" == existing-tag ]] && grep -q '^git tag ' "$FIXTURE/calls"; then fail 'Existing HEAD tag was recreated'; fi
     if [[ "$scenario" == no-digest ]] && ! grep -q '/releases/assets/' "$FIXTURE/calls"; then fail 'Missing digest fallback'; fi
     : >"$FIXTURE/calls"

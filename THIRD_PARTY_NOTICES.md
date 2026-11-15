@@ -19,5 +19,5 @@ Moeka's original code uses [GPL-3.0-or-later](LICENSE). Third-party code, data, 
 
 - Confirm rights to distribute original code and bundled assets. Recheck the resolved dependency graph and platform features for each release.
 - Collect actual license/NOTICE texts and copyright statements in `licenses/`, including transitive and crate-bundled materials. Inspect each final package: current packaging does not automatically include the complete collection on every platform.
-- Provide exact corresponding application, dependency, and bundled-library sources and build scripts through an authorized channel. The binary release helper does not provide them; community repository source archives, moving branches, and lockfiles alone are insufficient.
+- Provide exact corresponding application, dependency, and bundled-library sources and build scripts through an authorized channel. Releases in MoekaProject/moeka tag the built source commit; older community repository source archives do not contain application source. A source archive, moving branch, or lockfile alone does not establish complete corresponding-source coverage for bundled dependencies.
 - Keep private history private until publication is explicitly approved. Follow the [release process](AGENTS.md#release). Code licenses do not grant trademark rights or override independently licensed components.

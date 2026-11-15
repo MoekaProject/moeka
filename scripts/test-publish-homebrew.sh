@@ -22,7 +22,7 @@ set -euo pipefail
 }
 printf 'git %s\n' "$*" >>"$FIXTURE/calls"
 if [[ "$1" == clone ]]; then
-    [[ "$*" == "clone --quiet --single-branch --branch main https://github.com/MoekaProject/homebrew-moeka.git "* ]] || exit 99
+    [[ "$*" == "clone --quiet --single-branch --branch main https://github.com/MoekaProject/moeka.git "* ]] || exit 99
     if [[ "$SCENARIO" == clone-transient && ! -f "$FIXTURE/clone-retried" ]]; then
         touch "$FIXTURE/clone-retried"; mkdir -p "$7"; echo partial >"$7/partial"
         echo 'connection reset' >&2; exit 1
@@ -44,14 +44,14 @@ cat >"$work/bin/gh" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'gh %s\n' "$*" >>"$FIXTURE/calls"
-if [[ "$*" == 'api --method GET repos/MoekaProject/community/releases/tags/v0.1.29' ]]; then
+if [[ "$*" == 'api --method GET repos/MoekaProject/moeka/releases/tags/v0.1.29' ]]; then
     [[ "$SCENARIO" != api-failure ]] || { echo 'API unavailable' >&2; exit 1; }
     if [[ "$SCENARIO" == api-transient && ! -f "$FIXTURE/api-retried" ]]; then
         touch "$FIXTURE/api-retried"; echo partial; echo 'unexpected EOF' >&2; exit 1
     fi
     cat "$FIXTURE/release.json"
 elif [[ "$1 $2" == 'release download' ]]; then
-    [[ "$3" == v0.1.29 && "$4 $5" == '--repo MoekaProject/community' &&
+    [[ "$3" == v0.1.29 && "$4 $5" == '--repo MoekaProject/moeka' &&
        "$6" == --pattern && "$8" == --dir ]] || exit 99
     [[ "$SCENARIO" != download-failure ]] || { echo 'download failed' >&2; exit 1; }
     if [[ "$SCENARIO" == download-transient && ! -f "$FIXTURE/download-retried" ]]; then
@@ -84,7 +84,7 @@ run_case() {
             {name:"Moeka-macos-x86_64.dmg", state:"uploaded", size:17, digest:("sha256:" + $intel)}
         ]
     }' >"$FIXTURE/release.json"
-    sed 's/version "0.1.29"/version "0.1.11"/' "$root/packaging/homebrew/moeka.rb" >"$FIXTURE/seed/Casks/moeka.rb"
+    sed 's/version "0.1.37"/version "0.1.11"/' "$root/Casks/moeka.rb" >"$FIXTURE/seed/Casks/moeka.rb"
     case "$SCENARIO" in
         draft) filter='.draft = true';;
         prerelease) filter='.prerelease = true';;

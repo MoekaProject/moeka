@@ -9,13 +9,11 @@ The source commit must contain matching Cargo versions and
 
 - `release-signing` environment: the four Apple/P12 secrets and two variables
   documented in the [macOS guide](../macos/README.md).
-- Repository secret `MOEKA_PUBLIC_RELEASE_TOKEN`: contents read/write access to
-  **MoekaProject/community** and **MoekaProject/homebrew-moeka** only. The token is
-  used for read-only release preflight, binary publication and the separate Tap
-  job; it never reaches build or signing jobs. An installation token or dedicated
-  fine-grained PAT must be valid for both repositories for automatic Tap updates.
-- The publish job's own `GITHUB_TOKEN` has contents write solely to create the
-  source tag in **MoekaProject/moeka**. Checkout does not retain credentials.
+- The repository's built-in `GITHUB_TOKEN` handles preflight, source tag, Release
+  and Cask publication in **MoekaProject/moeka**. Preflight is read-only; publish
+  and Homebrew jobs have contents write for their separate operations. No
+  `MOEKA_PUBLIC_RELEASE_TOKEN` or cross-repository write access is needed.
+  Checkout does not retain credentials.
 - Enable environment branch restrictions and approval rules where supported.
   Protect `main` and workflow edits; do not expose signing to pull requests,
   forks or `pull_request_target`.
@@ -51,9 +49,11 @@ rechecks that remote main still matches the dispatch SHA.
    unique platform groups and exactly eight expected attachments before copying
    them into the publish directory.
 5. The existing release helper consumes these artifacts without building,
-   signing or overwriting them. It creates the source/community tags and a
+   signing or overwriting them. It creates one source tag at the build SHA and a
    draft, uploads missing files serially, verifies remote content, then publishes.
-6. Stable releases update the Tap in a separate job. Prereleases do not.
+6. Stable releases update `Casks/moeka.rb` on this repository's main branch in
+   a separate job. Prereleases do not. This Cask-only commit does not move the
+   source tag and does not discard concurrent source commits.
 
 ## Recovery
 
@@ -67,11 +67,18 @@ rechecks that remote main still matches the dispatch SHA.
 - If notarization failed, retrieve the recovery artifact and inspect the original
   submission ID before any retry. Signing on a repeated run attempt is refused
   to avoid duplicate submissions after an unknown result.
-- After a Tap-only failure, rerun only the failed `homebrew` job. Ensure its token
-  can access the Tap. Do not rebuild, re-sign or recreate the release.
+- After a Cask-only failure, rerun only the failed `homebrew` job. Ensure repository
+  rules allow its Cask-only main commit, or use a reviewed PR flow if required.
+  Do not rebuild, re-sign or recreate the release.
 - If the dispatch SHA changed, artifacts expired, or a run has incomplete
   notarization state, stop for reconciliation rather than mixing local or
   newly-built bytes into an existing draft.
 
 Local release builds are no longer the production path. Existing local signed
 artifacts are preserved for diagnosis, not uploaded by this pipeline.
+
+Old community releases and homebrew-moeka history are not changed by this
+workflow. Older applications querying the community update feed do not
+automatically discover the new destination; redirects or a bridge release need
+separate authorization. See the [Homebrew guide](../homebrew/README.md) for the
+explicit remote needed when using this repository as a tap.

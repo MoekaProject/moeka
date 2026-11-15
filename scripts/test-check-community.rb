@@ -123,11 +123,16 @@ class CommunityChecksTest
     assert_empty jobs.fetch('portable').to_s.scan(/secrets\./)
     assert_empty jobs.fetch('publish').to_s.scan(/MACOS_CERTIFICATE|APPLE_APP_SPECIFIC_PASSWORD|make signed|cargo build/)
     assert_equal({ 'contents' => 'write' }, jobs.fetch('publish').fetch('permissions'))
+    assert_equal({ 'contents' => 'write' }, jobs.fetch('homebrew').fetch('permissions'))
+    assert_empty document.to_s.scan(/MOEKA_PUBLIC_RELEASE_TOKEN|SOURCE_REPO_TOKEN|MoekaProject\/community|homebrew-moeka/)
     unsafe = Marshal.load(Marshal.dump(document))
     unsafe['jobs']['publish']['if'] = 'true'
     refute_empty CommunityChecks.workflow(unsafe, path)
     unsafe = Marshal.load(Marshal.dump(document))
     unsafe['jobs']['portable']['permissions'] = { 'contents' => 'write' }
+    refute_empty CommunityChecks.workflow(unsafe, path)
+    unsafe = Marshal.load(Marshal.dump(document))
+    unsafe['jobs']['homebrew']['needs'] = 'preflight'
     refute_empty CommunityChecks.workflow(unsafe, path)
   end
 
