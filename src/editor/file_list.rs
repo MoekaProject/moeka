@@ -879,7 +879,8 @@ impl EditorView {
     /// Rendered width of the FileList pane. Follows the sidebar show/hide
     /// animation proportionally.
     pub(crate) fn file_list_width(&self) -> f32 {
-        if self.sidebar_root.as_os_str().is_empty() {
+        // A remote-only session has no local root but still has a file list.
+        if self.sidebar_root.as_os_str().is_empty() && !self.remote_session_active() {
             return 0.0;
         }
         let sidebar_target = self.sidebar_target_width();

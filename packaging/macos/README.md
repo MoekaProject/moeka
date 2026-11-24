@@ -84,6 +84,16 @@ Local non-MAS builds reuse a previously verified bundle at
 fails the same source/version/payload validation rather than producing an app
 that installs an unrelated helper.
 
+Without any bundle, `build.rs` compiles the helper itself (into
+`target/remote-dev`) for the host and every other target whose Rust standard
+library is installed (`rustup target add x86_64-unknown-linux-musl
+aarch64-unknown-linux-musl x86_64-apple-darwin` covers the rest; Linux helpers
+link with `rust-lld`). The resulting bundle may be partial: connecting to a
+host whose platform is missing reports that target. It is bound to the same
+source SHA and version. Set `MOEKA_SKIP_DEV_REMOTE_BUNDLE=1` to skip this.
+Packages built with `MOEKA_REQUIRE_REMOTE_BUNDLE=1` still need all four
+targets.
+
 The opt-in editor integration test uses real SSH with GPUI's test window, not a
 native application window. Point it at an isolated `moeka-loopback-test` SSH
 alias whose remote `HOME` is disposable, and use an embedded bundle matching

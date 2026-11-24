@@ -1013,7 +1013,6 @@ impl EditorView {
         // switch, which is hundreds of megabytes on a large file.
         let tab_id = self.tabs[index].id.clone();
         let tab_kind = self.tabs[index].kind;
-        let tab_is_remote = self.tabs[index].is_remote;
         let tab_file_kind = self.tabs[index].file_kind.clone();
         let tab_path = self.tabs[index].path.clone();
         let tab_left_aligned = self.tabs[index].editor_left_aligned;
@@ -1021,11 +1020,6 @@ impl EditorView {
         let tab_source_word_wrap = self.tabs[index].source_word_wrap;
         let tab_reading_mode = self.tabs[index].reading_mode && !tab_source_mode;
         let switching_tabs = self.active_tab_id.as_deref() != Some(tab_id.as_str());
-        if tab_is_remote {
-            self.remote_workspace_active = true;
-        } else if tab_kind != TabKind::Settings {
-            self.remote_workspace_active = false;
-        }
         if switching_tabs {
             if let Some(id) = self.active_tab_id.clone()
                 && self.tabs.iter().any(|tab| tab.id == id)
@@ -2698,7 +2692,15 @@ impl EditorView {
             .into_any_element()
     }
 
-    pub(crate) fn render_tab_bar(&self, pane_id: PaneId, cx: &mut Context<Self>) -> AnyElement {
+    /// `toggle_actions` is rendered from the focused pane's state by the caller:
+    /// this runs with `pane_id` swapped in, but the buttons act on the focused
+    /// pane's active tab.
+    pub(crate) fn render_tab_bar(
+        &self,
+        pane_id: PaneId,
+        toggle_actions: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let is_top_left_pane = pane_id == self.top_left_pane_id();
         let is_top_right_pane = pane_id == self.top_right_pane_id();
         let ts = &self.styles.tab_bar;
@@ -2958,7 +2960,11 @@ impl EditorView {
                 Self::navigate_tab_history_forward,
             ))
             .into_any_element();
-        let leading_left_margin = if self.embedded_editor || !is_top_left_pane {
+        // The workspace strip above carries the window-control clearance.
+        let leading_left_margin = if self.embedded_editor
+            || !is_top_left_pane
+            || self.workspace_strip_visible()
+        {
             0.0
         } else {
             super::render::sidebar_button_tab_bar_inset(
@@ -2986,14 +2992,12 @@ impl EditorView {
             .flex()
             .items_center()
             .justify_end()
-            .when(
-                is_top_right_pane && !self.should_render_utility_panel(),
-                |this| this.child(self.render_tab_bar_toggle_actions(cx)),
-            )
+            .when_some(toggle_actions, |this, actions| this.child(actions))
             // Leaves room for the caption buttons the window draws on top.
-            .when(is_top_right_pane, |this| {
-                this.pr(px(self.window_caption_trailing_inset()))
-            });
+            .when(
+                is_top_right_pane && !self.workspace_strip_visible(),
+                |this| this.pr(px(self.window_caption_trailing_inset())),
+            );
 
         let tab_bar = div()
             .id("tab-bar")
@@ -3537,6 +3541,50 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(cx.window_title().as_deref(), Some("小语文稿"));
+    }
+
+    #[cfg(feature = "gpui-test-support")]
+    #[gpui::test]
+    fn queued_unsaved_closes_show_each_tab_before_asking(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let editor = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut editor = EditorView::new_with_mode(cx, true, false, Some("# One"), false);
+                editor.ui_language = UiLanguage::English;
+                editor.tabs = ["one", "two", "three"]
+                    .into_iter()
+                    .map(|id| {
+                        let mut tab = EditorView::build_file_tab(
+                            id.into(),
+                            Path::new(&format!("{id}.md")),
+                            b"# Text",
+                            false,
+                            false,
+                        );
+                        tab.is_dirty = id != "one";
+                        tab
+                    })
+                    .collect();
+                editor.active_tab_id = Some("one".into());
+                editor.reparse();
+                editor
+            })
+        });
+        editor.update(cx, |editor, cx| {
+            let asking = |editor: &EditorView| match editor.dialog.as_ref().map(|d| &d.action) {
+                Some(DialogAction::CloseTabUnsaved { tab_id }) => Some(tab_id.clone()),
+                _ => None,
+            };
+            editor.close_other_tabs("one", cx);
+            assert_eq!(asking(editor).as_deref(), Some("two"));
+            assert_eq!(editor.active_tab_id.as_deref(), Some("two"));
+            editor.confirm_dialog(cx);
+            assert_eq!(asking(editor).as_deref(), Some("three"));
+            assert_eq!(editor.active_tab_id.as_deref(), Some("three"));
+            editor.dismiss_dialog(cx);
+            assert_eq!(editor.active_tab_id.as_deref(), Some("one"));
+            assert_eq!(editor.tabs.len(), 2);
+        });
     }
 
     #[cfg(feature = "gpui-test-support")]

@@ -13,6 +13,44 @@ mod tests {
     use gpui::AppContext as _;
 
     #[gpui::test]
+    fn each_workspace_view_keeps_its_own_tabs_and_tab_activation_never_switches_views(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let editor = cx.update(|cx| {
+            cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some("# Local"), false))
+        });
+        editor.update(cx, |editor, cx| {
+            editor.workspaces.push(directory.path().to_path_buf());
+            editor.sidebar_root = directory.path().to_path_buf();
+            editor.create_remote_scratch_tab(cx);
+            let local_tab = editor.active_tab_id.clone().unwrap();
+            let key = PathBuf::from(format!("{REMOTE_VIEW_PREFIX}host\u{0}/work"));
+            editor.show_view(Some(key.clone()), cx);
+            assert!(editor.remote_workspace_active);
+            assert!(
+                editor.tabs.is_empty(),
+                "a new view starts without the other's tabs"
+            );
+            editor.create_remote_scratch_tab(cx);
+            let remote_tab = editor.active_tab_id.clone().unwrap();
+            assert_ne!(remote_tab, local_tab);
+            assert!(editor.all_tabs().any(|tab| tab.id == local_tab));
+            editor.show_view(None, cx);
+            assert!(!editor.remote_workspace_active);
+            assert_eq!(editor.active_tab_id.as_deref(), Some(local_tab.as_str()));
+            assert!(editor.tabs.iter().all(|tab| tab.id != remote_tab));
+            editor.show_view(Some(key), cx);
+            assert_eq!(editor.active_tab_id.as_deref(), Some(remote_tab.as_str()));
+            editor.activate_tab_by_index(0, cx);
+            assert!(
+                editor.remote_workspace_active,
+                "activating a tab keeps the view"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn workspace_adopts_unscoped_tabs_when_first_root_opens(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         let editor = cx.update(|cx| {
@@ -213,7 +251,126 @@ impl WorkspaceState {
     }
 }
 
+/// `workspace_states` also holds the tab views of SSH workspaces, under keys
+/// that cannot be local paths.
+const REMOTE_VIEW_PREFIX: &str = "\u{0}ssh:";
+
+pub(crate) fn remote_view_key(destination: &str, root: &moeka_fs::path::ResourcePath) -> PathBuf {
+    PathBuf::from(format!(
+        "{REMOTE_VIEW_PREFIX}{destination}\u{0}{}",
+        root.path
+    ))
+}
+
+pub(crate) fn is_remote_view_key(key: &Path) -> bool {
+    key.to_str()
+        .is_some_and(|key| key.starts_with(REMOTE_VIEW_PREFIX))
+}
+
 impl EditorView {
+    /// The key of the tab view currently on screen: a local root, or an SSH view key.
+    pub(crate) fn live_view_key(&self) -> PathBuf {
+        self.live_view
+            .clone()
+            .unwrap_or_else(|| self.active_workspace_root().to_path_buf())
+    }
+
+    pub(crate) fn remote_view_key_of_current(&self) -> Option<PathBuf> {
+        self.remote_workspace
+            .as_ref()
+            .map(|workspace| remote_view_key(&workspace.destination, &workspace.root))
+    }
+
+    /// Puts the live panes, history and closed-tab list aside under the live key.
+    fn stash_live_view(&mut self) {
+        debug_assert!(self.swapped_pane_id.is_none());
+        self.persist_active_tab_state();
+        let key = self
+            .live_view
+            .clone()
+            .unwrap_or_else(|| self.sidebar_root.clone());
+        let mut state = WorkspaceState::new(&key, self.pane_layout.clone(), self.focused_pane_id);
+        state.history = std::mem::take(&mut self.tab_navigation_history);
+        state.history_index = self.tab_navigation_index;
+        state.closed_tabs = std::mem::take(&mut self.recently_closed_tabs);
+        self.workspace_states.insert(key, state);
+    }
+
+    /// Brings the view stored under `key` (or a fresh one) onto the screen.
+    fn restore_view(&mut self, key: &Path, cx: &mut Context<Self>) {
+        let state = self.workspace_states.remove(key).unwrap_or_else(|| {
+            let id = self.next_pane_id;
+            self.next_pane_id += 1;
+            self.panes.push(Pane::new(id));
+            WorkspaceState::new(key, PaneLayout::Leaf(id), id)
+        });
+        self.pane_layout = state.layout;
+        self.focus_pane(state.focused_pane, cx);
+        if state.needs_hydration {
+            session_store::hydrate_visible_workspace(self);
+            self.invalidate_active_file_panel_caches();
+        }
+        self.tab_navigation_history = state.history;
+        self.tab_navigation_index = state.history_index;
+        self.recently_closed_tabs = state.closed_tabs;
+        self.pane_bounds.clear();
+        self.pending_terminal_focus = self.active_terminal_tab_id();
+        session_store::schedule_visible_workspace_restores(self, cx);
+    }
+
+    /// Shows a workspace's own tab view: `None` for the local workspace, or the
+    /// SSH workspace whose view key is given. Tabs never move between views.
+    pub(crate) fn show_view(&mut self, target: Option<PathBuf>, cx: &mut Context<Self>) {
+        if let Some(key) = &target {
+            // Make the connection serving this view the current one.
+            let parked = self.parked_remote_workspaces.iter().position(|workspace| {
+                remote_view_key(&workspace.destination, &workspace.root) == *key
+            });
+            if let Some(index) = parked {
+                self.switch_remote_workspace(index, cx);
+            }
+        }
+        if self.live_view == target {
+            self.remote_workspace_active = target.is_some();
+            return;
+        }
+        let adopt_unscoped = target.as_ref().is_some_and(|key| {
+            self.live_view.is_none()
+                && self.sidebar_root.as_os_str().is_empty()
+                && !self.workspace_states.contains_key(key)
+        });
+        if adopt_unscoped {
+            // Tabs opened before any workspace existed belong to the first one.
+            self.live_view = target;
+        } else {
+            self.stash_live_view();
+            self.live_view = target.clone();
+            let key = target.unwrap_or_else(|| self.sidebar_root.clone());
+            self.restore_view(&key, cx);
+        }
+        self.remote_workspace_active = self.live_view.is_some();
+        session_store::persist_session(self);
+        cx.notify();
+    }
+
+    /// Drops a view that no longer has a workspace (its tabs are already closed).
+    pub(crate) fn discard_view(&mut self, key: &Path) {
+        if let Some(state) = self.workspace_states.remove(key) {
+            let removed = state.layout.leaf_ids();
+            self.panes.retain(|pane| !removed.contains(&pane.id));
+            self.pane_bounds.retain(|id, _| !removed.contains(id));
+        }
+    }
+
+    /// Activates the workspace or view a pane belongs to.
+    pub(crate) fn switch_to_workspace_key(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        if is_remote_view_key(&root) {
+            self.show_view(Some(root), cx);
+        } else {
+            self.switch_workspace(root, cx);
+        }
+    }
+
     pub(crate) fn workspace_for_document_path(&self, path: &Path) -> Option<PathBuf> {
         self.pane_id_for_editor_path(path)
             .and_then(|pane| self.workspace_for_pane(pane))
@@ -278,9 +435,9 @@ impl EditorView {
             };
             self.all_tabs()
                 .filter(|tab| {
-                    tab.remote
-                        .as_ref()
-                        .is_some_and(|remote| remote.root == workspace.root)
+                    tab.remote.as_ref().is_some_and(|remote| {
+                        remote.root == workspace.root && remote.destination == workspace.destination
+                    })
                 })
                 .map(|tab| tab.id.clone())
                 .collect()
@@ -392,7 +549,11 @@ impl EditorView {
             self.close_tab(&id, cx);
         }
         if remote_generation.is_some() {
+            let key = self.remote_view_key_of_current();
             self.disconnect_remote(cx);
+            if let Some(key) = key {
+                self.discard_view(&key);
+            }
         } else {
             self.finish_close_workspace(&root, cx);
         }
@@ -410,7 +571,7 @@ impl EditorView {
 
     pub(crate) fn workspace_for_pane(&self, pane: PaneId) -> Option<PathBuf> {
         if self.pane_layout.contains(pane) {
-            return Some(self.active_workspace_root().to_path_buf());
+            return Some(self.live_view_key());
         }
         self.workspace_states
             .iter()

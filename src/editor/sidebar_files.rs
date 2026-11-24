@@ -1080,6 +1080,8 @@ impl EditorView {
 
     pub(crate) fn switch_workspace(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let was_remote = self.remote_workspace_active;
+        // Return to the local view first; the steps below park and restore local state.
+        self.show_view(None, cx);
         self.remote_workspace_active = false;
         if path == self.sidebar_root {
             if was_remote {
@@ -1165,6 +1167,7 @@ impl EditorView {
     }
 
     pub(crate) fn finish_close_workspace(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.show_view(None, cx);
         let removed_panes = if self.sidebar_root == path {
             self.visible_pane_ids()
         } else {
@@ -1189,7 +1192,13 @@ impl EditorView {
             self.pane_caret_overlay_views
                 .retain(|id, _| !removed_panes.contains(id));
             self.reset_sidebar_filter(cx);
-            self.sidebar_visible = false;
+            // A connected SSH workspace keeps the sidebar and becomes current.
+            let keep_sidebar = self.remote_workspace.is_some();
+            self.sidebar_visible = keep_sidebar;
+            if keep_sidebar {
+                let key = self.remote_view_key_of_current();
+                self.show_view(key, cx);
+            }
             self.sidebar_resizing = false;
             self.expanded_dirs.clear();
             self.selected_sidebar_paths.clear();

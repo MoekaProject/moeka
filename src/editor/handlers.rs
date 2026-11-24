@@ -3755,10 +3755,10 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.workspaces.is_empty() {
-            self.pick_workspace_folder(cx);
-        } else {
+        if self.has_sidebar_workspace() {
             self.toggle_sidebar_visibility(cx);
+        } else {
+            self.pick_workspace_folder(cx);
         }
     }
 

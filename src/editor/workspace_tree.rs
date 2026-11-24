@@ -178,6 +178,14 @@ mod tests {
             .debug_bounds("sidebar-settings")
             .expect("settings footer");
         assert!((f32::from(settings.bottom()) - 600.0).abs() < 2.0);
+        cx.update(|_, cx| {
+            let editor = editor.read(cx);
+            let separator = editor.styles.workspace_roots_separator().thickness_px;
+            assert!(
+                (f32::from(settings.size.height) + separator - editor.status_bar_height()).abs()
+                    < 1.0
+            );
+        });
         assert!(cx.debug_bounds("sidebar-help").is_none());
         assert!(cx.debug_bounds("sidebar-add-workspace").is_none());
         cx.simulate_click(settings.center(), Default::default());
@@ -899,7 +907,8 @@ impl EditorView {
         let name = root
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| root.display().to_string());
+            .unwrap_or_else(|| root.display().to_string())
+            .to_uppercase();
         let selected =
             self.file_tree_resource_selected(&moeka_fs::path::ResourcePath::local(&root));
         let label_style = self.styles.workspace_root_label(active);
@@ -1023,21 +1032,38 @@ impl EditorView {
                 .when(*after, |this| this.border_b(px(1.0)))
                 .when(!*after, |this| this.border_t(px(1.0)));
         }
-        if active {
-            row = row
-                .on_drop({
-                    let root = root.clone();
-                    cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
-                        this.clear_sidebar_drag_state(cx);
-                        this.move_sidebar_items(dragged.paths.clone(), root.clone(), cx);
-                    })
+        // Any workspace root accepts drops, so files can move between workspaces.
+        row = row
+            .drag_over::<DraggedResources>({
+                let bg = ss.sidebar_item_selected_bg;
+                move |style, _, _, _| style.bg(bg)
+            })
+            .on_drop({
+                let root = root.clone();
+                cx.listener(move |this, dragged: &DraggedResources, window, cx| {
+                    let copy = window.modifiers().alt;
+                    this.drop_resources_into(
+                        dragged.resources.clone(),
+                        moeka_fs::path::ResourcePath::local(&root),
+                        copy,
+                        cx,
+                    );
                 })
-                .on_drop({
-                    let root = root.clone();
-                    cx.listener(move |this, dragged: &gpui::ExternalPaths, _, cx| {
-                        this.copy_external_paths_into_dir(dragged.paths(), root.clone(), cx);
-                    })
-                });
+            })
+            .on_drop({
+                let root = root.clone();
+                cx.listener(move |this, dragged: &DraggedSidebarItems, _, cx| {
+                    this.clear_sidebar_drag_state(cx);
+                    this.move_sidebar_items(dragged.paths.clone(), root.clone(), cx);
+                })
+            });
+        if active {
+            row = row.on_drop({
+                let root = root.clone();
+                cx.listener(move |this, dragged: &gpui::ExternalPaths, _, cx| {
+                    this.copy_external_paths_into_dir(dragged.paths(), root.clone(), cx);
+                })
+            });
         }
         row.into_any_element()
     }
@@ -1075,11 +1101,10 @@ impl EditorView {
             .children(
                 self.workspaces
                     .iter()
+                    .filter(|root| self.sidebar_lists_local_workspace(root))
                     .map(|root| self.render_workspace_root(root.clone(), cx)),
             )
-            .when(self.remote_workspace.is_some(), |this| {
-                this.child(self.render_remote_workspace_root(cx))
-            })
+            .children(self.render_remote_workspace_rows(cx))
             .into_any_element()
     }
 }

@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use super::app_settings::{MinimapPosition, MinimapSide};
+use super::line_diff::LineDiffKind;
 use super::{EditorView, PaneId};
 pub(super) use snapshot::Snapshot;
 const MAX_QUADS: usize = 32_768;
@@ -628,7 +629,102 @@ impl EditorView {
                     .w(px(self.minimap_lane_width()))
                     .when(is_left, |lane| lane.left_0())
                     .when(!is_left, |lane| lane.right_0())
-                    .child(self.render_minimap(pane_id, cx)),
+                    .child(self.render_minimap(pane_id, cx))
+                    .child(self.render_minimap_diff_marks(pane_id, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// Document-space hunks projected onto the minimap track, as
+    /// `(top, bottom, kind)` relative to the track. Recomputed every frame, so
+    /// marks follow edits and saves without any separate invalidation.
+    fn minimap_diff_marks(&self) -> Vec<(f32, f32, LineDiffKind)> {
+        let (Some(projection), Some(bounds)) =
+            (self.minimap_state.projection, self.minimap_state.bounds)
+        else {
+            return Vec::new();
+        };
+        if self.minimap_state.tab != self.active_tab_id || self.line_diff.hunks.is_empty() {
+            return Vec::new();
+        }
+        let track = f32::from(bounds.size.height);
+        let first_line = self.line_at_y((projection.origin / projection.scale) as f32);
+        let last_line =
+            self.line_at_y(((projection.origin + projection.track) / projection.scale) as f32);
+        let min_height = self.scaled(self.styles.minimap.diff_mark_min_height_px);
+        let to_track = |y: f64| (y * projection.scale - projection.origin) as f32;
+        self.line_diff
+            .hunks
+            .iter()
+            .enumerate()
+            .filter(|(index, hunk)| {
+                self.line_diff.unchanged_comparison != Some(*index)
+                    && hunk.current_lines.end >= first_line
+                    && hunk.current_lines.start <= last_line
+            })
+            .filter_map(|(_, hunk)| {
+                let top = to_track(self.line_y_offset_precise(hunk.current_lines.start));
+                let bottom = to_track(self.line_y_offset_precise(hunk.current_lines.end));
+                // Deleted hunks have no current lines; they mark the boundary.
+                let (top, bottom) = if bottom - top < min_height {
+                    let center = (top + bottom) * 0.5;
+                    (center - min_height * 0.5, center + min_height * 0.5)
+                } else {
+                    (top, bottom)
+                };
+                (bottom > 0.0 && top < track).then_some((
+                    top.max(0.0),
+                    bottom.min(track),
+                    hunk.kind,
+                ))
+            })
+            .collect()
+    }
+
+    /// Painted above the dimmed lane so the marks keep their full color.
+    fn render_minimap_diff_marks(&self, pane_id: PaneId, cx: &mut Context<Self>) -> AnyElement {
+        let editor = cx.entity().clone();
+        let style = self.styles.minimap;
+        let diff = self.styles.line_diff;
+        let mark_width = self.scaled(style.diff_mark_width_px);
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .child(
+                canvas(
+                    move |_, _, cx| {
+                        editor.update(cx, |this, _| {
+                            this.with_pane(pane_id, |this| {
+                                (
+                                    this.minimap_state.bounds.map(|bounds| bounds.origin.y),
+                                    this.minimap_diff_marks(),
+                                )
+                            })
+                        })
+                    },
+                    move |bounds, (track_top, marks), window, _| {
+                        let Some(track_top) = track_top else {
+                            return;
+                        };
+                        for (top, bottom, kind) in marks {
+                            let color = match kind {
+                                LineDiffKind::Added => diff.added_stripe_color,
+                                LineDiffKind::Modified => diff.modified_stripe_color,
+                                LineDiffKind::Deleted => diff.deleted_stripe_color,
+                            };
+                            window.paint_quad(gpui::fill(
+                                Bounds::new(
+                                    point(bounds.right() - px(mark_width), track_top + px(top)),
+                                    size(px(mark_width), px(bottom - top)),
+                                ),
+                                color,
+                            ));
+                        }
+                    },
+                )
+                .size_full(),
             )
             .into_any_element()
     }
@@ -886,6 +982,53 @@ mod tests {
                 });
                 div().size_full().flex().child(content)
             }
+        }
+
+        #[gpui::test]
+        fn minimap_marks_follow_live_diff_hunks(cx: &mut gpui::TestAppContext) {
+            let saved = "paragraph\n\n".repeat(200);
+            let editor = cx.update(|cx| {
+                cx.new(|cx| {
+                    let mut editor =
+                        EditorView::new_with_mode(cx, true, false, Some(&saved), false);
+                    editor.embedded_editor = false;
+                    editor.app_settings.simple_mode = false;
+                    editor.styles.ui.spec.animations_enabled = false;
+                    editor.styles.minimap.min_pane_width_px = 0.0;
+                    editor.app_settings.minimap_position = MinimapSide::Right.position();
+                    editor.minimap_motion.snap(Some(MinimapSide::Right));
+                    editor
+                })
+            });
+            let (_, cx) = cx.add_window_view(|_, cx| {
+                let subscription = cx.observe(&editor, |_, _, cx| cx.notify());
+                Workspace(editor.clone(), subscription)
+            });
+            let marks = |cx: &mut gpui::VisualTestContext| {
+                cx.update(|_, cx| editor.read(cx).minimap_diff_marks())
+            };
+            cx.run_until_parked();
+            assert!(marks(cx).is_empty());
+            cx.update(|_, cx| {
+                editor.update(cx, |editor, cx| {
+                    let mut current = saved.replacen("paragraph", "changed", 1);
+                    current.push_str("added\n");
+                    editor.line_diff =
+                        crate::editor::line_diff::TextLineDiff::between(&saved, &current);
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            let kinds: Vec<_> = marks(cx).into_iter().map(|(_, _, kind)| kind).collect();
+            assert_eq!(kinds, [LineDiffKind::Modified, LineDiffKind::Added]);
+            cx.update(|_, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.line_diff = Default::default();
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            assert!(marks(cx).is_empty());
         }
 
         #[gpui::test]

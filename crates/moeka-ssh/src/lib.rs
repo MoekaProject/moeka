@@ -127,6 +127,16 @@ impl ServerTarget {
         }
     }
 
+    /// `case` pattern over `uname -s`/`uname -m` accepted for this target.
+    fn uname_pattern(self) -> &'static str {
+        match self {
+            Self::LinuxX86_64 => "Linux/x86_64",
+            Self::LinuxAarch64 => "Linux/aarch64|Linux/arm64",
+            Self::MacosX86_64 => "Darwin/x86_64",
+            Self::MacosAarch64 => "Darwin/arm64|Darwin/aarch64",
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::LinuxX86_64 => "linux-x86_64",
@@ -208,19 +218,20 @@ pub fn detect_target(options: &SshOptions) -> io::Result<ServerTarget> {
 /// Verify before executing; reuse a valid installation without retransmitting it.
 pub fn install(options: &SshOptions, payload: &ServerPayload<'_>) -> io::Result<bool> {
     payload.verify()?;
-    if detect_target(options)? != payload.target {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "remote server target mismatch",
-        ));
-    }
     let directory = payload.relative_directory();
+    // Both scripts resolve a symlinked home (e.g. /home -> /data/home) once, then
+    // require every directory below it to be a real, user-owned directory.
     let probe = format!(
         r#"set -eu
-base="$HOME/.local/share/moeka/remote-server"
+case "$(uname -s)/$(uname -m)" in
+    {platform}) ;;
+    *) printf 'MOEKA_REMOTE_PLATFORM_MISMATCH\n'; exit 0 ;;
+esac
+home=$(cd "$HOME" && pwd -P) || exit 71
+base="$home/.local/share/moeka/remote-server"
 dir="$base/{directory}"
 exe="$dir/moeka-remote-server"
-for parent in "$HOME" "$HOME/.local" "$HOME/.local/share" "$HOME/.local/share/moeka" "$base" "$dir"; do
+for parent in "$home" "$home/.local" "$home/.local/share" "$home/.local/share/moeka" "$base" "$dir"; do
     if [ -e "$parent" ] || [ -L "$parent" ]; then
         [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
     fi
@@ -240,8 +251,16 @@ printf 'MOEKA_REMOTE_INSTALL\n'
 "#,
         hash_command = hash_script("\"$exe\""),
         digest = payload.sha256,
+        platform = payload.target.uname_pattern(),
     );
+    // The probe checks the platform itself, saving a separate SSH round trip.
     let output = run_bootstrap(options.shell(&probe)?, &[], BOOTSTRAP_TIMEOUT)?;
+    if output == b"MOEKA_REMOTE_PLATFORM_MISMATCH\n" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "remote server target mismatch",
+        ));
+    }
     if output == b"MOEKA_REMOTE_READY\n" {
         return Ok(false);
     }
@@ -254,9 +273,10 @@ printf 'MOEKA_REMOTE_INSTALL\n'
     let upload = format!(
         r#"set -eu
 umask 077
-base="$HOME/.local/share/moeka/remote-server"
+home=$(cd "$HOME" && pwd -P) || exit 71
+base="$home/.local/share/moeka/remote-server"
 dir="$base/{directory}"
-for parent in "$HOME" "$HOME/.local" "$HOME/.local/share" "$HOME/.local/share/moeka" "$base" "$dir"; do
+for parent in "$home" "$home/.local" "$home/.local/share" "$home/.local/share/moeka" "$base" "$dir"; do
     if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then
         mkdir "$parent" || [ -d "$parent" ]
     fi

@@ -22,7 +22,7 @@ const MIN_MODIFICATION_SIMILARITY: f32 = 0.25;
 pub(crate) struct TextLineDiff {
     pub(crate) hunks: Vec<LineDiffHunk>,
     current_line_count: usize,
-    unchanged_comparison: Option<usize>,
+    pub(super) unchanged_comparison: Option<usize>,
 }
 
 #[derive(Clone, Debug)]

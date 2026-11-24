@@ -127,6 +127,18 @@ pub(crate) fn persist_session(editor: &EditorView) {
             active: editor.remote_workspace_active,
         })
         .or_else(|| editor.ssh_restore.clone());
+    // Entries still reconnecting stay saved until their connection succeeds.
+    config.workspaces.ssh_more = editor
+        .parked_remote_workspaces
+        .iter()
+        .map(|workspace| config_store::SshRestore::Connected {
+            destination: workspace.destination.clone(),
+            config_file: workspace.config_file.clone(),
+            root: workspace.root.clone(),
+            active: false,
+        })
+        .chain(editor.ssh_restore_more.iter().cloned())
+        .collect();
     config.workspaces.active_root = if editor.active_workspace_root().as_os_str().is_empty() {
         None
     } else {
@@ -154,7 +166,7 @@ pub(crate) fn persist_session(editor: &EditorView) {
             .collect();
         config
             .workspace_sessions
-            .insert(editor.active_workspace_root().to_path_buf(), session);
+            .insert(editor.live_view_key(), session);
     }
     let snapshot = config.clone();
     let _ = session_writer().send(SessionWrite::Save(snapshot.clone()));
@@ -424,6 +436,7 @@ fn restore_session_config(
 ) {
     let active_root = config.workspaces.active_root.clone().unwrap_or_default();
     editor.ssh_restore = config.workspaces.ssh.take();
+    editor.ssh_restore_more = std::mem::take(&mut config.workspaces.ssh_more);
     if let Some(session) = config.workspace_sessions.remove(&active_root) {
         config.sessions = session;
     }
@@ -438,6 +451,10 @@ fn restore_session_config(
         editor.sidebar_visible = true;
         editor.expanded_dirs.clear();
         editor.expanded_dirs.insert(active_root);
+    }
+    // Saved workspaces of any kind (including SSH ones still reconnecting) show the sidebar.
+    if !editor.workspaces.is_empty() || editor.has_sidebar_workspace() {
+        editor.sidebar_visible = true;
     }
 
     let restored_layout = config.sessions.pane_layout.as_ref().is_some_and(|layout| {
@@ -489,7 +506,10 @@ fn restore_session_config(
         records = config.sessions.tabs.clone();
     }
     for (root, session) in config.workspace_sessions {
-        if !root.as_os_str().is_empty() && !editor.workspaces.contains(&root) {
+        if !root.as_os_str().is_empty()
+            && !editor.workspaces.contains(&root)
+            && !workspace::is_remote_view_key(&root)
+        {
             continue;
         }
         let record = session.pane_layout.unwrap_or(PaneLayoutRecord::Leaf {

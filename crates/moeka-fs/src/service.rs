@@ -558,8 +558,14 @@ impl Service {
         options: SearchOptions,
         filters: SearchPathFilters,
     ) -> FsResult<Response> {
-        if self.searches.len() >= MAX_SEARCHES {
-            return Err(FsError::invalid("search", "search session limit reached"));
+        // A superseded search the client never released must not lock new ones out;
+        // the oldest session ends and reports itself done if it is ever polled.
+        while self.searches.len() >= MAX_SEARCHES {
+            let Some(oldest) = self.searches.keys().min().copied() else {
+                break;
+            };
+            self.searches.remove(&oldest);
+            self.complete_pages(oldest, PageKind::Search);
         }
         if options.query.is_empty() || options.query.len() > MAX_SEARCH_QUERY {
             return Err(FsError::invalid("search", "invalid query length"));
@@ -1269,6 +1275,42 @@ mod tests {
             })
             .unwrap();
         service
+    }
+
+    #[test]
+    fn starting_searches_beyond_the_limit_ends_the_oldest_instead_of_failing() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("note.md"), "needle").unwrap();
+        let mut service = ready_service();
+        let mut sessions = Vec::new();
+        for _ in 0..MAX_SEARCHES + 2 {
+            let Response::Session(session) = service
+                .execute(Request::StartSearch {
+                    root: NativePath::from_local(directory.path()),
+                    options: SearchOptions {
+                        query: "needle".into(),
+                        case_sensitive: true,
+                        whole_word: false,
+                        regex: false,
+                    },
+                })
+                .unwrap()
+            else {
+                panic!("expected search session");
+            };
+            sessions.push(session);
+        }
+        assert_eq!(service.searches.len(), MAX_SEARCHES);
+        let Response::Search { items, done } = service
+            .execute(Request::NextSearch {
+                session: sessions[0],
+            })
+            .unwrap()
+        else {
+            panic!("expected search page");
+        };
+        assert!(items.is_empty() && done);
+        assert!(service.searches.contains_key(sessions.last().unwrap()));
     }
 
     #[test]

@@ -281,6 +281,15 @@ impl SshFilesystem {
         Ok(())
     }
 
+    /// Whether the connection has died. A busy connection counts as alive.
+    pub fn is_closed(&self) -> bool {
+        match self.state.try_lock() {
+            Ok(state) => state.transport.is_closed(),
+            Err(std::sync::TryLockError::Poisoned(_)) => true,
+            Err(std::sync::TryLockError::WouldBlock) => false,
+        }
+    }
+
     pub fn request(&self, request: Request) -> FsResult<Response> {
         self.request_with_timeout(request, REQUEST_TIMEOUT)
     }

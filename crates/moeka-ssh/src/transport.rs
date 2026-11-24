@@ -179,6 +179,11 @@ impl FramedTransport {
         Ok(text)
     }
 
+    /// True once any failure or `close` ended the SSH process; never reconnects.
+    pub fn is_closed(&self) -> bool {
+        self.process.is_none()
+    }
+
     pub fn close(&mut self) {
         self.outgoing.take();
         self.process.take();

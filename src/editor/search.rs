@@ -789,10 +789,25 @@ impl EditorView {
         if range.is_empty() || self.buffer.text().get(range.clone()).is_none() {
             return;
         }
-        self.prepare_source_range_for_navigation(&range);
+        self.reveal_source_range(&range, cx);
+    }
+
+    /// Moves the caret to a match and scrolls it into view, shared by the editor
+    /// search and workspace search results. A match that is already fully on
+    /// screen stays where it is, unless unfolding moves the content around it.
+    pub(super) fn reveal_source_range(&mut self, range: &Range<usize>, cx: &mut Context<Self>) {
+        // Measured before preparing the navigation, which discards the layout.
+        let folds_before = self.folded_sections.len();
+        let was_visible = self.offset_visible_in_viewport(range.start);
+        self.prepare_source_range_for_navigation(range);
+        let keep_scroll = was_visible && self.folded_sections.len() == folds_before;
         self.clear_extra_cursors();
         self.cursor.move_to(range.start, &self.buffer);
         self.reset_cursor_visual_targeting();
+        if keep_scroll {
+            cx.notify();
+            return;
+        }
         self.center_cursor_in_view_once(cx);
     }
 

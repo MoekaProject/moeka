@@ -943,9 +943,11 @@ impl Filesystem for LocalBackend {
                 )
             })?;
             // Both native calls atomically reject an existing destination, including symlinks.
+            // The raw syscall avoids the libc wrapper, which musl lacks.
             #[cfg(target_os = "linux")]
             let result = unsafe {
-                libc::renameat2(
+                libc::syscall(
+                    libc::SYS_renameat2,
                     libc::AT_FDCWD,
                     from.as_ptr(),
                     libc::AT_FDCWD,

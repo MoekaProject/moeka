@@ -91,6 +91,7 @@ mod updater;
 mod whitespace;
 mod workspace;
 mod workspace_search;
+mod workspace_strip;
 mod workspace_tree;
 
 pub(crate) use app_settings::{AppSettings, theme_kind_to_string};
@@ -671,6 +672,12 @@ pub(crate) struct MultiCursorClipboard {
 #[derive(Clone)]
 pub(crate) struct DraggedSidebarItems {
     pub paths: Vec<PathBuf>,
+}
+
+/// Files dragged between local and SSH trees; each carries its filesystem.
+#[derive(Clone)]
+pub(crate) struct DraggedResources {
+    pub resources: Vec<moeka_fs::path::ResourcePath>,
 }
 
 pub(crate) struct DraggedSidebarItemsView {
@@ -2261,10 +2268,20 @@ pub(crate) enum CodeBlockDisplayAction {
 }
 
 pub struct EditorView {
+    /// The SSH workspace the remote sidebar, search and tabs currently operate on.
     pub(crate) remote_workspace: Option<remote::RemoteWorkspace>,
+    /// Other connected SSH workspaces. They keep their connection but do not
+    /// watch or refresh until one is swapped into `remote_workspace`.
+    pub(crate) parked_remote_workspaces: Vec<remote::RemoteWorkspace>,
+    pub(crate) remote_connect_epoch: u64,
     pub(crate) remote_workspace_active: bool,
+    /// The SSH workspace view on screen; `None` while a local workspace's is.
+    pub(crate) live_view: Option<PathBuf>,
     pub(crate) ssh_restore: Option<config_store::SshRestore>,
+    pub(crate) ssh_restore_more: Vec<config_store::SshRestore>,
     pub(super) ssh_restore_error: Option<String>,
+    /// Failures of the background-restored workspaces, keyed by destination and root.
+    pub(super) ssh_restore_errors: HashMap<String, String>,
     pub(crate) remote_documents: HashMap<String, remote::RemoteDocument>,
     pub(crate) remote_input: Option<remote::RemoteInput>,
     pub(crate) remote_sidebar_edit: Option<remote::RemoteSidebarEditMode>,
@@ -2452,6 +2469,8 @@ pub struct EditorView {
     pub(crate) swapped_workspace_root: Option<PathBuf>,
     pub(crate) focused_workspace_root: Option<PathBuf>,
     pub(crate) workspace_roots_scroll: ScrollHandle,
+    pub(crate) workspace_strip_scroll: ScrollHandle,
+    pub(crate) workspace_strip_drop_target: Option<(workspace_strip::WorkspaceKey, bool)>,
     pub(crate) workspace_drop_target: Option<(PathBuf, bool)>,
     pub(crate) workspace_drag_scroll: Option<Task<()>>,
     pub(crate) workspace_close: Option<workspace::WorkspaceClose>,
@@ -2867,6 +2886,11 @@ pub struct EditorView {
     pub(crate) workspace_search_epoch: usize,
     pub(crate) workspace_search_pending_paths: Vec<PathBuf>,
     pub(crate) workspace_search_has_more: bool,
+    /// Server-side search session behind the current SSH workspace search.
+    pub(crate) workspace_search_remote: Option<remote::WorkspaceSearchRemote>,
+    /// A search hit waiting for its remote file to finish opening.
+    pub(crate) remote_pending_search_match:
+        Option<(moeka_fs::path::ResourcePath, WorkspaceSearchMatch)>,
     pub(crate) workspace_search_scroll_handle: ScrollHandle,
     pub(crate) workspace_search_render_limit: usize,
     pub(crate) workspace_search_resizing: bool,
@@ -3138,9 +3162,14 @@ impl EditorView {
         );
         let mut this = Self {
             remote_workspace: None,
+            parked_remote_workspaces: Vec::new(),
+            remote_connect_epoch: 0,
             remote_workspace_active: false,
+            live_view: None,
             ssh_restore: None,
+            ssh_restore_more: Vec::new(),
             ssh_restore_error: None,
+            ssh_restore_errors: HashMap::new(),
             remote_documents: HashMap::new(),
             remote_input: None,
             remote_sidebar_edit: None,
@@ -3542,6 +3571,8 @@ impl EditorView {
             swapped_workspace_root: None,
             focused_workspace_root: None,
             workspace_roots_scroll: ScrollHandle::new(),
+            workspace_strip_scroll: ScrollHandle::new(),
+            workspace_strip_drop_target: None,
             workspace_drop_target: None,
             workspace_drag_scroll: None,
             workspace_close: None,
@@ -3667,6 +3698,8 @@ impl EditorView {
             workspace_search_epoch: 0,
             workspace_search_pending_paths: Vec::new(),
             workspace_search_has_more: false,
+            workspace_search_remote: None,
+            remote_pending_search_match: None,
             workspace_search_scroll_handle: ScrollHandle::new(),
             workspace_search_render_limit: list_viewport::SEARCH_LIST_POLICY.initial_count,
             workspace_search_resizing: false,
@@ -4904,7 +4937,7 @@ impl EditorView {
     }
 
     pub(crate) fn should_render_sidebar_panel(&self) -> bool {
-        self.sidebar_visible
+        (self.sidebar_visible && self.has_sidebar_workspace())
             || self.sidebar_width_task.is_some()
             || self.sidebar_width() > 0.5
             || self.workspace_search_panel_width() > 0.5
@@ -5065,16 +5098,17 @@ impl EditorView {
     }
 
     pub(crate) fn sync_sidebar_width_animation(&mut self, cx: &mut Context<Self>) {
+        let visible = self.sidebar_visible && self.has_sidebar_workspace();
         if !self.animations_enabled() {
             self.sidebar_width_epoch = self.sidebar_width_epoch.wrapping_add(1);
-            self.set_sidebar_width_immediately(if self.sidebar_visible {
+            self.set_sidebar_width_immediately(if visible {
                 self.sidebar_target_width()
             } else {
                 0.0
             });
             return;
         }
-        let target = if self.sidebar_visible {
+        let target = if visible {
             self.sidebar_target_width()
         } else {
             0.0
@@ -6539,7 +6573,11 @@ impl EditorView {
             }
             DialogAction::DismissOnly => {}
         }
-        self.restore_tab_after_close(cx);
+        // A queued close may already be asking about the next tab; returning to
+        // the original tab now would hide the tab that dialog refers to.
+        if self.dialog.is_none() {
+            self.restore_tab_after_close(cx);
+        }
         cx.notify();
     }
 

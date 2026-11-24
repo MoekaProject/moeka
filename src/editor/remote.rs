@@ -18,10 +18,9 @@ use moeka_fs::{
 };
 use moeka_ssh::{SshOptions, bundle::Bundle, filesystem::SshFilesystem};
 
-use super::search::{
-    SEARCH_CASE_ICON_SVG_PATH, SEARCH_REGEX_ICON_SVG_PATH, SEARCH_WHOLE_WORD_ICON_SVG_PATH,
-};
 use super::*;
+
+static NEXT_REMOTE_WORKSPACE_SERIAL: AtomicU64 = AtomicU64::new(0);
 
 const MAX_REMOTE_DOCUMENT_BYTES: usize = 128 * 1024 * 1024;
 
@@ -85,9 +84,51 @@ pub(crate) struct RemoteDirectoryEntry {
 
 #[derive(Clone)]
 pub(crate) struct RemoteSearchResult {
-    resource: ResourcePath,
-    snippet: String,
-    line: usize,
+    pub(super) resource: ResourcePath,
+    pub(super) snippet: String,
+    /// Zero-based line of the match.
+    pub(super) line: usize,
+    pub(super) start: usize,
+    pub(super) end: usize,
+}
+
+/// The server-side session feeding the workspace search panel.
+#[derive(Clone)]
+pub(crate) struct WorkspaceSearchRemote {
+    pub(super) session: u64,
+    pub(super) identity: FilesystemId,
+    pub(super) root: ResourcePath,
+    pub(super) generation: u64,
+}
+
+/// Remote paths are shown and grouped by the search panel as ordinary paths.
+pub(super) fn remote_path_buf(path: &NativePath) -> PathBuf {
+    match path {
+        NativePath::Unix(bytes) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStringExt;
+                PathBuf::from(std::ffi::OsString::from_vec(bytes.clone()))
+            }
+            #[cfg(not(unix))]
+            {
+                PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+            }
+        }
+        other => PathBuf::from(other.to_string()),
+    }
+}
+
+pub(super) fn remote_native_path(path: &Path) -> NativePath {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        NativePath::Unix(path.as_os_str().as_bytes().to_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        NativePath::Unix(path.to_string_lossy().replace('\\', "/").into_bytes())
+    }
 }
 
 #[derive(Clone)]
@@ -139,6 +180,10 @@ enum RemoteDocumentObservation {
 }
 
 pub(crate) struct RemoteWorkspace {
+    /// A replacement connection is being established after the link dropped.
+    pub reconnecting: bool,
+    /// Connection order; keeps sidebar rows put while workspaces swap slots.
+    serial: u64,
     pub(super) peer_scope: Option<[u8; 32]>,
     pub filesystem: Arc<SshFilesystem>,
     pub background_filesystem: Arc<SshFilesystem>,
@@ -159,10 +204,6 @@ pub(crate) struct RemoteWorkspace {
     pub connection_warning: Option<String>,
     pub watch_session: Option<u64>,
     pub watch_sequence: u64,
-    pub search_results: Vec<RemoteSearchResult>,
-    pub is_searching: bool,
-    pub search_session: Option<u64>,
-    pub search_filter: super::workspace_search::SearchPathFilter,
     sort_mode: SidebarSortMode,
     pub(super) file_list_dir: ResourcePath,
     pub(super) tree_scroll: gpui::ScrollHandle,
@@ -180,18 +221,25 @@ pub(crate) struct RemoteWorkspace {
     document_refresh_running: bool,
 }
 
+/// A saved SSH workspace that has not connected yet; `extra` indexes
+/// `ssh_restore_more`, `None` is the primary entry.
+#[derive(Clone)]
+struct PendingSshWorkspace {
+    extra: Option<usize>,
+    destination: String,
+    config_file: Option<PathBuf>,
+    root: ResourcePath,
+}
+
 #[derive(Clone)]
 pub(crate) enum RemoteInputMode {
     Connect,
     SaveAs(String),
-    Search,
 }
 
 pub(crate) struct RemoteInput {
     pub editor: gpui::Entity<crate::text_input::TextInput>,
     pub ssh_picker: Option<SshHostPicker>,
-    pub include_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
-    pub exclude_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub mode: RemoteInputMode,
     pub error: Option<String>,
 }
@@ -324,7 +372,7 @@ fn schedule_remote_filesystem_release(filesystem: Arc<SshFilesystem>, cx: &mut g
     .detach();
 }
 
-async fn cancel_remote_session(filesystem: Arc<SshFilesystem>, session: Option<u64>) {
+pub(super) async fn cancel_remote_session(filesystem: Arc<SshFilesystem>, session: Option<u64>) {
     if let Some(session) = session {
         let _ = crate::platform::fs_task::run("SSH session cleanup", scheduler_key(), move || {
             let _ = filesystem.request(Request::Cancel { session });
@@ -565,15 +613,24 @@ fn remote_connection(
     config_file: Option<PathBuf>,
     language: UiLanguage,
 ) -> io::Result<RemoteConnection> {
-    let filesystem = open_remote_filesystem(destination.clone(), config_file.clone(), language)?;
-    let (background_filesystem, channel_error) =
-        match open_remote_filesystem(destination, config_file, language) {
-            Ok(background) => match filesystem.verify_peer(&background) {
-                Ok(()) => (background, None),
-                Err(error) => (filesystem.clone(), Some(error.to_string())),
-            },
+    // The two channels bootstrap independently; their SSH round trips overlap.
+    let (filesystem, background) = std::thread::scope(|scope| {
+        let background = scope
+            .spawn(|| open_remote_filesystem(destination.clone(), config_file.clone(), language));
+        let filesystem = open_remote_filesystem(destination.clone(), config_file.clone(), language);
+        let background = background
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (filesystem, background)
+    });
+    let filesystem = filesystem?;
+    let (background_filesystem, channel_error) = match background {
+        Ok(background) => match filesystem.verify_peer(&background) {
+            Ok(()) => (background, None),
             Err(error) => (filesystem.clone(), Some(error.to_string())),
-        };
+        },
+        Err(error) => (filesystem.clone(), Some(error.to_string())),
+    };
     let root = ResourcePath {
         filesystem: filesystem.identity().clone(),
         path: remote_root,
@@ -614,7 +671,7 @@ fn remote_connection(
     ))
 }
 
-fn start_remote_search(
+pub(super) fn start_remote_search(
     filesystem: &SshFilesystem,
     root: &ResourcePath,
     options: SearchOptions,
@@ -644,11 +701,16 @@ fn start_remote_search(
             crate::i18n::remote_text(language, "search_response_error"),
         ));
     };
-    let (results, done) = next_remote_search_page(filesystem, root, session)?;
-    Ok((session, results, done))
+    match next_remote_search_page(filesystem, root, session) {
+        Ok((results, done)) => Ok((session, results, done)),
+        Err(error) => {
+            let _ = filesystem.request(Request::Cancel { session });
+            Err(error)
+        }
+    }
 }
 
-fn next_remote_search_page(
+pub(super) fn next_remote_search_page(
     filesystem: &SshFilesystem,
     root: &ResourcePath,
     session: u64,
@@ -662,12 +724,16 @@ fn next_remote_search_page(
                 path,
                 snippet,
                 line,
+                start,
+                end,
                 ..
             } => {
                 results.push(RemoteSearchResult {
                     resource: root.with_path(path),
                     snippet,
                     line,
+                    start,
+                    end,
                 });
             }
             SearchItem::Error(error) => return Err(fs_error(error)),
@@ -676,7 +742,7 @@ fn next_remote_search_page(
     Ok((results, done))
 }
 
-fn filter_remote_search_results(
+pub(super) fn filter_remote_search_results(
     root: &ResourcePath,
     filter: &super::workspace_search::SearchPathFilter,
     results: &mut Vec<RemoteSearchResult>,
@@ -800,7 +866,6 @@ fn remote_input_placeholder(mode: &RemoteInputMode, language: UiLanguage) -> Str
     match mode {
         RemoteInputMode::Connect => crate::i18n::remote_text(language, "host_placeholder"),
         RemoteInputMode::SaveAs(_) => crate::i18n::remote_text(language, "save_as_placeholder"),
-        RemoteInputMode::Search => crate::i18n::remote_text(language, "search_placeholder"),
     }
 }
 
@@ -1668,6 +1733,39 @@ impl EditorView {
         }
     }
 
+    /// A local folder or a connected SSH workspace gives the sidebar content.
+    pub(crate) fn has_sidebar_workspace(&self) -> bool {
+        !self.workspaces.is_empty()
+            || self.remote_workspace.is_some()
+            || matches!(
+                self.ssh_restore,
+                Some(config_store::SshRestore::Connected { .. })
+            )
+    }
+
+    /// Makes the connected SSH workspace that serves `resource` the active one,
+    /// preferring the workspace whose root contains it. False if none is connected.
+    pub(super) fn focus_remote_workspace_for_resource(
+        &mut self,
+        resource: &ResourcePath,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        for strict in [true, false] {
+            let serves = |workspace: &RemoteWorkspace| {
+                workspace.filesystem.identity() == &resource.filesystem
+                    && (!strict || resource_is_at_or_below(resource, &workspace.root))
+            };
+            if self.remote_workspace.as_ref().is_some_and(serves) {
+                return true;
+            }
+            if let Some(index) = self.parked_remote_workspaces.iter().position(serves) {
+                self.switch_remote_workspace(index, cx);
+                return true;
+            }
+        }
+        false
+    }
+
     pub(crate) fn remote_session_active(&self) -> bool {
         self.remote_workspace_active
             || self.workspaces.is_empty()
@@ -1680,18 +1778,9 @@ impl EditorView {
         if self.remote_workspace.is_none() {
             return;
         }
-        let remote_tab = self
-            .all_tabs()
-            .find(|tab| tab.is_remote && !tab.remote_binding_lost)
-            .map(|tab| tab.id.clone());
-        if let Some(tab_id) = remote_tab {
-            if let Some(owner) = self.pane_id_for_tab(&tab_id)
-                && owner != self.focused_pane_id
-            {
-                self.focus_pane(owner, cx);
-            }
-            self.switch_to_tab(&tab_id, cx);
-        }
+        // Each workspace has its own tab view; selecting it shows that view.
+        let key = self.remote_view_key_of_current();
+        self.show_view(key, cx);
         self.remote_workspace_active = true;
         self.sidebar_visible = true;
         self.workspace_search_visible = false;
@@ -1772,46 +1861,6 @@ impl EditorView {
         )
         .detach();
         let focus_handle = editor.read(cx).focus_handle.clone();
-        let search_filter_editor = |include: bool, cx: &mut Context<Self>| {
-            cx.new(|cx| {
-                let mut input = crate::text_input::TextInput::new(
-                    self.workspace_search_filter_text_input_styles(),
-                    crate::i18n::search_option_label(
-                        self.ui_language,
-                        if include {
-                            "include_placeholder"
-                        } else {
-                            "exclude_placeholder"
-                        },
-                    ),
-                    cx,
-                );
-                input.set_text(
-                    if include {
-                        &self.workspace_search_include
-                    } else {
-                        &self.workspace_search_exclude
-                    },
-                    cx,
-                );
-                input
-            })
-        };
-        let include_editor =
-            matches!(mode, RemoteInputMode::Search).then(|| search_filter_editor(true, cx));
-        let exclude_editor =
-            matches!(mode, RemoteInputMode::Search).then(|| search_filter_editor(false, cx));
-        for filter_editor in [&include_editor, &exclude_editor].into_iter().flatten() {
-            cx.subscribe(
-                filter_editor,
-                |this, _, event: &crate::text_input::TextInputEvent, cx| match event {
-                    crate::text_input::TextInputEvent::Submit => this.submit_remote_input(cx),
-                    crate::text_input::TextInputEvent::Escape => this.cancel_remote_input(cx),
-                    _ => {}
-                },
-            )
-            .detach();
-        }
         window.focus(&focus_handle);
         self.remote_input = Some(RemoteInput {
             editor,
@@ -1819,8 +1868,6 @@ impl EditorView {
                 loading: true,
                 ..Default::default()
             }),
-            include_editor,
-            exclude_editor,
             mode,
             error: None,
         });
@@ -2222,19 +2269,6 @@ impl EditorView {
                 }
             }
             RemoteInputMode::SaveAs(tab_id) => self.save_remote_as(&tab_id, value, cx),
-            RemoteInputMode::Search => {
-                self.workspace_search_include = input
-                    .include_editor
-                    .as_ref()
-                    .map(|editor| editor.read(cx).text().to_string())
-                    .unwrap_or_default();
-                self.workspace_search_exclude = input
-                    .exclude_editor
-                    .as_ref()
-                    .map(|editor| editor.read(cx).text().to_string())
-                    .unwrap_or_default();
-                self.search_remote(value, cx);
-            }
         }
     }
 
@@ -2254,13 +2288,6 @@ impl EditorView {
             cx.notify();
             return;
         }
-        if self.remote_workspace.is_some() {
-            self.notify_error(
-                crate::i18n::remote_text(self.ui_language, "already_connected"),
-                cx,
-            );
-            return;
-        }
         let language = self.ui_language;
         let (destination, root) = match parse_connect_input(input, language) {
             Ok(value) => value,
@@ -2272,7 +2299,7 @@ impl EditorView {
                 return;
             }
         };
-        self.start_remote_connection(destination, root, config_file, None, cx);
+        self.start_remote_connection(destination, root, config_file, None, true, cx);
     }
 
     pub(super) fn resume_ssh_workspace(&mut self, cx: &mut Context<Self>) {
@@ -2310,8 +2337,27 @@ impl EditorView {
             root.path,
             config_file,
             Some(root.filesystem),
+            true,
             cx,
         );
+        for extra in self.ssh_restore_more.clone() {
+            if let SshRestore::Connected {
+                destination,
+                config_file,
+                root,
+                ..
+            } = extra
+            {
+                self.start_remote_connection(
+                    destination,
+                    root.path,
+                    config_file,
+                    Some(root.filesystem),
+                    false,
+                    cx,
+                );
+            }
+        }
     }
 
     fn start_remote_connection(
@@ -2320,12 +2366,16 @@ impl EditorView {
         root: NativePath,
         config_file: Option<PathBuf>,
         restoring: Option<FilesystemId>,
+        foreground: bool,
         cx: &mut Context<Self>,
     ) {
         let language = self.ui_language;
         let expected_root = root.clone();
-        let generation = self.remote_generation.wrapping_add(1);
-        self.remote_generation = generation;
+        // Only a connection that will take over the sidebar supersedes others.
+        if foreground {
+            self.remote_connect_epoch = self.remote_connect_epoch.wrapping_add(1);
+        }
+        let connect_epoch = self.remote_connect_epoch;
         let input_generation = self.remote_input_generation;
         let picker_connection_generation = self
             .remote_input
@@ -2352,7 +2402,7 @@ impl EditorView {
                 Err(error) => (None, Some(error.to_string())),
             };
             let _ = this.update(cx, |editor, cx| {
-                if editor.remote_generation != generation
+                if (foreground && editor.remote_connect_epoch != connect_epoch)
                     || editor.remote_input_generation != input_generation
                     || picker_connection_generation.is_some_and(|generation| {
                         editor
@@ -2368,9 +2418,25 @@ impl EditorView {
                 if let (Some(expected), Some((fs, _, root, ..))) = (&restoring, &connection)
                     && (fs.identity() != expected || root.path != expected_root)
                 {
-                    editor.ssh_restore_error =
-                        Some(crate::i18n::remote_text(language, "wrong_connection"));
+                    editor.record_ssh_restore_error(
+                        &requested_destination,
+                        &expected_root,
+                        foreground,
+                        crate::i18n::remote_text(language, "wrong_connection"),
+                    );
                     cx.notify();
+                    return;
+                }
+                if let Some((_, _, root, ..)) = &connection
+                    && editor.remote_workspace_connected(&requested_destination, root)
+                {
+                    // Already open: reuse that workspace instead of a second connection.
+                    let root = root.clone();
+                    editor.forget_pending_ssh_restore(&requested_destination, &root);
+                    if restoring.is_none() {
+                        editor.cancel_remote_input(cx);
+                        editor.show_connected_remote_workspace(&requested_destination, &root, cx);
+                    }
                     return;
                 }
                 if let Some((
@@ -2389,13 +2455,13 @@ impl EditorView {
                     let identity = filesystem.identity().clone();
                     let reconnect_root = root.clone();
                     let reconnect_destination = requested_destination.clone();
-                    editor.remote_sidebar_filter_rows.clear();
-                    editor.remote_sidebar_filter_collapsed.clear();
-                    editor.invalidate_sidebar_filter_index();
-                    editor.remote_workspace = Some(RemoteWorkspace {
+                    let take_over = foreground || editor.remote_workspace.is_none();
+                    let mut workspace = RemoteWorkspace {
+                        reconnecting: false,
+                        serial: NEXT_REMOTE_WORKSPACE_SERIAL.fetch_add(1, Ordering::Relaxed),
                         peer_scope,
                         filesystem: filesystem.clone(),
-                        background_filesystem,
+                        background_filesystem: background_filesystem.clone(),
                         root: root.clone(),
                         destination: reconnect_destination.clone(),
                         config_file: requested_config_file.clone(),
@@ -2420,10 +2486,6 @@ impl EditorView {
                         }),
                         watch_session,
                         watch_sequence: 0,
-                        search_results: Vec::new(),
-                        is_searching: false,
-                        search_session: None,
-                        search_filter: super::workspace_search::SearchPathFilter::default(),
                         sort_mode: SidebarSortMode::NameAsc,
                         file_list_dir: reconnect_root.clone(),
                         tree_scroll: gpui::ScrollHandle::new(),
@@ -2439,64 +2501,56 @@ impl EditorView {
                         directory_epoch: 0,
                         documents_to_refresh: HashSet::new(),
                         document_refresh_running: false,
-                    });
-                    if restoring.is_none() {
-                        editor.remote_workspace_active = true;
+                    };
+                    editor.forget_pending_ssh_restore(&reconnect_destination, &reconnect_root);
+                    if !take_over {
+                        // Connected for the session restore; it waits unwatched until
+                        // the user switches to it.
+                        let session = workspace.watch_session.take();
+                        editor.parked_remote_workspaces.push(workspace);
+                        cx.spawn(async move |_, _| {
+                            cancel_remote_session(background_filesystem, session).await;
+                        })
+                        .detach();
+                        session_store::persist_session(editor);
+                        cx.notify();
+                        return;
                     }
+                    editor.park_active_remote_workspace(cx);
+                    editor.remote_generation = editor.remote_generation.wrapping_add(1);
+                    let generation = editor.remote_generation;
+                    editor.remote_sidebar_filter_rows.clear();
+                    editor.remote_sidebar_filter_collapsed.clear();
+                    editor.invalidate_sidebar_filter_index();
+                    editor.remote_workspace = Some(workspace);
                     editor.ssh_restore = None;
                     editor.ssh_restore_error = None;
-                    let has_matching_tabs = editor.all_tabs().any(|tab| {
-                        tab.remote.as_ref().is_some_and(|state| {
-                            remote_state_matches_workspace(
-                                state,
-                                &reconnect_destination,
-                                &reconnect_root,
-                            )
-                        })
-                    });
+                    if restoring.is_none() || editor.remote_workspace_active {
+                        editor.activate_remote_workspace(cx);
+                    } else if editor.workspaces.is_empty() && editor.remote_workspace_active {
+                        // Nothing else restores a sidebar for a remote-only session.
+                        editor.sidebar_visible = true;
+                        editor.sync_sidebar_width_animation(cx);
+                    }
+                    // Tabs of other connected workspaces keep their binding.
+                    let connected = editor
+                        .parked_remote_workspaces
+                        .iter()
+                        .map(|workspace| (workspace.destination.clone(), workspace.root.clone()))
+                        .collect::<Vec<_>>();
                     for tab in editor.all_tabs_mut() {
-                        if tab.is_remote {
+                        if tab.is_remote
+                            && !tab.remote.as_ref().is_some_and(|state| {
+                                connected.iter().any(|(destination, root)| {
+                                    remote_state_matches_workspace(state, destination, root)
+                                })
+                            })
+                        {
                             tab.remote_binding_lost = true;
                         }
                     }
                     editor.start_remote_watch(identity, generation, cx);
-                    let verified = peer_scope.is_some()
-                        && editor
-                            .all_tabs()
-                            .filter_map(|tab| tab.remote.as_ref())
-                            .filter(|state| {
-                                remote_state_matches_workspace(
-                                    state,
-                                    &reconnect_destination,
-                                    &reconnect_root,
-                                )
-                            })
-                            .all(|state| state.peer_scope == peer_scope);
-                    if has_matching_tabs && verified {
-                        editor.confirm_remote_rebind(generation, cx);
-                    } else if has_matching_tabs {
-                        editor.show_dialog(
-                            Dialog {
-                                title: crate::i18n::remote_text(editor.ui_language, "rebind_title"),
-                                message: crate::i18n::remote_text(
-                                    editor.ui_language,
-                                    "rebind_message",
-                                ),
-                                save_label: None,
-                                confirm_label: crate::i18n::remote_text(
-                                    editor.ui_language,
-                                    "continue",
-                                ),
-                                cancel_label: crate::i18n::remote_text(
-                                    editor.ui_language,
-                                    "cancel",
-                                ),
-                                is_danger: true,
-                                action: DialogAction::RebindRemote { generation },
-                            },
-                            cx,
-                        );
-                    }
+                    editor.begin_remote_rebind(cx);
                     session_store::persist_session(editor);
                     if restoring.is_none() {
                         editor.notify_info(
@@ -2506,7 +2560,12 @@ impl EditorView {
                     }
                 } else if let Some(error) = connect_error {
                     if restoring.is_some() {
-                        editor.ssh_restore_error = Some(error);
+                        editor.record_ssh_restore_error(
+                            &requested_destination,
+                            &expected_root,
+                            foreground,
+                            error,
+                        );
                         cx.notify();
                         return;
                     }
@@ -2529,6 +2588,463 @@ impl EditorView {
             }
         });
         result.detach();
+    }
+
+    pub(super) fn remote_workspace_connected(
+        &self,
+        destination: &str,
+        root: &ResourcePath,
+    ) -> bool {
+        self.remote_workspace
+            .iter()
+            .chain(self.parked_remote_workspaces.iter())
+            .any(|workspace| workspace.destination == destination && &workspace.root == root)
+    }
+
+    fn ssh_restore_key(destination: &str, root: &NativePath) -> String {
+        format!("{destination}\0{root}")
+    }
+
+    fn record_ssh_restore_error(
+        &mut self,
+        destination: &str,
+        root: &NativePath,
+        primary: bool,
+        error: String,
+    ) {
+        if primary {
+            self.ssh_restore_error = Some(error);
+        } else {
+            self.ssh_restore_errors
+                .insert(Self::ssh_restore_key(destination, root), error);
+        }
+    }
+
+    /// Restored workspaces still waiting for (or failing) their connection.
+    fn pending_ssh_workspaces(&self) -> Vec<PendingSshWorkspace> {
+        use config_store::SshRestore::Connected;
+        let primary = self.ssh_restore.iter().map(|entry| (None, entry));
+        let extras = self
+            .ssh_restore_more
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (Some(index), entry));
+        primary
+            .chain(extras)
+            .filter_map(|(extra, entry)| match entry {
+                Connected {
+                    destination,
+                    config_file,
+                    root,
+                    ..
+                } => Some(PendingSshWorkspace {
+                    extra,
+                    destination: destination.clone(),
+                    config_file: config_file.clone(),
+                    root: root.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn retry_pending_ssh_workspace(
+        &mut self,
+        pending: PendingSshWorkspace,
+        cx: &mut Context<Self>,
+    ) {
+        if !crate::platform::capabilities::CHILD_PROCESSES {
+            return;
+        }
+        match pending.extra {
+            None => self.ssh_restore_error = None,
+            Some(_) => {
+                self.ssh_restore_errors.remove(&Self::ssh_restore_key(
+                    &pending.destination,
+                    &pending.root.path,
+                ));
+            }
+        }
+        self.start_remote_connection(
+            pending.destination,
+            pending.root.path,
+            pending.config_file,
+            Some(pending.root.filesystem),
+            pending.extra.is_none(),
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn forget_pending_ssh_restore(&mut self, destination: &str, root: &ResourcePath) {
+        self.ssh_restore_errors
+            .remove(&Self::ssh_restore_key(destination, &root.path));
+        if matches!(
+            &self.ssh_restore,
+            Some(config_store::SshRestore::Connected { destination: pending, root: pending_root, .. })
+                if pending == destination && pending_root.path == root.path
+        ) {
+            self.ssh_restore = None;
+            self.ssh_restore_error = None;
+        }
+        self.ssh_restore_more.retain(|entry| {
+            !matches!(entry, config_store::SshRestore::Connected {
+                destination: pending,
+                root: pending_root,
+                ..
+            } if pending == destination && pending_root.path == root.path)
+        });
+    }
+
+    /// Brings an already connected workspace to the front, whichever slot holds it.
+    fn show_connected_remote_workspace(
+        &mut self,
+        destination: &str,
+        root: &ResourcePath,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(index) = self
+            .parked_remote_workspaces
+            .iter()
+            .position(|workspace| workspace.destination == destination && &workspace.root == root)
+        {
+            self.switch_remote_workspace(index, cx);
+        }
+        self.activate_remote_workspace(cx);
+    }
+
+    /// Moves the active SSH workspace aside. Its connection stays open, but it
+    /// stops watching and loses in-flight work, which is re-requested when it
+    /// becomes active again.
+    pub(super) fn park_active_remote_workspace(&mut self, cx: &mut Context<Self>) {
+        if self.remote_workspace.is_none() {
+            return;
+        }
+        self.cancel_workspace_search_remote_session(cx);
+        let Some(mut workspace) = self.remote_workspace.take() else {
+            return;
+        };
+        self.remote_generation = self.remote_generation.wrapping_add(1);
+        self.remote_watch_generation = self.remote_watch_generation.wrapping_add(1);
+        self.remote_search_generation = self.remote_search_generation.wrapping_add(1);
+        self.remote_opens_inflight.clear();
+        self.remote_sidebar_filter_epoch = self.remote_sidebar_filter_epoch.wrapping_add(1);
+        self.remote_sidebar_filter_task = None;
+        self.remote_sidebar_filter_rows.clear();
+        self.remote_sidebar_filter_collapsed.clear();
+        self.invalidate_sidebar_filter_index();
+        workspace.loading.clear();
+        workspace.refreshing.clear();
+        workspace.previews_loading.clear();
+        workspace.previews_waiting_refresh.clear();
+        workspace.image_requests.clear();
+        workspace.documents_to_refresh.clear();
+        workspace.document_refresh_running = false;
+        workspace.resource_epoch = workspace.resource_epoch.wrapping_add(1);
+        workspace.directory_epoch = workspace.directory_epoch.wrapping_add(1);
+        workspace.watch_sequence = 0;
+        let session = workspace.watch_session.take();
+        let filesystem = workspace.background_filesystem.clone();
+        cx.spawn(async move |_, _| {
+            cancel_remote_session(filesystem, session).await;
+        })
+        .detach();
+        self.parked_remote_workspaces.push(workspace);
+    }
+
+    /// Makes the parked workspace at `index` the active one.
+    pub(super) fn switch_remote_workspace(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.parked_remote_workspaces.len() {
+            return;
+        }
+        // Parking appends, so `index` still names the same workspace afterwards.
+        self.park_active_remote_workspace(cx);
+        let workspace = self.parked_remote_workspaces.remove(index);
+        self.remote_workspace = Some(workspace);
+        self.remote_generation = self.remote_generation.wrapping_add(1);
+        if self.remote_workspace.as_ref().is_some_and(|workspace| {
+            workspace.filesystem.is_closed() || workspace.background_filesystem.is_closed()
+        }) {
+            // It was parked while the link died; reconnect instead of watching.
+            self.reconnect_remote_workspace(cx);
+            self.follow_live_remote_view(cx);
+            session_store::persist_session(self);
+            cx.notify();
+            return;
+        }
+        self.restart_remote_watch(cx);
+        self.refresh_remote_tree(cx);
+        self.begin_remote_rebind(cx);
+        if self.workspace_search_visible {
+            self.run_workspace_search(cx);
+        }
+        self.follow_live_remote_view(cx);
+        session_store::persist_session(self);
+        cx.notify();
+    }
+
+    /// While an SSH view is on screen it always belongs to the current connection.
+    fn follow_live_remote_view(&mut self, cx: &mut Context<Self>) {
+        if self.live_view.is_some()
+            && let Some(key) = self.remote_view_key_of_current()
+        {
+            self.show_view(Some(key), cx);
+        }
+    }
+
+    fn remote_workspace_slot_mut(
+        &mut self,
+        destination: &str,
+        root: &ResourcePath,
+    ) -> Option<&mut RemoteWorkspace> {
+        self.remote_workspace
+            .iter_mut()
+            .chain(self.parked_remote_workspaces.iter_mut())
+            .find(|workspace| workspace.destination == destination && &workspace.root == root)
+    }
+
+    /// Replaces a dead connection with a fresh one, retrying with growing delays
+    /// until it works or the workspace is closed. Open tabs keep their binding;
+    /// their documents are reconciled once the link is back.
+    pub(super) fn reconnect_remote_workspace(&mut self, cx: &mut Context<Self>) {
+        const DELAYS_SECS: [u64; 6] = [0, 2, 5, 10, 30, 60];
+        let Some(workspace) = self.remote_workspace.as_mut() else {
+            return;
+        };
+        if workspace.reconnecting {
+            return;
+        }
+        workspace.reconnecting = true;
+        let destination = workspace.destination.clone();
+        let root = workspace.root.clone();
+        let config_file = workspace.config_file.clone();
+        let language = self.ui_language;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let mut attempt = 0_usize;
+            loop {
+                let delay = DELAYS_SECS[attempt.min(DELAYS_SECS.len() - 1)];
+                attempt += 1;
+                if delay > 0 {
+                    cx.background_executor()
+                        .timer(Duration::from_secs(delay))
+                        .await;
+                }
+                let still_wanted = this
+                    .update(cx, |editor, _| {
+                        editor
+                            .remote_workspace_slot_mut(&destination, &root)
+                            .is_some_and(|workspace| workspace.reconnecting)
+                    })
+                    .unwrap_or(false);
+                if !still_wanted {
+                    return;
+                }
+                let (connect_destination, connect_root, connect_config) =
+                    (destination.clone(), root.path.clone(), config_file.clone());
+                let result = crate::platform::fs_task::run_write(
+                    "SSH reconnect",
+                    scheduler_key(),
+                    move || {
+                        remote_connection(
+                            connect_destination,
+                            connect_root,
+                            connect_config,
+                            language,
+                        )
+                    },
+                )
+                .await;
+                let mut connection = match result {
+                    Ok(connection) => Some(connection),
+                    Err(error) => {
+                        let message = error.to_string();
+                        let _ = this.update(cx, |editor, cx| {
+                            if let Some(workspace) =
+                                editor.remote_workspace_slot_mut(&destination, &root)
+                            {
+                                workspace.error = Some(message);
+                            }
+                            cx.notify();
+                        });
+                        continue;
+                    }
+                };
+                let installed = this
+                    .update(cx, |editor, cx| {
+                        let Some((filesystem, background, _, entries, watch, warning, scope)) =
+                            connection.take()
+                        else {
+                            return true;
+                        };
+                        let identity = filesystem.identity().clone();
+                        let is_active = editor.remote_workspace.as_ref().is_some_and(|workspace| {
+                            workspace.destination == destination && workspace.root == root
+                        });
+                        let Some(workspace) = editor.remote_workspace_slot_mut(&destination, &root)
+                        else {
+                            // Closed meanwhile: hand the connection back for cleanup.
+                            connection = Some((
+                                filesystem,
+                                background,
+                                root.clone(),
+                                entries,
+                                watch,
+                                warning,
+                                scope,
+                            ));
+                            return true;
+                        };
+                        if !workspace.reconnecting {
+                            connection = Some((
+                                filesystem,
+                                background,
+                                root.clone(),
+                                entries,
+                                watch,
+                                warning,
+                                scope,
+                            ));
+                            return true;
+                        }
+                        workspace.filesystem = filesystem;
+                        workspace.background_filesystem = background.clone();
+                        workspace.peer_scope = scope;
+                        workspace.directories.insert(root.clone(), entries);
+                        workspace.loading.clear();
+                        workspace.refreshing.clear();
+                        workspace.error = None;
+                        workspace.watch_warning = None;
+                        workspace.connection_warning = warning.map(|error| {
+                            format!(
+                                "{}: {error}",
+                                crate::i18n::remote_text(language, "single_channel")
+                            )
+                        });
+                        workspace.watch_session = if is_active { watch } else { None };
+                        workspace.watch_sequence = 0;
+                        workspace.reconnecting = false;
+                        workspace.resource_epoch = workspace.resource_epoch.wrapping_add(1);
+                        workspace.directory_epoch = workspace.directory_epoch.wrapping_add(1);
+                        if is_active {
+                            editor.remote_generation = editor.remote_generation.wrapping_add(1);
+                            let generation = editor.remote_generation;
+                            editor.start_remote_watch(identity, generation, cx);
+                            editor.refresh_remote_tree(cx);
+                            editor.refresh_remote_documents(&[], true, cx);
+                        } else if watch.is_some() {
+                            cx.spawn(async move |_, _| {
+                                cancel_remote_session(background, watch).await;
+                            })
+                            .detach();
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(true);
+                if let Some((filesystem, background, _, _, watch, _, _)) = connection.take() {
+                    cancel_remote_session(background.clone(), watch).await;
+                    schedule_remote_filesystem_release(filesystem, cx);
+                    schedule_remote_filesystem_release(background, cx);
+                }
+                if installed {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Opens a fresh watch session for the active workspace and polls it.
+    fn restart_remote_watch(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.remote_workspace.as_ref() else {
+            return;
+        };
+        let filesystem = workspace.background_filesystem.clone();
+        let identity = workspace.filesystem.identity().clone();
+        let root = workspace.root.path.clone();
+        let generation = self.remote_generation;
+        cx.spawn(async move |this, cx| {
+            let session =
+                crate::platform::fs_task::run_background("SSH watch", scheduler_key(), move || {
+                    Ok(
+                        match filesystem.request(Request::StartWatch {
+                            root,
+                            generation: 1,
+                            recursive: true,
+                        }) {
+                            Ok(Response::Session(session)) => Some(session),
+                            _ => None,
+                        },
+                    )
+                })
+                .await
+                .ok()
+                .flatten();
+            let _ = this.update(cx, |editor, cx| {
+                let Some(workspace) = editor.remote_workspace.as_mut() else {
+                    return;
+                };
+                if editor.remote_generation != generation
+                    || workspace.filesystem.identity() != &identity
+                {
+                    return;
+                }
+                workspace.watch_session = session;
+                workspace.watch_sequence = 0;
+                if session.is_none() {
+                    workspace.error = Some(crate::i18n::remote_text(
+                        editor.ui_language,
+                        "watch_unavailable",
+                    ));
+                }
+                editor.start_remote_watch(identity, generation, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Rebinds disconnected tabs of the active workspace, asking first unless
+    /// every one of them was last seen on this same peer.
+    fn begin_remote_rebind(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.remote_workspace.as_ref() else {
+            return;
+        };
+        let destination = workspace.destination.clone();
+        let root = workspace.root.clone();
+        let peer_scope = workspace.peer_scope;
+        let generation = self.remote_generation;
+        let matching = |tab: &&OpenTab| {
+            tab.remote_binding_lost
+                && tab
+                    .remote
+                    .as_ref()
+                    .is_some_and(|state| remote_state_matches_workspace(state, &destination, &root))
+        };
+        let has_matching_tabs = self.all_tabs().any(|tab| matching(&tab));
+        let verified = peer_scope.is_some()
+            && self
+                .all_tabs()
+                .filter(matching)
+                .filter_map(|tab| tab.remote.as_ref())
+                .all(|state| state.peer_scope == peer_scope);
+        if has_matching_tabs && verified {
+            self.confirm_remote_rebind(generation, cx);
+        } else if has_matching_tabs {
+            self.show_dialog(
+                Dialog {
+                    title: crate::i18n::remote_text(self.ui_language, "rebind_title"),
+                    message: crate::i18n::remote_text(self.ui_language, "rebind_message"),
+                    save_label: None,
+                    confirm_label: crate::i18n::remote_text(self.ui_language, "continue"),
+                    cancel_label: crate::i18n::remote_text(self.ui_language, "cancel"),
+                    is_danger: true,
+                    action: DialogAction::RebindRemote { generation },
+                },
+                cx,
+            );
+        }
     }
 
     pub(super) fn confirm_remote_rebind(&mut self, generation: u64, cx: &mut Context<Self>) {
@@ -2605,20 +3121,27 @@ impl EditorView {
         let language = self.ui_language;
         cx.spawn(async move |this, cx| {
             let mut last_document_reconcile = std::time::Instant::now();
+            let mut ticks = 0_u32;
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(500))
                     .await;
+                ticks = ticks.wrapping_add(1);
                 let result = if let Some(session) = session {
                     let fs = filesystem.clone();
                     crate::platform::fs_task::run_background(
                         "SSH watch",
                         scheduler_key(),
+                        // A short deadline: a hung link is declared dead (and replaced)
+                        // within seconds instead of the 30 s default.
                         move || match fs
-                            .request(Request::PollWatch {
-                                session,
-                                after_sequence: sequence,
-                            })
+                            .request_with_timeout(
+                                Request::PollWatch {
+                                    session,
+                                    after_sequence: sequence,
+                                },
+                                Duration::from_secs(10),
+                            )
                             .map_err(fs_error)?
                         {
                             Response::Watch(batch) => Ok(Some(batch)),
@@ -2626,6 +3149,18 @@ impl EditorView {
                                 io::ErrorKind::InvalidData,
                                 crate::i18n::remote_text(language, "watch_response_error"),
                             )),
+                        },
+                    )
+                    .await
+                } else if ticks % 10 == 0 {
+                    // Without a watch session, a periodic ping still notices a dead link.
+                    let fs = filesystem.clone();
+                    crate::platform::fs_task::run_background(
+                        "SSH ping",
+                        scheduler_key(),
+                        move || {
+                            fs.request(Request::PeerIdentity).map_err(fs_error)?;
+                            Ok(None)
                         },
                     )
                     .await
@@ -2641,6 +3176,12 @@ impl EditorView {
                             || editor.remote_watch_generation != watch_generation
                             || workspace.filesystem.identity() != &identity
                         {
+                            return false;
+                        }
+                        if workspace.filesystem.is_closed()
+                            || workspace.background_filesystem.is_closed()
+                        {
+                            editor.reconnect_remote_workspace(cx);
                             return false;
                         }
                         let mut reload = Vec::new();
@@ -2735,11 +3276,19 @@ impl EditorView {
     }
 
     pub(crate) fn disconnect_remote(&mut self, cx: &mut Context<Self>) {
+        if self.remote_workspace.is_none() {
+            return;
+        }
+        self.cancel_workspace_search_remote_session(cx);
+        // Leave this workspace's view (its tabs stay, unbound) before the connection goes.
+        let was_active = self.live_view.is_some();
+        if was_active {
+            self.show_view(None, cx);
+        }
         let Some(workspace) = self.remote_workspace.take() else {
             return;
         };
         self.remote_workspace_active = false;
-        self.ssh_restore = Some(config_store::SshRestore::Disconnected);
         self.resource_clipboard = None;
         self.remote_generation = self.remote_generation.wrapping_add(1);
         self.remote_watch_generation = self.remote_watch_generation.wrapping_add(1);
@@ -2750,8 +3299,35 @@ impl EditorView {
         self.remote_sidebar_filter_rows.clear();
         self.remote_sidebar_filter_collapsed.clear();
         self.remote_opens_inflight.clear();
-        for tab in self.all_tabs_mut().filter(|tab| tab.is_remote) {
+        for tab in self.all_tabs_mut().filter(|tab| {
+            tab.remote.as_ref().is_some_and(|state| {
+                remote_state_matches_workspace(state, &workspace.destination, &workspace.root)
+            })
+        }) {
             tab.remote_binding_lost = true;
+        }
+        if self.parked_remote_workspaces.is_empty() {
+            self.ssh_restore = Some(config_store::SshRestore::Disconnected);
+        } else {
+            self.remote_workspace = Some(self.parked_remote_workspaces.remove(0));
+            if was_active && self.workspaces.is_empty() {
+                // Without a local workspace the next SSH workspace takes over the view.
+                let key = self.remote_view_key_of_current();
+                self.show_view(key, cx);
+            }
+            self.restart_remote_watch(cx);
+            self.refresh_remote_tree(cx);
+            self.begin_remote_rebind(cx);
+        }
+        if self.workspaces.is_empty() && self.remote_workspace.is_none() {
+            self.sidebar_visible = false;
+            self.sidebar_resizing = false;
+            self.workspace_search_visible = false;
+            self.reset_sidebar_filter(cx);
+            self.sync_sidebar_width_animation(cx);
+        }
+        if self.workspace_search_visible {
+            self.run_workspace_search(cx);
         }
         session_store::persist_session(self);
         let filesystem = workspace.filesystem;
@@ -3451,6 +4027,35 @@ impl EditorView {
         .detach();
     }
 
+    /// Opens a workspace-search hit; once the file is showing, the match is
+    /// revealed with the same highlighting and scrolling as a local one.
+    pub(super) fn open_remote_file_at_match(
+        &mut self,
+        resource: ResourcePath,
+        search_match: WorkspaceSearchMatch,
+        cx: &mut Context<Self>,
+    ) {
+        let line = search_match.line_number.saturating_sub(1);
+        self.remote_pending_search_match = Some((resource.clone(), search_match));
+        self.open_remote_file_with_location(resource, None, Some(line), cx);
+    }
+
+    /// Reveals `line`, upgrading to the pending search match for `resource`.
+    fn reveal_remote_target(
+        &mut self,
+        resource: &ResourcePath,
+        line: usize,
+        cx: &mut Context<Self>,
+    ) {
+        match self.remote_pending_search_match.take() {
+            Some((pending, search_match)) if &pending == resource => {
+                let path = remote_path_buf(&resource.path);
+                self.reveal_workspace_search_match(path, search_match, cx);
+            }
+            _ => self.reveal_line_in_current_buffer(line, cx),
+        }
+    }
+
     pub(super) fn open_remote_file(&mut self, resource: ResourcePath, cx: &mut Context<Self>) {
         self.open_remote_file_with_location(resource, None, None, cx);
     }
@@ -3490,7 +4095,7 @@ impl EditorView {
             {
                 self.reveal_line_in_current_buffer(line, cx);
             } else if let Some(line) = target_line {
-                self.reveal_line_in_current_buffer(line, cx);
+                self.reveal_remote_target(&resource, line, cx);
             }
             return;
         }
@@ -3650,7 +4255,7 @@ impl EditorView {
                             {
                                 editor.reveal_line_in_current_buffer(line, cx);
                             } else if let Some(line) = target_line {
-                                editor.reveal_line_in_current_buffer(line, cx);
+                                editor.reveal_remote_target(&open_resource, line, cx);
                             }
                             session_store::persist_session(editor);
                             cx.notify();
@@ -4141,156 +4746,6 @@ impl EditorView {
                 cx.notify();
             })
             .ok();
-        })
-        .detach();
-    }
-
-    fn search_remote(&mut self, query: String, cx: &mut Context<Self>) {
-        if query.is_empty() {
-            return;
-        }
-        let filter = match self.workspace_search_path_filter() {
-            Ok(filter) => filter,
-            Err(error) => {
-                self.notify_error(error.to_string(), cx);
-                return;
-            }
-        };
-        self.remote_search_generation = self.remote_search_generation.wrapping_add(1);
-        let search_generation = self.remote_search_generation;
-        let Some(workspace) = self.remote_workspace.as_mut() else {
-            return;
-        };
-        let filesystem = workspace.background_filesystem.clone();
-        let root = workspace.root.clone();
-        let previous_session = workspace.search_session.take();
-        let identity = filesystem.identity().clone();
-        let generation = self.remote_generation;
-        let options = SearchOptions {
-            query,
-            case_sensitive: self.workspace_search_case_sensitive,
-            whole_word: self.workspace_search_whole_word,
-            regex: self.workspace_search_use_regex,
-        };
-        let filters = moeka_fs::search::SearchPathFilters {
-            include: self.workspace_search_include.clone(),
-            exclude: self.workspace_search_exclude.clone(),
-        };
-        workspace.is_searching = true;
-        workspace.search_filter = filter;
-        workspace.error = None;
-        self.remote_input = None;
-        let language = self.ui_language;
-        cx.spawn(async move |this, cx| {
-            let search_root = root.clone();
-            let search_filesystem = filesystem.clone();
-            let mut result = Some(
-                crate::platform::fs_task::run_background(
-                    "SSH search",
-                    scheduler_key(),
-                    move || {
-                        if let Some(session) = previous_session {
-                            let _ = search_filesystem.request(Request::Cancel { session });
-                        }
-                        start_remote_search(
-                            &search_filesystem,
-                            &search_root,
-                            options,
-                            filters,
-                            language,
-                        )
-                    },
-                )
-                .await,
-            );
-            this.update(cx, |editor, cx| {
-                let Some(workspace) = editor.remote_workspace.as_mut() else {
-                    return;
-                };
-                if editor.remote_generation != generation
-                    || editor.remote_search_generation != search_generation
-                    || workspace.filesystem.identity() != &identity
-                {
-                    return;
-                }
-                workspace.is_searching = false;
-                match result.take().expect("search result is consumed once") {
-                    Ok((session, mut results, done)) => {
-                        filter_remote_search_results(
-                            &workspace.root,
-                            &workspace.search_filter,
-                            &mut results,
-                        );
-                        workspace.search_results = results;
-                        workspace.search_session = (!done).then_some(session);
-                    }
-                    Err(error) => workspace.error = Some(error.to_string()),
-                }
-                cx.notify();
-            })
-            .ok();
-            if let Some(Ok((session, _, false))) = result {
-                cancel_remote_session(filesystem.clone(), Some(session)).await;
-            }
-        })
-        .detach();
-    }
-
-    fn load_more_remote_search(&mut self, cx: &mut Context<Self>) {
-        let Some(workspace) = self.remote_workspace.as_mut() else {
-            return;
-        };
-        let Some(session) = workspace.search_session.take() else {
-            return;
-        };
-        let filesystem = workspace.background_filesystem.clone();
-        let root = workspace.root.clone();
-        let identity = filesystem.identity().clone();
-        let generation = self.remote_generation;
-        let search_generation = self.remote_search_generation;
-        workspace.is_searching = true;
-        cx.spawn(async move |this, cx| {
-            let search_filesystem = filesystem.clone();
-            let result = crate::platform::fs_task::run_background(
-                "SSH search page",
-                scheduler_key(),
-                move || next_remote_search_page(&search_filesystem, &root, session),
-            )
-            .await;
-            let accepted = this
-                .update(cx, |editor, cx| {
-                    let Some(workspace) = editor.remote_workspace.as_mut() else {
-                        return false;
-                    };
-                    if editor.remote_generation != generation
-                        || editor.remote_search_generation != search_generation
-                        || workspace.filesystem.identity() != &identity
-                    {
-                        return false;
-                    }
-                    workspace.is_searching = false;
-                    match result {
-                        Ok((mut items, done)) => {
-                            filter_remote_search_results(
-                                &workspace.root,
-                                &workspace.search_filter,
-                                &mut items,
-                            );
-                            workspace.search_results.extend(items);
-                            workspace.search_session = (!done).then_some(session);
-                        }
-                        Err(error) => {
-                            workspace.search_session = Some(session);
-                            workspace.error = Some(error.to_string());
-                        }
-                    }
-                    cx.notify();
-                    true
-                })
-                .unwrap_or(false);
-            if !accepted {
-                cancel_remote_session(filesystem.clone(), Some(session)).await;
-            }
         })
         .detach();
     }
@@ -5044,7 +5499,6 @@ impl EditorView {
         let mode_name = match &input.mode {
             RemoteInputMode::Connect => "add_ssh_directory",
             RemoteInputMode::SaveAs(_) => "save_as_title",
-            RemoteInputMode::Search => "search_title",
         };
         let title = crate::i18n::remote_text(self.ui_language, mode_name);
         let instruction = match &input.mode {
@@ -5089,87 +5543,6 @@ impl EditorView {
                             .child(instruction),
                     )
                     .child(editor)
-                    .when_some(input.include_editor.clone(), |this, editor| {
-                        this.child(editor)
-                    })
-                    .when_some(input.exclude_editor.clone(), |this, editor| {
-                        this.child(editor)
-                    })
-                    .when(matches!(input.mode, RemoteInputMode::Search), |this| {
-                        this.child(
-                            div()
-                                .flex()
-                                .gap(px(self.scaled(4.0)))
-                                .child(
-                                    crate::ui::button::icon_button(
-                                        "remote-search-case",
-                                        self.styles.workspace_toggle(),
-                                        crate::style::ControlState {
-                                            selected: self.workspace_search_case_sensitive,
-                                            ..Default::default()
-                                        },
-                                        self.ui_scale,
-                                    )
-                                    .child(
-                                        gpui::svg().path(SEARCH_CASE_ICON_SVG_PATH).size(px(16.0)),
-                                    )
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.workspace_search_case_sensitive =
-                                                !this.workspace_search_case_sensitive;
-                                            cx.notify();
-                                        }),
-                                    ),
-                                )
-                                .child(
-                                    crate::ui::button::icon_button(
-                                        "remote-search-word",
-                                        self.styles.workspace_toggle(),
-                                        crate::style::ControlState {
-                                            selected: self.workspace_search_whole_word,
-                                            ..Default::default()
-                                        },
-                                        self.ui_scale,
-                                    )
-                                    .child(
-                                        gpui::svg()
-                                            .path(SEARCH_WHOLE_WORD_ICON_SVG_PATH)
-                                            .size(px(16.0)),
-                                    )
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.workspace_search_whole_word =
-                                                !this.workspace_search_whole_word;
-                                            cx.notify();
-                                        }),
-                                    ),
-                                )
-                                .child(
-                                    crate::ui::button::icon_button(
-                                        "remote-search-regex",
-                                        self.styles.workspace_toggle(),
-                                        crate::style::ControlState {
-                                            selected: self.workspace_search_use_regex,
-                                            ..Default::default()
-                                        },
-                                        self.ui_scale,
-                                    )
-                                    .child(
-                                        gpui::svg().path(SEARCH_REGEX_ICON_SVG_PATH).size(px(16.0)),
-                                    )
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.workspace_search_use_regex =
-                                                !this.workspace_search_use_regex;
-                                            cx.notify();
-                                        }),
-                                    ),
-                                ),
-                        )
-                    })
                     .when_some(error, |this, error| {
                         this.child(
                             div()
@@ -5525,6 +5898,18 @@ impl EditorView {
         let context_path = path.clone();
         let is_dir = entry.metadata.is_dir;
         let id = resource_key(&path);
+        let drag_resources = self.dragged_remote_resources(&entry.resource);
+        let drag_label = entry.name.clone();
+        let drop_target = if is_dir {
+            entry.resource.clone()
+        } else {
+            entry
+                .resource
+                .parent()
+                .unwrap_or_else(|| entry.resource.clone())
+        };
+        let drag_over_bg = self.styles.sidebar.sidebar_item_selected_bg;
+        let ghost_style = self.styles.drag_preview(false, self.ui_scale);
         let visual =
             self.render_file_tree_row_visual(super::sidebar_render::FileTreeRowVisualSpec {
                 name: &entry.name,
@@ -5571,7 +5956,55 @@ impl EditorView {
                 this.activate_file_tree_resource(path.clone(), is_dir, event, window, cx);
             }),
         )
+        .when(!self.sidebar_resizing, |row| {
+            let count = drag_resources.len();
+            row.on_drag(
+                super::DraggedResources {
+                    resources: drag_resources,
+                },
+                move |_dragged, offset, _window, cx| {
+                    cx.new(|_cx| super::DraggedSidebarItemsView {
+                        label: drag_label.clone(),
+                        count,
+                        style: ghost_style.clone(),
+                        cursor_offset: offset,
+                    })
+                },
+            )
+        })
+        .drag_over::<super::DraggedResources>(move |style, _, _, _| style.bg(drag_over_bg))
+        .drag_over::<super::DraggedSidebarItems>(move |style, _, _, _| style.bg(drag_over_bg))
+        .on_drop({
+            let target = drop_target.clone();
+            cx.listener(move |this, dragged: &super::DraggedResources, window, cx| {
+                let copy = window.modifiers().alt;
+                this.drop_resources_into(dragged.resources.clone(), target.clone(), copy, cx);
+            })
+        })
+        .on_drop({
+            let target = drop_target;
+            cx.listener(
+                move |this, dragged: &super::DraggedSidebarItems, window, cx| {
+                    let copy = window.modifiers().alt;
+                    let resources = dragged.paths.iter().map(|path| ResourcePath::local(path));
+                    this.drop_resources_into(resources.collect(), target.clone(), copy, cx);
+                },
+            )
+        })
         .into_any_element()
+    }
+
+    /// The rows a drag starting on `resource` carries: the whole selection when
+    /// the row is part of it.
+    fn dragged_remote_resources(&self, resource: &ResourcePath) -> Vec<ResourcePath> {
+        match self.remote_workspace.as_ref() {
+            Some(workspace) if workspace.selected_paths.contains(resource) => {
+                super::file_tree::filter_resource_roots(
+                    workspace.selected_paths.iter().cloned().collect(),
+                )
+            }
+            _ => vec![resource.clone()],
+        }
     }
 
     fn collect_remote_rows(
@@ -5788,6 +6221,24 @@ impl EditorView {
                     "remote-file-list-{}",
                     resource_key(&path)
                 )))
+                .on_drag(
+                    super::DraggedResources {
+                        resources: self.dragged_remote_resources(&path),
+                    },
+                    {
+                        let label = entry.name.clone();
+                        let count = self.dragged_remote_resources(&path).len();
+                        let ghost_style = self.styles.drag_preview(false, self.ui_scale);
+                        move |_dragged, offset, _window, cx| {
+                            cx.new(|_cx| super::DraggedSidebarItemsView {
+                                label: label.clone(),
+                                count,
+                                style: ghost_style.clone(),
+                                cursor_offset: offset,
+                            })
+                        }
+                    },
+                )
                 .on_click(
                     cx.listener(move |editor, event: &gpui::ClickEvent, window, cx| {
                         cx.stop_propagation();
@@ -5926,16 +6377,6 @@ impl EditorView {
         self.prepare_starred_motion(&stars);
         let starred_section = self.render_starred_sidebar_section(&stars, cx);
         if self.remote_workspace.is_none() {
-            let saved_root = match &self.ssh_restore {
-                Some(config_store::SshRestore::Connected {
-                    root, destination, ..
-                }) => Some(format!(
-                    "{} · {}",
-                    root.path.file_name().unwrap_or_else(|| root.path.clone()),
-                    destination
-                )),
-                _ => None,
-            };
             return div()
                 .id("remote-sidebar")
                 .w(px(self.sidebar_layout_width()))
@@ -5949,63 +6390,11 @@ impl EditorView {
                 .children(
                     self.workspaces
                         .iter()
+                        .filter(|root| self.sidebar_lists_local_workspace(root))
                         .cloned()
                         .map(|root| self.render_workspace_root(root, cx)),
                 )
-                .when_some(saved_root, |row, label| {
-                    let error = self.ssh_restore_error.clone();
-                    row.child(super::tooltip::with_tooltip(
-                        crate::ui::list::tree_row(
-                            self.styles.sidebar_tree_row(),
-                            Default::default(),
-                            self.ui_scale,
-                        )
-                        .id("restoring-ssh-root")
-                        .pl(px(
-                            self.scaled(self.styles.sidebar.sidebar_root_padding_x_px)
-                        ))
-                        .child(gpui::svg().path(ROOT_SVG_PATH).size(px(
-                            self.scaled(self.styles.sidebar.sidebar_header_root_icon_size_px),
-                        )))
-                        .child(
-                            crate::ui::typography::badge(
-                                self.styles.sidebar_kind_badge(false),
-                                self.ui_scale,
-                            )
-                            .flex_none()
-                            .child("REMOTE"),
-                        )
-                        .child(div().min_w(px(0.)).truncate().child(label))
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_color(
-                                    self.styles
-                                        .quick_open
-                                        .quick_open_result_secondary_text_color,
-                                )
-                                .child(crate::i18n::remote_text(
-                                    self.ui_language,
-                                    if error.is_some() {
-                                        "offline"
-                                    } else {
-                                        "reconnecting"
-                                    },
-                                )),
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if this.ssh_restore_error.is_some() {
-                                this.resume_ssh_workspace(cx);
-                                cx.notify();
-                            }
-                        })),
-                        cx.entity(),
-                        error.unwrap_or_else(|| {
-                            crate::i18n::remote_text(self.ui_language, "reconnecting")
-                        }),
-                        None::<SharedString>,
-                    ))
-                })
+                .children(self.render_remote_workspace_rows(cx))
                 .child(div().flex_1())
                 .child(self.render_sidebar_settings_item(cx))
                 .into_any_element();
@@ -6022,74 +6411,10 @@ impl EditorView {
             .clone()
             .or_else(|| workspace.watch_warning.clone())
             .or_else(|| workspace.connection_warning.clone());
-        let searching = workspace.is_searching;
-        let search_results = workspace.search_results.clone();
-        let search_has_more = workspace.search_session.is_some();
         let rows = self.visible_remote_tree_rows();
         let ss = self.styles.sidebar.clone();
         let mut list = Vec::<AnyElement>::new();
-        if searching {
-            list.push(
-                div()
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .child(crate::i18n::remote_text(self.ui_language, "searching"))
-                    .into_any_element(),
-            );
-        } else if !search_results.is_empty() || search_has_more {
-            for (result_index, result) in search_results.into_iter().enumerate() {
-                let path = result.resource.clone();
-                let line = result.line;
-                let name = result
-                    .resource
-                    .path
-                    .file_name()
-                    .map(|name| name.to_string())
-                    .unwrap_or_else(|| result.resource.path.to_string());
-                list.push(
-                    div()
-                        .id(SharedString::from(format!(
-                            "remote-search-{}-{result_index}",
-                            resource_key(&result.resource),
-                        )))
-                        .w_full()
-                        .px(px(self.scaled(ss.sidebar_root_padding_x_px)))
-                        .py(px(self.scaled(5.0)))
-                        .text_color(ss.sidebar_item_text_color)
-                        .child(name)
-                        .child(
-                            div()
-                                .text_size(px(self.scaled(10.0)))
-                                .text_color(ss.sidebar_item_text_color)
-                                .child(result.snippet),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_remote_file_with_location(path.clone(), None, Some(line), cx)
-                        }))
-                        .into_any_element(),
-                );
-            }
-            if search_has_more {
-                list.push(
-                    crate::ui::button::button(
-                        "remote-search-more",
-                        self.styles.dialog_button(
-                            self.styles.dialog.dialog_btn_secondary_bg,
-                            self.styles.dialog.dialog_btn_secondary_text_color,
-                            self.styles.dialog.dialog_btn_secondary_hover_bg,
-                        ),
-                        Default::default(),
-                        self.ui_scale,
-                    )
-                    .child(crate::i18n::remote_text(self.ui_language, "continue"))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| this.load_more_remote_search(cx)),
-                    )
-                    .into_any_element(),
-                );
-            }
-        } else {
+        {
             let guide_levels = super::sidebar_motion::file_tree_guide_levels(
                 &rows.iter().map(|(_, depth)| *depth).collect::<Vec<_>>(),
             );
@@ -6201,45 +6526,292 @@ impl EditorView {
             .into_any_element()
     }
 
-    pub(super) fn render_remote_workspace_root(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(workspace) = self.remote_workspace.as_ref() else {
-            return div().into_any_element();
+    /// Rows for every connected SSH workspace in connection order, so switching
+    /// the active one never reorders the list.
+    pub(super) fn render_remote_workspace_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut rows: Vec<(u64, Option<usize>)> = self
+            .remote_workspace
+            .iter()
+            .map(|workspace| (workspace.serial, None))
+            .chain(
+                self.parked_remote_workspaces
+                    .iter()
+                    .enumerate()
+                    .map(|(index, workspace)| (workspace.serial, Some(index))),
+            )
+            .collect();
+        rows.sort_by_key(|(serial, _)| *serial);
+        let strip = self.workspace_strip_visible();
+        let mut elements: Vec<AnyElement> = rows
+            .into_iter()
+            // The strip lists every workspace; the sidebar keeps the active one.
+            .filter(|(_, parked)| !strip || (parked.is_none() && self.remote_workspace_active))
+            .map(|(_, parked)| self.render_remote_workspace_row(parked, cx))
+            .collect();
+        if !strip {
+            for (index, pending) in self.pending_ssh_workspaces().into_iter().enumerate() {
+                elements.push(self.render_pending_remote_workspace_row(index, pending, cx));
+            }
+        }
+        elements
+    }
+
+    /// `(serial, parked index, workspace)` in connection order.
+    pub(super) fn remote_workspaces_in_order(&self) -> Vec<(u64, Option<usize>, &RemoteWorkspace)> {
+        let mut all: Vec<_> = self
+            .remote_workspace
+            .iter()
+            .map(|workspace| (workspace.serial, None, workspace))
+            .chain(
+                self.parked_remote_workspaces
+                    .iter()
+                    .enumerate()
+                    .map(|(index, workspace)| (workspace.serial, Some(index), workspace)),
+            )
+            .collect();
+        all.sort_by_key(|(serial, ..)| *serial);
+        all
+    }
+
+    pub(super) fn pending_ssh_workspace_count(&self) -> usize {
+        self.pending_ssh_workspaces().len()
+    }
+
+    /// Display name and whether it failed, for each saved workspace still connecting.
+    pub(super) fn pending_ssh_workspace_labels(&self) -> Vec<(String, bool)> {
+        self.pending_ssh_workspaces()
+            .into_iter()
+            .map(|pending| {
+                let failed = match pending.extra {
+                    None => self.ssh_restore_error.is_some(),
+                    Some(_) => self.ssh_restore_errors.contains_key(&Self::ssh_restore_key(
+                        &pending.destination,
+                        &pending.root.path,
+                    )),
+                };
+                let name = pending
+                    .root
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| pending.root.path.to_string())
+                    .to_uppercase();
+                (name, failed)
+            })
+            .collect()
+    }
+
+    pub(super) fn retry_pending_ssh_workspace_at(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_ssh_workspaces().into_iter().nth(index) else {
+            return;
         };
+        let failed = match pending.extra {
+            None => self.ssh_restore_error.is_some(),
+            Some(_) => self.ssh_restore_errors.contains_key(&Self::ssh_restore_key(
+                &pending.destination,
+                &pending.root.path,
+            )),
+        };
+        if failed {
+            self.retry_pending_ssh_workspace(pending, cx);
+        }
+    }
+
+    /// Makes the SSH workspace with this connection serial the active one.
+    pub(super) fn activate_remote_workspace_serial(&mut self, serial: u64, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .parked_remote_workspaces
+            .iter()
+            .position(|workspace| workspace.serial == serial)
+        {
+            self.switch_remote_workspace(index, cx);
+        }
+        self.activate_remote_workspace(cx);
+        if let Some(root) = self.remote_workspace.as_ref().map(|w| w.root.clone()) {
+            self.select_remote_sidebar_item(&root, false, false);
+            if self.file_list_visible {
+                if let Some(workspace) = self.remote_workspace.as_mut() {
+                    workspace.file_list_dir = root.clone();
+                }
+                self.load_remote_directory(root, cx);
+            }
+        }
+    }
+
+    /// Moves one SSH workspace next to another in the displayed order.
+    pub(super) fn reorder_remote_workspaces(&mut self, source: u64, target: u64, after: bool) {
+        if source == target {
+            return;
+        }
+        let mut order: Vec<u64> = self
+            .remote_workspaces_in_order()
+            .into_iter()
+            .map(|(serial, ..)| serial)
+            .collect();
+        let (Some(from), true) = (
+            order.iter().position(|serial| *serial == source),
+            order.contains(&target),
+        ) else {
+            return;
+        };
+        let moved = order.remove(from);
+        let to = order.iter().position(|serial| *serial == target).unwrap() + usize::from(after);
+        order.insert(to, moved);
+        for workspace in self
+            .remote_workspace
+            .iter_mut()
+            .chain(self.parked_remote_workspaces.iter_mut())
+        {
+            if let Some(position) = order.iter().position(|serial| *serial == workspace.serial) {
+                workspace.serial = position as u64;
+            }
+        }
+    }
+
+    /// A saved workspace that is still connecting (or offline): its name carries
+    /// the state as a prefix instead of a separate status label.
+    fn render_pending_remote_workspace_row(
+        &self,
+        index: usize,
+        pending: PendingSshWorkspace,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let ss = &self.styles.sidebar;
-        let root = workspace.root.clone();
-        let label = root
+        let error = match pending.extra {
+            None => self.ssh_restore_error.clone(),
+            Some(_) => self
+                .ssh_restore_errors
+                .get(&Self::ssh_restore_key(
+                    &pending.destination,
+                    &pending.root.path,
+                ))
+                .cloned(),
+        };
+        let name = pending
+            .root
             .path
             .file_name()
             .map(|name| name.to_string())
-            .unwrap_or_else(|| root.path.to_string());
-        crate::ui::list::tree_row(
+            .unwrap_or_else(|| pending.root.path.to_string())
+            .to_uppercase();
+        let state = crate::i18n::remote_text(
+            self.ui_language,
+            if error.is_some() {
+                "offline"
+            } else {
+                "reconnecting"
+            },
+        );
+        let label = format!("[{state}] {name}");
+        let tooltip = error.clone().unwrap_or_else(|| state.to_string());
+        let offline = error.is_some();
+        super::tooltip::with_tooltip(
+            crate::ui::list::tree_row(
+                self.styles.sidebar_tree_row(),
+                Default::default(),
+                self.ui_scale,
+            )
+            .opacity(0.5)
+            .id(("pending-ssh-root", index))
+            .pl(px(self.scaled(ss.sidebar_root_padding_x_px)))
+            .pr(px(self.scaled(ss.sidebar_item_padding_right_px)))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(self.scaled(ss.sidebar_item_gap_px)))
+            .child(
+                gpui::svg()
+                    .path(ROOT_SVG_PATH)
+                    .size(px(self.scaled(ss.sidebar_header_root_icon_size_px)))
+                    .flex_none()
+                    .text_color(ss.sidebar_item_icon_color),
+            )
+            .child(
+                crate::ui::typography::badge(self.styles.sidebar_kind_badge(false), self.ui_scale)
+                    .flex_none()
+                    .child("REMOTE"),
+            )
+            .child(
+                crate::ui::typography::label(
+                    self.styles.workspace_root_label(false),
+                    self.ui_scale,
+                )
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .child(label),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if offline {
+                    this.retry_pending_ssh_workspace(pending.clone(), cx);
+                }
+            })),
+            cx.entity(),
+            tooltip,
+            None::<SharedString>,
+        )
+    }
+
+    /// One sidebar row per connected SSH workspace: the active one (`None`)
+    /// or a parked one, which switches in when clicked.
+    pub(super) fn render_remote_workspace_row(
+        &self,
+        parked: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(workspace) = (match parked {
+            None => self.remote_workspace.as_ref(),
+            Some(index) => self.parked_remote_workspaces.get(index),
+        }) else {
+            return div().into_any_element();
+        };
+        let current = parked.is_none() && self.remote_workspace_active;
+        let ss = &self.styles.sidebar;
+        let root = workspace.root.clone();
+        let mut label = root
+            .path
+            .file_name()
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| root.path.to_string())
+            .to_uppercase();
+        if workspace.reconnecting {
+            label = format!(
+                "[{}] {label}",
+                crate::i18n::remote_text(self.ui_language, "reconnecting")
+            );
+        }
+        let id: gpui::ElementId = match parked {
+            None => "remote-workspace-root".into(),
+            Some(index) => ("remote-workspace-parked-root", index).into(),
+        };
+        let row = crate::ui::list::tree_row(
             self.styles.sidebar_tree_row(),
             crate::style::TreeRowState {
-                selected: self.remote_workspace_active && self.file_tree_resource_selected(&root),
+                selected: current && self.file_tree_resource_selected(&root),
                 resizing: self.sidebar_resizing,
                 ..Default::default()
             },
             self.ui_scale,
         )
-        .opacity(if self.remote_workspace_active {
-            1.0
-        } else {
-            0.5
-        })
-        .id("remote-workspace-root")
-        .debug_selector(|| "remote-workspace-root".into())
+        .opacity(if current { 1.0 } else { 0.5 })
+        .id(id)
         .pl(px(self.scaled(ss.sidebar_root_padding_x_px)))
         .pr(px(self.scaled(ss.sidebar_item_padding_right_px)))
         .flex_none()
         .flex()
         .items_center()
-        .gap(px(self.scaled(ss.sidebar_item_gap_px)))
-        .child(
+        .gap(px(self.scaled(ss.sidebar_item_gap_px)));
+        let row = if parked.is_none() {
+            row.debug_selector(|| "remote-workspace-root".into())
+        } else {
+            row
+        };
+        row.child(
             gpui::svg()
                 .path(ROOT_SVG_PATH)
                 .size(px(self.scaled(ss.sidebar_header_root_icon_size_px)))
                 .flex_none()
-                .text_color(if self.remote_workspace_active {
+                .text_color(if current {
                     ss.sidebar_item_selected_icon_color
                 } else {
                     ss.sidebar_item_icon_color
@@ -6248,28 +6820,29 @@ impl EditorView {
         .child(
             crate::ui::typography::badge(self.styles.sidebar_kind_badge(false), self.ui_scale)
                 .flex_none()
-                .debug_selector(|| "remote-workspace-tag".into())
+                .when(parked.is_none(), |tag| {
+                    tag.debug_selector(|| "remote-workspace-tag".into())
+                })
                 .child("REMOTE"),
         )
         .child(
-            crate::ui::typography::label(
-                self.styles
-                    .workspace_root_label(self.remote_workspace_active),
-                self.ui_scale,
-            )
-            .min_w(px(0.0))
-            .flex_1()
-            .truncate()
-            .child(label),
+            crate::ui::typography::label(self.styles.workspace_root_label(current), self.ui_scale)
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .child(label),
         )
-        .when(self.remote_workspace_active, |this| {
+        .when(current, |this| {
             this.child(self.render_remote_workspace_actions(root.clone(), cx))
         })
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(|this, _, window, cx| {
+            cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
                 window.prevent_default();
+                if let Some(index) = parked {
+                    this.switch_remote_workspace(index, cx);
+                }
                 this.activate_remote_workspace(cx);
                 if let Some(root) = this
                     .remote_workspace
@@ -6287,11 +6860,41 @@ impl EditorView {
                 window.focus(&this.focus_handle);
             }),
         )
+        .drag_over::<super::DraggedResources>({
+            let bg = ss.sidebar_item_selected_bg;
+            move |style, _, _, _| style.bg(bg)
+        })
+        .drag_over::<super::DraggedSidebarItems>({
+            let bg = ss.sidebar_item_selected_bg;
+            move |style, _, _, _| style.bg(bg)
+        })
+        .on_drop({
+            let target = root.clone();
+            cx.listener(move |this, dragged: &super::DraggedResources, window, cx| {
+                let copy = window.modifiers().alt;
+                this.drop_resources_into(dragged.resources.clone(), target.clone(), copy, cx);
+            })
+        })
+        .on_drop({
+            let target = root.clone();
+            cx.listener(
+                move |this, dragged: &super::DraggedSidebarItems, window, cx| {
+                    let copy = window.modifiers().alt;
+                    let resources = dragged.paths.iter().map(|path| ResourcePath::local(path));
+                    this.drop_resources_into(resources.collect(), target.clone(), copy, cx);
+                },
+            )
+        })
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
+                if let Some(index) = parked {
+                    // The menu acts on the active workspace.
+                    this.switch_remote_workspace(index, cx);
+                    this.activate_remote_workspace(cx);
+                }
                 this.open_file_tree_resource_context_menu(root.clone(), true, event, window, cx);
             }),
         )
@@ -6309,6 +6912,14 @@ impl EditorView {
             .flex()
             .items_center()
             .gap(px(self.scaled(ss.sidebar_header_action_gap_px)))
+            .child(self.render_sidebar_header_action_button(
+                "remote-sidebar-search",
+                FILETREE_SEARCH_SVG_PATH,
+                crate::i18n::sidebar_action_label(self.ui_language, "search"),
+                None,
+                cx,
+                |this, _, window, cx| this.toggle_workspace_search(window, cx),
+            ))
             .child(self.render_sidebar_header_action_button(
                 "remote-sidebar-sort",
                 FILETREE_SORT_SVG_PATH,
@@ -7191,16 +7802,17 @@ mod tests {
             "# copied directory\n"
         );
         cx.update(|_, cx| {
-            editor.update(cx, |editor, cx| editor.search_remote("needle".into(), cx))
+            editor.update(cx, |editor, cx| {
+                editor.workspace_search_query = "needle".into();
+                editor.run_workspace_search(cx);
+            })
         });
         wait_for(cx, &editor, "search", |editor| {
-            editor.remote_workspace.as_ref().is_some_and(|workspace| {
-                !workspace.is_searching
-                    && workspace
-                        .search_results
-                        .iter()
-                        .any(|result| result.resource == resource)
-            })
+            !editor.workspace_search_has_more
+                && editor
+                    .workspace_search_results
+                    .iter()
+                    .any(|result| result.path == remote_path_buf(&resource.path))
         });
         cx.update(|_, cx| {
             editor.update(cx, |editor, cx| {
@@ -7472,6 +8084,8 @@ mod tests {
                 }),
                 snippet: String::new(),
                 line: 0,
+                start: 0,
+                end: 0,
             })
             .collect::<Vec<_>>();
         let filter =
@@ -7492,6 +8106,8 @@ mod tests {
             resource: non_utf8.clone(),
             snippet: String::new(),
             line: 0,
+            start: 0,
+            end: 0,
         }];
         let filter = super::super::workspace_search::SearchPathFilter::new("bad-�", "").unwrap();
         filter_remote_search_results(&root, &filter, &mut results);
@@ -7629,5 +8245,109 @@ mod tests {
                 path: root.path.clone(),
             }
         ));
+    }
+
+    #[cfg(all(unix, feature = "gpui-test-support"))]
+    #[gpui::test]
+    #[ignore = "freezes a real helper process and rewrites HOME/PATH for the whole test binary"]
+    fn frozen_ssh_server_is_reconnected_automatically(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        use std::os::unix::fs::PermissionsExt;
+        let sandbox = tempfile::tempdir().unwrap();
+        let bin = sandbox.path().join("bin");
+        let home = sandbox.path().join("home");
+        let work = sandbox.path().join("work");
+        for dir in [&bin, &home, &work] {
+            moeka_fs::local::native::create_dir(dir).unwrap();
+        }
+        // A stand-in `ssh` that runs the remote command locally.
+        let fake = bin.join("ssh");
+        moeka_fs::local::native::write(
+            &fake,
+            "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift; shift\nexec /bin/sh -c \"$*\"\n",
+        )
+        .unwrap();
+        moeka_fs::local::native::set_permissions(
+            &fake,
+            moeka_fs::local::native::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        // SAFETY: single-threaded test setup before any connection thread starts.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            );
+        }
+        let editor = cx
+            .update(|cx| cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some(""), false)));
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            struct Host(gpui::Entity<EditorView>, gpui::Subscription);
+            impl gpui::Render for Host {
+                fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                    div()
+                }
+            }
+            Host(editor.clone(), cx.observe(&editor, |_, _, cx| cx.notify()))
+        });
+        let wait =
+            |cx: &mut gpui::VisualTestContext, what: &str, ok: &dyn Fn(&EditorView) -> bool| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(150);
+                loop {
+                    cx.run_until_parked();
+                    if cx.update(|_, cx| ok(editor.read(cx))) {
+                        return;
+                    }
+                    assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+                    cx.executor().advance_clock(Duration::from_millis(500));
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            };
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.open_remote_input(RemoteInputMode::Connect, String::new(), window, cx);
+                editor.start_remote_connection(
+                    "fake".into(),
+                    NativePath::from_local(&work),
+                    None,
+                    None,
+                    true,
+                    cx,
+                );
+            })
+        });
+        wait(cx, "initial connect", &|editor| {
+            editor.remote_workspace.is_some()
+        });
+        let first = cx.update(|_, cx| {
+            editor
+                .read(cx)
+                .remote_workspace
+                .as_ref()
+                .unwrap()
+                .filesystem
+                .clone()
+        });
+        let pids = String::from_utf8(
+            std::process::Command::new("pgrep")
+                .args(["-f", "moeka-remote-server"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert!(!pids.trim().is_empty(), "no server process found");
+        for pid in pids.split_whitespace() {
+            // SAFETY: plain signal to the helper processes this test spawned.
+            unsafe { libc::kill(pid.parse().unwrap(), libc::SIGSTOP) };
+        }
+        wait(cx, "replacement connection", &|editor| {
+            editor.remote_workspace.as_ref().is_some_and(|workspace| {
+                !workspace.reconnecting
+                    && !workspace.filesystem.is_closed()
+                    && !std::sync::Arc::ptr_eq(&workspace.filesystem, &first)
+            })
+        });
     }
 }

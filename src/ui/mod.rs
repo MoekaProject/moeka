@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn search_close_button_is_round_in_both_rounded_modes() {
+    fn search_close_button_is_round_only_in_full_corner_mode() {
         let theme = ThemeKind::OneDark.build();
         for corners in UiCorners::ALL {
             let mut spec = UiStyleSpec::default();
@@ -191,10 +191,10 @@ mod tests {
                     ControlState::default(),
                     scale,
                 );
-                let expected_radius = if corners == UiCorners::Square {
-                    0.0
-                } else {
-                    close.height_px * 0.5
+                let expected_radius = match corners {
+                    UiCorners::Square => 0.0,
+                    UiCorners::Half => styles.search_toggle().radius_px,
+                    UiCorners::Full => close.height_px * 0.5,
                 };
                 assert_eq!(
                     button.style().corner_radii.top_left,
@@ -281,10 +281,10 @@ mod tests {
                     ControlState::default(),
                     scale,
                 );
-                let radius = if corners == UiCorners::Square {
-                    0.0
-                } else {
-                    close.height_px * 0.5
+                let radius = match corners {
+                    UiCorners::Square => 0.0,
+                    UiCorners::Half => toggle.radius_px,
+                    UiCorners::Full => close.height_px * 0.5,
                 };
                 assert_eq!(
                     button.style().corner_radii.top_left,

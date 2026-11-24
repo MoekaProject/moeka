@@ -149,6 +149,8 @@ pub struct MinimapStyles {
     pub padding_px: f32,
     pub min_handle_hit_height_px: f32,
     pub border_width_px: f32,
+    pub diff_mark_width_px: f32,
+    pub diff_mark_min_height_px: f32,
     pub colors: crate::theme::MinimapPalette,
 }
 
@@ -2928,6 +2930,8 @@ impl Styles {
                 padding_px: 4.0,
                 min_handle_hit_height_px: 18.0,
                 border_width_px: 1.0,
+                diff_mark_width_px: 3.0,
+                diff_mark_min_height_px: 2.0,
                 colors: theme.minimap_palette(),
             },
             line_diff: LineDiffStyles::from_theme(theme, is_light),
@@ -5133,7 +5137,7 @@ impl Styles {
 
     pub fn workspace_close_search_button(&self) -> ControlStyle {
         let mut control = self.workspace_toggle();
-        if self.ui.spec.appearance.corners != UiCorners::Square {
+        if self.ui.spec.appearance.corners == UiCorners::Full {
             control.radius_px = control.height_px * 0.5;
         }
         control
@@ -5146,7 +5150,7 @@ impl Styles {
         } else {
             s.search_nav_btn_size_px
         };
-        if close && self.ui.spec.appearance.corners != UiCorners::Square {
+        if close && self.ui.spec.appearance.corners == UiCorners::Full {
             c.radius_px = c.height_px * 0.5;
         }
         c.icon_size_px = if close {

@@ -15,6 +15,7 @@ readme = "README.md"
 publish = false
 
 [build-dependencies]
+moeka-fs = { path = "crates/moeka-fs" }
 moeka-ssh = { path = "crates/moeka-ssh" }
 
 [[bin]]

@@ -71,15 +71,26 @@ impl<'a> Bundle<'a> {
         }
         let manifest: Manifest = serde_json::from_slice(&bytes[12..12 + length])
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if manifest.protocol != PROTOCOL_VERSION || manifest.payloads.len() != TARGETS.len() {
-            return Err(invalid("incomplete or incompatible remote bundle"));
+        if manifest.protocol != PROTOCOL_VERSION
+            || manifest.payloads.is_empty()
+            || manifest.payloads.len() > TARGETS.len()
+        {
+            return Err(invalid("empty or incompatible remote bundle"));
         }
         validate_build(&manifest.build)?;
         let compressed = &bytes[12 + length..];
         let mut offset = 0_usize;
-        for (index, payload) in manifest.payloads.iter().enumerate() {
-            if payload.target != TARGETS[index]
-                || payload.offset != offset
+        let mut next_target = 0_usize;
+        for payload in &manifest.payloads {
+            // Payloads follow `TARGETS` order, so duplicates are impossible.
+            let Some(position) = TARGETS[next_target..]
+                .iter()
+                .position(|target| *target == payload.target)
+            else {
+                return Err(invalid("invalid remote payload manifest"));
+            };
+            next_target += position + 1;
+            if payload.offset != offset
                 || payload.compressed_bytes == 0
                 || payload.uncompressed_bytes == 0
                 || payload.uncompressed_bytes > MAX_PAYLOAD_BYTES
@@ -105,6 +116,11 @@ impl<'a> Bundle<'a> {
         &self.manifest
     }
 
+    /// Official packages carry every target; local builds may carry fewer.
+    pub fn is_complete(&self) -> bool {
+        self.manifest.payloads.len() == TARGETS.len()
+    }
+
     pub fn validate_identity(&self, app_version: &str, source_sha: &str) -> io::Result<()> {
         if self.manifest.build.app_version != app_version
             || self.manifest.build.source_sha != source_sha
@@ -123,7 +139,15 @@ impl<'a> Bundle<'a> {
             .payloads
             .iter()
             .find(|payload| payload.target == target)
-            .ok_or_else(|| invalid("remote target missing from bundle"))?;
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "this build does not include an SSH server for {}",
+                        target.name()
+                    ),
+                )
+            })?;
         let compressed =
             &self.compressed[payload.offset..payload.offset + payload.compressed_bytes];
         let mut decoder = GzDecoder::new(compressed);
@@ -149,18 +173,22 @@ impl<'a> Bundle<'a> {
 
 pub fn create(build: BuildIdentity, payloads: &[(ServerTarget, &[u8])]) -> io::Result<Vec<u8>> {
     validate_build(&build)?;
-    if payloads.len() != TARGETS.len() {
-        return Err(invalid("all four remote targets are required"));
+    if payloads.is_empty() {
+        return Err(invalid("at least one remote target is required"));
     }
     let mut compressed = Vec::new();
     let mut entries = Vec::new();
-    for (index, target) in TARGETS.iter().enumerate() {
-        if payloads[index].0 != *target {
+    let mut next_target = 0_usize;
+    for (target, bytes) in payloads {
+        let Some(position) = TARGETS
+            .get(next_target..)
+            .and_then(|rest| rest.iter().position(|candidate| candidate == target))
+        else {
             return Err(invalid(
-                "remote payload targets are missing, duplicated or out of order",
+                "remote payload targets are duplicated or out of order",
             ));
-        }
-        let bytes = payloads[index].1;
+        };
+        next_target += position + 1;
         if bytes.is_empty() || bytes.len() > MAX_PAYLOAD_BYTES {
             return Err(invalid("remote executable exceeds its size budget"));
         }
@@ -305,15 +333,16 @@ mod tests {
     }
 
     #[test]
-    fn bundle_requires_all_targets_and_binds_payloads_to_source_and_architecture() {
+    fn bundle_binds_payloads_to_source_and_architecture() {
         let fixtures = fixtures();
         let inputs: Vec<_> = fixtures
             .iter()
             .map(|(target, bytes)| (*target, bytes.as_slice()))
             .collect();
-        assert!(create(build(), &inputs[..3]).is_err());
+        assert!(create(build(), &[]).is_err());
         let bytes = create(build(), &inputs).unwrap();
         let bundle = Bundle::parse(&bytes).unwrap();
+        assert!(bundle.is_complete());
         bundle.validate_identity("0.1.38", &"1".repeat(40)).unwrap();
         assert!(bundle.validate_identity("0.1.39", &"1".repeat(40)).is_err());
         for (target, bytes) in &fixtures {
@@ -323,6 +352,23 @@ mod tests {
         swapped.swap(0, 1);
         assert!(create(build(), &swapped).is_err());
         assert!(validate_executable(ServerTarget::MacosX86_64, &fixtures[3].1).is_err());
+    }
+
+    #[test]
+    fn partial_bundles_serve_only_their_targets() {
+        let fixtures = fixtures();
+        let inputs: Vec<_> = fixtures
+            .iter()
+            .map(|(target, bytes)| (*target, bytes.as_slice()))
+            .collect();
+        let bytes = create(build(), &[inputs[1], inputs[3]]).unwrap();
+        let bundle = Bundle::parse(&bytes).unwrap();
+        assert!(!bundle.is_complete());
+        assert!(bundle.payload(ServerTarget::LinuxAarch64).is_ok());
+        assert!(bundle.payload(ServerTarget::MacosAarch64).is_ok());
+        let error = bundle.payload(ServerTarget::LinuxX86_64).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(create(build(), &[inputs[1], inputs[1]]).is_err());
     }
 
     #[test]

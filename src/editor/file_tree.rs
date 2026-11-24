@@ -275,6 +275,50 @@ mod resource_menu_tests {
 
     #[cfg(feature = "gpui-test-support")]
     #[gpui::test]
+    fn dropping_resources_moves_or_copies_between_workspaces_without_using_the_clipboard(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+        let directory = tempfile::tempdir().unwrap();
+        let (a, b) = (directory.path().join("a"), directory.path().join("b"));
+        moeka_fs::local::native::create_dir_all(a.join("nested")).unwrap();
+        moeka_fs::local::native::create_dir(&b).unwrap();
+        moeka_fs::local::native::write(a.join("move.md"), "move").unwrap();
+        moeka_fs::local::native::write(a.join("nested/copy.md"), "copy").unwrap();
+        let editor = cx
+            .update(|cx| cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some(""), false)));
+        editor.update(cx, |editor, cx| {
+            editor.workspaces = vec![a.clone(), b.clone()];
+            editor.sidebar_root = a.clone();
+            let kept = vec![ResourcePath::local(Path::new("kept.md"))];
+            editor.set_resource_clipboard(kept.clone(), false);
+            let target = ResourcePath::local(&b);
+            editor.drop_resources_into(
+                vec![ResourcePath::local(&a.join("move.md"))],
+                target.clone(),
+                false,
+                cx,
+            );
+            editor.drop_resources_into(
+                vec![ResourcePath::local(&a.join("nested/copy.md"))],
+                target,
+                true,
+                cx,
+            );
+            assert_eq!(
+                editor.resource_clipboard_contents().unwrap().resources,
+                kept
+            );
+        });
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        assert!(b.join("move.md").exists() && !a.join("move.md").exists());
+        assert!(b.join("copy.md").exists() && a.join("nested/copy.md").exists());
+    }
+
+    #[cfg(feature = "gpui-test-support")]
+    #[gpui::test]
     fn clipboard_and_batch_stars_share_resource_state(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
         let editor = cx
@@ -469,8 +513,9 @@ impl EditorView {
             return Ok(ResourceFilesystem::Local);
         }
         self.remote_workspace
-            .as_ref()
-            .filter(|workspace| workspace.filesystem.identity() == &resource.filesystem)
+            .iter()
+            .chain(self.parked_remote_workspaces.iter())
+            .find(|workspace| workspace.filesystem.identity() == &resource.filesystem)
             .map(|workspace| ResourceFilesystem::Ssh(workspace.filesystem.clone()))
             .ok_or_else(|| {
                 std::io::Error::other(crate::i18n::remote_text(
@@ -488,6 +533,54 @@ impl EditorView {
         let Some(clipboard) = self.resource_clipboard_contents() else {
             return;
         };
+        self.paste_resources(clipboard, true, target, cx);
+    }
+
+    /// Moves (or with `copy`, copies) dragged resources into `target`, which may
+    /// live in another workspace or on another filesystem. Never touches the
+    /// user's clipboard.
+    pub(super) fn drop_resources_into(
+        &mut self,
+        resources: Vec<ResourcePath>,
+        target: ResourcePath,
+        copy: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_sidebar_drag_state(cx);
+        let resources = filter_resource_roots(resources)
+            .into_iter()
+            .filter(|resource| copy || resource.parent().as_ref() != Some(&target))
+            .collect::<Vec<_>>();
+        if resources.is_empty() {
+            return;
+        }
+        if target.filesystem != FilesystemId::Local
+            && !self.focus_remote_workspace_for_resource(&target, cx)
+        {
+            self.notify_error(
+                crate::i18n::remote_text(self.ui_language, "not_connected"),
+                cx,
+            );
+            return;
+        }
+        self.paste_resources(
+            ResourceClipboard {
+                resources,
+                is_cut: !copy,
+            },
+            false,
+            target,
+            cx,
+        );
+    }
+
+    fn paste_resources(
+        &mut self,
+        clipboard: ResourceClipboard,
+        from_clipboard: bool,
+        target: ResourcePath,
+        cx: &mut Context<Self>,
+    ) {
         if clipboard.is_cut
             && clipboard.resources.iter().any(|resource| {
                 self.workspaces
@@ -518,12 +611,21 @@ impl EditorView {
                 .collect::<std::io::Result<Vec<_>>>();
             match (paths, target.local_path()) {
                 (Ok(paths), Ok(target)) => {
-                    self.resource_clipboard = None;
+                    // A drop borrows the local clipboard slot and gives it back.
+                    let saved = (!from_clipboard)
+                        .then(|| (self.resource_clipboard.take(), self.file_clipboard.take()));
+                    if from_clipboard {
+                        self.resource_clipboard = None;
+                    }
                     self.file_clipboard = Some(FileClipboard {
                         paths,
                         is_cut: clipboard.is_cut,
                     });
                     self.paste_into_dir(target, cx);
+                    if let Some((resources, files)) = saved {
+                        self.resource_clipboard = resources;
+                        self.file_clipboard = files;
+                    }
                 }
                 (Err(error), _) | (_, Err(error)) => self.notify_error(error.to_string(), cx),
             }
@@ -576,7 +678,7 @@ impl EditorView {
                     .or_else(|| tab.path.as_deref().map(ResourcePath::local))
             })
             .collect::<Vec<_>>();
-        if clipboard.is_cut {
+        if clipboard.is_cut && from_clipboard {
             self.resource_clipboard = None;
             self.file_clipboard = None;
         }
@@ -1112,26 +1214,15 @@ impl EditorView {
             }
             Collapse | Expand | Search => {
                 self.activate_resource_workspace(resource, cx);
-                if local.is_some() {
-                    match action {
-                        Collapse => self.collapse_all_dirs(cx),
-                        Expand => self.expand_all_dirs(cx),
-                        _ => {
-                            if !self.workspace_search_visible {
-                                self.toggle_workspace_search(window, cx);
-                            }
+                match action {
+                    Collapse if local.is_some() => self.collapse_all_dirs(cx),
+                    Collapse => self.collapse_remote_directories(cx),
+                    Expand if local.is_some() => self.expand_all_dirs(cx),
+                    Expand => self.expand_remote_directories(cx),
+                    _ => {
+                        if !self.workspace_search_visible {
+                            self.toggle_workspace_search(window, cx);
                         }
-                    }
-                } else {
-                    match action {
-                        Collapse => self.collapse_remote_directories(cx),
-                        Expand => self.expand_remote_directories(cx),
-                        _ => self.open_remote_input(
-                            super::remote::RemoteInputMode::Search,
-                            String::new(),
-                            window,
-                            cx,
-                        ),
                     }
                 }
             }

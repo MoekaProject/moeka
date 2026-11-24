@@ -360,6 +360,9 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let toggle_actions = (pane_id == self.top_right_pane_id()
+            && !self.should_render_utility_panel())
+        .then(|| self.render_tab_bar_toggle_actions(cx));
         self.with_pane(pane_id, |this| {
             this.sync_table_source_view();
             let has_tabs = !this.tabs.is_empty();
@@ -405,7 +408,9 @@ impl EditorView {
                     .absolute()
                     .size_full(),
                 )
-                .when(has_tabs, |el| el.child(this.render_tab_bar(pane_id, cx)))
+                .when(has_tabs, |el| {
+                    el.child(this.render_tab_bar(pane_id, toggle_actions, cx))
+                })
                 .when(is_settings, |el| {
                     el.child(this.render_settings_panel(window, cx))
                 })

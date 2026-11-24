@@ -240,6 +240,16 @@ impl EditorView {
             .items_center()
             .gap(px(self.scaled(ss.sidebar_header_action_gap_px)))
             .child(self.render_sidebar_header_action_button(
+                "sidebar-header-search",
+                FILETREE_SEARCH_SVG_PATH,
+                crate::i18n::sidebar_action_label(self.ui_language, "search"),
+                None,
+                cx,
+                |this, _event, window, cx| {
+                    this.toggle_workspace_search(window, cx);
+                },
+            ))
+            .child(self.render_sidebar_header_action_button(
                 "sidebar-header-sort",
                 FILETREE_SORT_SVG_PATH,
                 crate::i18n::sidebar_action_label(self.ui_language, "sort"),
@@ -347,9 +357,13 @@ impl EditorView {
     pub(super) fn render_sidebar_settings_item(&self, cx: &mut Context<Self>) -> AnyElement {
         let ss = &self.styles.sidebar;
         let separator = self.styles.workspace_roots_separator();
+        // Same height as the editor status bar so the two bottom edges line up.
         div()
             .w_full()
+            .h(px(self.status_bar_height()))
             .flex_none()
+            .flex()
+            .flex_col()
             .border_t(px(separator.thickness_px))
             .border_color(separator.color)
             .child(
@@ -358,6 +372,7 @@ impl EditorView {
                     Default::default(),
                     self.ui_scale,
                 )
+                .h_full()
                 .id("sidebar-settings")
                 .debug_selector(|| "sidebar-settings".into())
                 .pl(px(self.scaled(ss.sidebar_root_padding_x_px)))
@@ -711,8 +726,11 @@ impl EditorView {
                                 }
                             }
                         } else {
-                            if !this.validate_resource_menu(&click_path, this.remote_generation, cx)
-                            {
+                            if !this.focus_remote_workspace_for_resource(&click_path, cx) {
+                                this.notify_error(
+                                    crate::i18n::remote_text(this.ui_language, "not_connected"),
+                                    cx,
+                                );
                                 return;
                             }
                             this.select_starred_resource(&click_path, mods.shift, secondary);
@@ -737,6 +755,7 @@ impl EditorView {
                             this.focused_sidebar_path = Some(path.clone());
                             this.open_starred_sidebar_context_menu(path, event.position, cx);
                         } else {
+                            this.focus_remote_workspace_for_resource(&context_menu_path, cx);
                             if !this.file_tree_resource_selected(&context_menu_path) {
                                 this.select_starred_resource(&context_menu_path, false, false);
                             }
@@ -1141,6 +1160,19 @@ impl EditorView {
                     this.copy_external_paths_into_dir(&paths, drop_path.clone(), cx);
                 })
             })
+            .drag_over::<DraggedResources>(move |style, _, _, _| style.bg(drag_over_bg))
+            .on_drop({
+                let drop_path = item_drop_target.clone();
+                cx.listener(move |this, dragged: &DraggedResources, window, cx| {
+                    let copy = window.modifiers().alt;
+                    this.drop_resources_into(
+                        dragged.resources.clone(),
+                        moeka_fs::path::ResourcePath::local(&drop_path),
+                        copy,
+                        cx,
+                    );
+                })
+            })
             .on_drag_move(cx.listener({
                 let path = path.clone();
                 let drop_path = item_drop_target.clone();
@@ -1286,44 +1318,7 @@ impl EditorView {
                 .into_any_element(),
             );
         }
-        if !has_root {
-            let empty_hover_bg = ss.sidebar_empty_btn_hover_bg;
-            tree_items.push(
-                div()
-                    .w_full()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .px(px(self.scaled(ss.sidebar_empty_padding_x_px)))
-                    .child(
-                        crate::ui::typography::label(
-                            crate::style::TextStyle::new(
-                                f32::from(px(self.scaled(ss.sidebar_empty_btn_font_size_px))),
-                                ss.sidebar_empty_btn_text_color,
-                            ),
-                            1.0,
-                        )
-                        .px(px(self.scaled(ss.sidebar_empty_btn_padding_x_px)))
-                        .py(px(self.scaled(ss.sidebar_empty_btn_padding_y_px)))
-                        .rounded_full()
-                        .border(px(ss.sidebar_empty_btn_border_width_px))
-                        .border_color(ss.sidebar_empty_btn_border_color)
-                        .hover(move |s| s.bg(empty_hover_bg))
-                        .cursor(CursorStyle::Arrow)
-                        .child(self.t(crate::i18n::TextKey::OpenFolder))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.open_add_workspace_menu(event.position, cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-            );
-        } else {
+        if has_root {
             let create_parent = if self.sidebar_edit_in_file_list {
                 None
             } else {

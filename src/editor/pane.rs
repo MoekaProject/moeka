@@ -714,6 +714,7 @@ impl EditorView {
         self.panes[index].state = state;
         let root = self
             .workspace_for_pane(pane_id)
+            .filter(|root| !super::workspace::is_remote_view_key(root))
             .unwrap_or_else(|| self.sidebar_root.clone());
         self.swapped_workspace_root = Some(std::mem::replace(&mut self.sidebar_root, root));
         self.swapped_pane_id = Some(pane_id);
@@ -757,7 +758,7 @@ impl EditorView {
         if !self.pane_layout.contains(pane_id)
             && let Some(root) = self.workspace_for_pane(pane_id)
         {
-            self.switch_workspace(root, cx);
+            self.switch_to_workspace_key(root, cx);
         }
         if pane_id == self.focused_pane_id {
             return;

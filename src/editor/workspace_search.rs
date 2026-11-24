@@ -399,23 +399,15 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_workspace_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.remote_session_active() {
-            if self.remote_workspace.is_some() {
-                self.open_remote_input(
-                    super::remote::RemoteInputMode::Search,
-                    String::new(),
-                    window,
-                    cx,
-                );
-            } else {
-                self.notify_error(
-                    crate::i18n::remote_text(self.ui_language, "not_connected"),
-                    cx,
-                );
-            }
+        let remote = self.remote_session_active();
+        if remote && self.remote_workspace.is_none() {
+            self.notify_error(
+                crate::i18n::remote_text(self.ui_language, "not_connected"),
+                cx,
+            );
             return;
         }
-        if self.workspaces.is_empty() {
+        if !remote && self.workspaces.is_empty() {
             self.workspace_search_visible = false;
             self.workspace_search_task = None;
             cx.notify();
@@ -510,6 +502,7 @@ impl EditorView {
         self.workspace_search_task = None;
         self.workspace_search_epoch = self.workspace_search_epoch.wrapping_add(1);
         self.workspace_search_has_more = false;
+        self.cancel_workspace_search_remote_session(cx);
         self.workspace_search_blur_sub = None;
         self.workspace_search_input_focused = false;
         self.clear_workspace_search_preview_state();
@@ -782,6 +775,13 @@ impl EditorView {
         focus_editor: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.workspace_search_remote_root().is_some() {
+            // Remote files open only on an explicit choice, never while stepping.
+            if permanent {
+                self.open_remote_search_match(&path, &search_match, cx);
+            }
+            return;
+        }
         if permanent {
             self.open_path_in_permanent_tab(path.clone(), focus_editor, cx);
         } else {
@@ -796,20 +796,70 @@ impl EditorView {
         }
     }
 
-    fn reveal_workspace_search_match(
+    pub(super) fn reveal_workspace_search_match(
         &mut self,
         path: PathBuf,
         search_match: WorkspaceSearchMatch,
         cx: &mut Context<Self>,
     ) {
         self.workspace_search_pending_navigation = None;
-        self.workspace_search_highlight_path = Some(path);
-        self.workspace_search_highlight_ranges =
-            vec![search_match.byte_offset..search_match.byte_end];
-        self.workspace_search_highlight_current_index = Some(0);
-        self.cursor.offset = search_match.byte_offset.min(self.buffer.len());
-        self.cursor.anchor = self.cursor.offset;
-        self.center_cursor_in_view_once(cx);
+        let remote = self.workspace_search_remote_root().is_some();
+        let Some(range) = self.workspace_search_match_range(&search_match, remote) else {
+            // The buffer no longer matches what the search saw: fall back to the line.
+            self.reveal_line_in_current_buffer(search_match.line_number.saturating_sub(1), cx);
+            return;
+        };
+        // Remote tabs have no local path, which `None` stands for here.
+        self.workspace_search_highlight_path = (!remote).then_some(path);
+        // Like the editor search: every match of the query is marked and the
+        // chosen one is the active one.
+        let mut ranges = self.workspace_search_highlight_matches();
+        let mut current = ranges.iter().position(|candidate| *candidate == range);
+        if current.is_none() {
+            ranges.push(range.clone());
+            current = Some(ranges.len() - 1);
+        }
+        self.workspace_search_highlight_ranges = ranges;
+        self.workspace_search_highlight_current_index = current;
+        self.reveal_source_range(&range, cx);
+    }
+
+    /// The match's byte range in the open buffer, when the buffer still holds
+    /// the text the search saw there.
+    fn workspace_search_match_range(
+        &self,
+        search_match: &WorkspaceSearchMatch,
+        verify: bool,
+    ) -> Option<std::ops::Range<usize>> {
+        let range = search_match.byte_offset..search_match.byte_end;
+        let text = self.buffer.text();
+        let matched = text.get(range.clone())?;
+        if range.is_empty() {
+            return None;
+        }
+        let expected = search_match.line_text.get(..search_match.match_end);
+        (!verify || expected.is_none_or(|expected| expected == matched)).then_some(range)
+    }
+
+    /// All matches of the workspace query in the open file, bounded so a huge
+    /// file never stalls the UI thread.
+    fn workspace_search_highlight_matches(&self) -> Vec<std::ops::Range<usize>> {
+        const MAX_SCANNED_BYTES: usize = 2 * 1024 * 1024;
+        const MAX_MATCHES: usize = 5_000;
+        let query = self.workspace_search_query.trim();
+        let text = self.buffer.text();
+        if query.is_empty() || text.len() > MAX_SCANNED_BYTES {
+            return Vec::new();
+        }
+        let mut ranges = find_search_matches(
+            text,
+            query,
+            self.workspace_search_case_sensitive,
+            self.workspace_search_whole_word,
+            self.workspace_search_use_regex,
+        );
+        ranges.truncate(MAX_MATCHES);
+        ranges
     }
 
     pub(super) fn apply_pending_workspace_search_match(
@@ -1068,6 +1118,7 @@ impl EditorView {
         self.clear_workspace_search_preview_state();
         self.workspace_search_collapse_toggled.clear();
         self.workspace_search_filter_error = self.workspace_search_path_filter().is_err();
+        self.cancel_workspace_search_remote_session(cx);
         if query.is_empty() || self.workspace_search_filter_error {
             self.workspace_search_results.clear();
             self.workspace_search_staging_results.clear();
@@ -1081,6 +1132,10 @@ impl EditorView {
             return;
         }
 
+        if self.workspace_search_remote_root().is_some() {
+            self.run_remote_workspace_search(query, cx);
+            return;
+        }
         let root = self.sidebar_root.clone();
         if root.as_os_str().is_empty() {
             self.workspace_search_results.clear();
@@ -1276,6 +1331,10 @@ impl EditorView {
         if self.workspace_search_task.is_some() || !self.workspace_search_has_more {
             return;
         }
+        if self.workspace_search_remote.is_some() {
+            self.schedule_remote_workspace_search_batch(cx);
+            return;
+        }
         let query = self.workspace_search_query.trim().to_string();
         if query.is_empty() {
             return;
@@ -1343,18 +1402,273 @@ impl EditorView {
                 if this.workspace_search_has_more {
                     this.schedule_workspace_search_batch(cx);
                 } else {
-                    let mut results = std::mem::take(&mut this.workspace_search_staging_results);
-                    sort_search_results(&mut results, this.sidebar_sort_mode);
-                    this.workspace_search_results = results;
-                    this.workspace_search_render_limit =
-                        super::list_viewport::SEARCH_LIST_POLICY.initial_count;
-                    this.workspace_search_scroll_handle.scroll_to_item(0);
+                    this.publish_workspace_search_results();
                 }
                 cx.notify();
             })
             .ok();
         });
         self.workspace_search_task = Some(task);
+    }
+
+    fn workspace_search_relative_path(&self, path: &std::path::Path) -> Option<String> {
+        let Some(root) = self.workspace_search_remote_root() else {
+            return self.relative_path_for_path(path);
+        };
+        let relative = path
+            .strip_prefix(super::remote::remote_path_buf(&root.path))
+            .ok()?;
+        Some(if relative.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            relative.to_string_lossy().into_owned()
+        })
+    }
+
+    /// Moves the fully scanned staging results into view.
+    fn publish_workspace_search_results(&mut self) {
+        let mut results = std::mem::take(&mut self.workspace_search_staging_results);
+        sort_search_results(&mut results, self.sidebar_sort_mode);
+        self.workspace_search_results = results;
+        self.workspace_search_render_limit = super::list_viewport::SEARCH_LIST_POLICY.initial_count;
+        self.workspace_search_scroll_handle.scroll_to_item(0);
+    }
+
+    /// The root of the SSH workspace the search panel currently searches.
+    pub(super) fn workspace_search_remote_root(&self) -> Option<moeka_fs::path::ResourcePath> {
+        if !self.remote_session_active() {
+            return None;
+        }
+        self.remote_workspace
+            .as_ref()
+            .map(|workspace| workspace.root.clone())
+    }
+
+    pub(super) fn cancel_workspace_search_remote_session(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.workspace_search_remote.take() else {
+            return;
+        };
+        let Some(workspace) = self
+            .remote_workspace
+            .as_ref()
+            .filter(|workspace| workspace.filesystem.identity() == &state.identity)
+        else {
+            return;
+        };
+        let filesystem = workspace.background_filesystem.clone();
+        cx.spawn(async move |_, _| {
+            super::remote::cancel_remote_session(filesystem, Some(state.session)).await;
+        })
+        .detach();
+    }
+
+    /// Search results from the SSH workspace look like local ones: matches are
+    /// grouped per file under the remote path.
+    fn stage_remote_search_results(
+        &mut self,
+        mut results: Vec<super::remote::RemoteSearchResult>,
+        root: &moeka_fs::path::ResourcePath,
+    ) {
+        let filter = self.workspace_search_path_filter().unwrap_or_default();
+        super::remote::filter_remote_search_results(root, &filter, &mut results);
+        for result in results {
+            let path = super::remote::remote_path_buf(&result.resource.path);
+            let match_end = result
+                .end
+                .saturating_sub(result.start)
+                .min(result.snippet.len());
+            let search_match = WorkspaceSearchMatch {
+                line_number: result.line + 1,
+                line_text: result.snippet,
+                match_start: 0,
+                match_end,
+                byte_offset: result.start,
+                byte_end: result.end,
+            };
+            match self.workspace_search_staging_results.last_mut() {
+                Some(last) if last.path == path => last.matches.push(search_match),
+                _ => self
+                    .workspace_search_staging_results
+                    .push(WorkspaceSearchResult {
+                        path,
+                        matches: vec![search_match],
+                        resume: None,
+                    }),
+            }
+        }
+    }
+
+    fn run_remote_workspace_search(&mut self, query: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.remote_workspace.as_ref() else {
+            return;
+        };
+        let root = workspace.root.clone();
+        let filesystem = workspace.background_filesystem.clone();
+        let identity = filesystem.identity().clone();
+        let generation = self.remote_generation;
+        self.workspace_search_epoch = self.workspace_search_epoch.wrapping_add(1);
+        let epoch = self.workspace_search_epoch;
+        self.workspace_search_task = None;
+        begin_workspace_search_staging(
+            &mut self.workspace_search_results,
+            &mut self.workspace_search_staging_results,
+        );
+        self.workspace_search_pending_paths.clear();
+        self.workspace_search_has_more = true;
+        let options = moeka_fs::service::SearchOptions {
+            query,
+            case_sensitive: self.workspace_search_case_sensitive,
+            whole_word: self.workspace_search_whole_word,
+            regex: self.workspace_search_use_regex,
+        };
+        let filters = moeka_fs::search::SearchPathFilters {
+            include: self.workspace_search_include.clone(),
+            exclude: self.workspace_search_exclude.clone(),
+        };
+        let language = self.ui_language;
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(150))
+                .await;
+            if this
+                .read_with(cx, |editor, _| editor.workspace_search_epoch != epoch)
+                .unwrap_or(true)
+            {
+                return;
+            }
+            let search_root = root.clone();
+            let search_filesystem = filesystem.clone();
+            let mut result = Some(
+                crate::platform::fs_task::run_background(
+                    "SSH search",
+                    super::remote::scheduler_key(),
+                    move || {
+                        super::remote::start_remote_search(
+                            &search_filesystem,
+                            &search_root,
+                            options,
+                            filters,
+                            language,
+                        )
+                    },
+                )
+                .await,
+            );
+            this.update(cx, |this, cx| {
+                let current = this.workspace_search_epoch == epoch
+                    && this.remote_generation == generation
+                    && this.workspace_search_remote_root().as_ref() == Some(&root)
+                    && this
+                        .remote_workspace
+                        .as_ref()
+                        .is_some_and(|workspace| workspace.filesystem.identity() == &identity);
+                if !current {
+                    return;
+                }
+                this.workspace_search_task = None;
+                match result.take().expect("search result is consumed once") {
+                    Ok((session, results, done)) => {
+                        this.workspace_search_remote =
+                            (!done).then(|| super::remote::WorkspaceSearchRemote {
+                                session,
+                                identity: identity.clone(),
+                                root: root.clone(),
+                                generation,
+                            });
+                        this.stage_remote_search_results(results, &root);
+                        this.workspace_search_has_more = !done;
+                        if done {
+                            this.publish_workspace_search_results();
+                        } else {
+                            this.schedule_workspace_search_batch(cx);
+                        }
+                    }
+                    Err(error) => {
+                        this.workspace_search_has_more = false;
+                        this.workspace_search_staging_results.clear();
+                        this.notify_error(error.to_string(), cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+            // Superseded before it could be adopted: release the server session.
+            if let Some(Ok((session, _, false))) = result {
+                super::remote::cancel_remote_session(filesystem, Some(session)).await;
+            }
+        });
+        self.workspace_search_task = Some(task);
+    }
+
+    fn schedule_remote_workspace_search_batch(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.workspace_search_remote.clone() else {
+            return;
+        };
+        let Some(workspace) = self
+            .remote_workspace
+            .as_ref()
+            .filter(|workspace| workspace.filesystem.identity() == &state.identity)
+        else {
+            self.workspace_search_remote = None;
+            self.workspace_search_has_more = false;
+            return;
+        };
+        let filesystem = workspace.background_filesystem.clone();
+        let epoch = self.workspace_search_epoch;
+        let task = cx.spawn(async move |this, cx| {
+            let page_root = state.root.clone();
+            let page = crate::platform::fs_task::run_background(
+                "SSH search",
+                super::remote::scheduler_key(),
+                move || {
+                    super::remote::next_remote_search_page(&filesystem, &page_root, state.session)
+                },
+            )
+            .await;
+            this.update(cx, |this, cx| {
+                if this.workspace_search_epoch != epoch
+                    || this.remote_generation != state.generation
+                {
+                    return;
+                }
+                this.workspace_search_task = None;
+                match page {
+                    Ok((results, done)) => {
+                        this.stage_remote_search_results(results, &state.root);
+                        this.workspace_search_has_more = !done;
+                        if done {
+                            this.workspace_search_remote = None;
+                            this.publish_workspace_search_results();
+                        } else {
+                            this.schedule_workspace_search_batch(cx);
+                        }
+                    }
+                    Err(error) => {
+                        this.workspace_search_remote = None;
+                        this.workspace_search_has_more = false;
+                        this.workspace_search_staging_results.clear();
+                        this.notify_error(error.to_string(), cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self.workspace_search_task = Some(task);
+    }
+
+    /// Opens a search hit that lives on the SSH workspace.
+    fn open_remote_search_match(
+        &mut self,
+        path: &std::path::Path,
+        search_match: &WorkspaceSearchMatch,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.workspace_search_remote_root() else {
+            return;
+        };
+        let resource = root.with_path(super::remote::remote_native_path(path));
+        self.open_remote_file_at_match(resource, search_match.clone(), cx);
     }
 
     fn new_workspace_search_filter_input(
@@ -1913,7 +2227,7 @@ impl EditorView {
                 if viewport.include(header_height) {
                     viewport.flush(&mut result_children);
                     let relative_path = self
-                        .relative_path_for_path(&result.path)
+                        .workspace_search_relative_path(&result.path)
                         .or_else(|| {
                             result
                                 .path
@@ -2091,6 +2405,9 @@ impl EditorView {
                     let path_for_click = path.clone();
                     let search_match_for_click = search_match.clone();
                     let line_num = search_match.line_number;
+                    // Several matches can share a line and a column in `line_text`
+                    // (remote snippets start at the match), so identify by file offset.
+                    let search_match_byte_offset = search_match.byte_offset;
                     let line_text = search_match.line_text.clone();
                     let start = search_match.match_start;
                     let end = search_match.match_end;
@@ -2117,7 +2434,7 @@ impl EditorView {
                             "ws-match-{}-{}-{}",
                             result.path.display(),
                             line_num,
-                            start
+                            search_match_byte_offset
                         )))
                         .child(
                             div()
@@ -2156,7 +2473,13 @@ impl EditorView {
                                 );
                             } else {
                                 this.workspace_search_selected_match = Some(current_match_index);
-                                if this.switch_to_existing_editor_tab_for_path(
+                                if this.workspace_search_remote_root().is_some() {
+                                    this.open_remote_search_match(
+                                        &path_for_click,
+                                        &search_match_for_click,
+                                        cx,
+                                    );
+                                } else if this.switch_to_existing_editor_tab_for_path(
                                     &path_for_click,
                                     true,
                                     cx,

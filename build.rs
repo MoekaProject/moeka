@@ -16,7 +16,11 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/index");
 
     let commit = git_output(&["rev-parse", "--short=12", "HEAD"]);
-    let source = git_output(&["rev-parse", "HEAD"]);
+    // Builds outside a Git checkout still need a well-formed identity to bind
+    // the embedded SSH server to this application.
+    let source = Some(git_output(&["rev-parse", "HEAD"]))
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or_else(|| "0".repeat(40));
     let tag = git_output(&["describe", "--tags", "--exact-match", "HEAD"]);
 
     println!("cargo:rustc-env=MOEKA_GIT_COMMIT={commit}");
@@ -100,7 +104,7 @@ mod embedded_assets {
                 !required,
                 "SSH-capable packages require MOEKA_REMOTE_BUNDLE"
             );
-            return None;
+            return dev_bundle(source);
         };
         println!("cargo:rerun-if-changed={}", path.display());
         let bytes = std::fs::read(&path)
@@ -110,11 +114,122 @@ mod embedded_assets {
         bundle
             .validate_identity(env!("CARGO_PKG_VERSION"), source)
             .unwrap_or_else(|error| panic!("remote bundle identity mismatch: {error}"));
-        for target in moeka_ssh::bundle::TARGETS {
-            bundle.payload(target).unwrap_or_else(|error| {
-                panic!("invalid {} remote payload: {error}", target.name())
+        assert!(
+            bundle.is_complete() || !required,
+            "SSH-capable packages require a bundle with every remote target"
+        );
+        for payload in &bundle.manifest().payloads {
+            bundle.payload(payload.target).unwrap_or_else(|error| {
+                panic!("invalid {} remote payload: {error}", payload.target.name())
             });
         }
+        Some(path)
+    }
+
+    /// Local builds have no CI-produced bundle, so SSH would be unusable. Build
+    /// the helper for the host and for every other target whose Rust standard
+    /// library is installed, and bundle whatever succeeds. Official packages
+    /// never reach this: they must supply a complete bundle.
+    fn dev_bundle(source: &str) -> Option<PathBuf> {
+        use moeka_ssh::ServerTarget::{LinuxAarch64, LinuxX86_64, MacosAarch64, MacosX86_64};
+
+        println!("cargo:rerun-if-env-changed=MOEKA_SKIP_DEV_REMOTE_BUNDLE");
+        println!("cargo:rerun-if-changed=Cargo.lock");
+        println!("cargo:rerun-if-changed=crates/moeka-fs");
+        println!("cargo:rerun-if-changed=crates/moeka-remote-server");
+        if std::env::var_os("MOEKA_SKIP_DEV_REMOTE_BUNDLE").is_some() {
+            return None;
+        }
+
+        let targets = [
+            (LinuxX86_64, "x86_64-unknown-linux-musl"),
+            (LinuxAarch64, "aarch64-unknown-linux-musl"),
+            (MacosX86_64, "x86_64-apple-darwin"),
+            (MacosAarch64, "aarch64-apple-darwin"),
+        ];
+        let host = std::env::var("HOST").unwrap_or_default();
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+        let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"))
+            .join("remote-dev");
+        let server_version = std::fs::read_to_string("crates/moeka-remote-server/Cargo.toml")
+            .ok()?
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("version = \"")
+                    .and_then(|rest| rest.strip_suffix('"'))
+                    .map(str::to_owned)
+            })?;
+        let build = moeka_fs::service::BuildIdentity {
+            server_version,
+            app_version: env!("CARGO_PKG_VERSION").into(),
+            source_sha: source.into(),
+        };
+
+        let mut payloads = Vec::new();
+        for (target, triple) in targets {
+            let installed = triple == host
+                || Command::new(&rustc)
+                    .args(["--print", "target-libdir", "--target", triple])
+                    .output()
+                    .ok()
+                    .filter(|output| output.status.success())
+                    .is_some_and(|output| {
+                        Path::new(String::from_utf8_lossy(&output.stdout).trim()).is_dir()
+                    });
+            if !installed {
+                println!(
+                    "cargo:warning=SSH server for {} skipped; run `rustup target add {triple}` and rebuild to include it",
+                    target.name()
+                );
+                continue;
+            }
+            let mut command = Command::new(&cargo);
+            command
+                .args([
+                    "build",
+                    "--release",
+                    "--locked",
+                    "-p",
+                    "moeka-remote-server",
+                ])
+                .args(["--target", triple])
+                .env("CARGO_TARGET_DIR", &target_dir)
+                .env("MOEKA_REMOTE_APP_VERSION", &build.app_version)
+                .env("MOEKA_REMOTE_SOURCE_SHA", &build.source_sha)
+                .env_remove("CARGO_ENCODED_RUSTFLAGS");
+            if triple.ends_with("linux-musl") {
+                // Pure-Rust static helper: LLVM's linker needs no cross toolchain.
+                let key = format!(
+                    "CARGO_TARGET_{}_LINKER",
+                    triple.to_uppercase().replace('-', "_")
+                );
+                command.env(key, "rust-lld");
+            }
+            let built = command.status().is_ok_and(|status| status.success());
+            let executable = target_dir.join(triple).join("release/moeka-remote-server");
+            match std::fs::read(&executable) {
+                Ok(bytes) if built => payloads.push((target, bytes)),
+                _ => println!(
+                    "cargo:warning=SSH server for {} failed to build",
+                    target.name()
+                ),
+            }
+        }
+        if payloads.is_empty() {
+            return None;
+        }
+        let inputs: Vec<_> = payloads
+            .iter()
+            .map(|(target, bytes)| (*target, bytes.as_slice()))
+            .collect();
+        let bytes = moeka_ssh::bundle::create(build, &inputs)
+            .unwrap_or_else(|error| panic!("create local remote bundle: {error}"));
+        let path = out_dir.join("servers.mrb");
+        std::fs::write(&path, bytes).expect("write local remote bundle");
         Some(path)
     }
 

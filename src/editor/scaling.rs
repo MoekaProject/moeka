@@ -525,6 +525,29 @@ impl EditorView {
         ) == std::cmp::Ordering::Equal
     }
 
+    /// Whether the laid-out row holding `offset` is fully inside the viewport.
+    /// Rows without measured layout (offscreen, folded, rendered tables) count
+    /// as not visible.
+    pub(crate) fn offset_visible_in_viewport(&self, offset: usize) -> bool {
+        if self.layout_dirty
+            || !self.active_tab_supports_text_buffer()
+            || self.last_viewport_height <= 0.0
+            || self.table_cell_for_offset(offset).is_some()
+        {
+            return false;
+        }
+        let Some((row_top, row_bottom)) = self.visual_row_vertical_bounds_for_offset(offset) else {
+            return false;
+        };
+        let text_top = self.text_y_offset_for_line(self.buffer.offset_to_line_col(offset).0);
+        caret_vertical_overflow(
+            text_top + row_top,
+            text_top + row_bottom,
+            self.scroll_offset,
+            self.scroll_offset + self.editor_visible_height(),
+        ) == std::cmp::Ordering::Equal
+    }
+
     pub(crate) fn keep_previously_visible_cursor_in_view(&mut self) -> bool {
         let Some((top, bottom)) = self.cursor_vertical_bounds() else {
             return false;
@@ -1994,7 +2017,7 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_sidebar_visibility(&mut self, cx: &mut Context<Self>) {
-        if self.workspaces.is_empty() {
+        if !self.has_sidebar_workspace() {
             self.sidebar_visible = false;
             self.sidebar_resizing = false;
             self.sync_sidebar_width_animation(cx);

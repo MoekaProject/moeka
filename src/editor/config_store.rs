@@ -116,6 +116,9 @@ pub(crate) struct SessionsFile {
 pub(crate) struct WorkspaceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshRestore>,
+    /// Further SSH workspaces besides `ssh`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ssh_more: Vec<SshRestore>,
     #[serde(default)]
     pub roots: Vec<PathBuf>,
     #[serde(default)]
@@ -663,6 +666,7 @@ mod tests {
                 active_root: Some(PathBuf::from("/tmp/project")),
                 bookmarks: BTreeMap::from([(PathBuf::from("/tmp/project"), "Ym9va".to_string())]),
                 ssh: None,
+                ssh_more: Vec::new(),
             },
             ..SessionsFile::default()
         };
@@ -671,6 +675,40 @@ mod tests {
         let loaded = load_yaml_file::<SessionsFile>(&path).unwrap();
 
         assert_eq!(loaded, sessions);
+    }
+
+    #[test]
+    fn several_ssh_workspaces_on_one_host_roundtrip_and_old_files_still_load() {
+        let workspace = |root: &str, active| SshRestore::Connected {
+            destination: "dev".into(),
+            config_file: None,
+            root: ResourcePath {
+                filesystem: moeka_fs::path::FilesystemId::Ssh([7; 32]),
+                path: moeka_fs::path::NativePath::unix_absolute(root).unwrap(),
+            },
+            active,
+        };
+        let config = WorkspaceConfig {
+            ssh: Some(workspace("/work/a", true)),
+            ssh_more: vec![workspace("/work/b", false)],
+            ..WorkspaceConfig::default()
+        };
+        let text = serde_yaml::to_string(&config).unwrap();
+        assert_eq!(
+            serde_yaml::from_str::<WorkspaceConfig>(&text).unwrap(),
+            config
+        );
+
+        let mut single = config.clone();
+        single.ssh_more.clear();
+        let text = serde_yaml::to_string(&single).unwrap();
+        assert!(!text.contains("ssh_more"));
+        assert!(
+            serde_yaml::from_str::<WorkspaceConfig>(&text)
+                .unwrap()
+                .ssh_more
+                .is_empty()
+        );
     }
 
     #[test]
