@@ -26,6 +26,7 @@ mod theme;
 mod ui;
 
 use crate::i18n::system_application_display_name;
+use moeka_fs::local::native as local_fs;
 use std::borrow::Cow;
 #[cfg(target_os = "macos")]
 use std::cell::RefCell;
@@ -52,9 +53,9 @@ fn log_nonfatal_error(message: std::fmt::Arguments<'_>) {
     {
         let path = editor::config_paths::cache_dir().join("app.log");
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = local_fs::create_dir_all(parent);
         }
-        if let Ok(mut file) = std::fs::OpenOptions::new()
+        if let Ok(mut file) = local_fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
@@ -102,7 +103,7 @@ impl AssetSource for FsAssets {
             return Ok(embedded_asset(path).map(Cow::Borrowed));
         };
 
-        Ok(Some(std::fs::read(resolved_path)?.into()))
+        Ok(Some(local_fs::read(resolved_path)?.into()))
     }
 
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
@@ -124,7 +125,7 @@ impl AssetSource for FsAssets {
                 .collect());
         };
 
-        Ok(std::fs::read_dir(resolved_path)?
+        Ok(local_fs::read_dir(resolved_path)?
             .filter_map(|entry| {
                 entry
                     .ok()
@@ -137,13 +138,15 @@ impl AssetSource for FsAssets {
 pub(crate) fn resolve_runtime_path(path: impl AsRef<Path>) -> Option<PathBuf> {
     let path = path.as_ref();
     if path.is_absolute() {
-        return path.exists().then(|| path.to_path_buf());
+        return moeka_fs::local::native::metadata(path)
+            .is_ok()
+            .then(|| path.to_path_buf());
     }
 
     runtime_search_roots()
         .into_iter()
         .map(|root| root.join(path))
-        .find(|candidate| candidate.exists())
+        .find(|candidate| moeka_fs::local::native::metadata(candidate).is_ok())
 }
 
 fn runtime_search_roots() -> Vec<PathBuf> {
@@ -199,7 +202,7 @@ fn open_launch_paths_with_policy(
                 let candidate = path.clone();
                 match platform::fs_task::run("Open launch path", path.clone(), move || {
                     let absolute = std::path::absolute(candidate)?;
-                    let metadata = std::fs::metadata(&absolute)?;
+                    let metadata = local_fs::metadata(&absolute)?;
                     Ok((absolute, metadata))
                 })
                 .await
@@ -483,9 +486,9 @@ fn install_panic_logger() {
     std::panic::set_hook(Box::new(move |info| {
         let path = editor::config_paths::cache_dir().join("crash.log");
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = local_fs::create_dir_all(parent);
         }
-        if let Ok(mut file) = std::fs::OpenOptions::new()
+        if let Ok(mut file) = local_fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
@@ -1060,7 +1063,7 @@ mod macos_file_open_tests {
     fn decodes_markdown_file_urls_with_spaces_and_unicode() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("示例 note.mdx");
-        std::fs::write(&path, "# MDX").expect("write mdx");
+        moeka_fs::local::native::write(&path, "# MDX").expect("write mdx");
         let encoded_path = path
             .to_string_lossy()
             .replace(' ', "%20")
@@ -1076,7 +1079,7 @@ mod macos_file_open_tests {
     fn defers_file_classification_without_probing_the_launch_path() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("notes.txt");
-        std::fs::write(&path, "notes").expect("write text");
+        moeka_fs::local::native::write(&path, "notes").expect("write text");
 
         assert_eq!(
             macos_markdown_path_from_url(&format!("file://{}", path.display())),

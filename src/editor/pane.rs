@@ -581,6 +581,7 @@ pane_state! {
     (wiki_link_query, String, String::new()),
     (wiki_link_recent_results, Vec<WorkspaceFileCandidate>, Vec::new()),
     (wiki_link_search_results, Vec<QuickOpenResult>, Vec::new()),
+    (remote_wiki_link_results, Vec<moeka_fs::path::ResourcePath>, Vec::new()),
     (wiki_link_recent_task, Option<Task<()>>, None),
     (wiki_link_search_task, Option<Task<()>>, None),
     // ── In-buffer search ──

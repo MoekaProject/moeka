@@ -388,6 +388,7 @@ impl EditorView {
             Some(FileKind::Code { language }) => language.clone(),
             Some(FileKind::Text) => self.message(crate::i18n::MessageKey::PlainText).to_string(),
             Some(FileKind::Image) => self.t(crate::i18n::TextKey::Image).to_string(),
+            Some(FileKind::Pdf) => "PDF".to_string(),
             Some(FileKind::Binary) => self.message(crate::i18n::MessageKey::Binary).to_string(),
             None => String::new(),
         }

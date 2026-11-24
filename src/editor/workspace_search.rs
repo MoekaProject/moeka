@@ -142,7 +142,7 @@ fn search_dates() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf
     DATES.get_or_init(Default::default)
 }
 
-fn remember_search_date(path: &std::path::Path, metadata: &std::fs::Metadata) {
+fn remember_search_date(path: &std::path::Path, metadata: &moeka_fs::local::native::Metadata) {
     let date = metadata
         .created()
         .or_else(|_| metadata.modified())
@@ -211,38 +211,28 @@ fn sort_search_results(results: &mut [WorkspaceSearchResult], mode: SidebarSortM
 /// decides which files are read.
 #[derive(Clone, Default)]
 pub(crate) struct SearchPathFilter {
-    include: Option<regex::Regex>,
-    exclude: Option<regex::Regex>,
+    compiled: moeka_fs::search::CompiledSearchPathFilters,
 }
 
 impl SearchPathFilter {
     pub(crate) fn new(include: &str, exclude: &str) -> Result<Self, regex::Error> {
-        let compile = |pattern: &str| {
-            let pattern = pattern.trim();
-            (!pattern.is_empty())
-                .then(|| regex::Regex::new(pattern))
-                .transpose()
-        };
         Ok(Self {
-            include: compile(include)?,
-            exclude: compile(exclude)?,
+            compiled: moeka_fs::search::SearchPathFilters {
+                include: include.to_string(),
+                exclude: exclude.to_string(),
+            }
+            .compile()?,
         })
     }
 
     fn relative_path(root: &std::path::Path, path: &std::path::Path) -> Option<String> {
         let relative = path.strip_prefix(root).ok()?;
-        let parts = relative
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>();
-        (!parts.is_empty()).then(|| parts.join("/"))
+        let text = moeka_fs::search::relative_path_text(relative);
+        (!text.is_empty()).then_some(text)
     }
 
     fn excludes_dir(&self, root: &std::path::Path, dir: &std::path::Path) -> bool {
-        let Some(exclude) = &self.exclude else {
-            return false;
-        };
-        Self::relative_path(root, dir).is_some_and(|relative| exclude.is_match(&relative))
+        Self::relative_path(root, dir).is_some_and(|relative| self.compiled.is_excluded(&relative))
     }
 
     /// Index candidates arrive as bare file paths, so every ancestor is
@@ -251,17 +241,11 @@ impl SearchPathFilter {
         let Some(relative) = Self::relative_path(root, file) else {
             return true;
         };
-        if let Some(exclude) = &self.exclude {
-            let ancestor_excluded = relative
-                .match_indices('/')
-                .any(|(index, _)| exclude.is_match(&relative[..index]));
-            if ancestor_excluded || exclude.is_match(&relative) {
-                return false;
-            }
-        }
-        self.include
-            .as_ref()
-            .is_none_or(|include| include.is_match(&relative))
+        self.allows_relative(&relative)
+    }
+
+    pub(super) fn allows_relative(&self, relative: &str) -> bool {
+        self.compiled.accepts_file(relative)
     }
 }
 
@@ -415,6 +399,22 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_workspace_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.remote_session_active() {
+            if self.remote_workspace.is_some() {
+                self.open_remote_input(
+                    super::remote::RemoteInputMode::Search,
+                    String::new(),
+                    window,
+                    cx,
+                );
+            } else {
+                self.notify_error(
+                    crate::i18n::remote_text(self.ui_language, "not_connected"),
+                    cx,
+                );
+            }
+            return;
+        }
         if self.workspaces.is_empty() {
             self.workspace_search_visible = false;
             self.workspace_search_task = None;
@@ -926,7 +926,7 @@ impl EditorView {
         self.workspace_search_task = Some(cx.spawn(async move |this, cx| {
             let scanned =
                 crate::platform::fs_task::run("Continue search", path.clone(), move || {
-                    let bytes = std::fs::read(&scan_path)?;
+                    let bytes = moeka_fs::local::native::read(&scan_path)?;
                     let content = String::from_utf8_lossy(&bytes).into_owned();
                     let mut offset = resume.next_byte_offset.min(content.len());
                     while !content.is_char_boundary(offset) {
@@ -1451,7 +1451,8 @@ impl EditorView {
     /// hairline so it reads as a separate panel.
     pub(crate) fn render_workspace_search_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let ss = &self.styles.sidebar;
-        crate::ui::panel::panel(ss.panel())
+        let panel = ss.panel();
+        crate::ui::panel::panel(panel)
             .id("workspace-search-column")
             .w(px(self.workspace_search_layout_width))
             .flex_none()
@@ -2567,9 +2568,9 @@ fn search_directory_batch(
         }
         scanned_paths += 1;
         let observed = if path == workspace_root {
-            std::fs::metadata(&path)
+            moeka_fs::local::native::metadata(&path)
         } else {
-            std::fs::symlink_metadata(&path)
+            moeka_fs::local::native::symlink_metadata(&path)
         };
         let metadata = match observed {
             Ok(metadata) => metadata,
@@ -2601,7 +2602,7 @@ fn search_directory_batch(
         }
         if is_dir {
             let mut children = Vec::new();
-            let entries = std::fs::read_dir(&path).map_err(|error| {
+            let entries = moeka_fs::local::native::read_dir(&path).map_err(|error| {
                 std::io::Error::new(error.kind(), format!("List {}: {error}", path.display()))
             })?;
             for entry in entries {
@@ -2621,7 +2622,7 @@ fn search_directory_batch(
             pending_paths.extend(children.into_iter().rev());
         } else if metadata.is_file() {
             remember_search_date(&path, &metadata);
-            let bytes = match std::fs::read(&path) {
+            let bytes = match moeka_fs::local::native::read(&path) {
                 Ok(bytes) => bytes,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => {
@@ -2665,7 +2666,8 @@ fn search_directory_batch(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::SystemTime};
+    use moeka_fs::local::native as fs;
+    use std::time::SystemTime;
 
     use super::{
         SearchPathFilter, search_directory_batch, take_pending_workspace_search_navigation,

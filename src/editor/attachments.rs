@@ -8,7 +8,7 @@ use crate::markdown::{LocalLinkSyntax, parse_local_link_targets};
 
 use super::{file_ops, should_skip_path};
 
-const MARKDOWN_PATH_ENCODE_SET: &AsciiSet = &CONTROLS
+pub(crate) const MARKDOWN_PATH_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
     .add(b'#')
@@ -163,7 +163,7 @@ impl AttachmentPolicy {
     ) -> Result<PathBuf> {
         let target = self.preview_directory(workspace_root, current_file)?;
         if self.location == AttachmentLocation::ExternalFolder {
-            let metadata = std::fs::metadata(&self.folder)
+            let metadata = moeka_fs::local::native::metadata(&self.folder)
                 .with_context(|| crate::i18n::runtime::rt!(InspectPath, self.folder))?;
             if !metadata.is_dir() {
                 bail!(crate::i18n::runtime::RuntimeText::NotDirectory.to_string());
@@ -234,7 +234,7 @@ impl AttachmentPolicy {
             return Ok(());
         }
         let base = self.base_directory(workspace_root, current_file)?;
-        let canonical_base = std::fs::canonicalize(&base)
+        let canonical_base = moeka_fs::local::native::canonicalize(&base)
             .with_context(|| crate::i18n::runtime::rt!(InspectPath, base.display()))?;
         let relative = target
             .strip_prefix(&base)
@@ -243,18 +243,19 @@ impl AttachmentPolicy {
         for component in relative.components() {
             crate::platform::fs_task::check_deadline()?;
             ancestor.push(component);
-            match std::fs::symlink_metadata(&ancestor) {
+            match moeka_fs::local::native::symlink_metadata(&ancestor) {
                 Ok(_) => {
-                    let resolved = std::fs::canonicalize(&ancestor).with_context(|| {
-                        crate::i18n::runtime::rt!(InspectPath, ancestor.display())
-                    })?;
+                    let resolved =
+                        moeka_fs::local::native::canonicalize(&ancestor).with_context(|| {
+                            crate::i18n::runtime::rt!(InspectPath, ancestor.display())
+                        })?;
                     if !resolved.starts_with(&canonical_base) {
                         bail!(crate::i18n::runtime::rt!(
                             AttachmentOutsideBase,
                             ancestor.display()
                         ));
                     }
-                    if !std::fs::metadata(&resolved)
+                    if !moeka_fs::local::native::metadata(&resolved)
                         .with_context(|| {
                             crate::i18n::runtime::rt!(InspectPath, ancestor.display())
                         })?
@@ -494,7 +495,9 @@ impl WorkspaceLinkIndex {
             .map_or(raw_target, |(path, _)| path);
         if crate::platform::paths::is_file_url(raw_path) {
             let path = crate::platform::paths::path_from_file_url(raw_path)?;
-            return path.exists().then_some(path);
+            return moeka_fs::local::native::metadata(&path)
+                .is_ok()
+                .then_some(path);
         }
         let decoded = percent_decode_str(raw_path).decode_utf8().ok()?;
         let decoded = decoded.trim();
@@ -507,10 +510,13 @@ impl WorkspaceLinkIndex {
             let workspace_path = decoded
                 .strip_prefix('/')
                 .map(|relative| self.root.join(relative));
-            return path
-                .exists()
+            return moeka_fs::local::native::metadata(&path)
+                .is_ok()
                 .then_some(path)
-                .or_else(|| workspace_path.filter(|candidate| candidate.exists()));
+                .or_else(|| {
+                    workspace_path
+                        .filter(|candidate| moeka_fs::local::native::metadata(candidate).is_ok())
+                });
         }
 
         let mut direct_candidates = Vec::new();
@@ -522,12 +528,12 @@ impl WorkspaceLinkIndex {
             .into_iter()
             .map(|path| normalize_path(&path))
         {
-            if candidate.exists() {
+            if moeka_fs::local::native::metadata(&candidate).is_ok() {
                 return Some(candidate);
             }
             if candidate.extension().is_none() {
                 let markdown = candidate.with_extension("md");
-                if markdown.exists() {
+                if moeka_fs::local::native::metadata(&markdown).is_ok() {
                     return Some(markdown);
                 }
             }
@@ -755,7 +761,7 @@ fn valid_template_component(value: &str) -> bool {
         })
 }
 
-fn expand_folder_template(
+pub(crate) fn expand_folder_template(
     template: &str,
     mut variable: impl FnMut(&str) -> Result<String, AttachmentTemplateError>,
 ) -> Result<PathBuf, AttachmentTemplateError> {
@@ -825,11 +831,11 @@ fn collect_workspace_files(
     on_error: &mut impl FnMut(std::io::Error) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     crate::platform::fs_task::check_deadline()?;
-    let entries = match std::fs::read_dir(directory) {
+    let entries = match moeka_fs::local::native::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) => return on_error(error),
     };
-    let canonical = match std::fs::canonicalize(directory) {
+    let canonical = match moeka_fs::local::native::canonicalize(directory) {
         Ok(path) => path,
         Err(error) => return on_error(error),
     };
@@ -855,7 +861,7 @@ fn collect_workspace_files(
         };
         let is_directory = kind.is_dir()
             || (kind.is_symlink()
-                && match std::fs::metadata(&path) {
+                && match moeka_fs::local::native::metadata(&path) {
                     Ok(metadata) => metadata.is_dir(),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
                     Err(error) => {
@@ -1038,7 +1044,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let external = tempfile::tempdir().unwrap();
         let notes = workspace.path().join("notes");
-        std::fs::create_dir(&notes).unwrap();
+        moeka_fs::local::native::create_dir(&notes).unwrap();
         let note = notes.join("document.md");
         for (location, base) in [
             ("current_file", notes.as_path()),
@@ -1151,7 +1157,7 @@ mod tests {
         let external = tempfile::tempdir().expect("external");
         let note = documents.path().join("note.md");
         let image = external.path().join("示例 image.png");
-        std::fs::write(&image, b"image").expect("image");
+        moeka_fs::local::native::write(&image, b"image").expect("image");
         let policy = AttachmentPolicy::from_settings(
             "external_folder",
             "attachments",
@@ -1251,12 +1257,12 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let assets = temp.path().join("assets");
         let notes = temp.path().join("notes");
-        std::fs::create_dir_all(&assets).expect("assets");
-        std::fs::create_dir_all(&notes).expect("notes");
+        moeka_fs::local::native::create_dir_all(&assets).expect("assets");
+        moeka_fs::local::native::create_dir_all(&notes).expect("notes");
         let image = assets.join("示例 image.png");
-        std::fs::write(&image, b"image").expect("image");
+        moeka_fs::local::native::write(&image, b"image").expect("image");
         let note = notes.join("note.md");
-        std::fs::write(&note, b"note").expect("note");
+        moeka_fs::local::native::write(&note, b"note").expect("note");
         let index = WorkspaceLinkIndex::build(temp.path());
 
         assert_eq!(
@@ -1274,10 +1280,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let assets = temp.path().join("assets");
         let other = temp.path().join("other");
-        std::fs::create_dir_all(&assets).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
+        moeka_fs::local::native::create_dir_all(&assets).unwrap();
+        moeka_fs::local::native::create_dir_all(&other).unwrap();
         let image = assets.join("image.png");
-        std::fs::write(&image, b"image").unwrap();
+        moeka_fs::local::native::write(&image, b"image").unwrap();
         let source = temp.path().join("note.md");
         let link_policy = policy("workspace_folder", "wikilink", "shortest");
         let index = WorkspaceLinkIndex::build(temp.path());
@@ -1287,7 +1293,7 @@ mod tests {
                 .unwrap(),
             "![[image.png]]"
         );
-        std::fs::write(other.join("image.png"), b"other").unwrap();
+        moeka_fs::local::native::write(other.join("image.png"), b"other").unwrap();
         let index = WorkspaceLinkIndex::build(temp.path());
         assert_eq!(
             link_policy
@@ -1302,13 +1308,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let notes = temp.path().join("notes");
         let assets = temp.path().join("assets");
-        std::fs::create_dir_all(&notes).expect("notes");
-        std::fs::create_dir_all(&assets).expect("assets");
+        moeka_fs::local::native::create_dir_all(&notes).expect("notes");
+        moeka_fs::local::native::create_dir_all(&assets).expect("assets");
         let note = notes.join("note.md");
         let old_image = assets.join("old image.png");
         let new_image = assets.join("新 image.png");
-        std::fs::write(&note, b"note").expect("note");
-        std::fs::write(&old_image, b"image").expect("image");
+        moeka_fs::local::native::write(&note, b"note").expect("note");
+        moeka_fs::local::native::write(&old_image, b"image").expect("image");
         let index = WorkspaceLinkIndex::build(temp.path());
         let mappings = [PathMapping::new(old_image, new_image)];
 
@@ -1333,11 +1339,11 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let notes = temp.path().join("notes");
         let assets = temp.path().join("assets");
-        std::fs::create_dir_all(&notes).expect("notes");
-        std::fs::create_dir_all(&assets).expect("assets");
+        moeka_fs::local::native::create_dir_all(&notes).expect("notes");
+        moeka_fs::local::native::create_dir_all(&assets).expect("assets");
         let note = notes.join("note.md");
-        std::fs::write(&note, b"note").expect("note");
-        std::fs::write(assets.join("old.png"), b"image").expect("image");
+        moeka_fs::local::native::write(&note, b"note").expect("note");
+        moeka_fs::local::native::write(assets.join("old.png"), b"image").expect("image");
         let index = WorkspaceLinkIndex::build(temp.path());
         let mappings = [PathMapping::new(assets.clone(), temp.path().join("media"))];
 
@@ -1359,12 +1365,12 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let notes = temp.path().join("notes");
         let assets = temp.path().join("assets");
-        std::fs::create_dir_all(&notes).expect("notes");
-        std::fs::create_dir_all(&assets).expect("assets");
+        moeka_fs::local::native::create_dir_all(&notes).expect("notes");
+        moeka_fs::local::native::create_dir_all(&assets).expect("assets");
         let old_note = notes.join("note.md");
         let new_note = temp.path().join("archive/notes/note.md");
-        std::fs::write(&old_note, b"note").expect("note");
-        std::fs::write(assets.join("file.pdf"), b"pdf").expect("pdf");
+        moeka_fs::local::native::write(&old_note, b"note").expect("note");
+        moeka_fs::local::native::write(assets.join("file.pdf"), b"pdf").expect("pdf");
         let index = WorkspaceLinkIndex::build(temp.path());
         let mappings = [PathMapping::new(old_note.clone(), new_note.clone())];
 

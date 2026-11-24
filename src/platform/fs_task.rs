@@ -804,6 +804,32 @@ async fn run_queued<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn application_filesystem_access_uses_explicit_backends() {
+        let direct = ["std", "fs"].join("::");
+        let grouped = regex::Regex::new(r"use\s+std::\{[^;]*\bfs\b").unwrap();
+        let mut directories = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(directory) = directories.pop() {
+            for entry in moeka_fs::local::native::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    directories.push(entry.path());
+                } else if entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "rs")
+                {
+                    let source = moeka_fs::local::native::read_to_string(entry.path()).unwrap();
+                    assert!(
+                        !source.contains(&direct) && !grouped.is_match(&source),
+                        "{} bypasses the common filesystem boundary",
+                        entry.path().display()
+                    );
+                }
+            }
+        }
+    }
+
     use std::{
         sync::atomic::{AtomicBool, Ordering},
         task::Wake,
@@ -923,7 +949,7 @@ mod tests {
         register_workspace_root(dir.path());
         let path = dir.path().join("missing.md");
         let error = block_on(run("read document", path.clone(), move || {
-            std::fs::read(path)
+            moeka_fs::local::native::read(path)
         }))
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);

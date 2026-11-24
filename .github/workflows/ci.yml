@@ -79,6 +79,7 @@ jobs:
           python-version: '3.12'
       - run: bash scripts/test-publish-release.sh
       - run: bash scripts/test-ci-macos-signing.sh
+      - run: ruby scripts/test-remote-artifact.rb
       - run: python3 scripts/test-release-artifacts.py
       - run: bash scripts/test-publish-homebrew.sh
 
@@ -177,7 +178,7 @@ jobs:
           "$RUNNER_TEMP/cache-routing-tests"
 
       - name: Clippy
-        run: cargo clippy --release --locked --all-targets
+        run: cargo clippy --release --locked --workspace --all-targets
 
       - name: Full test suite including GPUI events
         env:
@@ -185,7 +186,7 @@ jobs:
           XDG_CACHE_HOME: ${{ runner.temp }}/moeka-tests/cache
           APPDATA: ${{ runner.temp }}/moeka-tests/config
           LOCALAPPDATA: ${{ runner.temp }}/moeka-tests/cache
-        run: cargo test --release --locked --features gpui-test-support
+        run: cargo test --release --locked --workspace --features gpui-test-support
 
   macos-production:
     name: macOS production build and capability gates

@@ -116,6 +116,7 @@ actions!(
         NewDocument,
         NewTab,
         OpenTerminalWindow,
+        ConnectSsh,
         Quit,
         Escape,
         ToggleFullscreen,

@@ -92,32 +92,13 @@ fn filter_index(
     query: &str,
     cancel: &AtomicBool,
 ) -> Option<Vec<SidebarItem>> {
-    let mut keep = vec![false; index.len()];
-    let mut matched_directory_depth = None;
-    for (i, entry) in index.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            return None;
-        }
-        if matched_directory_depth.is_some_and(|depth| entry.item.depth <= depth) {
-            matched_directory_depth = None;
-        }
-        keep[i] = matched_directory_depth.is_some() || entry.name.contains(query);
-        if keep[i] && entry.item.is_dir && matched_directory_depth.is_none() {
-            matched_directory_depth = Some(entry.item.depth);
-        }
-    }
-    let mut ancestor_depth = None;
-    for (i, entry) in index.iter().enumerate().rev() {
-        if cancel.load(Ordering::Relaxed) {
-            return None;
-        }
-        if ancestor_depth.is_some_and(|depth| entry.item.depth < depth) && entry.item.is_dir {
-            keep[i] = true;
-        }
-        if keep[i] {
-            ancestor_depth = Some(entry.item.depth);
-        }
-    }
+    let keep = filter_preorder(index.len(), query, cancel, |i| {
+        (
+            index[i].item.depth,
+            index[i].item.is_dir,
+            index[i].name.as_str(),
+        )
+    })?;
     Some(
         index
             .iter()
@@ -126,6 +107,43 @@ fn filter_index(
             .map(|(entry, _)| entry.item.clone())
             .collect(),
     )
+}
+
+pub(super) fn filter_preorder<'a>(
+    len: usize,
+    query: &str,
+    cancel: &AtomicBool,
+    entry: impl Fn(usize) -> (usize, bool, &'a str),
+) -> Option<Vec<bool>> {
+    let mut keep = vec![false; len];
+    let mut matched_directory_depth = None;
+    for (i, keep_item) in keep.iter_mut().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let (entry_depth, is_dir, name) = entry(i);
+        if matched_directory_depth.is_some_and(|depth| entry_depth <= depth) {
+            matched_directory_depth = None;
+        }
+        *keep_item = matched_directory_depth.is_some() || name.contains(query);
+        if *keep_item && is_dir && matched_directory_depth.is_none() {
+            matched_directory_depth = Some(entry_depth);
+        }
+    }
+    let mut ancestor_depth = None;
+    for (i, keep_item) in keep.iter_mut().enumerate().rev() {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let (entry_depth, is_dir, _) = entry(i);
+        if ancestor_depth.is_some_and(|depth| entry_depth < depth) && is_dir {
+            *keep_item = true;
+        }
+        if *keep_item {
+            ancestor_depth = Some(entry_depth);
+        }
+    }
+    Some(keep)
 }
 
 fn visible_filtered_items(
@@ -182,6 +200,9 @@ pub(super) fn filter_match_ranges(name: &str, query: &str) -> Vec<Range<usize>> 
 }
 
 impl EditorView {
+    pub(super) fn sidebar_filter_query(&self) -> &str {
+        &self.sidebar_filter.query
+    }
     pub(super) fn sidebar_filter_match_ranges(&self, name: &str) -> Vec<Range<usize>> {
         filter_match_ranges(name, &self.sidebar_filter.query)
     }
@@ -193,7 +214,6 @@ impl EditorView {
     ) {
         self.sidebar_visible = true;
         self.sync_sidebar_width_animation(cx);
-        self.ensure_sidebar_filter_input(cx);
         self.ensure_sidebar_filter_input(cx);
         if let Some(input) = &self.sidebar_filter.input {
             input.read(cx).focus_handle.focus(window);
@@ -280,6 +300,20 @@ impl EditorView {
         self.sidebar_filter.generation = self.sidebar_filter.generation.wrapping_add(1);
         self.sidebar_filter.requested_epoch = Some(self.sidebar_directory_epoch);
         self.sidebar_filter.debounce = None;
+        if self.remote_session_active() {
+            self.sidebar_filter.cancel = Arc::new(AtomicBool::new(false));
+            let cancel = self.sidebar_filter.cancel.clone();
+            if !self.sidebar_filter_active() {
+                self.run_remote_sidebar_filter(cancel, cx);
+            } else {
+                self.sidebar_filter.debounce = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(FILTER_DELAY).await;
+                    this.update(cx, |this, cx| this.run_remote_sidebar_filter(cancel, cx))
+                        .ok();
+                }));
+            }
+            return;
+        }
         if !self.sidebar_filter_active() {
             self.sidebar_filter.collapsed.clear();
             self.sidebar_filter.matches.clear();
@@ -399,9 +433,11 @@ impl EditorView {
             .map(|input| input.read(cx).text().trim().to_lowercase())
             .unwrap_or_default();
         if self.sidebar_filter.query != query {
-            self.pending_sidebar_scroll_anchor = None;
-            self.pending_sidebar_scroll_top.set(None);
-            self.sidebar_scroll_handle
+            if !self.remote_session_active() {
+                self.pending_sidebar_scroll_anchor = None;
+                self.pending_sidebar_scroll_top.set(None);
+            }
+            self.active_sidebar_scrollbar_handle()
                 .set_offset(gpui::point(px(0.0), px(0.0)));
             self.sidebar_filter.query = query;
             self.schedule_sidebar_filter(cx);
@@ -500,7 +536,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let roots = [directory.path().join("a"), directory.path().join("b")];
         for root in &roots {
-            std::fs::create_dir(root).unwrap();
+            moeka_fs::local::native::create_dir(root).unwrap();
         }
         let editor = cx
             .update(|cx| cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some(""), false)));
@@ -646,10 +682,10 @@ mod tests {
     #[test]
     fn sidebar_filter_scan_visits_collapsed_descendants_and_preserves_tree_order() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("folder/nested")).unwrap();
-        std::fs::write(root.path().join("folder/nested/NOTE.md"), "").unwrap();
-        std::fs::write(root.path().join(".hidden.md"), "").unwrap();
-        std::fs::write(root.path().join("z.txt"), "").unwrap();
+        moeka_fs::local::native::create_dir_all(root.path().join("folder/nested")).unwrap();
+        moeka_fs::local::native::write(root.path().join("folder/nested/NOTE.md"), "").unwrap();
+        moeka_fs::local::native::write(root.path().join(".hidden.md"), "").unwrap();
+        moeka_fs::local::native::write(root.path().join("z.txt"), "").unwrap();
         let cancel = AtomicBool::new(false);
         let index = scan_filter_index(root.path(), SidebarSortMode::NameAsc, &cancel)
             .unwrap()

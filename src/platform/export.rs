@@ -136,10 +136,10 @@ pub(crate) fn run(
         page_height,
         margin,
     };
-    std::fs::write(&request.html, html)
+    moeka_fs::local::native::write(&request.html, html)
         .context(crate::i18n::runtime::RuntimeText::PrepareExport.to_string())?;
     let request_path = directory.path().join("request.json");
-    std::fs::write(&request_path, serde_json::to_vec(&request)?)
+    moeka_fs::local::native::write(&request_path, serde_json::to_vec(&request)?)
         .context(crate::i18n::runtime::RuntimeText::PrepareExport.to_string())?;
     let mut command = Command::new(std::env::current_exe()?);
     command
@@ -176,11 +176,11 @@ pub(crate) fn run(
         }
     };
     if !status.success() {
-        let error = std::fs::read_to_string(request_path.with_extension("error"))
+        let error = moeka_fs::local::native::read_to_string(request_path.with_extension("error"))
             .context(crate::i18n::runtime::RuntimeText::ExportProcess.to_string())?;
         anyhow::bail!("{error}");
     }
-    let bytes = std::fs::read(&request.output)
+    let bytes = moeka_fs::local::native::read(&request.output)
         .context(crate::i18n::runtime::RuntimeText::ReadFile.to_string())?;
     validate_output(&bytes, format)?;
     Ok(bytes)
@@ -226,7 +226,7 @@ pub(crate) fn helper_main() -> Option<i32> {
             args.next().is_none(),
             crate::i18n::runtime::RuntimeText::InvalidRequest.to_string()
         );
-        let request: Request = serde_json::from_slice(&std::fs::read(&path)?)?;
+        let request: Request = serde_json::from_slice(&moeka_fs::local::native::read(&path)?)?;
         crate::i18n::runtime::set_language(
             crate::i18n::UiLanguage::from_code(&request.language)
                 .context(crate::i18n::runtime::RuntimeText::InvalidRequest)?,
@@ -251,7 +251,7 @@ pub(crate) fn helper_main() -> Option<i32> {
         Ok(()) => 0,
         Err(error) => {
             if let Err(write_error) =
-                std::fs::write(path.with_extension("error"), format!("{error:#}"))
+                moeka_fs::local::native::write(path.with_extension("error"), format!("{error:#}"))
             {
                 eprintln!("Could not record export failure: {write_error}; {error:#}");
             }

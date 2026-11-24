@@ -76,6 +76,13 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.remote_session_active() {
+            self.notify_error(
+                crate::i18n::remote_text(self.ui_language, "local_action_blocked"),
+                cx,
+            );
+            return;
+        }
         #[cfg(not(target_os = "macos"))]
         let title = self.t(crate::i18n::TextKey::OpenFile).to_string();
         cx.spawn(async move |this, cx| {
@@ -193,6 +200,7 @@ impl EditorView {
     pub(crate) fn reset_quick_open_state(&mut self, cx: &mut Context<Self>) {
         self.quick_open_query.clear();
         self.quick_open_results.clear();
+        self.remote_quick_open_results.clear();
         self.quick_open_selected_index = 0;
         self.quick_open_render_limit = super::list_viewport::SEARCH_LIST_POLICY.initial_count;
         self.quick_open_scroll_handle.scroll_to_item(0);
@@ -211,19 +219,24 @@ impl EditorView {
     }
 
     pub(crate) fn move_quick_open_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if self.quick_open_results.is_empty() {
+        let total = if self.remote_session_active() {
+            self.remote_quick_open_results.len()
+        } else {
+            self.quick_open_results.len()
+        };
+        if total == 0 {
             self.quick_open_selected_index = 0;
             cx.notify();
             return;
         }
 
-        let len = self.quick_open_results.len() as isize;
+        let len = total as isize;
         let current = self.quick_open_selected_index as isize;
         self.quick_open_selected_index = (current + delta).clamp(0, len - 1) as usize;
         if self.quick_open_selected_index + 1 > self.quick_open_render_limit {
             self.quick_open_render_limit = super::list_viewport::SEARCH_LIST_POLICY.ensure_index(
                 self.quick_open_render_limit,
-                self.quick_open_results.len(),
+                total,
                 self.quick_open_selected_index,
             );
         }
@@ -233,7 +246,11 @@ impl EditorView {
     }
 
     fn maybe_extend_quick_open_results(&mut self, cx: &mut Context<Self>) {
-        let total = self.quick_open_results.len();
+        let total = if self.remote_session_active() {
+            self.remote_quick_open_results.len()
+        } else {
+            self.quick_open_results.len()
+        };
         if total <= self.quick_open_render_limit {
             return;
         }
@@ -251,6 +268,14 @@ impl EditorView {
     }
 
     pub(crate) fn confirm_quick_open(&mut self, cx: &mut Context<Self>) {
+        let remote_result = self
+            .remote_session_active()
+            .then(|| {
+                self.remote_quick_open_results
+                    .get(self.quick_open_selected_index)
+                    .map(|result| result.resource.clone())
+            })
+            .flatten();
         let result = self
             .quick_open_results
             .get(self.quick_open_selected_index)
@@ -259,12 +284,19 @@ impl EditorView {
         self.quick_open_task = None;
         self.reset_quick_open_state(cx);
         cx.notify();
-        if let Some(result) = result {
+        if let Some(resource) = remote_result {
+            self.open_remote_file(resource, cx);
+        } else if let Some(result) = result {
             self.open_sidebar_file(result.path, cx);
         }
     }
 
     pub(crate) fn run_quick_open_search(&mut self, cx: &mut Context<Self>) {
+        if self.remote_session_active() {
+            self.quick_open_results.clear();
+            self.run_remote_quick_open_search(cx);
+            return;
+        }
         let root = self.sidebar_root.clone();
         if root.as_os_str().is_empty() {
             self.quick_open_results.clear();
@@ -367,7 +399,12 @@ impl EditorView {
         let workspace_name_char_len = workspace_name.chars().count();
 
         let mut result_children: Vec<AnyElement> = Vec::new();
-        if self.quick_open_results.is_empty() {
+        let remote = self.remote_session_active();
+        if if remote {
+            self.remote_quick_open_results.is_empty()
+        } else {
+            self.quick_open_results.is_empty()
+        } {
             let message = if self.quick_open_query.is_empty() {
                 self.t(crate::i18n::TextKey::QuickOpenEmpty)
             } else if self.quick_open_task.is_some() {
@@ -380,6 +417,69 @@ impl EditorView {
                     .child(message)
                     .into_any_element(),
             );
+        } else if remote {
+            for (index, result) in self
+                .remote_quick_open_results
+                .iter()
+                .take(self.quick_open_render_limit)
+                .enumerate()
+            {
+                let name = render_highlighted_text(
+                    &result.name,
+                    &result.name_matches,
+                    text_primary,
+                    match_color,
+                    name_font,
+                );
+                let directory = result
+                    .relative
+                    .rsplit_once('/')
+                    .map_or("", |(directory, _)| directory);
+                let indices = result
+                    .path_matches
+                    .iter()
+                    .copied()
+                    .filter(|index| *index < directory.chars().count())
+                    .collect::<Vec<_>>();
+                let path = render_highlighted_text(
+                    directory,
+                    &indices,
+                    text_secondary,
+                    match_color,
+                    path_font,
+                );
+                result_children.push(
+                    crate::ui::list::list_item(
+                        self.styles.command_item(),
+                        crate::style::ControlState {
+                            selected: index == self.quick_open_selected_index,
+                            ..Default::default()
+                        },
+                        self.ui_scale,
+                    )
+                    .id(SharedString::from(format!("quick-open-remote-{index}")))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(self.scaled(
+                                self.styles.ui.space(crate::style::SpaceStep::OneAndHalf),
+                            )))
+                            .child(div().flex_none().child(name))
+                            .child(div().flex_1().min_w(px(0.0)).overflow_hidden().child(path)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.quick_open_selected_index = index;
+                            this.confirm_quick_open(cx);
+                        }),
+                    )
+                    .into_any_element(),
+                );
+            }
         } else {
             for (index, result) in self
                 .quick_open_results
@@ -653,7 +753,7 @@ fn collect_recent_openable_files(
     limit: usize,
     ranked: &mut Vec<(SystemTime, WorkspaceFileCandidate)>,
 ) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = moeka_fs::local::native::read_dir(dir) else {
         return;
     };
 
@@ -721,7 +821,7 @@ fn collect_openable_files(dir: &Path, results: &mut Vec<PathBuf>) -> std::io::Re
                 crate::i18n::runtime::rt!(ReadDirectory, dir.display(), error),
             )
         };
-        for entry in std::fs::read_dir(&dir).map_err(contextual)? {
+        for entry in moeka_fs::local::native::read_dir(&dir).map_err(contextual)? {
             crate::platform::fs_task::check_deadline()?;
             let entry = entry.map_err(contextual)?;
             let path = entry.path();
@@ -745,7 +845,7 @@ fn collect_openable_files(dir: &Path, results: &mut Vec<PathBuf>) -> std::io::Re
     Ok(())
 }
 
-fn fuzzy_match(text: &str, query: &str) -> Option<(i64, Vec<usize>)> {
+pub(super) fn fuzzy_match(text: &str, query: &str) -> Option<(i64, Vec<usize>)> {
     let direct_match = fuzzy_match_direct(text, query);
     let pinyin_match = fuzzy_match_via_pinyin(text, query);
 
@@ -974,7 +1074,7 @@ mod filesystem_tests {
     #[test]
     fn directory_cycles_are_not_followed() {
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("note.md"), "text").unwrap();
+        moeka_fs::local::native::write(directory.path().join("note.md"), "text").unwrap();
         std::os::unix::fs::symlink(directory.path(), directory.path().join("cycle")).unwrap();
         let mut paths = Vec::new();
         collect_openable_files(directory.path(), &mut paths).unwrap();

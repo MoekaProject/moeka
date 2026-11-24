@@ -1129,7 +1129,11 @@ mod tests {
             let wait_for_saved = |cx: &mut gpui::VisualTestContext, expected| {
                 for _ in 0..200 {
                     cx.run_until_parked();
-                    if super::super::super::config_paths::settings_file_path().exists() {
+                    if moeka_fs::local::native::metadata(
+                        super::super::super::config_paths::settings_file_path(),
+                    )
+                    .is_ok()
+                    {
                         let saved =
                             super::super::super::config_store::load_settings_strict().unwrap();
                         if saved.minimap_position == expected

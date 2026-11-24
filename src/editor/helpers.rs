@@ -6395,7 +6395,7 @@ mod tests {
                             && matches!(kind, ThemeKind::PaperWhite | ThemeKind::OneDark)
                         {
                             let directory = std::path::Path::new(&directory);
-                            std::fs::create_dir_all(directory).unwrap();
+                            moeka_fs::local::native::create_dir_all(directory).unwrap();
                             let background =
                                 super::parse_svg_hex_color(&super::svg_color(theme.bg_primary))
                                     .unwrap();
@@ -11792,7 +11792,9 @@ pub(crate) fn resolve_image_to_path(
     if crate::platform::paths::is_file_url(raw) {
         let path = crate::platform::paths::path_from_file_url(raw)?;
         let path = normalize_image_path(&path);
-        return path.exists().then_some(path);
+        return moeka_fs::local::native::metadata(&path)
+            .is_ok()
+            .then_some(path);
     }
 
     let path_str = percent_decode_path(raw);
@@ -11806,13 +11808,15 @@ pub(crate) fn resolve_image_to_path(
     // just check existence.
     if expanded.is_absolute() {
         let expanded = normalize_image_path(&expanded);
-        return expanded.exists().then_some(expanded);
+        return moeka_fs::local::native::metadata(&expanded)
+            .is_ok()
+            .then_some(expanded);
     }
 
     // Relative to current file's directory
     if let Some(dir) = file_dir {
         let candidate = normalize_image_path(&dir.join(&expanded));
-        if candidate.exists() {
+        if moeka_fs::local::native::metadata(&candidate).is_ok() {
             return Some(candidate);
         }
     }
@@ -11820,7 +11824,7 @@ pub(crate) fn resolve_image_to_path(
     // Relative to workspace roots
     for root in workspace_roots {
         let candidate = normalize_image_path(&root.join(&expanded));
-        if candidate.exists() {
+        if moeka_fs::local::native::metadata(&candidate).is_ok() {
             return Some(candidate);
         }
     }
@@ -11857,10 +11861,10 @@ mod image_path_tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let notes = workspace.path().join("notes");
         let images = workspace.path().join("images");
-        std::fs::create_dir_all(&notes).expect("notes");
-        std::fs::create_dir_all(&images).expect("images");
+        moeka_fs::local::native::create_dir_all(&notes).expect("notes");
+        moeka_fs::local::native::create_dir_all(&images).expect("images");
         let image = images.join("示例 image.png");
-        std::fs::write(&image, b"image").expect("image");
+        moeka_fs::local::native::write(&image, b"image").expect("image");
 
         assert_eq!(
             resolve_image_to_path(
@@ -11889,7 +11893,7 @@ pub(crate) fn load_image(
     load_render_image_from_path(&resolved)
 }
 
-fn load_render_image_from_bytes(
+pub(crate) fn load_render_image_from_bytes(
     bytes: &[u8],
     extension: Option<&str>,
 ) -> anyhow::Result<RenderImage> {
@@ -13093,7 +13097,7 @@ fn escape_svg_text(text: &str) -> String {
 }
 
 pub(crate) fn load_render_image_from_path(path: &PathBuf) -> anyhow::Result<RenderImage> {
-    let bytes = std::fs::read(path)?;
+    let bytes = moeka_fs::local::native::read(path)?;
     load_render_image_from_bytes(
         &bytes,
         path.extension().and_then(|extension| extension.to_str()),

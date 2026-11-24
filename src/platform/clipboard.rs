@@ -22,7 +22,7 @@ impl ExportFile {
             .prefix("moeka-clipboard-")
             .tempdir()?;
         let path = directory.path().join(name);
-        std::fs::write(&path, bytes)?;
+        moeka_fs::local::native::write(&path, bytes)?;
         Ok(Self { directory, path })
     }
 
@@ -184,7 +184,7 @@ fn write_file(path: &Path) -> anyhow::Result<()> {
         crate::i18n::runtime::rt!(
             ClipboardFailed,
             program,
-            std::fs::read_to_string(errors.path())?
+            moeka_fs::local::native::read_to_string(errors.path())?
         )
     );
     Ok(())
@@ -392,7 +392,7 @@ mod tests {
             let file = ExportFile::prepare(name, bytes).unwrap();
             let path = file.path.clone();
             assert_eq!(path.file_name().unwrap(), name);
-            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(moeka_fs::local::native::read(&path).unwrap(), bytes);
             drop(file);
             assert!(!path.exists());
         }

@@ -3,6 +3,7 @@ use gpui::px;
 
 pub(crate) struct WorkspaceClose {
     root: PathBuf,
+    remote_generation: Option<u64>,
     approved: HashMap<String, String>,
 }
 
@@ -33,8 +34,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let a = directory.path().join("a");
         let b = directory.path().join("b");
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
+        moeka_fs::local::native::create_dir_all(&a).unwrap();
+        moeka_fs::local::native::create_dir_all(&b).unwrap();
         let editor = cx.update(|cx| {
             cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some("# A"), false))
         });
@@ -91,8 +92,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let a = directory.path().join("a");
         let b = directory.path().join("b");
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
+        moeka_fs::local::native::create_dir_all(&a).unwrap();
+        moeka_fs::local::native::create_dir_all(&b).unwrap();
         let editor = cx.update(|cx| {
             cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some("# Draft"), false))
         });
@@ -249,9 +250,43 @@ impl EditorView {
         }
         self.workspace_close = Some(WorkspaceClose {
             root: root.to_path_buf(),
+            remote_generation: None,
             approved: HashMap::new(),
         });
         self.continue_workspace_close(cx);
+    }
+
+    pub(super) fn request_close_remote_workspace(&mut self, cx: &mut Context<Self>) {
+        if self.remote_workspace.is_none() {
+            return;
+        }
+        self.workspace_close = Some(WorkspaceClose {
+            root: PathBuf::new(),
+            remote_generation: Some(self.remote_generation),
+            approved: HashMap::new(),
+        });
+        self.continue_workspace_close(cx);
+    }
+
+    fn pending_workspace_close_tabs(&self) -> Vec<String> {
+        let Some(close) = &self.workspace_close else {
+            return Vec::new();
+        };
+        if close.remote_generation.is_some() {
+            let Some(workspace) = &self.remote_workspace else {
+                return Vec::new();
+            };
+            self.all_tabs()
+                .filter(|tab| {
+                    tab.remote
+                        .as_ref()
+                        .is_some_and(|remote| remote.root == workspace.root)
+                })
+                .map(|tab| tab.id.clone())
+                .collect()
+        } else {
+            self.workspace_tab_ids(&close.root)
+        }
     }
 
     fn workspace_close_text(&mut self, tab: &str) -> Option<String> {
@@ -273,14 +308,18 @@ impl EditorView {
         tab: &str,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(root) = self
+        let Some(_root) = self
             .workspace_close
             .as_ref()
             .map(|close| close.root.clone())
         else {
             return false;
         };
-        if !self.workspace_tab_ids(&root).iter().any(|id| id == tab) {
+        if !self
+            .pending_workspace_close_tabs()
+            .iter()
+            .any(|id| id == tab)
+        {
             return false;
         }
         if let Some(text) = self.workspace_close_text(tab) {
@@ -303,7 +342,19 @@ impl EditorView {
         else {
             return;
         };
-        let ids = self.workspace_tab_ids(&root);
+        let remote_generation = self
+            .workspace_close
+            .as_ref()
+            .and_then(|close| close.remote_generation);
+        if remote_generation.is_some_and(|generation| generation != self.remote_generation) {
+            self.workspace_close = None;
+            self.notify_error(
+                crate::i18n::remote_text(self.ui_language, "wrong_connection"),
+                cx,
+            );
+            return;
+        }
+        let ids = self.pending_workspace_close_tabs();
         if self.all_tabs().any(|tab| {
             ids.contains(&tab.id)
                 && tab
@@ -340,7 +391,11 @@ impl EditorView {
         for id in ids {
             self.close_tab(&id, cx);
         }
-        self.finish_close_workspace(&root, cx);
+        if remote_generation.is_some() {
+            self.disconnect_remote(cx);
+        } else {
+            self.finish_close_workspace(&root, cx);
+        }
     }
 
     pub(crate) fn visible_pane_ids(&self) -> Vec<PaneId> {

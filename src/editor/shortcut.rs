@@ -599,6 +599,7 @@ pub(crate) fn app_menus(language: UiLanguage) -> Vec<gpui::Menu> {
                     label("menu_workspaces"),
                     [e(&[
                         E::OpenWorkspace,
+                        E::ConnectSsh,
                         E::ChooseWorkspace,
                         E::CloseWorkspace,
                     ])],
@@ -1687,7 +1688,7 @@ mod command_tests {
         let mut problems = Vec::new();
         for &language in UiLanguage::supported() {
             let file = docs_dir.join(format!("help-{}.md", language.code().to_lowercase()));
-            let Ok(content) = std::fs::read_to_string(&file) else {
+            let Ok(content) = moeka_fs::local::native::read_to_string(&file) else {
                 problems.push(format!("missing help doc {}", file.display()));
                 continue;
             };

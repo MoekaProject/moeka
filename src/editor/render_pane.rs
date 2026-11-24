@@ -387,6 +387,12 @@ impl EditorView {
                 .flex()
                 .flex_col()
                 .bg(this.styles.editor.editor_bg)
+                .when(this.active_tab_is_pdf(), |pane| {
+                    pane.capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                        this.focus_pane(pane_id, cx);
+                        this.clear_sidebar_keyboard_focus();
+                    }))
+                })
                 .child(
                     canvas(
                         move |bounds, _window, cx| {
@@ -404,6 +410,27 @@ impl EditorView {
                     el.child(this.render_settings_panel(window, cx))
                 })
                 .when(has_tabs && !is_settings, |el| {
+                    if this
+                        .active_tab_index()
+                        .is_some_and(|i| this.tabs[i].remote_text_unavailable())
+                    {
+                        return el.child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(
+                                    this.styles
+                                        .quick_open
+                                        .quick_open_result_secondary_text_color,
+                                )
+                                .child(
+                                    crate::i18n::runtime::RuntimeText::DocumentUnavailable
+                                        .to_string(),
+                                ),
+                        );
+                    }
                     el.child(this.render_editor_pane(pane_id, window, cx))
                 })
                 .when(!has_tabs, |el| el.child(div().flex_1()))
@@ -524,6 +551,7 @@ impl EditorView {
         let _ = &window;
         let is_focused_pane = pane_id == self.focused_pane_id;
         let renders_document = !self.active_tab_is_terminal()
+            && !self.active_tab_is_pdf()
             && !self.active_tab_is_image()
             && !self.active_tab_is_binary();
         let editor_pane_views = renders_document.then(|| {
@@ -594,13 +622,20 @@ impl EditorView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, event, window, cx| {
-                            this.focused_sidebar_path = None; this.focused_workspace_root = None;
+                            this.clear_sidebar_keyboard_focus();
+                            if this.active_tab_is_pdf() { return; }
                             this.on_mouse_down(event, window, cx);
                         }),
                     )
                     .on_mouse_down(
                         MouseButton::Right,
-                        cx.listener(Self::on_editor_context_menu),
+                        cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                            if this.active_tab_is_pdf() {
+                                this.open_pdf_context_menu(event.position, window, cx);
+                            } else {
+                                this.on_editor_context_menu(event, window, cx);
+                            }
+                        }),
                     )
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -656,18 +691,22 @@ impl EditorView {
                     .on_drop(cx.listener(
                         move |this, dragged: &DraggedSidebarItems, _, cx| {
                             this.clear_sidebar_drag_state(cx);
-                            this.focused_sidebar_path = None; this.focused_workspace_root = None;
+                            this.clear_sidebar_keyboard_focus();
                             this.focus_pane(pane_id, cx);
+                            if this.active_tab_is_pdf() { return; }
                             this.insert_sidebar_items_as_wiki_links(&dragged.paths, cx);
                         },
                     ))
                     .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                         this.clear_sidebar_drag_state(cx);
                         this.focus_pane(pane_id, cx);
+                        if this.active_tab_is_pdf() { return; }
                         this.import_external_paths_as_attachments(paths.paths(), cx);
                     }))
                     .child(if let Some(terminal_tab_id) = self.active_terminal_tab_id() {
                         self.render_terminal_tab_content(terminal_tab_id, window, cx)
+                    } else if self.active_tab_is_pdf() {
+                        self.render_pdf_view(cx)
                     } else if self.active_tab_is_image() {
                         image_view::ImageViewElement {
                             editor: cx.entity().clone(),
@@ -950,6 +989,7 @@ impl EditorView {
                     .when(
                         self.search_visible
                             && (self.active_tab_supports_text_search()
+                                || self.active_tab_is_pdf()
                                 || self.active_tab_is_terminal()),
                         |this: gpui::Stateful<gpui::Div>| this.child(self.render_search_bar(cx)),
                     ),

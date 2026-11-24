@@ -1,4 +1,4 @@
-use std::fs;
+use moeka_fs::local::native as fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]

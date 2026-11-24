@@ -281,7 +281,7 @@ pub(super) fn render(request: &Request) -> Result<()> {
                 .context(crate::i18n::runtime::RuntimeText::InvalidOutput.to_string())?;
             let bytes = base64::engine::general_purpose::STANDARD.decode(data)?;
             super::validate_output(&bytes, NativeFormat::Png)?;
-            std::fs::write(&request.output, bytes)?;
+            moeka_fs::local::native::write(&request.output, bytes)?;
         }
     }
     Ok(())

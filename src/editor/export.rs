@@ -1,13 +1,18 @@
 //! Document export orchestration and portable Markdown/HTML/PDF conversion.
 use super::*;
 use gpui::Context;
+use moeka_fs::local::native as fs;
 use pulldown_cmark::{
     BlockQuoteKind, CodeBlockKind, CowStr, Event, LinkType, Options, Parser, Tag, TagEnd,
     html::push_html,
 };
-use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+type RemoteExportSource = (
+    std::sync::Arc<moeka_ssh::filesystem::SshFilesystem>,
+    moeka_fs::path::ResourcePath,
+    moeka_fs::path::ResourcePath,
+);
 mod html;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -1143,6 +1148,64 @@ impl EditorView {
         None
     }
 
+    pub(super) fn export_resource(
+        &mut self,
+        resource: moeka_fs::path::ResourcePath,
+        format: ExportFormat,
+        target: ExportTarget,
+        cx: &mut Context<Self>,
+    ) {
+        if let Ok(path) = resource.local_path() {
+            self.export_path(path, format, target, cx);
+            return;
+        }
+        let generation = self.remote_generation;
+        if !self.validate_resource_menu(&resource, generation, cx) {
+            return;
+        }
+        let Some(workspace) = &self.remote_workspace else {
+            return;
+        };
+        let source = (
+            workspace.filesystem.clone(),
+            resource.clone(),
+            workspace.root.clone(),
+        );
+        if let Some((_, text)) = self.resource_text_snapshot(&resource) {
+            self.export_document_source(None, Some(source), text, format, target, cx);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let filesystem = source.0.clone();
+            let path = resource.path.clone();
+            let result = crate::platform::fs_task::run(
+                "read export source",
+                PathBuf::from("ssh"),
+                move || {
+                    let (bytes, _) = filesystem
+                        .read_file(&path, 128 * 1024 * 1024)
+                        .map_err(std::io::Error::other)?;
+                    String::from_utf8(bytes).map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                    })
+                },
+            )
+            .await;
+            let _ = this.update(cx, |editor, cx| {
+                if !editor.validate_resource_menu(&resource, generation, cx) {
+                    return;
+                }
+                match result {
+                    Ok(text) => {
+                        editor.export_document_source(None, Some(source), text, format, target, cx)
+                    }
+                    Err(error) => editor.notify_error(format!("{}: {error}", resource.path), cx),
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn export_path(
         &mut self,
         path: PathBuf,
@@ -1223,18 +1286,80 @@ impl EditorView {
         target: ExportTarget,
         cx: &mut Context<Self>,
     ) {
-        let title = source_file_path
-            .as_deref()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            .unwrap_or(self.t(crate::i18n::TextKey::Untitled))
-            .to_string();
-        let default_name =
-            self.export_default_name_for_path(source_file_path.as_deref(), format.extension());
-        let feedback = (target == ExportTarget::Clipboard
-            && self.current_file_path == source_file_path
-            && self.buffer.text() == text)
-            .then(|| self.export_copy_identity(format));
+        let remote_source = if source_file_path.is_none()
+            && self
+                .active_tab_index()
+                .is_some_and(|index| self.tabs[index].is_remote)
+        {
+            let tab = &self.tabs[self.active_tab_index().expect("active remote tab")];
+            let source = self.remote_workspace.as_ref().and_then(|workspace| {
+                let resource = tab.remote.as_ref()?.resource.clone()?;
+                (!tab.remote_binding_lost
+                    && resource.filesystem == *workspace.filesystem.identity())
+                .then(|| {
+                    (
+                        workspace.filesystem.clone(),
+                        resource,
+                        workspace.root.clone(),
+                    )
+                })
+            });
+            if source.is_none() && format != ExportFormat::Markdown {
+                self.notify_error(
+                    crate::i18n::remote_text(self.ui_language, "remote_binding_lost"),
+                    cx,
+                );
+                return;
+            }
+            source
+        } else {
+            None
+        };
+        self.export_document_source(source_file_path, remote_source, text, format, target, cx);
+    }
+
+    fn export_document_source(
+        &mut self,
+        source_file_path: Option<PathBuf>,
+        remote_source: Option<RemoteExportSource>,
+        text: String,
+        format: ExportFormat,
+        target: ExportTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let title = remote_source
+            .as_ref()
+            .and_then(|(_, resource, _)| resource.path.file_name())
+            .map(|name| name.to_string())
+            .or_else(|| {
+                source_file_path
+                    .as_deref()
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| self.t(crate::i18n::TextKey::Untitled).to_string());
+        let default_name = if remote_source.is_some() {
+            let stem = Path::new(&title)
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy();
+            format!("{stem}.{}", format.extension())
+        } else {
+            self.export_default_name_for_path(source_file_path.as_deref(), format.extension())
+        };
+        let source_is_active = remote_source.as_ref().map_or(
+            self.current_file_path == source_file_path,
+            |(_, resource, _)| {
+                self.active_tab_index()
+                    .and_then(|index| self.tabs[index].remote.as_ref())
+                    .and_then(|remote| remote.resource.as_ref())
+                    == Some(resource)
+            },
+        );
+        let feedback =
+            (target == ExportTarget::Clipboard && source_is_active && self.buffer.text() == text)
+                .then(|| self.export_copy_identity(format));
         #[cfg(not(target_os = "macos"))]
         let ui_language = self.ui_language;
         let layout = ExportLayout::from_settings(&self.app_settings);
@@ -1298,6 +1423,7 @@ impl EditorView {
                     workspace_root,
                     workspace_roots,
                     typography_css,
+                    remote_source,
                 )
                 .await
                 .map(String::into_bytes),
@@ -1311,6 +1437,7 @@ impl EditorView {
                         workspace_root,
                         workspace_roots,
                         typography_css,
+                        remote_source,
                     )
                     .await;
                     #[cfg(target_os = "macos")]
@@ -1472,6 +1599,11 @@ async fn render_html_export(
     workspace_root: PathBuf,
     workspace_roots: Vec<PathBuf>,
     typography_css: String,
+    remote_source: Option<(
+        std::sync::Arc<moeka_ssh::filesystem::SshFilesystem>,
+        moeka_fs::path::ResourcePath,
+        moeka_fs::path::ResourcePath,
+    )>,
 ) -> anyhow::Result<String> {
     crate::platform::fs_task::run_anyhow(
         "render HTML export",
@@ -1485,11 +1617,12 @@ async fn render_html_export(
                 fonts,
                 &typography_css,
             );
-            html::embed_images(
+            html::embed_images_with_remote(
                 &document,
                 source_file_path.as_deref(),
                 &workspace_root,
                 &workspace_roots,
+                remote_source.as_ref(),
             )
         },
     )

@@ -100,44 +100,14 @@ impl EditorView {
         self.focused_starred_path = None;
         let path_buf = path.to_path_buf();
 
-        if shift {
-            let anchor = self
-                .sidebar_selection_anchor
-                .clone()
-                .unwrap_or_else(|| path_buf.clone());
-            let anchor_idx = paths.iter().position(|item| item == &anchor);
-            let target_idx = paths.iter().position(|item| item == &path_buf);
-            if let (Some(anchor_index), Some(target_index)) = (anchor_idx, target_idx) {
-                let (start, end) = if anchor_index <= target_index {
-                    (anchor_index, target_index)
-                } else {
-                    (target_index, anchor_index)
-                };
-                if !cmd {
-                    self.selected_sidebar_paths.clear();
-                }
-                for index in start..=end {
-                    self.selected_sidebar_paths.insert(paths[index].clone());
-                }
-            } else {
-                if !cmd {
-                    self.selected_sidebar_paths.clear();
-                }
-                self.selected_sidebar_paths.insert(path_buf.clone());
-                self.sidebar_selection_anchor = Some(path_buf.clone());
-            }
-        } else if cmd {
-            if self.selected_sidebar_paths.contains(&path_buf) {
-                self.selected_sidebar_paths.remove(&path_buf);
-            } else {
-                self.selected_sidebar_paths.insert(path_buf.clone());
-            }
-            self.sidebar_selection_anchor = Some(path_buf.clone());
-        } else {
-            self.selected_sidebar_paths.clear();
-            self.selected_sidebar_paths.insert(path_buf.clone());
-            self.sidebar_selection_anchor = Some(path_buf.clone());
-        }
+        super::file_tree::select_tree_item(
+            &mut self.selected_sidebar_paths,
+            &mut self.sidebar_selection_anchor,
+            &path_buf,
+            paths,
+            shift,
+            cmd,
+        );
 
         self.focused_sidebar_path = Some(path_buf);
     }

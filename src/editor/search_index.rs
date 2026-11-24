@@ -55,7 +55,7 @@ impl WorkspaceSearchIndex {
     /// files. Runs on a background thread.
     pub(crate) fn build(root: &Path) -> anyhow::Result<Self> {
         crate::platform::fs_task::check_deadline()?;
-        if !std::fs::metadata(root)
+        if !moeka_fs::local::native::metadata(root)
             .with_context(|| crate::i18n::runtime::rt!(InspectPath, root.display()))?
             .is_dir()
         {
@@ -83,9 +83,9 @@ impl WorkspaceSearchIndex {
         while let Some(path) = pending.pop() {
             crate::platform::fs_task::check_deadline()?;
             let observed = if path == root {
-                std::fs::metadata(&path)
+                moeka_fs::local::native::metadata(&path)
             } else {
-                std::fs::symlink_metadata(&path)
+                moeka_fs::local::native::symlink_metadata(&path)
             };
             let metadata = match observed {
                 Ok(metadata) => metadata,
@@ -103,7 +103,7 @@ impl WorkspaceSearchIndex {
                 continue;
             }
             if is_dir {
-                for entry in std::fs::read_dir(&path)
+                for entry in moeka_fs::local::native::read_dir(&path)
                     .with_context(|| crate::i18n::runtime::rt!(ReadDirectory, path.display()))?
                 {
                     crate::platform::fs_task::check_deadline()?;
@@ -119,7 +119,7 @@ impl WorkspaceSearchIndex {
                     > MAX_INDEXED_WORKSPACE_BYTES.saturating_sub(indexed_source_bytes) as u64;
             if should_skip_full_read {
                 let mut sample = [0; FILE_KIND_SAMPLE_BYTES];
-                let mut file = std::fs::File::open(&path)
+                let mut file = moeka_fs::local::native::File::open(&path)
                     .with_context(|| crate::i18n::runtime::rt!(OpenFile, path.display()))?;
                 crate::platform::fs_task::check_deadline()?;
                 let sample_len = file
@@ -132,7 +132,7 @@ impl WorkspaceSearchIndex {
                 continue;
             }
             let mut bytes = Vec::new();
-            std::fs::File::open(&path)
+            moeka_fs::local::native::File::open(&path)
                 .with_context(|| crate::i18n::runtime::rt!(OpenFile, path.display()))?
                 .take(MAX_INDEXED_FILE_BYTES as u64 + 1)
                 .read_to_end(&mut bytes)
@@ -225,7 +225,7 @@ impl WorkspaceSearchIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use moeka_fs::local::native as fs;
     use std::time::SystemTime;
 
     fn temp_workspace(label: &str) -> PathBuf {

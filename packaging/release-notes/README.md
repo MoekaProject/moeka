@@ -40,7 +40,10 @@ rechecks that remote main still matches the dispatch SHA.
 ## Pipeline
 
 1. Validate version and absence/draft status of the requested release.
-2. Build macOS app bundles without credentials, then sign/notarize them in fresh
+2. Build the four native SSH helpers without credentials, then sign/notarize the
+   macOS helpers in isolated jobs before hashing and compressing them. Every
+   desktop app package must embed this source-matched bundle.
+   Build macOS app bundles without credentials, then sign/notarize them in fresh
    hosted macOS jobs. In parallel, build Windows and Linux natively on x86_64 and
    ARM64 runners. Packages include repository license notices.
 3. Record version, source SHA, workflow run ID, filenames, sizes and SHA-256 in

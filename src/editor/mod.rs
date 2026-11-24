@@ -13,6 +13,7 @@ mod element;
 pub(crate) mod export;
 mod file_list;
 pub(crate) mod file_ops;
+mod file_tree;
 mod file_watch;
 mod fold;
 mod front_matter;
@@ -43,11 +44,15 @@ mod navigation_io;
 mod notifications;
 mod outline;
 mod pane;
+mod pdf;
+mod pdf_view;
 mod preview_overlay;
 mod profiler;
 mod quick_open;
+mod remote;
 mod render;
 mod render_pane;
+mod resource_transfer;
 mod scaling;
 mod scrollbar;
 mod search;
@@ -310,7 +315,7 @@ fn unique_import_path(directory: &Path, stem: &str, extension: Option<&str>) -> 
             (_, None) => format!("{stem}-{suffix}"),
         };
         let candidate = directory.join(&file_name);
-        if !candidate.exists() {
+        if moeka_fs::local::native::metadata(&candidate).is_err() {
             return candidate;
         }
         suffix += 1;
@@ -367,6 +372,8 @@ pub(crate) struct ContextSubmenuAim {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ContextMenuKind {
+    SidebarSettings,
+    AddWorkspace,
     WorkspaceRoot {
         path: PathBuf,
     },
@@ -374,10 +381,17 @@ pub(crate) enum ContextMenuKind {
         path: PathBuf,
         is_dir: bool,
     },
-    SidebarStarred {
-        path: PathBuf,
+    RemoteCreate {
+        parent: moeka_fs::path::ResourcePath,
+        generation: u64,
     },
-    FileList {
+    FileTreeResource {
+        resource: moeka_fs::path::ResourcePath,
+        is_dir: bool,
+        is_root: bool,
+        generation: u64,
+    },
+    SidebarStarred {
         path: PathBuf,
     },
     SidebarSort,
@@ -395,13 +409,18 @@ pub(crate) enum ContextMenuKind {
         table_start_line: usize,
     },
     Export {
-        path: PathBuf,
+        path: moeka_fs::path::ResourcePath,
     },
     WikiLink,
     Tab {
         tab_id: String,
     },
     Image,
+    Pdf {
+        tab_id: String,
+        content_id: usize,
+        image: Option<(usize, usize)>,
+    },
     Table {
         table_start_line: usize,
         row: usize,
@@ -636,6 +655,12 @@ pub(crate) struct FileClipboard {
 }
 
 #[derive(Clone)]
+pub(crate) struct ResourceClipboard {
+    pub resources: Vec<moeka_fs::path::ResourcePath>,
+    pub is_cut: bool,
+}
+
+#[derive(Clone)]
 pub(crate) struct MultiCursorClipboard {
     pub serialized_text: String,
     pub segments: Vec<String>,
@@ -738,12 +763,31 @@ impl Render for DraggedTabView {
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) enum DialogAction {
-    CloseTabUnsaved { tab_id: String },
-    CloseRunningTerminal { tab_id: String },
-    SaveAndCloseTab { tab_id: String },
-    DeletePath { path: PathBuf },
-    DeletePaths { paths: Vec<PathBuf> },
-    InstallUpdate { update: PreparedUpdate },
+    CloseTabUnsaved {
+        tab_id: String,
+    },
+    CloseRunningTerminal {
+        tab_id: String,
+    },
+    SaveAndCloseTab {
+        tab_id: String,
+    },
+    DeletePath {
+        path: PathBuf,
+    },
+    DeletePaths {
+        paths: Vec<PathBuf>,
+    },
+    DeleteResources {
+        resources: Vec<moeka_fs::path::ResourcePath>,
+        generation: u64,
+    },
+    RebindRemote {
+        generation: u64,
+    },
+    InstallUpdate {
+        update: PreparedUpdate,
+    },
     FormatWholeDocument,
     DismissOnly,
 }
@@ -2217,6 +2261,21 @@ pub(crate) enum CodeBlockDisplayAction {
 }
 
 pub struct EditorView {
+    pub(crate) remote_workspace: Option<remote::RemoteWorkspace>,
+    pub(crate) remote_workspace_active: bool,
+    pub(crate) ssh_restore: Option<config_store::SshRestore>,
+    pub(super) ssh_restore_error: Option<String>,
+    pub(crate) remote_documents: HashMap<String, remote::RemoteDocument>,
+    pub(crate) remote_input: Option<remote::RemoteInput>,
+    pub(crate) remote_sidebar_edit: Option<remote::RemoteSidebarEditMode>,
+    pub(crate) remote_generation: u64,
+    pub(crate) remote_input_generation: u64,
+    pub(crate) remote_search_generation: u64,
+    pub(crate) remote_watch_generation: u64,
+    pub(crate) remote_saves_inflight: HashSet<String>,
+    pub(crate) remote_opens_inflight: HashSet<moeka_fs::path::ResourcePath>,
+    pdf_views: HashMap<String, gpui::Entity<pdf_view::PdfView>>,
+    pdf_search_counts: HashMap<String, usize>,
     pub buffer: Buffer,
     pub cursor: Cursor,
     pub(crate) extra_cursors: Vec<Cursor>,
@@ -2392,10 +2451,9 @@ pub struct EditorView {
     pub(crate) workspace_states: HashMap<PathBuf, workspace::WorkspaceState>,
     pub(crate) swapped_workspace_root: Option<PathBuf>,
     pub(crate) focused_workspace_root: Option<PathBuf>,
-    pub(crate) workspace_top_scroll: ScrollHandle,
-    pub(crate) workspace_bottom_scroll: ScrollHandle,
+    pub(crate) workspace_roots_scroll: ScrollHandle,
     pub(crate) workspace_drop_target: Option<(PathBuf, bool)>,
-    pub(crate) workspace_drag_scroll: Option<(bool, Task<()>)>,
+    pub(crate) workspace_drag_scroll: Option<Task<()>>,
     pub(crate) workspace_close: Option<workspace::WorkspaceClose>,
     pub(crate) expanded_dirs: HashSet<PathBuf>,
     /// All selected sidebar paths.
@@ -2488,6 +2546,8 @@ pub struct EditorView {
     pub(crate) sidebar_edit: Option<SidebarEditMode>,
     pub(crate) sidebar_edit_blur_sub: Option<gpui::Subscription>,
     pub(crate) file_clipboard: Option<FileClipboard>,
+    pub(crate) resource_clipboard: Option<ResourceClipboard>,
+    pub(crate) chat_resource_snapshots: Vec<tempfile::TempDir>,
     pub(crate) multi_cursor_clipboard: Option<MultiCursorClipboard>,
     pub(crate) ui_scale: f32,
     #[cfg(target_os = "macos")]
@@ -2566,6 +2626,7 @@ pub struct EditorView {
     pub(crate) wiki_link_query: String,
     pub(crate) wiki_link_recent_results: Vec<WorkspaceFileCandidate>,
     pub(crate) wiki_link_search_results: Vec<QuickOpenResult>,
+    pub(crate) remote_wiki_link_results: Vec<moeka_fs::path::ResourcePath>,
     pub(crate) wiki_link_recent_task: Option<Task<()>>,
     pub(crate) wiki_link_search_task: Option<Task<()>>,
     pub(crate) menu_selected_index: usize,
@@ -2822,6 +2883,11 @@ pub struct EditorView {
     pub(crate) quick_open_visible: bool,
     pub(crate) quick_open_query: String,
     pub(crate) quick_open_results: Vec<QuickOpenResult>,
+    pub(crate) remote_quick_open_results: Vec<remote::RemoteQuickOpenResult>,
+    pub(crate) remote_sidebar_filter_rows: Vec<(remote::RemoteDirectoryEntry, usize)>,
+    pub(crate) remote_sidebar_filter_collapsed: HashSet<moeka_fs::path::ResourcePath>,
+    pub(crate) remote_sidebar_filter_task: Option<Task<()>>,
+    pub(crate) remote_sidebar_filter_epoch: usize,
     pub(crate) quick_open_selected_index: usize,
     pub(crate) quick_open_editor: Option<gpui::Entity<crate::text_input::TextInput>>,
     pub(crate) quick_open_task: Option<Task<()>>,
@@ -3071,6 +3137,19 @@ impl EditorView {
             app_settings.minimap_last_side,
         );
         let mut this = Self {
+            remote_workspace: None,
+            remote_workspace_active: false,
+            ssh_restore: None,
+            ssh_restore_error: None,
+            remote_documents: HashMap::new(),
+            remote_input: None,
+            remote_sidebar_edit: None,
+            remote_generation: 0,
+            remote_input_generation: 0,
+            remote_search_generation: 0,
+            remote_watch_generation: 0,
+            remote_saves_inflight: HashSet::new(),
+            remote_opens_inflight: HashSet::new(),
             buffer,
             cursor: Cursor::new(),
             extra_cursors: Vec::new(),
@@ -3207,6 +3286,8 @@ impl EditorView {
             table_size_hover: None,
             selected_handle: None,
             image_cache: HashMap::new(),
+            pdf_views: HashMap::new(),
+            pdf_search_counts: HashMap::new(),
             retired_images: Vec::new(),
             generated_preview_svg_cache: HashMap::new(),
             mermaid_preview_worker: Default::default(),
@@ -3290,6 +3371,8 @@ impl EditorView {
             sidebar_edit: None,
             sidebar_edit_blur_sub: None,
             file_clipboard: None,
+            resource_clipboard: None,
+            chat_resource_snapshots: Vec::new(),
             multi_cursor_clipboard: None,
             ui_scale: app_settings.ui_scale,
             #[cfg(target_os = "macos")]
@@ -3372,6 +3455,7 @@ impl EditorView {
             wiki_link_query: String::new(),
             wiki_link_recent_results: Vec::new(),
             wiki_link_search_results: Vec::new(),
+            remote_wiki_link_results: Vec::new(),
             wiki_link_recent_task: None,
             wiki_link_search_task: None,
             sidebar_visible: false,
@@ -3457,8 +3541,7 @@ impl EditorView {
             workspace_states: HashMap::new(),
             swapped_workspace_root: None,
             focused_workspace_root: None,
-            workspace_top_scroll: ScrollHandle::new(),
-            workspace_bottom_scroll: ScrollHandle::new(),
+            workspace_roots_scroll: ScrollHandle::new(),
             workspace_drop_target: None,
             workspace_drag_scroll: None,
             workspace_close: None,
@@ -3595,6 +3678,11 @@ impl EditorView {
             quick_open_visible: false,
             quick_open_query: String::new(),
             quick_open_results: Vec::new(),
+            remote_quick_open_results: Vec::new(),
+            remote_sidebar_filter_rows: Vec::new(),
+            remote_sidebar_filter_collapsed: HashSet::new(),
+            remote_sidebar_filter_task: None,
+            remote_sidebar_filter_epoch: 0,
             quick_open_selected_index: 0,
             quick_open_editor: None,
             quick_open_task: None,
@@ -5287,6 +5375,41 @@ impl EditorView {
             return;
         }
 
+        let is_remote = self
+            .active_tab_index()
+            .is_some_and(|index| self.tabs[index].is_remote);
+        let remote_source = if is_remote && !helpers::is_remote_image_url(&path) {
+            let Some(workspace) = self.remote_workspace.as_ref() else {
+                self.notify_error(
+                    crate::i18n::remote_text(self.ui_language, "not_connected"),
+                    cx,
+                );
+                return;
+            };
+            let Some(resource) = self
+                .active_tab_index()
+                .and_then(|index| {
+                    (!self.tabs[index].remote_binding_lost).then_some(&self.tabs[index])
+                })
+                .and_then(|tab| tab.remote.as_ref())
+                .and_then(|remote| remote.resource.clone())
+                .filter(|resource| resource.filesystem == *workspace.filesystem.identity())
+            else {
+                self.notify_error(
+                    crate::i18n::remote_text(self.ui_language, "remote_binding_lost"),
+                    cx,
+                );
+                return;
+            };
+            Some((
+                workspace.filesystem.clone(),
+                resource,
+                workspace.root.clone(),
+                self.remote_generation,
+            ))
+        } else {
+            None
+        };
         self.image_cache.insert(path.clone(), None);
         let source = navigation_io::DocumentContext::capture(self);
         let current_file = self.current_file_path.clone();
@@ -5294,24 +5417,56 @@ impl EditorView {
         let workspace_root = self.sidebar_root.clone();
         let entity_id = cx.entity_id();
         let request = navigation_io::begin_image_request(entity_id, source.pane_id(), &path);
-        let operation_path =
-            navigation_io::image_operation_path(&path, current_file.as_deref(), &workspace_root);
+        let operation_path = if remote_source.is_some() {
+            remote::scheduler_key()
+        } else {
+            navigation_io::image_operation_path(&path, current_file.as_deref(), &workspace_root)
+        };
         cx.spawn(async move |this, cx| {
             let image_path = path.clone();
+            let remote_identity = remote_source
+                .as_ref()
+                .map(|(_, resource, _, generation)| (resource.filesystem.clone(), *generation));
             let result = crate::platform::fs_task::run_background_anyhow(
                 "load document image",
                 operation_path.clone(),
                 move || {
-                    navigation_io::load_document_image(
-                        &image_path,
-                        current_file.as_deref(),
-                        &workspace_root,
-                        &workspaces,
-                    )
+                    if let Some((filesystem, source, root, _)) = remote_source {
+                        let bytes = remote::read_remote_relative_file(
+                            &filesystem,
+                            &source,
+                            &root,
+                            &image_path,
+                            64 * 1024 * 1024,
+                        )?;
+                        let extension = Path::new(&image_path)
+                            .extension()
+                            .and_then(|value| value.to_str());
+                        helpers::load_render_image_from_bytes(&bytes, extension).map(Arc::new)
+                    } else {
+                        navigation_io::load_document_image(
+                            &image_path,
+                            current_file.as_deref(),
+                            &workspace_root,
+                            &workspaces,
+                        )
+                    }
                 },
             )
             .await;
             this.update(cx, |editor, cx| {
+                if remote_identity
+                    .as_ref()
+                    .is_some_and(|(identity, generation)| {
+                        editor.remote_generation != *generation
+                            || editor
+                                .remote_workspace
+                                .as_ref()
+                                .is_none_or(|workspace| workspace.filesystem.identity() != identity)
+                    })
+                {
+                    return;
+                }
                 if !navigation_io::image_request_is_current(
                     entity_id,
                     source.pane_id(),
@@ -6014,6 +6169,20 @@ impl EditorView {
                                         active_tab_id.as_deref() == Some(tab.id.as_str());
                                 }
                                 if !tab.is_dirty {
+                                    if matches!(tab.file_kind, Some(FileKind::Pdf)) {
+                                        if let Some(view) = this.pdf_views.get(&tab.id).cloned() {
+                                            view.update(cx, |view, cx| {
+                                                view.reload(
+                                                    tab_path.clone(),
+                                                    &this.theme,
+                                                    this.ui_language,
+                                                    cx,
+                                                )
+                                            });
+                                        }
+                                        needs_notify = true;
+                                        continue;
+                                    }
                                     if !tab
                                         .file_kind
                                         .as_ref()
@@ -6350,6 +6519,18 @@ impl EditorView {
             DialogAction::DeletePaths { paths } => {
                 self.delete_paths_to_trash(&paths, cx);
             }
+            DialogAction::DeleteResources {
+                resources,
+                generation,
+            } => {
+                if resources
+                    .iter()
+                    .all(|resource| self.validate_resource_menu(resource, generation, cx))
+                {
+                    self.trash_resource_paths(resources, cx);
+                }
+            }
+            DialogAction::RebindRemote { generation } => self.confirm_remote_rebind(generation, cx),
             DialogAction::InstallUpdate { update } => {
                 self.install_update(update);
             }
@@ -6530,6 +6711,8 @@ impl EditorView {
             }
             DialogAction::DeletePath { .. }
             | DialogAction::DeletePaths { .. }
+            | DialogAction::DeleteResources { .. }
+            | DialogAction::RebindRemote { .. }
             | DialogAction::InstallUpdate { .. }
             | DialogAction::FormatWholeDocument
             | DialogAction::CloseRunningTerminal { .. } => {
@@ -6672,6 +6855,13 @@ impl EditorView {
             return Ok(ClipboardPasteOutcome::NotHandled);
         }
 
+        if self
+            .active_tab_index()
+            .is_some_and(|index| self.tabs[index].is_remote)
+        {
+            self.import_remote_attachments(images, file_paths, cx);
+            return Ok(ClipboardPasteOutcome::Consumed);
+        }
         let Some(current_file) = self.current_file_path.clone() else {
             self.show_save_before_import_dialog(cx);
             return Ok(ClipboardPasteOutcome::Consumed);
@@ -6746,6 +6936,13 @@ impl EditorView {
         paths: &[PathBuf],
         cx: &mut Context<Self>,
     ) {
+        if self
+            .active_tab_index()
+            .is_some_and(|index| self.tabs[index].is_remote)
+        {
+            self.import_remote_attachments(Vec::new(), paths.to_vec(), cx);
+            return;
+        }
         if !self.active_tab_is_markdown() {
             self.open_external_paths_in_tabs(paths, cx);
             return;
@@ -6987,8 +7184,9 @@ impl EditorView {
             let range = offset.min(anchor)..offset.max(anchor);
             if range.is_empty() {
                 let line = self.buffer.offset_to_line_col(offset).0;
-                if self.active_tab_is_non_markdown_text() {
+                if self.active_tab_is_non_markdown_text() || self.source_mode {
                     lines.push(line);
+                    has_list_line |= self.list_indent_width_for_line(line).is_some();
                 } else if self.list_indent_width_for_line(line).is_some() {
                     lines.push(line);
                     has_list_line = true;
@@ -7285,6 +7483,7 @@ impl EditorView {
     pub(crate) fn modal_overlay_is_open(&self) -> bool {
         self.context_menu.is_some()
             || self.dialog.is_some()
+            || self.remote_input.is_some()
             || self.settings_font_picker.is_some()
             || self.quick_open_visible
             || self.command_palette_visible
@@ -9077,6 +9276,10 @@ impl EditorView {
             .is_some_and(FileKind::supports_text_search)
     }
 
+    pub(crate) fn active_tab_is_pdf(&self) -> bool {
+        matches!(self.active_file_kind(), Some(FileKind::Pdf))
+    }
+
     pub(crate) fn active_tab_supports_persistent_save(&self) -> bool {
         !self.active_tab_is_read_only()
             && self
@@ -9137,10 +9340,18 @@ impl EditorView {
     }
 
     pub(crate) fn active_tab_is_read_only(&self) -> bool {
-        editor_is_read_only(self.embedded_read_only, self.reading_mode)
+        self.active_tab_index()
+            .is_some_and(|i| self.tabs[i].remote_text_unavailable())
+            || editor_is_read_only(self.embedded_read_only, self.reading_mode)
     }
 
     pub(crate) fn active_tab_can_start_content_edit(&self) -> bool {
+        if self
+            .active_tab_index()
+            .is_some_and(|i| self.tabs[i].remote_text_unavailable())
+        {
+            return false;
+        }
         editor_can_start_content_edit(
             self.embedded_read_only,
             self.active_tab_supports_text_buffer(),
@@ -10711,14 +10922,44 @@ impl EditorView {
             self.toggle_current_line_prefix_single(prefix);
             return;
         }
-
-        self.apply_single_cursor_edit_to_all_cursors(
-            |this, offset, anchor| {
-                let (start_line, _) = this.buffer.offset_to_line_col(offset.min(anchor));
-                this.buffer.line_start(start_line)
-            },
-            |this| this.toggle_current_line_prefix_single(prefix),
-        );
+        if self.table_cursor_cell_range().is_some() {
+            self.apply_single_cursor_edit_to_all_cursors(
+                |this, offset, anchor| {
+                    let (start_line, _) = this.buffer.offset_to_line_col(offset.min(anchor));
+                    this.buffer.line_start(start_line)
+                },
+                |this| this.toggle_current_line_prefix_single(prefix),
+            );
+            return;
+        }
+        let mut lines = std::collections::BTreeSet::new();
+        for cursor in self.all_cursors_snapshot() {
+            let (start, end) = self.line_span_for_range(cursor.selection_range());
+            lines.extend(start..=end);
+        }
+        let edits = lines
+            .into_iter()
+            .map(|line| {
+                let content = self.buffer.line_content(line);
+                let quote = markdown::blockquote_prefix_len(content);
+                let body = &content[quote..];
+                let trimmed = body.trim_start();
+                let leading = quote + body.len() - trimmed.len();
+                let old_len = Self::detect_block_prefix_len(trimmed);
+                let new_prefix = if &trimmed[..old_len] == prefix {
+                    ""
+                } else {
+                    prefix
+                };
+                let start = self.buffer.line_start(line) + leading;
+                table_cell_list_edit::Edit::new(start..start + old_len, new_prefix.to_string())
+            })
+            .collect();
+        let mut cursors = self.cursor_states_with_primary_flag();
+        table_cell_list_edit::apply_prefix_edits(&mut self.buffer, &mut cursors, edits);
+        self.restore_cursor_states(cursors);
+        self.reparse();
+        self.scroll_to_cursor();
     }
 
     fn toggle_current_line_prefix_single(&mut self, prefix: &str) {
@@ -10906,22 +11147,22 @@ impl EditorView {
         if !self.table_block_format_allowed(false) {
             return;
         }
-        if self.extra_cursors.is_empty() {
-            self.toggle_horizontal_rule_at_cursor_single();
+        let plans: Vec<_> =
+            source_input::normalize_targets(self.cursor_states_with_primary_flag(), &self.buffer)
+                .into_iter()
+                .map(|(cursor, primary)| (self.horizontal_rule_plan(cursor), primary))
+                .collect();
+        if !source_edit::validate(&self.buffer, &plans) {
+            log_error!("Cannot apply conflicting Markdown rule ranges");
             return;
         }
-
-        self.apply_single_cursor_edit_to_all_cursors(
-            |this, offset, _anchor| {
-                let (line, _) = this.buffer.offset_to_line_col(offset);
-                this.buffer.line_start(line)
-            },
-            |this| this.toggle_horizontal_rule_at_cursor_single(),
-        );
+        self.apply_source_plans(plans);
+        self.reparse();
+        self.scroll_to_cursor();
     }
 
-    fn toggle_horizontal_rule_at_cursor_single(&mut self) {
-        let line = self.cursor_line();
+    fn horizontal_rule_plan(&self, cursor: Cursor) -> source_edit::SourceCursorEdit {
+        let line = self.buffer.offset_to_line_col(cursor.offset).0;
         let line_start = self.buffer.line_start(line);
         let line_end = self.buffer.line_end(line);
         let line_text = self.buffer.line_content(line).to_string();
@@ -10931,13 +11172,15 @@ impl EditorView {
         } else {
             "---".to_string()
         };
-        self.buffer.replace(line_start..line_end, &replacement);
-        self.cursor.move_to(
-            (line_start + replacement.len()).min(self.buffer.len()),
-            &self.buffer,
-        );
-        self.reparse();
-        self.scroll_to_cursor();
+        let target = line_start + replacement.len();
+        source_edit::SourceCursorEdit {
+            range: line_start..line_end,
+            text: replacement,
+            cursor: Cursor {
+                offset: target,
+                anchor: target,
+            },
+        }
     }
 
     fn apply_single_cursor_edit_to_all_cursors(
@@ -11045,7 +11288,24 @@ impl EditorView {
     }
 
     pub(crate) fn list_indent_width_for_line(&self, line: usize) -> Option<usize> {
-        list_indent_width_for_source(self.decorations.get(line)?, self.buffer.line_content(line))
+        list_indent_width_for_source(
+            &self.markdown_edit_decoration(line)?,
+            self.buffer.line_content(line),
+        )
+    }
+
+    pub(super) fn markdown_edit_decoration(&self, line: usize) -> Option<LineDecoration> {
+        self.with_canonical_markdown_decorations(|decorations| decorations.get(line).cloned())
+    }
+
+    pub(super) fn prepare_markdown_format_context(&mut self) {
+        if !self.uses_lazy_markdown_decorations() {
+            return;
+        }
+        for cursor in self.all_cursors_snapshot() {
+            let (start, end) = self.line_span_for_range(cursor.selection_range());
+            self.ensure_lazy_markdown_decorations(start..end + 1);
+        }
     }
 
     pub(crate) fn normalize_ordered_lists_in_line_span(
@@ -11111,69 +11371,6 @@ impl EditorView {
             self.normalize_ordered_lists_in_line_span(first_line, last_line);
             self.reparse();
         }
-    }
-
-    pub(crate) fn insert_link_or_image(&mut self, prefix: &str, suffix: &str, placeholder: &str) {
-        if self.extra_cursors.is_empty() {
-            self.insert_link_or_image_single(prefix, suffix, placeholder);
-            return;
-        }
-
-        self.apply_single_cursor_edit_to_all_cursors(
-            |_this, offset, anchor| offset.min(anchor),
-            |this| this.insert_link_or_image_single(prefix, suffix, placeholder),
-        );
-    }
-
-    pub(crate) fn insert_wiki_image(&mut self) {
-        if self.extra_cursors.is_empty() {
-            self.insert_wiki_image_single();
-        } else {
-            self.apply_single_cursor_edit_to_all_cursors(
-                |_this, offset, anchor| offset.min(anchor),
-                |this| this.insert_wiki_image_single(),
-            );
-        }
-    }
-
-    fn insert_wiki_image_single(&mut self) {
-        let range = self.cursor.selection_range();
-        let selected = self.buffer.text_for_range(range.clone());
-        let target = if selected.is_empty() {
-            "image.png"
-        } else {
-            selected
-        };
-        let insertion = format!("![[{target}]]");
-        let target_start = range.start + 3;
-        let target_end = target_start + target.len();
-        self.buffer.replace(range, &insertion);
-        self.cursor.anchor = target_start;
-        self.cursor.offset = target_end;
-        self.reparse();
-        self.scroll_to_cursor();
-    }
-
-    fn insert_link_or_image_single(&mut self, prefix: &str, suffix: &str, placeholder: &str) {
-        let range = self.cursor.selection_range();
-        let selected = self.buffer.text_for_range(range.clone()).to_string();
-        let replacement = if selected.is_empty() {
-            format!("{}{placeholder}{}", prefix, suffix)
-        } else {
-            format!("{}{}{}", prefix, selected, suffix)
-        };
-        self.buffer.replace(range.clone(), &replacement);
-        let desc_end = if selected.is_empty() {
-            range.start + prefix.len() + placeholder.len()
-        } else {
-            range.start + prefix.len() + selected.len()
-        };
-        let url_start = desc_end + 2;
-        let url_end = desc_end + suffix.len() - 1;
-        self.cursor.anchor = url_start;
-        self.cursor.offset = url_end;
-        self.reparse();
-        self.scroll_to_cursor();
     }
 
     pub(crate) fn toggle_checkbox(&mut self, line: usize) {
@@ -11244,28 +11441,32 @@ impl EditorView {
         true
     }
 
-    pub(crate) fn wrap_current_lines_as_code_block(&mut self) {
+    pub(crate) fn toggle_code_block_format(&mut self) {
         if !self.table_block_format_allowed(false) {
             return;
         }
-        if self.extra_cursors.is_empty() {
-            self.wrap_current_lines_as_code_block_single();
+        let plans: Vec<_> =
+            source_input::normalize_targets(self.cursor_states_with_primary_flag(), &self.buffer)
+                .into_iter()
+                .map(|(cursor, primary)| {
+                    let edit = self
+                        .code_block_unwrap_plan(cursor)
+                        .unwrap_or_else(|| self.code_block_wrap_plan(cursor));
+                    (edit, primary)
+                })
+                .collect();
+        if !source_edit::validate(&self.buffer, &plans) {
+            log_error!("Cannot apply conflicting Markdown code block ranges");
             return;
         }
-
-        self.apply_single_cursor_edit_to_all_cursors(
-            |this, offset, anchor| {
-                let (start_line, _) =
-                    this.line_span_for_range(offset.min(anchor)..offset.max(anchor));
-                this.buffer.line_start(start_line)
-            },
-            |this| this.wrap_current_lines_as_code_block_single(),
-        );
+        self.apply_source_plans(plans);
+        self.reparse();
+        self.scroll_to_cursor();
     }
 
-    fn wrap_current_lines_as_code_block_single(&mut self) {
-        let selection = self.cursor.selection_range();
-        let (start_line, end_line) = self.selected_line_span();
+    fn code_block_wrap_plan(&self, cursor: Cursor) -> source_edit::SourceCursorEdit {
+        let selection = cursor.selection_range();
+        let (start_line, end_line) = self.line_span_for_range(selection.clone());
         let block_start = self.buffer.line_start(start_line);
         let block_end = if end_line + 1 < self.buffer.line_count() {
             self.buffer.line_start(end_line + 1)
@@ -11304,95 +11505,35 @@ impl EditorView {
             }
         };
 
-        self.buffer.replace(block_start..block_end, &replacement);
-        if selection.is_empty() {
-            let target = adjust_offset(self.cursor.offset)
-                .max(body_start)
-                .min(self.buffer.len());
-            self.cursor.offset = target;
-            self.cursor.anchor = target;
+        let cursor = if selection.is_empty() {
+            let target = adjust_offset(cursor.offset).max(body_start);
+            Cursor {
+                offset: target,
+                anchor: target,
+            }
         } else {
-            self.cursor.anchor = adjust_offset(self.cursor.anchor).min(self.buffer.len());
-            self.cursor.offset = adjust_offset(self.cursor.offset).min(self.buffer.len());
+            Cursor {
+                anchor: adjust_offset(cursor.anchor),
+                offset: adjust_offset(cursor.offset),
+            }
+        };
+        source_edit::SourceCursorEdit {
+            range: block_start..block_end,
+            text: replacement,
+            cursor,
         }
-        self.reparse();
-        self.scroll_to_cursor();
     }
 
-    /// Strips a `marker … marker` pair whose content span the caret sits in and
-    /// selects the freed text. Used by syntaxes the inline-span parser reports
-    /// separately (highlight, superscript, subscript), which `apply_wrap` does
-    /// not know how to toggle off.
-    pub(crate) fn remove_marker_wrap_at_cursor(&mut self, marker: &str) -> bool {
-        let line = self.cursor_line();
-        let line_start = self.buffer.line_start(line);
-        let col = self.cursor.offset.saturating_sub(line_start);
-        let line_content = self.buffer.line_content(line).to_string();
-        let Some(decoration) = self.decorations.get(line) else {
-            return false;
-        };
-        let spans: &Vec<Range<usize>> = match marker {
-            "==" => &decoration.highlight_spans,
-            "^" => &decoration.superscript_spans,
-            "~" => &decoration.subscript_spans,
-            _ => return false,
-        };
-        let marker_len = marker.len();
-        let Some(span) = spans
-            .iter()
-            .filter(|span| {
-                let start = span.start.saturating_sub(marker_len);
-                let end = (span.end + marker_len).min(line_content.len());
-                col >= start && col <= end
-            })
-            .min_by_key(|span| span.end.saturating_sub(span.start))
-            .cloned()
-        else {
-            return false;
-        };
-        let marker_start = span.start.saturating_sub(marker_len);
-        let marker_end = (span.end + marker_len).min(line_content.len());
-        if !line_content[marker_start..].starts_with(marker)
-            || !line_content[..marker_end].ends_with(marker)
-        {
-            return false;
-        }
-        let range = line_start + marker_start..line_start + marker_end;
-        let wrapped = self.buffer.text_for_range(range.clone()).to_string();
-        let inner = wrapped[marker_len..wrapped.len() - marker_len].to_string();
-        self.buffer.replace(range.clone(), &inner);
-        self.cursor.anchor = range.start;
-        self.cursor.offset = range.start + inner.len();
-        self.reparse();
-        self.scroll_to_cursor();
-        true
-    }
-
-    /// Replaces the enclosing `range` with `keep` and selects what is left, so
-    /// re-invoking Link / Image / WikiLink / Footnote removes the syntax
-    /// instead of nesting another one.
-    pub(crate) fn unwrap_syntax_range(&mut self, range: Range<usize>, keep: Range<usize>) {
-        let kept = self.buffer.text_for_range(keep).to_string();
-        self.buffer.replace(range.clone(), &kept);
-        self.cursor.anchor = range.start;
-        self.cursor.offset = range.start + kept.len();
-        self.reparse();
-        self.scroll_to_cursor();
-    }
-
-    /// Removes the fences around the code block the caret is in.
-    pub(crate) fn unwrap_code_block_at_cursor(&mut self) -> bool {
-        let line = self.cursor_line();
-        let Some((fence_start, fence_end)) = self.code_fence_group_range(line) else {
-            return false;
-        };
+    fn code_block_unwrap_plan(&self, cursor: Cursor) -> Option<source_edit::SourceCursorEdit> {
+        let line = self.buffer.offset_to_line_col(cursor.offset).0;
+        let (fence_start, fence_end) = self.code_fence_group_range(line)?;
         if fence_end <= fence_start {
-            return false;
+            return None;
         }
         let body_start = self.buffer.line_start(fence_start + 1);
         let body_end = self.buffer.line_start(fence_end).min(self.buffer.len());
         if body_start > body_end {
-            return false;
+            return None;
         }
         let body = self.buffer.text()[body_start..body_end].to_string();
         let block_start = self.buffer.line_start(fence_start);
@@ -11401,29 +11542,31 @@ impl EditorView {
         } else {
             self.buffer.len()
         };
-        self.buffer.replace(block_start..block_end, &body);
-        self.cursor.anchor = block_start;
-        self.cursor.offset =
-            (block_start + body.trim_end_matches('\n').len()).min(self.buffer.len());
-        self.reparse();
-        self.scroll_to_cursor();
-        true
+        let cursor = Cursor {
+            anchor: block_start,
+            offset: block_start + body.trim_end_matches('\n').len(),
+        };
+        Some(source_edit::SourceCursorEdit {
+            range: block_start..block_end,
+            text: body,
+            cursor,
+        })
     }
 
     /// First and last physical line of the fenced code block containing `line`.
     fn code_fence_group_range(&self, line: usize) -> Option<(usize, usize)> {
         let is_fence = |index: usize| {
-            self.decorations
-                .get(index)
+            self.markdown_edit_decoration(index)
                 .is_some_and(|decoration| decoration.block_type == BlockType::CodeBlockFence)
         };
         let in_block = |index: usize| {
-            self.decorations.get(index).is_some_and(|decoration| {
-                matches!(
-                    decoration.block_type,
-                    BlockType::CodeBlock | BlockType::CodeBlockFence
-                )
-            })
+            self.markdown_edit_decoration(index)
+                .is_some_and(|decoration| {
+                    matches!(
+                        decoration.block_type,
+                        BlockType::CodeBlock | BlockType::CodeBlockFence
+                    )
+                })
         };
         if !in_block(line) {
             return None;
@@ -11440,24 +11583,71 @@ impl EditorView {
     }
 
     pub(crate) fn apply_wrap(&mut self, prefix: &str, suffix: &str) {
-        if self.extra_cursors.is_empty() {
-            self.apply_wrap_single(prefix, suffix);
+        let plans: Vec<_> =
+            source_input::normalize_targets(self.cursor_states_with_primary_flag(), &self.buffer)
+                .into_iter()
+                .map(|(cursor, primary)| (self.markdown_wrap_plan(cursor, prefix, suffix), primary))
+                .collect();
+        if !source_edit::validate(&self.buffer, &plans) {
+            log_error!("Cannot apply conflicting Markdown format ranges");
             return;
         }
-
-        self.apply_single_cursor_edit_to_all_cursors(
-            |_this, offset, anchor| offset.min(anchor),
-            |this| this.apply_wrap_single(prefix, suffix),
-        );
+        self.apply_source_plans(plans);
+        self.reparse();
+        self.scroll_to_cursor();
     }
 
-    fn apply_wrap_single(&mut self, prefix: &str, suffix: &str) {
-        let offset = self.cursor.offset;
+    fn markdown_wrap_plan(
+        &self,
+        cursor: Cursor,
+        prefix: &str,
+        suffix: &str,
+    ) -> source_edit::SourceCursorEdit {
+        let reversed = cursor.offset < cursor.anchor;
+        let offset = cursor.offset;
         let (line, col) = self.buffer.offset_to_line_col(offset);
         let line_content = self.buffer.line_content(line).to_string();
 
         // Try to find an enclosing inline span the cursor/selection is in
-        if let Some(dec) = self.decorations.get(line).cloned() {
+        if let Some(dec) = self.markdown_edit_decoration(line) {
+            let spans = match prefix {
+                "==" => Some(&dec.highlight_spans),
+                "^" => Some(&dec.superscript_spans),
+                "~" => Some(&dec.subscript_spans),
+                _ => None,
+            };
+            if let Some(span) = spans.and_then(|spans| {
+                spans
+                    .iter()
+                    .filter(|span| {
+                        let start =
+                            self.buffer.line_start(line) + span.start.saturating_sub(prefix.len());
+                        let end = self.buffer.line_start(line) + span.end + suffix.len();
+                        let selection = cursor.selection_range();
+                        selection.start >= start && selection.end <= end
+                    })
+                    .min_by_key(|span| span.end - span.start)
+            }) {
+                let start = self.buffer.line_start(line) + span.start.saturating_sub(prefix.len());
+                let end = self.buffer.line_start(line) + span.end + suffix.len();
+                if self.buffer.text().get(start..start + prefix.len()) == Some(prefix)
+                    && self.buffer.text().get(end - suffix.len()..end) == Some(suffix)
+                {
+                    let text = self
+                        .buffer
+                        .text_for_range(start + prefix.len()..end - suffix.len())
+                        .to_string();
+                    let inner_end = start + text.len();
+                    return source_edit::SourceCursorEdit {
+                        range: start..end,
+                        text,
+                        cursor: Cursor {
+                            anchor: if reversed { inner_end } else { start },
+                            offset: if reversed { start } else { inner_end },
+                        },
+                    };
+                }
+            }
             let enclosing = dec
                 .inline_spans
                 .iter()
@@ -11472,8 +11662,8 @@ impl EditorView {
                     };
                     let marker_start = span.range.start.saturating_sub(kind_prefix_len);
                     let marker_end = (span.range.end + kind_prefix_len).min(line_content.len());
-                    let contains_cursor = if self.cursor.has_selection() {
-                        let sel = self.cursor.selection_range();
+                    let contains_cursor = if cursor.has_selection() {
+                        let sel = cursor.selection_range();
                         let line_start = self.buffer.line_start(line);
                         let sel_start_col = sel.start.saturating_sub(line_start);
                         let sel_end_col = sel.end.saturating_sub(line_start);
@@ -11513,30 +11703,35 @@ impl EditorView {
                         .buffer
                         .text_for_range(inner_start..inner_end)
                         .to_string();
-                    self.buffer.replace(sel_start..sel_end, &inner);
                     let new_start = sel_start;
                     let new_end = sel_start + inner.len();
                     if existing_prefix == prefix && existing_suffix == suffix {
-                        // Same format: select the inner text
-                        self.cursor.anchor = new_start;
-                        self.cursor.offset = new_end;
+                        return source_edit::SourceCursorEdit {
+                            range: sel_start..sel_end,
+                            text: inner,
+                            cursor: Cursor {
+                                anchor: if reversed { new_end } else { new_start },
+                                offset: if reversed { new_start } else { new_end },
+                            },
+                        };
                     } else {
-                        // Different format: apply the new wrap around inner text
                         let replacement = format!("{prefix}{inner}{suffix}");
-                        self.buffer.replace(new_start..new_end, &replacement);
                         let new_start2 = new_start + prefix.len();
                         let new_end2 = new_start2 + inner.len();
-                        self.cursor.anchor = new_start2;
-                        self.cursor.offset = new_end2;
+                        return source_edit::SourceCursorEdit {
+                            range: sel_start..sel_end,
+                            text: replacement,
+                            cursor: Cursor {
+                                anchor: if reversed { new_end2 } else { new_start2 },
+                                offset: if reversed { new_start2 } else { new_end2 },
+                            },
+                        };
                     }
-                    self.reparse();
-                    self.scroll_to_cursor();
-                    return;
                 }
             }
         }
 
-        let range = self.cursor.selection_range();
+        let range = cursor.selection_range();
         let selected = self.buffer.text_for_range(range.clone()).to_string();
         let (replacement, new_start, new_end) = if range.is_empty() {
             (
@@ -11558,29 +11753,62 @@ impl EditorView {
                 range.end + prefix.len(),
             )
         };
-        self.buffer.replace(range, &replacement);
-        self.cursor.anchor = new_start;
-        self.cursor.offset = new_end;
-        self.reparse();
-        self.scroll_to_cursor();
+        source_edit::SourceCursorEdit {
+            range,
+            text: replacement,
+            cursor: Cursor {
+                anchor: if reversed { new_end } else { new_start },
+                offset: if reversed { new_start } else { new_end },
+            },
+        }
     }
 
     pub(crate) fn apply_heading(&mut self, level: u8) {
         if !self.table_block_format_allowed(false) {
             return;
         }
-        if self.extra_cursors.is_empty() {
+        if level != 0
+            && self.extra_cursors.is_empty()
+            && self.selected_line_span().0 == self.selected_line_span().1
+        {
             self.apply_heading_single(level);
             return;
         }
-
-        self.apply_single_cursor_edit_to_all_cursors(
-            |this, offset, _anchor| {
-                let (line, _) = this.buffer.offset_to_line_col(offset);
-                this.buffer.line_start(line)
-            },
-            |this| this.apply_heading_single(level),
-        );
+        let mut lines = std::collections::BTreeSet::new();
+        for cursor in self.all_cursors_snapshot() {
+            let (start, end) = self.line_span_for_range(cursor.selection_range());
+            lines.extend(start..=end);
+        }
+        let edits = lines
+            .into_iter()
+            .filter_map(|line| {
+                let content = self.buffer.line_content(line);
+                let quote = markdown::blockquote_prefix_len(content);
+                let body = &content[quote..];
+                let indent = body.len() - body.trim_start_matches([' ', '\t']).len();
+                let body = &body[indent..];
+                let hashes = body.bytes().take_while(|byte| *byte == b'#').count();
+                let old_len =
+                    if (1..=6).contains(&hashes) && body.as_bytes().get(hashes) == Some(&b' ') {
+                        hashes + 1
+                    } else {
+                        0
+                    };
+                let prefix = if level == 0 || hashes == level as usize && old_len > 0 {
+                    String::new()
+                } else {
+                    format!("{} ", "#".repeat(level as usize))
+                };
+                let start = self.buffer.line_start(line) + quote + indent;
+                (old_len > 0 || !prefix.is_empty())
+                    .then(|| table_cell_list_edit::Edit::new(start..start + old_len, prefix))
+            })
+            .collect();
+        let mut cursors = self.cursor_states_with_primary_flag();
+        table_cell_list_edit::apply_prefix_edits(&mut self.buffer, &mut cursors, edits);
+        self.restore_cursor_states(cursors);
+        self.reparse();
+        self.scroll_to_cursor();
     }
 
     fn apply_heading_single(&mut self, level: u8) {
@@ -12284,9 +12512,7 @@ fn normalize_ordered_list_numbers_in_buffer(buffer: &mut Buffer) -> Option<(usiz
 // ── Free functions ──────────────────────────────────────────────────
 
 pub(crate) fn is_markdown_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown" | "mdx"))
+    moeka_fs::content::is_markdown_path(path)
 }
 
 fn split_external_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
@@ -12296,67 +12522,16 @@ fn split_external_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
         .partition(|path| is_markdown_file(path))
 }
 
-pub(crate) fn is_image_file(path: &Path) -> bool {
-    crate::platform::image_decode::is_image_path(path)
-}
-
-pub(crate) fn should_skip_path(path: &Path, is_dir: bool) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-
-    if name.starts_with('.') {
-        return true;
-    }
-
-    if !is_dir {
-        return false;
-    }
-
-    matches!(
-        name,
-        "node_modules" | "target" | "dist" | "build" | "coverage" | ".git"
-    )
-}
-
-fn looks_like_text(bytes: &[u8]) -> bool {
-    if bytes.contains(&0) {
-        return false;
-    }
-
-    if bytes.is_empty() {
-        return true;
-    }
-
-    let sample = &bytes[..bytes.len().min(4096)];
-    let control_count = sample
-        .iter()
-        .filter(|&&byte| byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t' | 0x08 | 0x0c))
-        .count();
-    if control_count * 10 > sample.len().max(1) {
-        return false;
-    }
-
-    if std::str::from_utf8(sample).is_ok() {
-        return true;
-    }
-
-    let lossy = String::from_utf8_lossy(sample);
-    let replacement_count = lossy.chars().filter(|&ch| ch == '\u{fffd}').count();
-    replacement_count * 20 <= lossy.chars().count().max(1)
-}
+pub(crate) use moeka_fs::search::should_skip_path;
 
 pub(crate) fn classify_file_kind_for_bytes(path: &Path, bytes: &[u8]) -> FileKind {
-    if is_markdown_file(path) {
-        return FileKind::Markdown;
-    }
-
-    if is_image_file(path) {
-        return FileKind::Image;
-    }
-
-    if !looks_like_text(bytes) {
-        return FileKind::Binary;
+    use moeka_fs::content::{ContentKind, classify_content};
+    match classify_content(path, bytes) {
+        ContentKind::Pdf => return FileKind::Pdf,
+        ContentKind::Markdown => return FileKind::Markdown,
+        ContentKind::Image => return FileKind::Image,
+        ContentKind::Binary => return FileKind::Binary,
+        ContentKind::Text => {}
     }
 
     let first_line = String::from_utf8_lossy(
@@ -12569,7 +12744,9 @@ pub(crate) fn parse_decorations_for_file_kind(
     match file_kind {
         FileKind::Markdown => markdown::parse_decorations(text),
         FileKind::Code { language } => plain_text_decorations(text, Some(language.clone())),
-        FileKind::Text | FileKind::Image | FileKind::Binary => plain_text_decorations(text, None),
+        FileKind::Text | FileKind::Image | FileKind::Pdf | FileKind::Binary => {
+            plain_text_decorations(text, None)
+        }
     }
 }
 
@@ -13234,9 +13411,9 @@ impl EditorView {
         output["visible_edit_max_scroll_delta_px"] =
             serde_json::json!(bench.visible_edit_max_scroll_delta);
         if let Some(parent) = bench.output_path.parent() {
-            std::fs::create_dir_all(parent).ok();
+            moeka_fs::local::native::create_dir_all(parent).ok();
         }
-        if let Ok(file) = std::fs::File::create(&bench.output_path) {
+        if let Ok(file) = moeka_fs::local::native::File::create(&bench.output_path) {
             serde_json::to_writer_pretty(file, &output).ok();
         }
         Some(false)
@@ -13838,6 +14015,9 @@ pub(super) fn builtin_welcome_tab(ui_language: UiLanguage) -> OpenTab {
         heading_title_cache: Default::default(),
         kind: TabKind::Editor,
         path: None,
+        is_remote: false,
+        remote_binding_lost: false,
+        remote: None,
         file_kind: Some(FileKind::Markdown),
         editor_left_aligned: false,
         reading_mode: false,
@@ -13851,6 +14031,7 @@ pub(super) fn builtin_welcome_tab(ui_language: UiLanguage) -> OpenTab {
             extra_cursors: Vec::new(),
         },
         image_view: ImageViewState::default(),
+        pdf_view: PdfViewState::default(),
         is_preview: false,
         is_dirty: false,
         is_deleted: false,
@@ -15932,8 +16113,10 @@ mod tests {
     fn unique_import_path_appends_incrementing_suffix_on_conflict() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let directory = temp_dir.path();
-        std::fs::write(directory.join("20260507153045.png"), b"one").expect("write first");
-        std::fs::write(directory.join("20260507153045-1.png"), b"two").expect("write second");
+        moeka_fs::local::native::write(directory.join("20260507153045.png"), b"one")
+            .expect("write first");
+        moeka_fs::local::native::write(directory.join("20260507153045-1.png"), b"two")
+            .expect("write second");
 
         let next_path = unique_import_path(directory, "20260507153045", Some("png"));
 
@@ -15966,11 +16149,11 @@ mod tests {
     fn resolve_markdown_target_path_strips_fragment_and_prefers_current_file_dir() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let notes_dir = temp_dir.path().join("notes");
-        std::fs::create_dir_all(&notes_dir).expect("mkdir");
+        moeka_fs::local::native::create_dir_all(&notes_dir).expect("mkdir");
         let current_file = notes_dir.join("current.md");
         let linked_file = notes_dir.join("other.md");
-        std::fs::write(&current_file, b"# current").expect("write current");
-        std::fs::write(&linked_file, b"# other").expect("write other");
+        moeka_fs::local::native::write(&current_file, b"# current").expect("write current");
+        moeka_fs::local::native::write(&linked_file, b"# other").expect("write other");
 
         let resolved = resolve_markdown_target_path(
             temp_dir.path(),

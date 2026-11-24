@@ -1,4 +1,4 @@
-use std::fs::{self, OpenOptions};
+use moeka_fs::local::native::{self as fs, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -143,37 +143,11 @@ impl DocumentSave {
 }
 
 fn save_document(path: &Path, content: &[u8]) -> io::Result<()> {
-    check_deadline()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    check_deadline()?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
-    check_deadline()?;
-    file.write_all(content)?;
-    check_deadline()?;
-    file.flush()
+    moeka_fs::local::LocalFilesystem.save_document(path, content, &check_deadline)
 }
 
 pub(crate) fn copy_file_data(source: &Path, target: &Path, overwrite: bool) -> io::Result<u64> {
-    check_deadline()?;
-    let mut input = fs::File::open(source)?;
-    check_deadline()?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(overwrite)
-        .create_new(!overwrite)
-        .open(target)?;
-    check_deadline()?;
-    let copied = io::copy(&mut input, &mut output)?;
-    check_deadline()?;
-    output.flush()?;
-    Ok(copied)
+    moeka_fs::local::LocalFilesystem.copy_file_data(source, target, overwrite, &check_deadline)
 }
 
 pub(crate) fn is_atomic_write_temp_path(path: &Path) -> bool {
@@ -266,7 +240,10 @@ fn write_without_atomic_replace(path: &Path, content: &[u8]) -> io::Result<()> {
             }
             result
         }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_file() => {
+        Err(error)
+            if error.kind() == io::ErrorKind::AlreadyExists
+                && fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) =>
+        {
             write_existing_file_in_place(path, content)
         }
         Err(error) => Err(error),

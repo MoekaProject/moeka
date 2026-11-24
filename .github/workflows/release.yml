@@ -13,10 +13,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  remote_servers:
+    uses: ./.github/workflows/remote-servers.yml
+
   build:
+    needs: remote_servers
     name: Unsigned macOS ${{ matrix.arch }}
     runs-on: macos-15
     timeout-minutes: 90
+    env:
+      MOEKA_REMOTE_BUNDLE: ${{ github.workspace }}/remote/servers.mrb
+      MOEKA_REQUIRE_REMOTE_BUNDLE: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -33,6 +40,10 @@ jobs:
         with:
           target: ${{ matrix.target }}
           environment: macos-15
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.remote_servers.outputs.artifact }}
+          path: remote
       - name: Build unsigned app and DMG
         run: |
           make dmg-one \
@@ -50,9 +61,13 @@ jobs:
           compression-level: 0
 
   build_linux:
+    needs: remote_servers
     name: Unsigned Linux ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    env:
+      MOEKA_REMOTE_BUNDLE: ${{ github.workspace }}/remote/servers.mrb
+      MOEKA_REQUIRE_REMOTE_BUNDLE: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -83,6 +98,10 @@ jobs:
         with:
           target: ${{ matrix.target }}
           environment: ${{ matrix.runner }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.remote_servers.outputs.artifact }}
+          path: remote
       - name: Build package
         run: CARGO_INCREMENTAL=0 make linux-${{ matrix.arch }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -94,9 +113,13 @@ jobs:
           compression-level: 0
 
   build_windows:
+    needs: remote_servers
     name: Unsigned Windows ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    env:
+      MOEKA_REMOTE_BUNDLE: ${{ github.workspace }}/remote/servers.mrb
+      MOEKA_REQUIRE_REMOTE_BUNDLE: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -115,6 +138,10 @@ jobs:
         with:
           target: ${{ matrix.target }}
           environment: ${{ matrix.runner }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.remote_servers.outputs.artifact }}
+          path: remote
       - name: Build package
         shell: pwsh
         run: |

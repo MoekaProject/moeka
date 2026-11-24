@@ -9,6 +9,21 @@ use std::{
 use gpui::{AnyElement, Context, Render, Subscription, WeakEntity, Window, div, prelude::*, px};
 
 use super::{EditorView, SidebarItem};
+
+pub(super) fn file_tree_guide_levels(depths: &[usize]) -> Vec<HashSet<usize>> {
+    let mut next_at_depth = HashMap::new();
+    let mut guides = vec![HashSet::new(); depths.len()];
+    for index in (0..depths.len()).rev() {
+        let depth = depths[index];
+        next_at_depth.insert(depth, index);
+        for level in 1..=depth {
+            if next_at_depth.get(&level).is_some_and(|next| *next > index) {
+                guides[index].insert(level);
+            }
+        }
+    }
+    guides
+}
 use crate::ui::motion::Transition;
 
 pub(super) struct SidebarMotionView {
@@ -18,7 +33,7 @@ pub(super) struct SidebarMotionView {
 }
 
 pub(super) struct StarredMotion {
-    paths: Vec<PathBuf>,
+    paths: Vec<moeka_fs::path::ResourcePath>,
     progress: Transition,
     frame_progress: f32,
 }
@@ -138,7 +153,7 @@ impl EditorView {
     pub(super) fn toggle_starred_section(&mut self, cx: &mut Context<Self>) {
         self.sidebar_starred_collapsed = !self.sidebar_starred_collapsed;
         let expanding = !self.sidebar_starred_collapsed;
-        let paths = self.visible_starred_sidebar_files();
+        let paths = self.visible_starred_resources();
         let now = Instant::now();
         let mut motion = self
             .sidebar_starred_motion
@@ -160,7 +175,7 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(super) fn prepare_starred_motion(&mut self, paths: &[PathBuf]) {
+    pub(super) fn prepare_starred_motion(&mut self, paths: &[moeka_fs::path::ResourcePath]) {
         let now = Instant::now();
         if self.sidebar_starred_motion.as_ref().is_some_and(|motion| {
             motion.paths != paths || !motion.progress.running(now) || !self.animations_enabled()
@@ -320,17 +335,8 @@ impl EditorView {
         {
             return guides.clone();
         }
-        let mut next_at_depth = HashMap::new();
-        let mut guides = vec![HashSet::new(); items.len()];
-        for i in (0..items.len()).rev() {
-            let depth = items[i].depth;
-            next_at_depth.insert(depth, i);
-            for level in 1..=depth {
-                if next_at_depth.get(&level).is_some_and(|next| *next > i) {
-                    guides[i].insert(level);
-                }
-            }
-        }
+        let guides =
+            file_tree_guide_levels(&items.iter().map(|item| item.depth).collect::<Vec<_>>());
         let guides = Rc::new(guides);
         self.sidebar_guide_cache = Some((items.clone(), guides.clone()));
         if let Some(motion) = &mut self.sidebar_tree_motion {

@@ -1,6 +1,6 @@
+use moeka_fs::local::native as fs;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Weak};
@@ -467,6 +467,13 @@ impl EditorView {
         focus_editor: bool,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .active_tab_index()
+            .is_some_and(|index| self.tabs[index].is_remote)
+        {
+            self.navigate_remote_markdown(target, cx);
+            return;
+        }
         let source = DocumentContext::capture(self);
         self.preview_open_epoch = self.preview_open_epoch.wrapping_add(1);
         let epoch = self.preview_open_epoch;

@@ -43,13 +43,117 @@ mod filesystem_free_menu_tests {
 
     #[cfg(feature = "gpui-test-support")]
     #[gpui::test]
+    fn tab_resource_menu_order_and_copy_are_shared_for_local_and_ssh(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::*;
+        use gpui::{AppContext, Render, Subscription};
+        use moeka_fs::path::{FilesystemId, NativePath, ResourcePath};
+        struct Harness(gpui::Entity<EditorView>, Subscription);
+        impl Render for Harness {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let _ = &self.1;
+                self.0.update(cx, |editor, cx| {
+                    div().size_full().child(editor.render_context_menu(cx))
+                })
+            }
+        }
+        let editor = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut editor = EditorView::new_with_mode(cx, true, false, Some("draft"), false);
+                editor.ui_language = UiLanguage::English;
+                editor.styles.ui.spec.animations_enabled = false;
+                editor.last_window_height = 1200.0;
+                editor.last_window_width = 1000.0;
+                editor
+            })
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let local = directory.path().join("note.md");
+        let remote_root = ResourcePath {
+            filesystem: FilesystemId::Ssh([7; 32]),
+            path: NativePath::unix_absolute("/workspace").unwrap(),
+        };
+        let remote_path = remote_root.join_child("note.md").unwrap();
+        for remote in [false, true] {
+            let (_, cx) = cx.add_window_view(|_, cx| {
+                Harness(editor.clone(), cx.observe(&editor, |_, _, cx| cx.notify()))
+            });
+            cx.update(|_, cx| {
+                editor.update(cx, |editor, cx| {
+                    let tab = &mut editor.tabs[0];
+                    tab.path = (!remote).then(|| local.clone());
+                    tab.is_remote = remote;
+                    tab.remote = remote.then(|| config_store::RemoteTabState {
+                        peer_scope: None,
+                        destination: "example.invalid".into(),
+                        config_file: None,
+                        root: remote_root.clone(),
+                        resource: Some(remote_path.clone()),
+                        revision: None,
+                        save_uncertain: false,
+                        pending_resource: None,
+                        line_ending_crlf: false,
+                    });
+                    let id = tab.id.clone();
+                    editor.open_context_menu(
+                        ContextMenu {
+                            position: gpui::point(px(0.0), px(0.0)),
+                            kind: ContextMenuKind::Tab { tab_id: id },
+                        },
+                        false,
+                        cx,
+                    );
+                })
+            });
+            cx.run_until_parked();
+            let labels = [
+                crate::i18n::add_file_to_chat_label(UiLanguage::English),
+                crate::i18n::translate(UiLanguage::English, crate::i18n::TextKey::RevealInFileTree),
+                crate::i18n::translate(UiLanguage::English, crate::i18n::TextKey::CopyRelativePath),
+                crate::i18n::translate(UiLanguage::English, crate::i18n::TextKey::CopyPath),
+            ];
+            let bounds = labels.map(|label| {
+                cx.debug_bounds(Box::leak(format!("menu-item-{label}").into_boxed_str()))
+                    .expect(label)
+            });
+            for pair in bounds.windows(2) {
+                assert!(pair[0].top() < pair[1].top());
+            }
+            let reveal = Box::leak(
+                format!(
+                    "menu-item-{}",
+                    crate::i18n::translate(
+                        UiLanguage::English,
+                        crate::i18n::TextKey::RevealInFinder
+                    )
+                )
+                .into_boxed_str(),
+            );
+            assert_eq!(cx.debug_bounds(reveal).is_some(), !remote);
+            cx.simulate_click(bounds[3].center(), Default::default());
+            cx.update(|_, cx| {
+                assert_eq!(
+                    cx.read_from_clipboard().unwrap().text().unwrap(),
+                    if remote {
+                        "/workspace/note.md".into()
+                    } else {
+                        local.display().to_string()
+                    }
+                );
+            });
+        }
+    }
+
+    #[cfg(feature = "gpui-test-support")]
+    #[gpui::test]
     fn export_submenu_has_eight_rows_and_reserves_their_height(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;
         let editor = cx.update(|cx| {
             cx.new(|cx| super::EditorView::new_with_mode(cx, true, false, Some("draft"), false))
         });
         editor.update(cx, |editor, cx| {
-            let path = PathBuf::from("unavailable/note.md");
+            let path = moeka_fs::path::ResourcePath::local(Path::new("unavailable/note.md"));
             let rows = editor.render_export_context_submenu(&path, cx);
             assert_eq!(rows.len(), 8);
             assert_eq!(
@@ -1056,6 +1160,21 @@ impl EditorView {
         cx.notify();
     }
 
+    pub(super) fn open_add_workspace_menu(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_context_menu(
+            ContextMenu {
+                position,
+                kind: ContextMenuKind::AddWorkspace,
+            },
+            false,
+            cx,
+        );
+    }
+
     fn animate_context_menu_opacity(
         &mut self,
         target: f32,
@@ -1198,7 +1317,10 @@ impl EditorView {
     }
 
     pub(crate) fn current_heading_action(&self) -> Option<FormatMenuAction> {
-        match self.decorations.get(self.cursor_line())?.block_type {
+        match self
+            .markdown_edit_decoration(self.cursor_line())?
+            .block_type
+        {
             BlockType::Heading(1) => Some(FormatMenuAction::Heading1),
             BlockType::Heading(2) => Some(FormatMenuAction::Heading2),
             BlockType::Heading(3) => Some(FormatMenuAction::Heading3),
@@ -1210,7 +1332,7 @@ impl EditorView {
     }
 
     pub(super) fn image_menu_target_on_line(&self, line: usize) -> Option<ImageMenuTarget> {
-        let decoration = self.decorations.get(line)?;
+        let decoration = self.markdown_edit_decoration(line)?;
         decoration
             .inline_spans
             .iter()
@@ -1256,6 +1378,13 @@ impl EditorView {
     }
 
     pub(super) fn copy_active_image_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        if self
+            .active_tab_index()
+            .is_some_and(|index| self.tabs[index].is_remote)
+        {
+            self.copy_remote_image(None, cx);
+            return;
+        }
         let Some(path) = self.current_file_path.clone() else {
             self.context_menu = None;
             cx.notify();
@@ -1305,7 +1434,7 @@ impl EditorView {
                         Some("tif" | "tiff") => Some(ImageFormat::Tiff),
                         _ => None,
                     };
-                    let bytes = std::fs::read(&path)?;
+                    let bytes = moeka_fs::local::native::read(&path)?;
                     let image = if let Some(format) = format {
                         Image::from_bytes(format, bytes)
                     } else {
@@ -1336,6 +1465,12 @@ impl EditorView {
     }
 
     fn current_markdown_image_path(&self) -> Option<PathBuf> {
+        if self
+            .active_tab_index()
+            .is_some_and(|index| self.tabs[index].is_remote)
+        {
+            return None;
+        }
         let raw_path = self.current_markdown_image_source()?;
         if helpers::is_remote_image_url(raw_path) {
             return None;
@@ -1355,6 +1490,14 @@ impl EditorView {
     }
 
     fn copy_markdown_image_to_clipboard(&mut self, source: String, cx: &mut Context<Self>) {
+        if self
+            .active_tab_index()
+            .is_some_and(|index| self.tabs[index].is_remote)
+            && !helpers::is_remote_image_url(&source)
+        {
+            self.copy_remote_image(Some(source), cx);
+            return;
+        }
         if !helpers::is_remote_image_url(&source) {
             self.copy_local_image_source_to_clipboard(source, cx);
             return;
@@ -1540,7 +1683,7 @@ impl EditorView {
         }
     }
 
-    fn sidebar_context_paths(&self, path: &Path) -> Vec<PathBuf> {
+    pub(super) fn sidebar_context_paths(&self, path: &Path) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = if self.selected_sidebar_paths.contains(path) {
             self.selected_sidebar_paths.iter().cloned().collect()
         } else {
@@ -1592,6 +1735,43 @@ impl EditorView {
         let Some(source) = self.current_markdown_image_source().map(str::to_string) else {
             return;
         };
+        let remote_source = if self
+            .active_tab_index()
+            .is_some_and(|index| self.tabs[index].is_remote)
+            && !helpers::is_remote_image_url(&source)
+        {
+            let tab = &self.tabs[self.active_tab_index().expect("active remote tab")];
+            let Some(workspace) = self.remote_workspace.as_ref() else {
+                self.notify_error(
+                    crate::i18n::remote_text(self.ui_language, "not_connected"),
+                    cx,
+                );
+                return;
+            };
+            let Some(resource) = tab
+                .remote
+                .as_ref()
+                .and_then(|state| state.resource.clone())
+                .filter(|resource| {
+                    !tab.remote_binding_lost
+                        && resource.filesystem == *workspace.filesystem.identity()
+                })
+            else {
+                self.notify_error(
+                    crate::i18n::remote_text(self.ui_language, "remote_binding_lost"),
+                    cx,
+                );
+                return;
+            };
+            Some((
+                workspace.filesystem.clone(),
+                resource,
+                workspace.root.clone(),
+                self.remote_generation,
+            ))
+        } else {
+            None
+        };
         let file = self.current_file_path.clone();
         let root = self.sidebar_root.clone();
         let workspaces = self.workspaces.clone();
@@ -1629,15 +1809,37 @@ impl EditorView {
             let Some(destination) = destination else {
                 return;
             };
+            if let Some((_, resource, _, generation)) = remote_source.as_ref()
+                && !this
+                    .update(cx, |editor, _| {
+                        editor.remote_generation == *generation
+                            && editor.remote_workspace.as_ref().is_some_and(|workspace| {
+                                workspace.filesystem.identity() == &resource.filesystem
+                            })
+                    })
+                    .unwrap_or(false)
+            {
+                return;
+            }
             let path = destination.clone();
             let result =
                 crate::platform::fs_task::run_anyhow("save image as", destination, move || {
-                    let bytes = navigation_io::read_document_image_bytes(
-                        &source,
-                        file.as_deref(),
-                        &root,
-                        &workspaces,
-                    )?;
+                    let bytes = if let Some((filesystem, resource, root, _)) = remote_source {
+                        super::remote::read_remote_relative_file(
+                            &filesystem,
+                            &resource,
+                            &root,
+                            &source,
+                            64 * 1024 * 1024,
+                        )?
+                    } else {
+                        navigation_io::read_document_image_bytes(
+                            &source,
+                            file.as_deref(),
+                            &root,
+                            &workspaces,
+                        )?
+                    };
                     file_ops::atomic_write(&path, &bytes)?;
                     Ok(())
                 })
@@ -1759,6 +1961,12 @@ impl EditorView {
     }
 
     pub(crate) fn wiki_link_result_count(&self) -> usize {
+        if self
+            .active_tab_index()
+            .is_some_and(|index| self.tabs[index].is_remote)
+        {
+            return self.remote_wiki_link_results.len();
+        }
         if self.wiki_link_query.trim().is_empty() {
             self.wiki_link_recent_results.len()
         } else {
@@ -1782,57 +1990,9 @@ impl EditorView {
     /// Uses the markdown parser's decoration data for accurate detection.
     /// Inline syntax has priority over block-level syntax.
     /// Returns at most one active action.
-    /// `(full syntax range, text to keep)` for the `[desc](url)` the caret is
-    /// inside, in buffer offsets.
-    fn link_syntax_at_cursor(&self) -> Option<(Range<usize>, Range<usize>)> {
-        let line = self.cursor_line();
-        let line_start = self.buffer.line_start(line);
-        let col = self.cursor.offset.saturating_sub(line_start);
-        let line_content = self.buffer.line_content(line);
-        // An image is a link with a leading `!`; leave those to the image action.
-        let (full, desc, _url) = markdown_link_ranges(line_content, col)?;
-        Some((
-            line_start + full.start..line_start + full.end,
-            line_start + desc.start..line_start + desc.end,
-        ))
-    }
-
-    /// `(full syntax range, target to keep)` for the `[[target]]` at the caret.
-    fn wiki_link_syntax_at_cursor(&self) -> Option<(Range<usize>, Range<usize>)> {
-        let line = self.cursor_line();
-        let line_start = self.buffer.line_start(line);
-        let decoration = self.decorations.get(line)?;
-        let col = self.cursor.offset.saturating_sub(line_start);
-        let wiki_link = decoration
-            .wiki_links
-            .iter()
-            .find(|link| (link.full_range.start..=link.full_range.end).contains(&col))?;
-        Some((
-            line_start + wiki_link.full_range.start..line_start + wiki_link.full_range.end,
-            line_start + wiki_link.full_range.start + 2
-                ..line_start + wiki_link.full_range.end.saturating_sub(2),
-        ))
-    }
-
-    /// `(full syntax range, label to keep)` for the `[^label]` at the caret.
-    fn footnote_syntax_at_cursor(&self) -> Option<(Range<usize>, Range<usize>)> {
-        let line = self.cursor_line();
-        let line_start = self.buffer.line_start(line);
-        let decoration = self.decorations.get(line)?;
-        let col = self.cursor.offset.saturating_sub(line_start);
-        let footnote = decoration.footnote_references.iter().find(|reference| {
-            (reference.full_range.start..=reference.full_range.end).contains(&col)
-        })?;
-        Some((
-            line_start + footnote.full_range.start..line_start + footnote.full_range.end,
-            line_start + footnote.full_range.start + 2
-                ..line_start + footnote.full_range.end.saturating_sub(1),
-        ))
-    }
-
     fn active_format_actions(&self) -> Vec<FormatMenuAction> {
         let cursor_line = self.cursor_line();
-        let decoration = match self.decorations.get(cursor_line) {
+        let decoration = match self.markdown_edit_decoration(cursor_line) {
             Some(d) => d,
             None => return Vec::new(),
         };
@@ -1960,20 +2120,141 @@ impl EditorView {
         );
     }
 
-    pub(crate) fn open_file_list_context_menu(
+    pub(super) fn open_remote_create_menu(
         &mut self,
-        path: PathBuf,
+        parent: moeka_fs::path::ResourcePath,
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
         self.open_context_menu(
             ContextMenu {
                 position,
-                kind: ContextMenuKind::FileList { path },
+                kind: ContextMenuKind::RemoteCreate {
+                    parent,
+                    generation: self.remote_generation,
+                },
             },
             true,
             cx,
         );
+    }
+
+    fn render_file_tree_resource_context_menu(
+        &self,
+        resource: moeka_fs::path::ResourcePath,
+        is_dir: bool,
+        is_root: bool,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        use super::file_tree::ResourceMenuAction as Action;
+        let remote = resource.filesystem != moeka_fs::path::FilesystemId::Local;
+        let is_root = is_root
+            || is_dir
+                && (self
+                    .workspaces
+                    .iter()
+                    .any(|root| moeka_fs::path::ResourcePath::local(root) == resource)
+                    || self
+                        .remote_workspace
+                        .as_ref()
+                        .is_some_and(|workspace| workspace.root == resource));
+        let paths = self.resource_menu_paths(&resource, is_root);
+        let count = paths.len();
+        let star_paths = paths
+            .iter()
+            .filter(|path| *path == &resource || self.resource_is_known_file(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        let starred = star_paths.iter().all(|path| self.resource_is_starred(path));
+        let paste_count = self
+            .resource_clipboard_contents()
+            .map_or(0, |clip| clip.resources.len());
+        let markdown = resource
+            .path
+            .file_name()
+            .is_some_and(|name| is_markdown_file(Path::new(&name.to_string())));
+        super::file_tree::resource_menu_actions(
+            is_root,
+            is_dir,
+            markdown,
+            count,
+            paste_count > 0,
+            remote,
+        )
+        .into_iter()
+        .map(|action| {
+            if action == Action::Separator {
+                return self.render_context_menu_separator();
+            }
+            if action == Action::Export {
+                return self.render_format_submenu_trigger_item(
+                    self.t(crate::i18n::TextKey::Export),
+                    None,
+                    ContextMenuKind::Export {
+                        path: resource.clone(),
+                    },
+                    cx,
+                );
+            }
+            let key = match action {
+                Action::NewFile => crate::i18n::TextKey::NewFile,
+                Action::NewDirectory => crate::i18n::TextKey::MenuNewFolder,
+                Action::Star => {
+                    if starred {
+                        crate::i18n::TextKey::Unstar
+                    } else {
+                        crate::i18n::TextKey::Star
+                    }
+                }
+                Action::Rename => crate::i18n::TextKey::Rename,
+                Action::Delete => crate::i18n::TextKey::Delete,
+                Action::Cut => crate::i18n::TextKey::Cut,
+                Action::Copy => crate::i18n::TextKey::Copy,
+                Action::Paste => crate::i18n::TextKey::Paste,
+                Action::CopyPath => crate::i18n::TextKey::CopyPath,
+                Action::CopyRelativePath => crate::i18n::TextKey::CopyRelativePath,
+                Action::Collapse => crate::i18n::TextKey::CollapseAllDirectories,
+                Action::Expand => crate::i18n::TextKey::ExpandAllDirectories,
+                Action::Reveal => crate::i18n::TextKey::RevealInFinder,
+                Action::CloseWorkspace => crate::i18n::TextKey::CloseFolder,
+                _ => crate::i18n::TextKey::NewFile,
+            };
+            let label = match action {
+                Action::Chat => crate::i18n::add_file_to_chat_label(self.ui_language).to_string(),
+                Action::Search => {
+                    crate::i18n::sidebar_action_label(self.ui_language, "search").to_string()
+                }
+                Action::Refresh => crate::i18n::remote_text(self.ui_language, "refresh"),
+                Action::Disconnect => crate::i18n::remote_text(self.ui_language, "disconnect"),
+                Action::Delete if count > 1 => {
+                    crate::i18n::delete_items_label(self.ui_language, count)
+                }
+                Action::Star => self.sidebar_counted_label(self.t(key), star_paths.len()),
+                Action::Cut | Action::Copy => self.sidebar_counted_label(self.t(key), count),
+                Action::Paste => self.sidebar_counted_label(self.t(key), paste_count),
+                _ => self.t(key).to_string(),
+            };
+            let resource = resource.clone();
+            let paths = if action == Action::Star {
+                star_paths.clone()
+            } else {
+                paths.clone()
+            };
+            self.render_context_menu_item(
+                &label,
+                matches!(action, Action::Delete | Action::Disconnect),
+                cx,
+                move |this, window, cx| {
+                    if this.validate_resource_menu(&resource, generation, cx) {
+                        this.perform_resource_menu_action(
+                            action, &resource, &paths, is_dir, window, cx,
+                        );
+                    }
+                },
+            )
+        })
+        .collect()
     }
 
     pub(crate) fn open_format_context_menu(
@@ -2106,13 +2387,52 @@ impl EditorView {
         let (line, column) = self.buffer.offset_to_line_col(self.cursor.offset);
         let content = self.buffer.line_content(line);
         if self.slash_menu_start.is_none()
-            && self.active_tab_is_markdown()
+            && self.active_tab_uses_markdown_editor()
             && !self.embedded_editor
             && column == content.len()
             && content.trim().is_empty()
             && !self.offset_in_code_context(self.cursor.offset)
         {
             self.slash_menu_anchor = Some(self.slash_menu_anchor_at(self.cursor.offset));
+        }
+    }
+
+    pub(super) fn sync_markdown_completion_after_edit(
+        &mut self,
+        new_text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.active_tab_uses_markdown_editor() || self.embedded_editor {
+            return;
+        }
+        if self.slash_menu_start.is_some() {
+            self.update_slash_filter(cx);
+        } else if self.wiki_link_start.is_some() {
+            self.sync_wiki_link_menu(cx);
+        } else if !self.has_extra_cursors()
+            && self.table_source.is_none()
+            && !self.offset_in_code_context(self.cursor.offset)
+        {
+            let offset = self.cursor.offset;
+            if new_text == "["
+                && self.buffer.text().get(offset.saturating_sub(2)..offset) == Some("[[")
+            {
+                let closer = input_ime::missing_wiki_link_closer(self.buffer.text(), offset);
+                if !closer.is_empty() {
+                    self.buffer.replace(offset..offset, closer);
+                    self.reparse();
+                    self.cursor.move_to(offset, &self.buffer);
+                }
+            }
+            if self.maybe_open_wiki_link_menu_after_edit(cx) {
+                return;
+            }
+            if new_text == "/" {
+                let (line, col) = self.buffer.offset_to_line_col(self.cursor.offset);
+                if input_ime::slash_menu_trigger(self.buffer.line_content(line), col, false) {
+                    self.open_slash_menu(cx);
+                }
+            }
         }
     }
 
@@ -2238,7 +2558,7 @@ impl EditorView {
             self.buffer.text(),
             start,
             self.cursor.offset,
-            self.active_tab_is_markdown() && !self.embedded_editor,
+            self.active_tab_uses_markdown_editor() && !self.embedded_editor,
             self.offset_in_code_context(self.cursor.offset),
         );
         let Some(query) = query else {
@@ -2315,6 +2635,13 @@ impl EditorView {
     }
 
     pub(crate) fn run_wiki_link_recent_search(&mut self, cx: &mut Context<Self>) {
+        if self
+            .active_tab_index()
+            .is_some_and(|index| self.tabs[index].is_remote)
+        {
+            self.search_remote_wiki_links(cx);
+            return;
+        }
         self.wiki_link_recent_task = None;
         self.wiki_link_search_task = None;
         self.wiki_link_search_results.clear();
@@ -2332,7 +2659,7 @@ impl EditorView {
                 "search recent wiki links",
                 root.clone(),
                 move || {
-                    std::fs::read_dir(&root)?;
+                    moeka_fs::local::native::read_dir(&root)?;
                     Ok(crate::editor::quick_open::collect_wiki_link_recent_files(
                         &root, 10,
                     ))
@@ -2360,6 +2687,13 @@ impl EditorView {
     }
 
     pub(crate) fn run_wiki_link_search(&mut self, cx: &mut Context<Self>) {
+        if self
+            .active_tab_index()
+            .is_some_and(|index| self.tabs[index].is_remote)
+        {
+            self.search_remote_wiki_links(cx);
+            return;
+        }
         // Keep the previous query's results visible while the new search runs;
         // replacing `wiki_link_search_task` cancels the stale task, so results
         // can only be written by the latest query. This avoids the per-keystroke
@@ -2380,7 +2714,7 @@ impl EditorView {
         let task = cx.spawn(async move |this, cx| {
             let results =
                 crate::platform::fs_task::run("search wiki links", root.clone(), move || {
-                    std::fs::read_dir(&root)?;
+                    moeka_fs::local::native::read_dir(&root)?;
                     Ok(crate::editor::quick_open::collect_wiki_link_search_results(
                         &root, &query, 10,
                     ))
@@ -2524,11 +2858,41 @@ impl EditorView {
             self.close_context_menu(cx);
             return;
         };
+        if self
+            .active_tab_index()
+            .is_some_and(|index| self.tabs[index].is_remote)
+        {
+            let source = self.active_tab_index().and_then(|index| {
+                let tab = &self.tabs[index];
+                (!tab.remote_binding_lost).then_some(tab.remote.as_ref()?.resource.as_ref()?)
+            });
+            let target = source.and_then(|source| {
+                self.remote_wiki_link_results
+                    .get(self.menu_selected_index)
+                    .and_then(|target| super::remote::remote_relative_link(source, target))
+            });
+            let Some(target) = target else {
+                self.notify_error(
+                    crate::i18n::remote_text(self.ui_language, "remote_binding_lost"),
+                    cx,
+                );
+                return;
+            };
+            self.checkpoint();
+            self.buffer.replace(start + 2..query_end, &target);
+            self.cursor.move_to(start + 2 + target.len(), &self.buffer);
+            self.reparse();
+            self.close_context_menu(cx);
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
+        }
         let Some(path) = self.selected_wiki_link_path() else {
             return;
         };
         let pane_id = self.current_pane_id();
         let tab_id = self.active_tab_id.clone();
+        let source_mode = self.source_mode;
         let query = self.buffer.text_for_range(start + 2..query_end).to_string();
         let root = self.sidebar_root.clone();
         let source = self
@@ -2542,7 +2906,7 @@ impl EditorView {
                 "resolve wiki link target",
                 root.clone(),
                 move || {
-                    std::fs::read_dir(&root)?;
+                    moeka_fs::local::native::read_dir(&root)?;
                     let index =
                         if policy.path_style == super::attachments::AttachmentPathStyle::Shortest {
                             Some(super::attachments::WorkspaceLinkIndex::build(&root))
@@ -2556,6 +2920,8 @@ impl EditorView {
             this.update(cx, |editor, cx| {
                 editor.with_pane_if_alive(pane_id, |editor| {
                     if editor.active_tab_id != tab_id
+                        || editor.source_mode != source_mode
+                        || editor.active_tab_is_read_only()
                         || editor.wiki_link_start != Some(start)
                         || editor.wiki_link_query_end(start) != Some(query_end)
                         || editor.buffer.text_for_range(start + 2..query_end) != query
@@ -2570,6 +2936,7 @@ impl EditorView {
                         }
                     };
                     let replace_start = start + 2;
+                    editor.checkpoint();
                     editor.buffer.replace(replace_start..query_end, &target);
                     editor
                         .cursor
@@ -2652,319 +3019,343 @@ impl EditorView {
             self.close_context_menu(cx);
             return;
         }
+        if !matches!(
+            action,
+            FormatMenuAction::Cut | FormatMenuAction::Copy | FormatMenuAction::Paste
+        ) && (!self.active_tab_uses_markdown_editor() || !self.begin_content_edit(cx))
+        {
+            self.close_context_menu(cx);
+            return;
+        }
+        if !matches!(
+            action,
+            FormatMenuAction::Cut | FormatMenuAction::Copy | FormatMenuAction::Paste
+        ) {
+            self.prepare_markdown_format_context();
+            self.checkpoint();
+        }
         if let Some(start) = self.slash_menu_start.take() {
             let end = self.cursor.offset;
             if end > start {
-                self.checkpoint();
                 self.buffer.replace(start..end, "");
                 self.cursor.move_to(start, &self.buffer);
                 self.reparse();
-                self.commit_history_transaction();
             }
             self.slash_filter.clear();
             self.close_context_menu_immediately(cx);
         }
         self.close_context_menu(cx);
+        self.apply_format_menu_action(action, cx);
+        if action == FormatMenuAction::WikiLink
+            || action == FormatMenuAction::Link && self.app_settings.link_syntax == "wikilink"
+        {
+            self.ensure_wiki_link_menu_for_cursor(cx);
+        } else {
+            self.close_context_menu(cx);
+        }
+        self.pause_blinking(cx);
+    }
+
+    fn apply_reference_format(&mut self, action: FormatMenuAction) {
+        let date = if action == FormatMenuAction::DateTime {
+            chrono::Local::now()
+                .format(self.app_settings.date_time_format())
+                .to_string()
+        } else {
+            String::new()
+        };
+        let plans: Vec<_> = super::source_input::normalize_targets(
+            self.cursor_states_with_primary_flag(),
+            &self.buffer,
+        )
+        .into_iter()
+        .map(|(cursor, primary)| (self.reference_format_plan(action, cursor, &date), primary))
+        .collect();
+        if !super::source_edit::validate(&self.buffer, &plans) {
+            log_error!("Cannot apply conflicting Markdown reference ranges");
+            return;
+        }
+        self.apply_source_plans(plans);
+        self.reparse();
+        self.scroll_to_cursor();
+    }
+
+    fn reference_format_plan(
+        &self,
+        action: FormatMenuAction,
+        cursor: crate::cursor::Cursor,
+        date: &str,
+    ) -> super::source_edit::SourceCursorEdit {
+        let range = cursor.selection_range();
+        let selected = self.buffer.text_for_range(range.clone());
+        let (line, col) = self.buffer.offset_to_line_col(cursor.offset);
+        let line_start = self.buffer.line_start(line);
+        let content = self.buffer.line_content(line);
         let action = if action == FormatMenuAction::Link
             && self.app_settings.link_syntax == "wikilink"
-            && self.link_syntax_at_cursor().is_none()
-            && !["https://", "http://", "mailto:"].iter().any(|prefix| {
-                self.buffer
-                    .text_for_range(self.cursor.selection_range())
-                    .trim()
-                    .starts_with(prefix)
-            }) {
+            && markdown_link_ranges(content, col).is_none()
+            && !["https://", "http://", "mailto:"]
+                .iter()
+                .any(|prefix| selected.trim().starts_with(prefix))
+        {
             FormatMenuAction::WikiLink
         } else {
             action
         };
+        let decoration = self.markdown_edit_decoration(line);
+        let wiki = decoration.as_ref().and_then(|decoration| {
+            decoration
+                .wiki_links
+                .iter()
+                .find(|link| (link.full_range.start..=link.full_range.end).contains(&col))
+        });
+        let unwrap = match action {
+            FormatMenuAction::Link => {
+                markdown_link_ranges(content, col).map(|(full, desc, _)| (full, desc))
+            }
+            FormatMenuAction::WikiLink => wiki.map(|wiki| {
+                (
+                    wiki.full_range.clone(),
+                    wiki.full_range.start + 2..wiki.full_range.end - 2,
+                )
+            }),
+            FormatMenuAction::Image
+                if self.app_settings.link_syntax == "wikilink"
+                    && wiki.is_some_and(|wiki| {
+                        wiki.full_range.start > 0
+                            && content.as_bytes()[wiki.full_range.start - 1] == b'!'
+                    }) =>
+            {
+                wiki.map(|wiki| {
+                    (
+                        wiki.full_range.start - 1..wiki.full_range.end,
+                        wiki.full_range.start + 2..wiki.full_range.end - 2,
+                    )
+                })
+            }
+            FormatMenuAction::Image => image_markdown_ranges(content)
+                .filter(|(full, _, _)| (full.start..=full.end).contains(&col))
+                .map(|(full, desc, _)| (full, desc)),
+            FormatMenuAction::Footnote => decoration.as_ref().and_then(|decoration| {
+                decoration
+                    .footnote_references
+                    .iter()
+                    .find(|reference| {
+                        (reference.full_range.start..=reference.full_range.end).contains(&col)
+                    })
+                    .map(|reference| {
+                        (
+                            reference.full_range.clone(),
+                            reference.full_range.start + 2..reference.full_range.end - 1,
+                        )
+                    })
+            }),
+            _ => None,
+        };
+        if let Some((full, keep)) = unwrap {
+            let text = content[keep].to_string();
+            let start = line_start + full.start;
+            let end = start + text.len();
+            return super::source_edit::SourceCursorEdit {
+                range: start..line_start + full.end,
+                text,
+                cursor: crate::cursor::Cursor {
+                    offset: if cursor.offset < cursor.anchor {
+                        start
+                    } else {
+                        end
+                    },
+                    anchor: if cursor.offset < cursor.anchor {
+                        end
+                    } else {
+                        start
+                    },
+                },
+            };
+        }
+        let start = range.start;
+        let (text, anchor, offset) = match action {
+            FormatMenuAction::Link
+                if ["https://", "http://", "mailto:"]
+                    .iter()
+                    .any(|prefix| selected.trim().starts_with(prefix)) =>
+            {
+                let text = format!("[{selected}]({selected})");
+                let end = start + text.len();
+                (text, end, end)
+            }
+            FormatMenuAction::Link | FormatMenuAction::Image
+                if action == FormatMenuAction::Link
+                    || self.app_settings.link_syntax != "wikilink" =>
+            {
+                let (prefix, suffix, placeholder) = if action == FormatMenuAction::Link {
+                    ("[", "](https://)", "title")
+                } else {
+                    ("![", "](image.png)", "alt")
+                };
+                let desc = if selected.is_empty() {
+                    placeholder
+                } else {
+                    selected
+                };
+                let desc_end = start + prefix.len() + desc.len();
+                (
+                    format!("{prefix}{desc}{suffix}"),
+                    desc_end + 2,
+                    desc_end + suffix.len() - 1,
+                )
+            }
+            FormatMenuAction::WikiLink => {
+                let offset = start + 2 + selected.len();
+                (format!("[[{selected}]]"), offset, offset)
+            }
+            FormatMenuAction::Image => {
+                let target = if selected.is_empty() {
+                    "image.png"
+                } else {
+                    selected
+                };
+                (
+                    format!("![[{target}]]"),
+                    start + 3,
+                    start + 3 + target.len(),
+                )
+            }
+            FormatMenuAction::Footnote => {
+                let label = if selected.is_empty() {
+                    "note"
+                } else {
+                    selected
+                };
+                let text = format!("[^{label}]");
+                if selected.is_empty() {
+                    (text, start + 2, start + 2 + label.len())
+                } else {
+                    let end = start + text.len();
+                    (text, end, end)
+                }
+            }
+            FormatMenuAction::Table => {
+                let column = self.message(crate::i18n::MessageKey::TableColumn);
+                let cell = self.message(crate::i18n::MessageKey::TableCell);
+                let text = format!(
+                    "| {column}1 | {column}2 |\n| --- | --- |\n| {cell}1 | {cell}2 |\n| {cell}3 | {cell}4 |"
+                );
+                (text, start + 2, start + 2 + column.len() + 1)
+            }
+            FormatMenuAction::DateTime => {
+                (date.to_string(), start + date.len(), start + date.len())
+            }
+            _ => unreachable!("not a Markdown reference insertion action"),
+        };
+        super::source_edit::SourceCursorEdit {
+            range,
+            text,
+            cursor: crate::cursor::Cursor { offset, anchor },
+        }
+    }
+
+    fn apply_format_menu_action(&mut self, action: FormatMenuAction, cx: &mut Context<Self>) {
         match action {
             FormatMenuAction::Cut => self.cut_selection_to_clipboard(cx),
             FormatMenuAction::Copy => self.copy_selection_to_clipboard(cx),
             FormatMenuAction::Paste => self.paste_from_clipboard(cx),
             FormatMenuAction::Heading1 => {
-                self.checkpoint();
                 self.apply_heading(1);
-                self.pause_blinking(cx);
             }
             FormatMenuAction::Heading2 => {
-                self.checkpoint();
                 self.apply_heading(2);
-                self.pause_blinking(cx);
             }
             FormatMenuAction::Heading3 => {
-                self.checkpoint();
                 self.apply_heading(3);
-                self.pause_blinking(cx);
             }
             FormatMenuAction::Heading4 => {
-                self.checkpoint();
                 self.apply_heading(4);
-                self.pause_blinking(cx);
             }
             FormatMenuAction::Heading5 => {
-                self.checkpoint();
                 self.apply_heading(5);
-                self.pause_blinking(cx);
             }
             FormatMenuAction::Heading6 => {
-                self.checkpoint();
                 self.apply_heading(6);
-                self.pause_blinking(cx);
             }
             FormatMenuAction::Paragraph => {
-                if let Some(current_heading) = self.current_heading_action() {
-                    self.checkpoint();
-                    match current_heading {
-                        FormatMenuAction::Heading1 => self.apply_heading(1),
-                        FormatMenuAction::Heading2 => self.apply_heading(2),
-                        FormatMenuAction::Heading3 => self.apply_heading(3),
-                        FormatMenuAction::Heading4 => self.apply_heading(4),
-                        FormatMenuAction::Heading5 => self.apply_heading(5),
-                        FormatMenuAction::Heading6 => self.apply_heading(6),
-                        _ => {}
-                    }
-                    self.pause_blinking(cx);
-                }
+                self.apply_heading(0);
             }
             FormatMenuAction::Bold => {
-                self.checkpoint();
                 self.apply_wrap("**", "**");
-                self.pause_blinking(cx);
             }
             FormatMenuAction::Italic => {
-                self.checkpoint();
                 self.apply_wrap("*", "*");
-                self.pause_blinking(cx);
             }
             FormatMenuAction::Strikethrough => {
-                self.checkpoint();
                 self.apply_wrap("~~", "~~");
-                self.pause_blinking(cx);
             }
             FormatMenuAction::Underline => {
-                self.checkpoint();
                 self.apply_wrap("++", "++");
-                self.pause_blinking(cx);
             }
             FormatMenuAction::InlineCode => {
-                self.checkpoint();
                 self.apply_wrap("`", "`");
-                self.pause_blinking(cx);
             }
             FormatMenuAction::Highlight => {
-                self.checkpoint();
-                if !self.remove_marker_wrap_at_cursor("==") {
-                    self.apply_wrap("==", "==");
-                }
-                self.pause_blinking(cx);
+                self.apply_wrap("==", "==");
             }
             FormatMenuAction::CodeBlock => {
-                self.checkpoint();
-                if !self.unwrap_code_block_at_cursor() {
-                    self.wrap_current_lines_as_code_block();
-                }
-                self.pause_blinking(cx);
+                self.toggle_code_block_format();
             }
             FormatMenuAction::HorizontalRule => {
-                self.checkpoint();
                 self.toggle_horizontal_rule_at_cursor();
-                self.pause_blinking(cx);
             }
             FormatMenuAction::Quote => {
-                self.checkpoint();
                 self.toggle_current_line_prefix("> ");
-                self.pause_blinking(cx);
             }
             FormatMenuAction::UnorderedList => {
-                self.checkpoint();
                 self.toggle_current_line_prefix("- ");
-                self.pause_blinking(cx);
             }
             FormatMenuAction::OrderedList => {
-                self.checkpoint();
                 self.toggle_current_line_prefix("1. ");
                 self.normalize_ordered_lists_near_all_cursors(true);
                 self.reparse();
-                self.pause_blinking(cx);
             }
             FormatMenuAction::Todo => {
-                self.checkpoint();
                 self.toggle_current_line_prefix("- [ ] ");
-                self.pause_blinking(cx);
             }
-            FormatMenuAction::Link => {
-                self.checkpoint();
-                if let Some((full, keep)) = self.link_syntax_at_cursor() {
-                    self.unwrap_syntax_range(full, keep);
-                } else {
-                    let selected = self
-                        .buffer
-                        .text_for_range(self.cursor.selection_range())
-                        .to_string();
-                    if ["https://", "http://", "mailto:"]
-                        .iter()
-                        .any(|prefix| selected.trim().starts_with(prefix))
-                    {
-                        let range = self.cursor.selection_range();
-                        let replacement = format!("[{selected}]({selected})");
-                        self.buffer.replace(range.clone(), &replacement);
-                        self.cursor
-                            .move_to(range.start + replacement.len(), &self.buffer);
-                        self.reparse();
-                        self.scroll_to_cursor();
-                    } else {
-                        self.insert_link_or_image("[", "](https://)", "title");
-                    }
-                }
-                self.pause_blinking(cx);
-            }
-            FormatMenuAction::WikiLink => {
-                self.checkpoint();
-                if let Some((full, keep)) = self.wiki_link_syntax_at_cursor() {
-                    self.unwrap_syntax_range(full, keep);
-                    self.pause_blinking(cx);
-                    self.close_context_menu(cx);
-                    return;
-                }
-                let range = self.cursor.selection_range();
-                let selected_text = self.buffer.text_for_range(range.clone()).to_string();
-                let replacement = format!("[[{}]]", selected_text);
-                self.buffer.replace(range.clone(), &replacement);
-                let cursor_offset = range.start + 2 + selected_text.len();
-                self.cursor.move_to(cursor_offset, &self.buffer);
-                self.reparse();
-                self.ensure_wiki_link_menu_for_cursor(cx);
-                self.scroll_to_cursor();
-                self.pause_blinking(cx);
-                return;
-            }
-            FormatMenuAction::Image => {
-                self.checkpoint();
-                if self.app_settings.link_syntax == "wikilink"
-                    && let Some((full, keep)) = self.wiki_link_syntax_at_cursor()
-                    && full.start > 0
-                    && self.buffer.text().as_bytes()[full.start - 1] == b'!'
-                {
-                    self.unwrap_syntax_range(full.start - 1..full.end, keep);
-                } else if let Some(target) = self.current_image_menu_target() {
-                    let line_start = self.buffer.line_start(target.line);
-                    self.unwrap_syntax_range(
-                        line_start + target.full_range.start..line_start + target.full_range.end,
-                        line_start + target.desc_range.start..line_start + target.desc_range.end,
-                    );
-                } else {
-                    if self.app_settings.link_syntax == "wikilink" {
-                        self.insert_wiki_image();
-                    } else {
-                        self.insert_link_or_image("![", "](image.png)", "alt");
-                    }
-                }
-                self.pause_blinking(cx);
-            }
-            FormatMenuAction::Table => {
-                self.checkpoint();
-                let range = self.cursor.selection_range();
-                let column = self.message(crate::i18n::MessageKey::TableColumn);
-                let cell = self.message(crate::i18n::MessageKey::TableCell);
-                let snippet = format!(
-                    "| {column}1 | {column}2 |\n| --- | --- |\n| {cell}1 | {cell}2 |\n| {cell}3 | {cell}4 |"
-                );
-                self.buffer.replace(range.clone(), &snippet);
-                let select_start = range.start + 2;
-                let select_end = select_start + column.len() + 1;
-                self.cursor.anchor = select_start;
-                self.cursor.offset = select_end;
-                self.reparse();
-                self.scroll_to_cursor();
-                self.pause_blinking(cx);
-            }
-            FormatMenuAction::DateTime => {
-                self.checkpoint();
-                let range = self.cursor.selection_range();
-                let formatted = chrono::Local::now()
-                    .format(self.app_settings.date_time_format())
-                    .to_string();
-                self.buffer.replace(range.clone(), &formatted);
-                self.cursor
-                    .move_to(range.start + formatted.len(), &self.buffer);
-                self.reparse();
-                self.scroll_to_cursor();
-                self.pause_blinking(cx);
-            }
+            FormatMenuAction::Link
+            | FormatMenuAction::WikiLink
+            | FormatMenuAction::Image
+            | FormatMenuAction::Table
+            | FormatMenuAction::DateTime
+            | FormatMenuAction::Footnote => self.apply_reference_format(action),
             FormatMenuAction::Superscript => {
-                self.checkpoint();
-                if !self.remove_marker_wrap_at_cursor("^") {
-                    self.apply_wrap("^", "^");
-                }
-                self.pause_blinking(cx);
+                self.apply_wrap("^", "^");
             }
             FormatMenuAction::Subscript => {
-                self.checkpoint();
-                if !self.remove_marker_wrap_at_cursor("~") {
-                    self.apply_wrap("~", "~");
-                }
-                self.pause_blinking(cx);
-            }
-            FormatMenuAction::Footnote => {
-                self.checkpoint();
-                if let Some((full, keep)) = self.footnote_syntax_at_cursor() {
-                    self.unwrap_syntax_range(full, keep);
-                    self.pause_blinking(cx);
-                    self.close_context_menu(cx);
-                    return;
-                }
-                let range = self.cursor.selection_range();
-                if range.is_empty() {
-                    let snippet = "[^note]";
-                    self.buffer.replace(range.clone(), snippet);
-                    let select_start = range.start + 2;
-                    let select_end = select_start + "note".len();
-                    self.cursor.anchor = select_start;
-                    self.cursor.offset = select_end;
-                } else {
-                    let selected_text = self.buffer.text_for_range(range.clone()).to_string();
-                    let replacement = format!("[^{}]", selected_text);
-                    self.buffer.replace(range.clone(), &replacement);
-                    self.cursor
-                        .move_to(range.start + replacement.len(), &self.buffer);
-                }
-                self.reparse();
-                self.scroll_to_cursor();
-                self.pause_blinking(cx);
+                self.apply_wrap("~", "~");
             }
             FormatMenuAction::CalloutTip => {
-                self.checkpoint();
                 self.toggle_current_line_prefix("> [!TIP] ");
-                self.pause_blinking(cx);
             }
             FormatMenuAction::EditImageDescription => {
                 if let Some(target) = self.current_image_menu_target() {
                     self.set_selection_range(target.desc_range);
-                    self.pause_blinking(cx);
                 }
             }
             FormatMenuAction::EditImageUrl => {
                 if let Some(target) = self.current_image_menu_target() {
                     self.set_selection_range(target.url_range);
-                    self.pause_blinking(cx);
                 }
             }
             FormatMenuAction::DeleteImage => {
                 if let Some(target) = self.current_image_menu_target() {
-                    self.checkpoint();
                     self.buffer.replace(target.full_range.clone(), "");
                     self.cursor.move_to(target.full_range.start, &self.buffer);
                     self.reparse();
                     self.scroll_to_cursor();
-                    self.pause_blinking(cx);
                 }
             }
             FormatMenuAction::SelectImageFile => {
                 self.pick_image_for_current_markdown_image(cx);
             }
         }
-        self.close_context_menu(cx);
     }
 
     fn slash_menu_items(&self) -> Vec<SlashMenuItem> {
@@ -3232,6 +3623,7 @@ impl EditorView {
         let ms = &self.styles.context_menu;
         let icon_styles = &self.styles.context_menu;
         let item_id = SharedString::from(format!("menu-item-{}", label));
+        let debug_id = item_id.clone();
         let (icon_col_w, _gap) = menu_icon_column_metrics(
             ms.menu_format_icon_size_px,
             icon_styles.menu_item_check_size_px,
@@ -3244,6 +3636,7 @@ impl EditorView {
             self.ui_scale,
         )
         .id(item_id)
+        .debug_selector(move || debug_id.to_string())
         .child(
             div()
                 .w(px(icon_col_w))
@@ -3308,6 +3701,7 @@ impl EditorView {
         );
         let icon_size = self.scaled(ms.menu_format_icon_size_px);
         let icon_col_w = self.scaled(icon_col_w);
+        let debug_id = item_id.clone();
         let mut item_style = self.styles.menu_item(is_destructive);
         if multiline_label {
             item_style.control.height_px *= 1.5;
@@ -3333,6 +3727,7 @@ impl EditorView {
                             .text_color(icon_styles.menu_item_action_icon_color),
                     ),
             )
+            .debug_selector(move || debug_id.to_string())
             .child(if multiline_label {
                 div()
                     .min_w(px(0.0))
@@ -3780,401 +4175,6 @@ impl EditorView {
         crate::ui::surface::separator(self.styles.context_menu.separator(), 1.0).into_any_element()
     }
 
-    fn render_sidebar_context_menu(
-        &self,
-        path: PathBuf,
-        is_dir: bool,
-        workspace_root: bool,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let has_clipboard = self.file_clipboard.is_some();
-        let is_root = workspace_root || is_dir && path == self.sidebar_root;
-        let parent_dir = if is_dir {
-            path.clone()
-        } else {
-            path.parent()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| path.clone())
-        };
-
-        let mut items: Vec<AnyElement> = Vec::new();
-
-        if is_root {
-            {
-                let pd = parent_dir.clone();
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::NewFile),
-                    false,
-                    cx,
-                    move |this, window, cx| {
-                        this.switch_workspace(pd.clone(), cx);
-                        this.start_create_file(pd.clone(), window, cx);
-                    },
-                ));
-            }
-            {
-                let pd = parent_dir.clone();
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::MenuNewFolder),
-                    false,
-                    cx,
-                    move |this, window, cx| {
-                        this.switch_workspace(pd.clone(), cx);
-                        this.start_create_dir(pd.clone(), window, cx);
-                    },
-                ));
-            }
-            items.push(self.render_context_menu_separator());
-            if has_clipboard {
-                let pd = parent_dir.clone();
-                let paste_count = self
-                    .file_clipboard
-                    .as_ref()
-                    .map(|clipboard| {
-                        Self::filter_nested_paths(&clipboard.paths.iter().cloned().collect()).len()
-                    })
-                    .unwrap_or(0);
-                let paste_label =
-                    self.sidebar_counted_label(self.t(crate::i18n::TextKey::Paste), paste_count);
-                items.push(self.render_context_menu_item(
-                    &paste_label,
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.switch_workspace(pd.clone(), cx);
-                        this.paste_into_dir(pd.clone(), cx);
-                    },
-                ));
-                items.push(self.render_context_menu_separator());
-            }
-            if path == self.sidebar_root && !self.expanded_dirs.is_empty() {
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::CollapseAllDirectories),
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.collapse_all_dirs(cx);
-                    },
-                ));
-            }
-            let expand_root = path.clone();
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::ExpandAllDirectories),
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.switch_workspace(expand_root.clone(), cx);
-                    this.expand_all_dirs(cx);
-                },
-            ));
-            items.push(self.render_context_menu_separator());
-            let search_root = path.clone();
-            items.push(self.render_context_menu_item(
-                crate::i18n::sidebar_action_label(self.ui_language, "search"),
-                false,
-                cx,
-                move |this, window, cx| {
-                    this.switch_workspace(search_root.clone(), cx);
-                    if !this.workspace_search_visible {
-                        this.toggle_workspace_search(window, cx);
-                    }
-                },
-            ));
-            if let Some(copy_path_text) = self.sidebar_paths_copy_text(&path, false) {
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::CopyPath),
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.copy_text_to_clipboard(copy_path_text.clone(), cx);
-                    },
-                ));
-            }
-            if let Some(copy_relative_path_text) = self.sidebar_paths_copy_text(&path, true) {
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::CopyRelativePath),
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.copy_text_to_clipboard(copy_relative_path_text.clone(), cx);
-                    },
-                ));
-            }
-            items.push(self.render_context_menu_separator());
-            {
-                let chat_path = path.clone();
-                items.push(self.render_context_menu_item(
-                    crate::i18n::add_file_to_chat_label(self.ui_language),
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.close_context_menu(cx);
-                        this.switch_workspace(chat_path.clone(), cx);
-                        this.add_path_to_chat(&chat_path, cx);
-                    },
-                ));
-            }
-            items.push(self.render_context_menu_separator());
-            {
-                let p = path.clone();
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::RevealInFinder),
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.reveal_in_file_manager(&p, cx);
-                    },
-                ));
-            }
-            items.push(self.render_context_menu_separator());
-            {
-                let p = path.clone();
-                items.push(self.render_context_menu_item(
-                    self.t(crate::i18n::TextKey::CloseFolder),
-                    false,
-                    cx,
-                    move |this, _, cx| {
-                        this.close_workspace(&p, cx);
-                    },
-                ));
-            }
-            return items;
-        }
-
-        {
-            let pd = parent_dir.clone();
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::NewFile),
-                false,
-                cx,
-                move |this, window, cx| {
-                    this.start_create_file(pd.clone(), window, cx);
-                },
-            ));
-        }
-        {
-            let pd = parent_dir.clone();
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::MenuNewFolder),
-                false,
-                cx,
-                move |this, window, cx| {
-                    this.start_create_dir(pd.clone(), window, cx);
-                },
-            ));
-        }
-        items.push(self.render_context_menu_separator());
-
-        let context_paths = self.sidebar_context_paths(&path);
-        let context_paths = Self::filter_nested_paths(&context_paths.into_iter().collect());
-        let context_count = context_paths.len();
-
-        if !is_dir {
-            if is_markdown_file(&path) {
-                items.push(self.render_format_submenu_trigger_item(
-                    self.t(crate::i18n::TextKey::Export),
-                    None,
-                    ContextMenuKind::Export { path: path.clone() },
-                    cx,
-                ));
-                items.push(self.render_context_menu_separator());
-            }
-            let starred_paths: Vec<PathBuf> = context_paths
-                .iter()
-                .filter(|candidate| {
-                    *candidate == &path
-                        || self
-                            .sidebar_items_cache
-                            .iter()
-                            .any(|item| item.path == **candidate && !item.is_dir)
-                })
-                .cloned()
-                .collect();
-            let is_starred = starred_paths
-                .iter()
-                .all(|path| self.app_settings.is_starred_file(path));
-            let label = if is_starred {
-                self.t(crate::i18n::TextKey::Unstar)
-            } else {
-                self.t(crate::i18n::TextKey::Star)
-            };
-            let star_label = self.sidebar_counted_label(label, starred_paths.len());
-            items.push(self.render_context_menu_item(
-                &star_label,
-                false,
-                cx,
-                move |this, _, cx| {
-                    for starred_path in &starred_paths {
-                        let normalized = Self::normalize_sidebar_path(starred_path);
-                        if is_starred {
-                            this.app_settings.remove_starred_file(&normalized);
-                        } else {
-                            this.app_settings.add_starred_file(normalized);
-                            this.sidebar_starred_collapsed = false;
-                        }
-                    }
-                    this.app_settings.save();
-                    this.context_menu = None;
-                    cx.notify();
-                },
-            ));
-            items.push(self.render_context_menu_separator());
-        }
-        {
-            let chat_paths = context_paths.clone();
-            items.push(self.render_context_menu_item(
-                crate::i18n::add_file_to_chat_label(self.ui_language),
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.close_context_menu(cx);
-                    this.add_paths_to_chat(&chat_paths, cx);
-                },
-            ));
-        }
-        items.push(self.render_context_menu_separator());
-        // Rename: only for single selection
-        if self.selected_sidebar_paths.len() <= 1 {
-            let p = path.clone();
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::Rename),
-                false,
-                cx,
-                move |this, window, cx| {
-                    this.start_rename(p.clone(), window, cx);
-                },
-            ));
-        }
-        {
-            let delete_label = if context_count > 1 {
-                crate::i18n::delete_items_label(self.ui_language, context_count)
-            } else {
-                self.t(crate::i18n::TextKey::Delete).to_string()
-            };
-            let delete_paths = context_paths.clone();
-            items.push(self.render_context_menu_item(
-                &delete_label,
-                true,
-                cx,
-                move |this, _, cx| {
-                    this.show_sidebar_delete_dialog(delete_paths.clone(), cx);
-                },
-            ));
-        }
-        items.push(self.render_context_menu_separator());
-        {
-            let cut_paths = context_paths
-                .iter()
-                .map(|path| Self::normalize_sidebar_path(path))
-                .collect::<Vec<_>>();
-            let copy_paths = cut_paths.clone();
-            let cut_label =
-                self.sidebar_counted_label(self.t(crate::i18n::TextKey::Cut), context_count);
-            let copy_label =
-                self.sidebar_counted_label(self.t(crate::i18n::TextKey::Copy), context_count);
-            items.push(
-                self.render_context_menu_item(&cut_label, false, cx, move |this, _, cx| {
-                    this.file_clipboard = Some(FileClipboard {
-                        paths: cut_paths.clone(),
-                        is_cut: true,
-                    });
-                    this.context_menu = None;
-                    cx.notify();
-                }),
-            );
-            items.push(self.render_context_menu_item(
-                &copy_label,
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.file_clipboard = Some(FileClipboard {
-                        paths: copy_paths.clone(),
-                        is_cut: false,
-                    });
-                    this.context_menu = None;
-                    cx.notify();
-                },
-            ));
-        }
-        if has_clipboard {
-            let pd = parent_dir.clone();
-            let paste_count = self
-                .file_clipboard
-                .as_ref()
-                .map(|clipboard| {
-                    Self::filter_nested_paths(&clipboard.paths.iter().cloned().collect()).len()
-                })
-                .unwrap_or(0);
-            let paste_label =
-                self.sidebar_counted_label(self.t(crate::i18n::TextKey::Paste), paste_count);
-            items.push(self.render_context_menu_item(
-                &paste_label,
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.paste_into_dir(pd.clone(), cx);
-                },
-            ));
-        }
-        items.push(self.render_context_menu_separator());
-        if let Some(copy_path_text) = self.sidebar_paths_copy_text(&path, false) {
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::CopyPath),
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.copy_text_to_clipboard(copy_path_text.clone(), cx);
-                },
-            ));
-        }
-        if let Some(copy_relative_path_text) = self.sidebar_paths_copy_text(&path, true) {
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::CopyRelativePath),
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.copy_text_to_clipboard(copy_relative_path_text.clone(), cx);
-                },
-            ));
-        }
-        items.push(self.render_context_menu_separator());
-        // Collapse / Expand all
-        if !self.expanded_dirs.is_empty() {
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::CollapseAllDirectories),
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.collapse_all_dirs(cx);
-                },
-            ));
-        }
-        {
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::ExpandAllDirectories),
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.expand_all_dirs(cx);
-                },
-            ));
-        }
-        items.push(self.render_context_menu_separator());
-        {
-            let p = path.clone();
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::RevealInFinder),
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.reveal_in_file_manager(&p, cx);
-                },
-            ));
-        }
-
-        items
-    }
-
     fn render_starred_sidebar_context_menu(
         &self,
         path: PathBuf,
@@ -4186,7 +4186,9 @@ impl EditorView {
             items.push(self.render_format_submenu_trigger_item(
                 self.t(crate::i18n::TextKey::Export),
                 None,
-                ContextMenuKind::Export { path: path.clone() },
+                ContextMenuKind::Export {
+                    path: moeka_fs::path::ResourcePath::local(&path),
+                },
                 cx,
             ));
             items.push(self.render_context_menu_separator());
@@ -4261,7 +4263,7 @@ impl EditorView {
                 self.sidebar_counted_label(self.t(crate::i18n::TextKey::Copy), context_count);
             items.push(
                 self.render_context_menu_item(&cut_label, false, cx, move |this, _, cx| {
-                    this.file_clipboard = Some(FileClipboard {
+                    this.set_local_file_tree_clipboard(FileClipboard {
                         paths: cut_paths.clone(),
                         is_cut: true,
                     });
@@ -4274,7 +4276,7 @@ impl EditorView {
                 false,
                 cx,
                 move |this, _, cx| {
-                    this.file_clipboard = Some(FileClipboard {
+                    this.set_local_file_tree_clipboard(FileClipboard {
                         paths: copy_paths.clone(),
                         is_cut: false,
                     });
@@ -4338,133 +4340,6 @@ impl EditorView {
                 cx,
                 move |this, _, cx| {
                     this.reveal_paths_in_file_manager(&reveal_paths, cx);
-                },
-            ));
-        }
-
-        items
-    }
-
-    fn render_file_list_context_menu(
-        &self,
-        path: PathBuf,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let parent_dir = path
-            .parent()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.file_list_effective_dir());
-        let mut items: Vec<AnyElement> = Vec::new();
-
-        {
-            let parent = parent_dir.clone();
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::NewFile),
-                false,
-                cx,
-                move |this, window, cx| {
-                    this.start_create_file(parent.clone(), window, cx);
-                    this.sidebar_edit_in_file_list = true;
-                },
-            ));
-        }
-        {
-            let chat_path = path.clone();
-            items.push(self.render_context_menu_item(
-                crate::i18n::add_file_to_chat_label(self.ui_language),
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.close_context_menu(cx);
-                    this.add_path_to_chat(&chat_path, cx);
-                },
-            ));
-        }
-        if is_markdown_file(&path) {
-            items.push(self.render_format_submenu_trigger_item(
-                self.t(crate::i18n::TextKey::Export),
-                None,
-                ContextMenuKind::Export { path: path.clone() },
-                cx,
-            ));
-        }
-        if self.selected_sidebar_paths.len() <= 1 {
-            let rename_path = path.clone();
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::Rename),
-                false,
-                cx,
-                move |this, window, cx| {
-                    this.file_list_menu_origin = true;
-                    this.start_rename(rename_path.clone(), window, cx);
-                },
-            ));
-        }
-        {
-            let delete_path = path.clone();
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::Delete),
-                true,
-                cx,
-                move |this, _, cx| {
-                    this.show_sidebar_delete_dialog(vec![delete_path.clone()], cx);
-                },
-            ));
-        }
-        {
-            let star_path = path.clone();
-            let normalized = Self::normalize_sidebar_path(&star_path);
-            let is_starred = self.app_settings.is_starred_file(&normalized);
-            let label = if is_starred {
-                self.t(crate::i18n::TextKey::Unstar)
-            } else {
-                self.t(crate::i18n::TextKey::Star)
-            };
-            items.push(
-                self.render_context_menu_item(label, false, cx, move |this, _, cx| {
-                    let normalized = Self::normalize_sidebar_path(&star_path);
-                    if is_starred {
-                        this.app_settings.remove_starred_file(&normalized);
-                    } else {
-                        this.app_settings.add_starred_file(normalized);
-                        this.sidebar_starred_collapsed = false;
-                    }
-                    this.app_settings.save();
-                    this.close_context_menu(cx);
-                    cx.notify();
-                }),
-            );
-        }
-        items.push(self.render_context_menu_separator());
-        if let Some(copy_path_text) = self.sidebar_paths_copy_text(&path, false) {
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::CopyPath),
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.copy_text_to_clipboard(copy_path_text.clone(), cx);
-                },
-            ));
-        }
-        if let Some(copy_relative_path_text) = self.sidebar_paths_copy_text(&path, true) {
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::CopyRelativePath),
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.copy_text_to_clipboard(copy_relative_path_text.clone(), cx);
-                },
-            ));
-        }
-        {
-            let reveal_path = path.clone();
-            items.push(self.render_context_menu_item(
-                self.t(crate::i18n::TextKey::RevealInFinder),
-                false,
-                cx,
-                move |this, _, cx| {
-                    this.close_context_menu(cx);
-                    this.reveal_in_file_manager(&reveal_path, cx);
                 },
             ));
         }
@@ -5327,6 +5202,42 @@ impl EditorView {
 
     fn render_wiki_link_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut items: Vec<AnyElement> = Vec::new();
+        if self
+            .active_tab_index()
+            .is_some_and(|index| self.tabs[index].is_remote)
+        {
+            if self.remote_wiki_link_results.is_empty() {
+                let key = if self.wiki_link_search_task.is_some() {
+                    crate::i18n::TextKey::Searching
+                } else {
+                    crate::i18n::TextKey::NoMatchingReferenceFiles
+                };
+                items.push(self.render_context_menu_item(
+                    self.t(key),
+                    false,
+                    cx,
+                    |_this, _, _cx| {},
+                ));
+            } else {
+                for (index, resource) in self.remote_wiki_link_results.iter().enumerate() {
+                    let label = resource
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string())
+                        .unwrap_or_default();
+                    items.push(self.render_context_menu_item(
+                        &label,
+                        index == self.menu_selected_index,
+                        cx,
+                        move |this, _, cx| {
+                            this.menu_selected_index = index;
+                            this.confirm_wiki_link_selection(cx);
+                        },
+                    ));
+                }
+            }
+            return items;
+        }
         let ms = &self.styles.context_menu;
 
         let has_query = !self.wiki_link_query.trim().is_empty();
@@ -5884,7 +5795,6 @@ impl EditorView {
         } else {
             menu_div
         };
-
         let is_table_panel = (panel_id == "context-submenu"
             && matches!(self.context_submenu, Some(ContextMenuKind::Table { .. })))
             || (panel_id == "context-menu"
@@ -6009,9 +5919,94 @@ impl EditorView {
         }
     }
 
+    fn append_tab_resource_menu_items(
+        &self,
+        items: &mut Vec<AnyElement>,
+        tab_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.all_tabs().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let resource = tab
+            .remote
+            .as_ref()
+            .and_then(|remote| remote.resource.clone())
+            .or_else(|| tab.path.as_deref().map(moeka_fs::path::ResourcePath::local));
+        let Some(resource) = resource else {
+            if tab.kind == TabKind::Editor {
+                items.push(self.render_chat_attachment_item(None, None, cx));
+            }
+            return;
+        };
+        let generation = self.remote_generation;
+        if tab.kind == TabKind::Editor {
+            let resource = resource.clone();
+            items.push(self.render_context_menu_item(
+                crate::i18n::add_file_to_chat_label(self.ui_language),
+                false,
+                cx,
+                move |this, _, cx| {
+                    if this.validate_resource_menu(&resource, generation, cx) {
+                        this.add_resources_to_chat(vec![resource.clone()], cx);
+                    }
+                },
+            ));
+        }
+        if resource
+            .path
+            .file_name()
+            .is_some_and(|name| is_markdown_file(Path::new(&name.to_string())))
+        {
+            items.push(self.render_context_menu_separator());
+            items.push(self.render_format_submenu_trigger_item(
+                self.t(crate::i18n::TextKey::Export),
+                None,
+                ContextMenuKind::Export {
+                    path: resource.clone(),
+                },
+                cx,
+            ));
+        }
+        items.push(self.render_context_menu_separator());
+        let reveal = resource.clone();
+        items.push(self.render_context_menu_item(
+            self.t(crate::i18n::TextKey::RevealInFileTree),
+            false,
+            cx,
+            move |this, _, cx| {
+                if this.validate_resource_menu(&reveal, generation, cx) {
+                    this.reveal_resource_in_tree(reveal.clone(), cx);
+                }
+            },
+        ));
+        if let Ok(path) = resource.local_path() {
+            items.push(self.render_context_menu_item(
+                self.t(crate::i18n::TextKey::RevealInFinder),
+                false,
+                cx,
+                move |this, _, cx| this.reveal_in_file_manager(&path, cx),
+            ));
+        }
+        items.push(self.render_context_menu_separator());
+        for relative in [true, false] {
+            let text = self.resource_path_text(&resource, relative);
+            items.push(self.render_context_menu_item(
+                self.t(if relative {
+                    crate::i18n::TextKey::CopyRelativePath
+                } else {
+                    crate::i18n::TextKey::CopyPath
+                }),
+                false,
+                cx,
+                move |this, _, cx| this.copy_text_to_clipboard(text.clone(), cx),
+            ));
+        }
+    }
+
     fn render_export_context_submenu(
         &self,
-        path: &Path,
+        path: &moeka_fs::path::ResourcePath,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let formats = [
@@ -6043,7 +6038,7 @@ impl EditorView {
         .into_iter()
         .flat_map(|target| formats.into_iter().map(move |entry| (target, entry)))
         .map(|(target, (label, icon_path, format))| {
-            let path = path.to_path_buf();
+            let path = path.clone();
             let label = if target == super::export::ExportTarget::Clipboard {
                 format!(
                     "{label}\n({})",
@@ -6060,7 +6055,7 @@ impl EditorView {
                 cx,
                 move |this, _, cx| {
                     this.close_context_menu(cx);
-                    this.export_path(path.clone(), format, target, cx);
+                    this.export_resource(path.clone(), format, target, cx);
                 },
             )
         })
@@ -6301,20 +6296,132 @@ impl EditorView {
         };
 
         let (items, width) = match &menu.kind {
+            ContextMenuKind::SidebarSettings => {
+                let mut items = vec![
+                    self.render_context_menu_item_with_icon(
+                        self.t(crate::i18n::TextKey::SettingsTitle),
+                        "assets/icons/appearance/setting.svg",
+                        false,
+                        cx,
+                        |this, _, cx| this.open_settings_tab(cx),
+                    ),
+                    self.render_context_menu_item_with_icon(
+                        self.t(crate::i18n::TextKey::HelpManual),
+                        DOC_SVG_PATH,
+                        false,
+                        cx,
+                        |this, _, cx| this.open_welcome_tab(cx),
+                    ),
+                    self.render_context_menu_item_with_icon(
+                        &crate::i18n::remote_text(self.ui_language, "add_local_directory"),
+                        "assets/icons/menu/new-folder.svg",
+                        false,
+                        cx,
+                        |this, _, cx| this.pick_workspace_folder(cx),
+                    ),
+                ];
+                if crate::platform::capabilities::CHILD_PROCESSES {
+                    items.push(self.render_context_menu_item_with_icon(
+                        &crate::i18n::remote_text(self.ui_language, "add_ssh_directory"),
+                        "assets/icons/menu/terminal.svg",
+                        false,
+                        cx,
+                        |this, window, cx| {
+                            this.on_connect_ssh(&crate::actions::ConnectSsh, window, cx);
+                        },
+                    ));
+                }
+                (
+                    items,
+                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                )
+            }
+            ContextMenuKind::AddWorkspace => {
+                let mut items = vec![self.render_context_menu_item_with_icon(
+                    &crate::i18n::remote_text(self.ui_language, "add_local_directory"),
+                    "assets/icons/menu/new-folder.svg",
+                    false,
+                    cx,
+                    |this, _, cx| this.pick_workspace_folder(cx),
+                )];
+                if crate::platform::capabilities::CHILD_PROCESSES {
+                    items.push(self.render_context_menu_item_with_icon(
+                        &crate::i18n::remote_text(self.ui_language, "add_ssh_directory"),
+                        "assets/icons/menu/terminal.svg",
+                        false,
+                        cx,
+                        |this, window, cx| {
+                            this.on_connect_ssh(&crate::actions::ConnectSsh, window, cx);
+                        },
+                    ));
+                }
+                (
+                    items,
+                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                )
+            }
             ContextMenuKind::WorkspaceRoot { path } => (
-                self.render_sidebar_context_menu(path.clone(), true, true, cx),
+                self.render_file_tree_resource_context_menu(
+                    moeka_fs::path::ResourcePath::local(path),
+                    true,
+                    true,
+                    self.remote_generation,
+                    cx,
+                ),
                 self.scaled(self.styles.context_menu.menu_sidebar_width_px),
             ),
             ContextMenuKind::Sidebar { path, is_dir } => (
-                self.render_sidebar_context_menu(path.clone(), *is_dir, false, cx),
+                self.render_file_tree_resource_context_menu(
+                    moeka_fs::path::ResourcePath::local(path),
+                    *is_dir,
+                    false,
+                    self.remote_generation,
+                    cx,
+                ),
+                self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+            ),
+            ContextMenuKind::RemoteCreate { parent, generation } => {
+                let mut items = Vec::new();
+                for (label, folder) in [
+                    (self.t(crate::i18n::TextKey::NewFile), false),
+                    (self.t(crate::i18n::TextKey::MenuNewFolder), true),
+                ] {
+                    let parent = parent.clone();
+                    let generation = *generation;
+                    items.push(self.render_context_menu_item(
+                        label,
+                        false,
+                        cx,
+                        move |this, window, cx| {
+                            if this.remote_generation != generation {
+                                return;
+                            }
+                            this.start_remote_sidebar_create(parent.clone(), folder, window, cx);
+                        },
+                    ));
+                }
+                (
+                    items,
+                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                )
+            }
+            ContextMenuKind::FileTreeResource {
+                resource,
+                is_dir,
+                is_root,
+                generation,
+            } => (
+                self.render_file_tree_resource_context_menu(
+                    resource.clone(),
+                    *is_dir,
+                    *is_root,
+                    *generation,
+                    cx,
+                ),
                 self.scaled(self.styles.context_menu.menu_sidebar_width_px),
             ),
             ContextMenuKind::SidebarStarred { path } => (
                 self.render_starred_sidebar_context_menu(path.clone(), cx),
-                self.scaled(self.styles.context_menu.menu_sidebar_width_px),
-            ),
-            ContextMenuKind::FileList { path } => (
-                self.render_file_list_context_menu(path.clone(), cx),
                 self.scaled(self.styles.context_menu.menu_sidebar_width_px),
             ),
             ContextMenuKind::SidebarSort => {
@@ -6511,6 +6618,101 @@ impl EditorView {
                 }
                 (items, width)
             }
+            ContextMenuKind::Pdf {
+                tab_id,
+                content_id,
+                image,
+            } => {
+                let reader = self
+                    .pdf_menu_view(tab_id, *content_id, cx)
+                    .map(|view| view.read(cx));
+                let has_text = reader.is_some_and(|view| {
+                    view.text
+                        .as_ref()
+                        .is_some_and(|pages| pages.iter().any(|page| !page.text.is_empty()))
+                });
+                let can_copy = reader.is_some_and(|view| view.has_selection()) && has_text;
+                let can_export = reader.is_some_and(|view| !view.image_exporting());
+                let entries = if image.is_some() {
+                    [
+                        (
+                            format!("{}...", self.t(crate::i18n::TextKey::SaveAs)),
+                            "pdf-menu-save-image",
+                            can_export,
+                        ),
+                        (
+                            self.t(crate::i18n::TextKey::CopyToClipboard).to_string(),
+                            "pdf-menu-copy-image",
+                            can_export,
+                        ),
+                    ]
+                } else {
+                    [
+                        (
+                            self.t(crate::i18n::TextKey::Copy).to_string(),
+                            "pdf-menu-copy",
+                            can_copy,
+                        ),
+                        (
+                            self.t(crate::i18n::TextKey::SelectAll).to_string(),
+                            "pdf-menu-select-all",
+                            has_text,
+                        ),
+                    ]
+                };
+                let mut items = Vec::new();
+                for (index, (label, id, enabled)) in entries.into_iter().enumerate() {
+                    let tab_id = tab_id.clone();
+                    let content_id = *content_id;
+                    let image = *image;
+                    items.push(
+                        crate::ui::list::list_item(
+                            self.styles.menu_item(false),
+                            crate::style::ControlState {
+                                disabled: !enabled,
+                                ..Default::default()
+                            },
+                            self.ui_scale,
+                        )
+                        .id(id)
+                        .debug_selector(move || id.to_string())
+                        .child(label)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |editor, _, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                if !enabled {
+                                    return;
+                                }
+                                editor.suppress_editor_mouse_up_for_current_menu_event(cx);
+                                editor.close_context_menu(cx);
+                                let Some(view) =
+                                    editor.pdf_menu_view(&tab_id, content_id, cx).cloned()
+                                else {
+                                    return;
+                                };
+                                if let Some((page, image)) = image {
+                                    view.update(cx, |view, cx| {
+                                        view.export_image(page, image, index == 0, cx)
+                                    });
+                                } else if index == 0 {
+                                    if let Some(text) = view.read(cx).selected_text() {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    }
+                                } else {
+                                    view.update(cx, |view, cx| view.select_all(cx));
+                                }
+                            }),
+                        )
+                        .into_any_element(),
+                    );
+                }
+                (
+                    items,
+                    self.scaled(self.styles.context_menu.menu_sidebar_width_px),
+                )
+            }
             ContextMenuKind::Image => {
                 let mut items = Vec::new();
                 items.push(self.render_context_menu_item_with_icon(
@@ -6639,67 +6841,7 @@ impl EditorView {
                     ));
                 }
                 self.append_tab_pane_context_menu_items(&mut items, tab_id, cx);
-                if let Some(tab) = self.tabs.iter().find(|t| t.id == *tab_id) {
-                    if tab.kind == TabKind::Editor {
-                        items.push(self.render_chat_attachment_item(tab.path.clone(), None, cx));
-                    }
-                    if let Some(path) = &tab.path {
-                        if is_markdown_file(path) {
-                            items.push(self.render_context_menu_separator());
-                            items.push(self.render_format_submenu_trigger_item(
-                                self.t(crate::i18n::TextKey::Export),
-                                None,
-                                ContextMenuKind::Export { path: path.clone() },
-                                cx,
-                            ));
-                        }
-                        items.push(self.render_context_menu_separator());
-                        let reveal_path = path.clone();
-                        items.push(self.render_context_menu_item(
-                            self.t(crate::i18n::TextKey::RevealInFileTree),
-                            false,
-                            cx,
-                            move |this, _, cx| {
-                                this.close_context_menu(cx);
-                                this.locate_path_in_sidebar(reveal_path.clone(), cx);
-                            },
-                        ));
-                        {
-                            let reveal_path = path.clone();
-                            items.push(self.render_context_menu_item(
-                                self.t(crate::i18n::TextKey::RevealInFinder),
-                                false,
-                                cx,
-                                move |this, _, cx| {
-                                    this.close_context_menu(cx);
-                                    this.reveal_in_file_manager(&reveal_path, cx);
-                                },
-                            ));
-                        }
-                        items.push(self.render_context_menu_separator());
-                        if let Some(relative_path_text) = self.path_copy_text(path, true) {
-                            items.push(self.render_context_menu_item(
-                                self.t(crate::i18n::TextKey::CopyRelativePath),
-                                false,
-                                cx,
-                                move |this, _, cx| {
-                                    this.close_context_menu(cx);
-                                    this.copy_text_to_clipboard(relative_path_text.clone(), cx);
-                                },
-                            ));
-                        }
-                        let path_text = path.display().to_string();
-                        items.push(self.render_context_menu_item(
-                            self.t(crate::i18n::TextKey::CopyPath),
-                            false,
-                            cx,
-                            move |this, _, cx| {
-                                this.close_context_menu(cx);
-                                this.copy_text_to_clipboard(path_text.clone(), cx);
-                            },
-                        ));
-                    }
-                }
+                self.append_tab_resource_menu_items(&mut items, tab_id, cx);
                 (
                     items,
                     self.scaled(self.styles.context_menu.menu_tab_width_px),

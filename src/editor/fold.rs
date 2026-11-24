@@ -2207,7 +2207,7 @@ impl EditorView {
         self.finish_fold_change(cx);
     }
 
-    pub(crate) fn pick_image_for_line(&self, line: usize, cx: &mut Context<Self>) {
+    pub(crate) fn pick_image_for_line(&mut self, line: usize, cx: &mut Context<Self>) {
         if self.active_tab_is_read_only() {
             return;
         }
@@ -2244,7 +2244,14 @@ impl EditorView {
                         if document.is_current(editor)
                             && editor.buffer.line_content(line) == original
                         {
-                            editor.replace_image_url_on_line(line, &path, cx);
+                            if editor
+                                .active_tab_index()
+                                .is_some_and(|index| editor.tabs[index].is_remote)
+                            {
+                                editor.replace_remote_image_for_line(line, original, path, cx);
+                            } else {
+                                editor.replace_image_url_on_line(line, &path, cx);
+                            }
                         }
                     });
                 })
@@ -2260,6 +2267,15 @@ impl EditorView {
         new_path: &PathBuf,
         cx: &mut Context<Self>,
     ) {
+        self.replace_image_url_with_text(line, &new_path.to_string_lossy(), cx);
+    }
+
+    pub(super) fn replace_image_url_with_text(
+        &mut self,
+        line: usize,
+        new_url: &str,
+        cx: &mut Context<Self>,
+    ) {
         if self.active_tab_is_read_only() {
             return;
         }
@@ -2270,10 +2286,9 @@ impl EditorView {
             if let Some(close_pos) = line_content[url_start..].find(')') {
                 let url_end = url_start + close_pos;
                 let old_url = line_content[url_start..url_end].to_string();
-                let new_url = new_path.to_string_lossy().to_string();
                 self.checkpoint();
                 self.buffer
-                    .replace(line_start + url_start..line_start + url_end, &new_url);
+                    .replace(line_start + url_start..line_start + url_end, new_url);
                 self.retire_image_cache_entry(&old_url);
                 self.reparse();
                 self.pause_blinking(cx);

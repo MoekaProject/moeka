@@ -534,7 +534,12 @@ impl EditorView {
             self.open_path_in_permanent_tab_with_view(path.clone(), true, Some(view), cx);
             return;
         }
-        let tab = Self::tab_for_reopen(self.next_tab_identity(), closed_tab);
+        let closed_id = closed_tab.id.clone();
+        let reopened_id = self.next_tab_identity();
+        let tab = Self::tab_for_reopen(reopened_id.clone(), closed_tab);
+        if let Some(document) = self.remote_documents.remove(&closed_id) {
+            self.remote_documents.insert(reopened_id, document);
+        }
         self.tabs.push(tab);
         let index = self.tabs.len() - 1;
         self.activate_tab_by_index(index, cx);
@@ -547,6 +552,9 @@ impl EditorView {
             heading_title_cache: Default::default(),
             kind: TabKind::Editor,
             path: closed_tab.path,
+            is_remote: closed_tab.is_remote,
+            remote_binding_lost: closed_tab.remote_binding_lost,
+            remote: closed_tab.remote,
             file_kind: closed_tab.file_kind,
             editor_left_aligned: closed_tab.editor_left_aligned,
             reading_mode: closed_tab.reading_mode && !closed_tab.source_mode,
@@ -554,6 +562,7 @@ impl EditorView {
             source_word_wrap: closed_tab.source_word_wrap,
             snapshot: closed_tab.snapshot,
             image_view: closed_tab.image_view,
+            pdf_view: closed_tab.pdf_view,
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -675,22 +684,23 @@ impl EditorView {
         } else {
             String::new()
         };
+        (Self::snapshot_for_loaded_text(text, &file_kind), file_kind)
+    }
+
+    pub(super) fn snapshot_for_loaded_text(text: String, file_kind: &FileKind) -> EditorSnapshot {
         let cursor_offset = if matches!(file_kind, FileKind::Markdown) {
             first_markdown_content_line_end(&text)
                 .unwrap_or_else(|| text.find('\n').unwrap_or(text.len()))
         } else {
             text.find('\n').unwrap_or(text.len())
         };
-        (
-            EditorSnapshot {
-                text,
-                cursor_offset,
-                cursor_anchor: cursor_offset,
-                scroll_offset: 0.0,
-                extra_cursors: Vec::new(),
-            },
-            file_kind,
-        )
+        EditorSnapshot {
+            text,
+            cursor_offset,
+            cursor_anchor: cursor_offset,
+            scroll_offset: 0.0,
+            extra_cursors: Vec::new(),
+        }
     }
 
     fn build_file_tab(
@@ -710,6 +720,9 @@ impl EditorView {
             heading_title_cache: Default::default(),
             kind: TabKind::Editor,
             path: Some(path.to_path_buf()),
+            is_remote: false,
+            remote_binding_lost: false,
+            remote: None,
             file_kind: Some(file_kind),
             editor_left_aligned: initial_left_aligned,
             reading_mode: false,
@@ -717,6 +730,7 @@ impl EditorView {
             source_word_wrap: true,
             snapshot,
             image_view: ImageViewState::default(),
+            pdf_view: PdfViewState::default(),
             is_preview,
             is_dirty: false,
             is_deleted: false,
@@ -763,7 +777,7 @@ impl EditorView {
         cx.spawn(async move |this, cx| {
             let read_path = path.clone();
             let loaded = fs_task::run("Open preview tab", path.clone(), move || {
-                let bytes = std::fs::read(&read_path)?;
+                let bytes = moeka_fs::local::native::read(&read_path)?;
                 Ok(Self::build_file_tab(
                     tab_id,
                     &read_path,
@@ -826,6 +840,13 @@ impl EditorView {
         focus_editor: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.remote_session_active() {
+            self.notify_error(
+                crate::i18n::remote_text(self.ui_language, "local_action_blocked"),
+                cx,
+            );
+            return;
+        }
         self.open_path_in_permanent_tab_with_view(path, focus_editor, None, cx);
     }
 
@@ -853,7 +874,7 @@ impl EditorView {
         cx.spawn(async move |this, cx| {
             let read_path = path.clone();
             let loaded = fs_task::run("Open tab", path.clone(), move || {
-                let bytes = std::fs::read(&read_path)?;
+                let bytes = moeka_fs::local::native::read(&read_path)?;
                 let mut tab =
                     Self::build_file_tab(tab_id, &read_path, &bytes, false, default_left_align);
                 if let Some(view) = reopen_view {
@@ -992,6 +1013,7 @@ impl EditorView {
         // switch, which is hundreds of megabytes on a large file.
         let tab_id = self.tabs[index].id.clone();
         let tab_kind = self.tabs[index].kind;
+        let tab_is_remote = self.tabs[index].is_remote;
         let tab_file_kind = self.tabs[index].file_kind.clone();
         let tab_path = self.tabs[index].path.clone();
         let tab_left_aligned = self.tabs[index].editor_left_aligned;
@@ -999,6 +1021,11 @@ impl EditorView {
         let tab_source_word_wrap = self.tabs[index].source_word_wrap;
         let tab_reading_mode = self.tabs[index].reading_mode && !tab_source_mode;
         let switching_tabs = self.active_tab_id.as_deref() != Some(tab_id.as_str());
+        if tab_is_remote {
+            self.remote_workspace_active = true;
+        } else if tab_kind != TabKind::Settings {
+            self.remote_workspace_active = false;
+        }
         if switching_tabs {
             if let Some(id) = self.active_tab_id.clone()
                 && self.tabs.iter().any(|tab| tab.id == id)
@@ -1020,6 +1047,16 @@ impl EditorView {
             self.reset_table_handles();
             self.cancel_line_drag(cx);
             self.stash_active_tab_generated_preview_cache();
+            if self.tabs[index].is_remote
+                || self
+                    .active_tab_id
+                    .as_ref()
+                    .is_some_and(|id| self.tabs.iter().any(|tab| &tab.id == id && tab.is_remote))
+            {
+                for key in self.image_cache.keys().cloned().collect::<Vec<_>>() {
+                    self.retire_image_cache_entry(&key);
+                }
+            }
             self.table_boundary_caret = None;
         }
         self.invalidate_active_file_panel_caches();
@@ -1068,6 +1105,16 @@ impl EditorView {
                 && let Some(path) = tab_path.as_ref()
             {
                 self.queue_image_load(path.to_string_lossy().into_owned(), cx);
+            }
+            if tab_file_kind.as_ref().is_some_and(FileKind::is_image)
+                && self.tabs[index].is_remote
+                && !self.tabs[index].remote_binding_lost
+                && let Some(resource) = self.tabs[index]
+                    .remote
+                    .as_ref()
+                    .and_then(|state| state.resource.clone())
+            {
+                self.queue_remote_tab_image(resource, cx);
             }
             self.clamp_scroll();
             self.pause_blinking(cx);
@@ -1125,6 +1172,8 @@ impl EditorView {
         let was_active = self.active_tab_id.as_deref() == Some(tab_id);
         // Save to recently closed (keep up to 20)
         let mut removed = self.tabs.remove(index);
+        self.pdf_views.remove(tab_id);
+        self.pdf_search_counts.remove(tab_id);
         self.outline_tab_states.remove(tab_id);
         self.code_block_display_overrides.remove(&removed.id);
         self.non_markdown_horizontal_scroll_states
@@ -1482,6 +1531,25 @@ impl EditorView {
     }
 
     pub(crate) fn create_scratch_tab(&mut self, cx: &mut Context<Self>) {
+        if self.remote_session_active() {
+            if self.remote_workspace.is_some() {
+                self.create_remote_scratch_tab(cx);
+            } else {
+                self.notify_error(
+                    crate::i18n::remote_text(self.ui_language, "not_connected"),
+                    cx,
+                );
+            }
+            return;
+        }
+        self.create_scratch_tab_impl(false, cx);
+    }
+
+    pub(super) fn create_remote_scratch_tab(&mut self, cx: &mut Context<Self>) {
+        self.create_scratch_tab_impl(true, cx);
+    }
+
+    fn create_scratch_tab_impl(&mut self, remote: bool, cx: &mut Context<Self>) {
         self.persist_active_tab_state();
         let title = self.next_untitled_title();
         let tab_id = self.next_tab_identity();
@@ -1491,6 +1559,25 @@ impl EditorView {
             heading_title_cache: Default::default(),
             kind: TabKind::Editor,
             path: None,
+            is_remote: remote,
+            remote_binding_lost: false,
+            remote: if remote {
+                self.remote_workspace
+                    .as_ref()
+                    .map(|workspace| config_store::RemoteTabState {
+                        peer_scope: workspace.peer_scope,
+                        destination: workspace.destination.clone(),
+                        config_file: workspace.config_file.clone(),
+                        root: workspace.root.clone(),
+                        resource: None,
+                        revision: None,
+                        save_uncertain: false,
+                        pending_resource: None,
+                        line_ending_crlf: false,
+                    })
+            } else {
+                None
+            },
             file_kind: Some(FileKind::Markdown),
             editor_left_aligned: self.app_settings.default_left_align,
             reading_mode: false,
@@ -1504,6 +1591,7 @@ impl EditorView {
                 extra_cursors: Vec::new(),
             },
             image_view: ImageViewState::default(),
+            pdf_view: PdfViewState::default(),
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -1597,6 +1685,9 @@ impl EditorView {
             heading_title_cache: Default::default(),
             kind: TabKind::Settings,
             path: None,
+            is_remote: false,
+            remote_binding_lost: false,
+            remote: None,
             file_kind: None,
             editor_left_aligned: false,
             reading_mode: false,
@@ -1610,6 +1701,7 @@ impl EditorView {
                 extra_cursors: Vec::new(),
             },
             image_view: ImageViewState::default(),
+            pdf_view: PdfViewState::default(),
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -2903,7 +2995,7 @@ impl EditorView {
                 this.pr(px(self.window_caption_trailing_inset()))
             });
 
-        div()
+        let tab_bar = div()
             .id("tab-bar")
             .debug_selector(move || format!("tab-bar-{pane_id}"))
             .relative()
@@ -2971,8 +3063,8 @@ impl EditorView {
                     .children(tab_items)
                     .child(div().flex_1().min_w(px(0.0)).h_full()),
             )
-            .child(action_chrome)
-            .into_any_element()
+            .child(action_chrome);
+        tab_bar.into_any_element()
     }
 }
 
@@ -3175,6 +3267,9 @@ mod tests {
             heading_title_cache: Default::default(),
             kind: TabKind::Editor,
             path,
+            is_remote: false,
+            remote_binding_lost: false,
+            remote: None,
             file_kind: None,
             editor_left_aligned: false,
             reading_mode: false,
@@ -3185,6 +3280,7 @@ mod tests {
                 ..Default::default()
             },
             image_view: ImageViewState::default(),
+            pdf_view: PdfViewState::default(),
             is_preview: false,
             is_dirty: false,
             is_deleted: false,

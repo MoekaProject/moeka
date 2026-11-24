@@ -269,7 +269,7 @@ fn insert(
             return wrap(buffer, cursor, &open.to_string(), &close.to_string());
         }
         if marker(ch) && markdown_at(buffer, cursor.selection_range().start, cache) {
-            let delimiter = if matches!(ch, '+' | '=') {
+            let delimiter = if matches!(ch, '*' | '~' | '+' | '=') {
                 ch.to_string().repeat(2)
             } else {
                 ch.to_string()
@@ -1473,6 +1473,31 @@ mod tests {
     }
 
     #[test]
+    fn selected_markers_use_edit_mode_formatting_width() {
+        for (input, expected) in [("*", "**word**"), ("~", "~~word~~"), ("+", "++word++")] {
+            let mut buffer = Buffer::from_text("word");
+            let mut cache = SourceContextCache::default();
+            let cursor = step(
+                &mut buffer,
+                Cursor {
+                    offset: 0,
+                    anchor: 4,
+                },
+                SourceAction::Insert(input),
+                &mut cache,
+            );
+            assert_eq!(buffer.text(), expected);
+            assert_eq!(
+                cursor,
+                Cursor {
+                    offset: 2,
+                    anchor: 6
+                }
+            );
+        }
+    }
+
+    #[test]
     fn wrapping_is_literal_and_preserves_selection_direction() {
         for input in ["*", "_", "~", "`", "$", "^", "[", "「", "+", "="] {
             for reverse in [false, true] {
@@ -2593,7 +2618,7 @@ mod tests {
             assert_eq!(
                 buffer.text(),
                 format!(
-                    "{}*{}*{}",
+                    "{}**{}**{}",
                     &source[..start],
                     &source[start..end],
                     &source[end..]

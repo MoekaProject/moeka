@@ -1,4 +1,4 @@
-use std::fs;
+use moeka_fs::local::native as fs;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

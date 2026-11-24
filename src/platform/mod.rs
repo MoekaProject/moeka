@@ -20,6 +20,7 @@ pub(crate) mod paths;
 pub(crate) mod process;
 pub(crate) mod security_scope;
 pub(crate) mod shell;
+pub(crate) mod ssh;
 pub(crate) mod terminal;
 pub(crate) mod trash;
 pub(crate) mod window_chrome;

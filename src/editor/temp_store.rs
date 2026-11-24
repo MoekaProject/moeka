@@ -77,6 +77,7 @@ impl EditorView {
 
 fn update_tab_recovery(tab: &mut OpenTab, snapshot: EditorSnapshot) {
     tab.recovery.text = Some(snapshot.text.clone());
+    tab.recovery.clean_remote_snapshot = false;
     tab.set_snapshot(snapshot);
     // A detached recovery draft still needs its original source identity.
     if tab.path.is_some() {

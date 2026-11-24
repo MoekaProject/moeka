@@ -204,6 +204,20 @@ pub(super) fn embed_images(
     workspace_root: &Path,
     workspace_roots: &[PathBuf],
 ) -> Result<String> {
+    embed_images_with_remote(html, source, workspace_root, workspace_roots, None)
+}
+
+pub(super) fn embed_images_with_remote(
+    html: &str,
+    source: Option<&Path>,
+    workspace_root: &Path,
+    workspace_roots: &[PathBuf],
+    remote: Option<&(
+        std::sync::Arc<moeka_ssh::filesystem::SshFilesystem>,
+        moeka_fs::path::ResourcePath,
+        moeka_fs::path::ResourcePath,
+    )>,
+) -> Result<String> {
     let mut cache = HashMap::new();
     let mut total = 0;
     let mut failure = None;
@@ -225,7 +239,13 @@ pub(super) fn embed_images(
                     let data = if let Some(data) = cache.get(&target) {
                         data
                     } else {
-                        match image_data_url(&target, source, workspace_root, workspace_roots) {
+                        match image_data_url(
+                            &target,
+                            source,
+                            workspace_root,
+                            workspace_roots,
+                            remote,
+                        ) {
                             Ok(data) => cache.entry(target.clone()).or_insert(data),
                             Err(error) => {
                                 failure = Some(
@@ -263,6 +283,11 @@ fn image_data_url(
     source: Option<&Path>,
     workspace_root: &Path,
     workspace_roots: &[PathBuf],
+    remote: Option<&(
+        std::sync::Arc<moeka_ssh::filesystem::SshFilesystem>,
+        moeka_fs::path::ResourcePath,
+        moeka_fs::path::ResourcePath,
+    )>,
 ) -> Result<String> {
     crate::platform::fs_task::check_deadline()?;
     let mut bytes = Vec::new();
@@ -305,6 +330,14 @@ fn image_data_url(
                 .into_reader()
                 .take(MAX_IMAGE_BYTES + 1)
                 .read_to_end(&mut bytes)?;
+        } else if let Some((filesystem, source, root)) = remote {
+            bytes = super::super::remote::read_remote_relative_file(
+                filesystem,
+                source,
+                root,
+                target,
+                MAX_IMAGE_BYTES as usize,
+            )?;
         } else {
             let resolved = super::super::navigation_io::resolve_document_image_path(
                 target,
@@ -316,7 +349,7 @@ fn image_data_url(
                 .extension()
                 .and_then(|ext| ext.to_str())
                 .map(str::to_string);
-            std::fs::File::open(&resolved)
+            moeka_fs::local::native::File::open(&resolved)
                 .with_context(|| crate::i18n::runtime::rt!(ReadFile, resolved.display()))?
                 .take(MAX_IMAGE_BYTES + 1)
                 .read_to_end(&mut bytes)?;
@@ -360,7 +393,7 @@ mod tests {
         let other_workspace = tempfile::tempdir().unwrap();
         let source = documents.path().join("note.md");
         let attachments = workspace.path().join("attachments/note");
-        std::fs::create_dir_all(&attachments).unwrap();
+        moeka_fs::local::native::create_dir_all(&attachments).unwrap();
         let image = image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]));
         let image_path = attachments.join("sample image.png");
         image.save(&image_path).unwrap();
@@ -395,7 +428,7 @@ mod tests {
                     &roots,
                 )
                 .unwrap(),
-                std::fs::read(&image_path).unwrap(),
+                moeka_fs::local::native::read(&image_path).unwrap(),
             );
             let html = embed_images(
                 &format!("<img src=\"{target}\">"),
@@ -468,7 +501,7 @@ mod tests {
         let source = workspace.path().join("note.md");
         for folder in ["first", "second"] {
             let directory = workspace.path().join(folder);
-            std::fs::create_dir(&directory).unwrap();
+            moeka_fs::local::native::create_dir(&directory).unwrap();
             image::RgbaImage::new(1, 1)
                 .save(directory.join("duplicate.png"))
                 .unwrap();
@@ -572,7 +605,7 @@ mod tests {
             let mut encoded = Cursor::new(Vec::new());
             image.write_to(&mut encoded, format).unwrap();
             let path = directory.path().join(format!("image.{extension}"));
-            std::fs::write(&path, encoded.get_ref()).unwrap();
+            moeka_fs::local::native::write(&path, encoded.get_ref()).unwrap();
             let preview = super::super::helpers::load_render_image_from_path(&path).unwrap();
             let html = embed_images(
                 &format!("<img src=\"image.{extension}\">"),
@@ -682,7 +715,7 @@ mod tests {
             }
             let bytes = export_format_fixture(extension);
             let path = directory.path().join(format!("fixture.{extension}"));
-            std::fs::write(&path, &bytes).unwrap();
+            moeka_fs::local::native::write(&path, &bytes).unwrap();
             let preview = super::super::helpers::load_render_image_from_path(&path)
                 .unwrap_or_else(|error| panic!("{extension} preview: {error:#}"));
             let mime = if *extension == "svg" {
@@ -733,7 +766,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("note.md");
         for extension in ["svg", "tga"] {
-            std::fs::write(
+            moeka_fs::local::native::write(
                 directory.path().join(format!("image.{extension}")),
                 export_format_fixture(extension),
             )
@@ -754,7 +787,7 @@ mod tests {
             let mut bytes = Cursor::new(Vec::new());
             source_pixels.write_to(&mut bytes, format).unwrap();
             let extension = format.extensions_str()[0];
-            std::fs::write(
+            moeka_fs::local::native::write(
                 directory.path().join(format!("image.{extension}")),
                 bytes.get_ref(),
             )
@@ -775,7 +808,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         for extension in crate::platform::image_decode::IMAGE_EXTENSIONS {
             let name = format!("bad.{extension}");
-            std::fs::write(directory.path().join(&name), b"not an image").unwrap();
+            moeka_fs::local::native::write(directory.path().join(&name), b"not an image").unwrap();
             assert!(
                 embed_images(
                     &format!("<img src=\"{name}\">"),

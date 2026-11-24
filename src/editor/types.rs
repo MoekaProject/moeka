@@ -106,6 +106,7 @@ pub(crate) enum FileKind {
     Code { language: String },
     Text,
     Image,
+    Pdf,
     Binary,
 }
 
@@ -140,6 +141,26 @@ pub(crate) struct ImageViewState {
     pub zoom_factor: f32,
     pub pan_x: f32,
     pub pan_y: f32,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(default)]
+pub(crate) struct PdfViewState {
+    pub page: usize,
+    pub fraction: f32,
+    pub zoom: f32,
+    pub thumbnail_scroll: f32,
+}
+
+impl Default for PdfViewState {
+    fn default() -> Self {
+        Self {
+            page: 0,
+            fraction: 0.0,
+            zoom: 1.0,
+            thumbnail_scroll: 0.0,
+        }
+    }
 }
 
 impl Default for ImageViewState {
@@ -203,6 +224,11 @@ pub(crate) struct OpenTab {
     pub heading_title_cache: std::cell::RefCell<Option<Option<String>>>,
     pub kind: TabKind,
     pub path: Option<PathBuf>,
+    /// Remote documents intentionally have no local `PathBuf`.
+    pub is_remote: bool,
+    /// Restored remote drafts are not bound to a live filesystem identity.
+    pub remote_binding_lost: bool,
+    pub remote: Option<config_store::RemoteTabState>,
     pub file_kind: Option<FileKind>,
     pub editor_left_aligned: bool,
     pub reading_mode: bool,
@@ -210,6 +236,7 @@ pub(crate) struct OpenTab {
     pub source_word_wrap: bool,
     pub snapshot: EditorSnapshot,
     pub image_view: ImageViewState,
+    pub pdf_view: PdfViewState,
     pub is_preview: bool,
     pub is_dirty: bool,
     pub is_deleted: bool,
@@ -219,6 +246,22 @@ pub(crate) struct OpenTab {
 }
 
 impl OpenTab {
+    pub(super) fn remote_text_unavailable(&self) -> bool {
+        self.is_remote
+            && !self.is_dirty
+            && self.snapshot.text.is_empty()
+            && self.history.saved_text.is_none()
+            && self
+                .file_kind
+                .as_ref()
+                .is_some_and(FileKind::supports_text_buffer)
+            && self
+                .remote
+                .as_ref()
+                .and_then(|state| state.revision.as_ref())
+                .is_some_and(|rev| rev.size > 0)
+    }
+
     pub(super) fn set_snapshot(&mut self, snapshot: EditorSnapshot) {
         self.heading_title_cache.get_mut().take();
         self.snapshot = snapshot;

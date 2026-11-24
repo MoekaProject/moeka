@@ -168,6 +168,8 @@ pub(crate) struct AppSettings {
     pub date_time_format: String,
     #[serde(default = "default_starred_files")]
     pub starred_files: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub starred_resources: Vec<moeka_fs::path::ResourcePath>,
     #[serde(default = "default_outline_rail_visible")]
     pub outline_rail_visible: bool,
     #[serde(default, alias = "minimap_visible")]
@@ -394,6 +396,7 @@ impl Default for AppSettings {
             file_list_visible: default_file_list_visible(),
             date_time_format: default_date_time_format(),
             starred_files: default_starred_files(),
+            starred_resources: Vec::new(),
             outline_rail_visible: default_outline_rail_visible(),
             minimap_position: MinimapPosition::default(),
             minimap_last_side: None,
@@ -712,6 +715,30 @@ pub(crate) fn theme_kind_to_string(kind: ThemeKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::{AppSettings, MinimapPosition, theme_kind_to_string};
+    #[test]
+    fn remote_stars_round_trip_authorities_and_native_units_without_local_paths() {
+        use moeka_fs::path::{FilesystemId, NativePath, ResourcePath};
+        let legacy: AppSettings = serde_yaml::from_str("{}").unwrap();
+        assert!(legacy.starred_resources.is_empty());
+        let resources = vec![
+            ResourcePath {
+                filesystem: FilesystemId::Ssh([1; 32]),
+                path: NativePath::Unix(b"/work/bad-\xff.md".to_vec()),
+            },
+            ResourcePath {
+                filesystem: FilesystemId::Ssh([2; 32]),
+                path: NativePath::Unix(b"/work/bad-\xff.md".to_vec()),
+            },
+        ];
+        let settings = AppSettings {
+            starred_resources: resources.clone(),
+            ..Default::default()
+        };
+        let restored: AppSettings =
+            serde_yaml::from_str(&serde_yaml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.starred_resources, resources);
+        assert!(restored.starred_files.is_empty());
+    }
     use crate::editor::attachments::{AttachmentLinkSyntax, AttachmentPathStyle};
     use crate::editor::{ChatAgentCli, TerminalCursorShape};
     use crate::theme::{EditorThemeMode, ThemeKind};
@@ -1042,7 +1069,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let external = tempfile::tempdir().unwrap();
         let notes = workspace.path().join("notes");
-        std::fs::create_dir(&notes).unwrap();
+        moeka_fs::local::native::create_dir(&notes).unwrap();
         let note = notes.join("document.md");
         for (location, base, folder) in [
             ("current_file", "current_file", ""),

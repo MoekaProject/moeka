@@ -76,6 +76,7 @@ pub struct TextInput {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) placeholder: SharedString,
     pub(crate) styles: TextInputStyles,
+    completion: Option<(String, String)>,
     /// Multi-line mode: Enter inserts a newline instead of submitting, and the
     /// text lays out as stacked lines.
     pub(crate) multiline: bool,
@@ -115,6 +116,7 @@ impl TextInput {
             focus_handle,
             placeholder: placeholder.into(),
             styles,
+            completion: None,
             multiline: false,
             last_layout: None,
             last_bounds: None,
@@ -135,6 +137,44 @@ impl TextInput {
         self.cursor_offset = self.text.len();
         self.selection_anchor = self.cursor_offset;
         cx.notify();
+    }
+
+    pub(crate) fn set_completion(
+        &mut self,
+        expected: &str,
+        suffix: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.completion = suffix
+            .filter(|suffix| !suffix.is_empty())
+            .map(|suffix| (expected.to_string(), suffix));
+        cx.notify();
+    }
+
+    pub(crate) fn completion_suffix(&self) -> Option<&str> {
+        let (expected, suffix) = self.completion.as_ref()?;
+        (self.text == *expected
+            && self.cursor_offset == self.text.len()
+            && !self.has_selection()
+            && self.marked_range.is_none()
+            && !self.multiline)
+            .then_some(suffix.as_str())
+    }
+
+    fn accept_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(suffix) = self.completion_suffix().map(str::to_owned) else {
+            return false;
+        };
+        self.undo_stack
+            .push((self.text.clone(), self.cursor_offset));
+        self.text.push_str(&suffix);
+        self.cursor_offset = self.text.len();
+        self.selection_anchor = self.cursor_offset;
+        self.completion = None;
+        self.pause_blinking(cx);
+        cx.emit(TextInputEvent::Changed);
+        cx.notify();
+        true
     }
 
     pub fn set_styles(&mut self, styles: TextInputStyles, cx: &mut Context<Self>) {
@@ -590,6 +630,9 @@ impl TextInput {
     }
 
     fn on_right(&mut self, _: &TextInputRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.accept_completion(cx) {
+            return;
+        }
         if self.has_selection() {
             let end = self.selection_range().end;
             self.move_cursor(end, false);
@@ -1038,13 +1081,18 @@ impl Render for TextInput {
                     }
                 }),
             )
-            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     if context_menu::dismiss(window, cx) {
                         cx.stop_propagation();
                     } else {
                         cx.emit(TextInputEvent::Escape);
                     }
+                } else if event.keystroke.key == "tab"
+                    && event.keystroke.modifiers == gpui::Modifiers::none()
+                    && this.accept_completion(cx)
+                {
+                    cx.stop_propagation();
                 }
             }))
             .on_mouse_down(
@@ -1246,6 +1294,7 @@ struct TextElement {
 
 struct TextElementPrepaintState {
     line: Option<ShapedLine>,
+    completion: Option<(ShapedLine, Pixels)>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
     center_offset: Pixels,
@@ -1266,6 +1315,64 @@ impl IntoElement for TextElement {
 mod caret_tests {
     use super::*;
     use gpui::Element;
+
+    #[gpui::test]
+    fn completion_is_only_visible_at_unselected_matching_text_end(cx: &mut gpui::TestAppContext) {
+        let input = cx.update(|cx| {
+            cx.new(|cx| {
+                let theme = crate::theme::ThemeKind::PaperWhite.build();
+                let styles = crate::style::Styles::from_theme(&theme, &theme)
+                    .input_styles(crate::style::InputRole::Search, 1.0);
+                TextInput::new(styles, "", cx)
+            })
+        });
+        input.update(cx, |input, cx| {
+            input.set_text("/文", cx);
+            input.set_completion("/文", Some("档/".into()), cx);
+            assert_eq!(input.completion_suffix(), Some("档/"));
+            input.select_all(cx);
+            assert_eq!(input.completion_suffix(), None);
+            input.set_text("/文x", cx);
+            assert_eq!(input.completion_suffix(), None);
+            input.set_text("/文", cx);
+            input.marked_range = Some(1..4);
+            assert_eq!(input.completion_suffix(), None);
+            input.marked_range = None;
+            assert!(input.accept_completion(cx));
+            assert_eq!(input.text(), "/文档/");
+            assert_eq!(
+                input.selection_range(),
+                input.text().len()..input.text().len()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn completion_suffix_reaches_the_shaped_paint_state(cx: &mut gpui::TestAppContext) {
+        let (_, window_cx) = cx.add_window_view(|_, _| gpui::EmptyView);
+        window_cx.update(|window, cx| {
+            let theme = crate::theme::ThemeKind::PaperWhite.build();
+            let styles = crate::style::Styles::from_theme(&theme, &theme)
+                .input_styles(crate::style::InputRole::Picker, 1.0);
+            let height = styles.text_input_height_px;
+            let input = cx.new(|cx| {
+                let mut input = TextInput::new(styles, "", cx);
+                input.set_text("/User", cx);
+                input.set_completion("/User", Some("s/".into()), cx);
+                input
+            });
+            let mut element = TextElement { input };
+            let state = element.prepaint(
+                None,
+                None,
+                Bounds::new(point(px(0.0), px(0.0)), size(px(300.0), px(height))),
+                &mut (),
+                window,
+                cx,
+            );
+            assert!(state.completion.is_some());
+        });
+    }
 
     #[gpui::test]
     fn input_caret_timing_pause_and_blur_match_shared_cursor_style(cx: &mut gpui::TestAppContext) {
@@ -1559,6 +1666,7 @@ impl Element for TextElement {
 
             return TextElementPrepaintState {
                 line: None,
+                completion: None,
                 cursor: cursor_quad,
                 selection: None,
                 center_offset: Pixels::ZERO,
@@ -1707,8 +1815,26 @@ impl Element for TextElement {
             )
         };
 
+        let completion = input.completion_suffix().map(|suffix| {
+            let run = TextRun {
+                len: suffix.len(),
+                font: text_style.font(),
+                color: styles.text_input_placeholder_color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let shaped = window.text_system().shape_line(
+                SharedString::from(suffix.to_string()),
+                font_size,
+                &[run],
+                None,
+            );
+            (shaped, line.x_for_index(content.len()))
+        });
         TextElementPrepaintState {
             line: Some(line),
+            completion,
             cursor,
             selection,
             center_offset,
@@ -1771,6 +1897,16 @@ impl Element for TextElement {
         };
         let text_origin = bounds.origin + point(center_offset, Pixels::ZERO);
         line.paint(text_origin, bounds.size.height, window, cx).ok();
+        if let Some((completion, x)) = prepaint.completion.take() {
+            completion
+                .paint(
+                    text_origin + point(x, Pixels::ZERO),
+                    bounds.size.height,
+                    window,
+                    cx,
+                )
+                .ok();
+        }
 
         // Paint cursor (only when focused)
         if focus_handle.is_focused(window)

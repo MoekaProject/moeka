@@ -253,6 +253,7 @@ publish-check:
 test-publish-release:
 	@bash scripts/test-publish-release.sh
 	@bash scripts/test-ci-macos-signing.sh
+	@ruby scripts/test-remote-artifact.rb
 	@python3 scripts/test-prepare-linux-sysroot.py
 	@python3 scripts/test-release-artifacts.py
 

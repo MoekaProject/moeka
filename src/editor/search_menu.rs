@@ -276,11 +276,11 @@ impl EditorView {
             .when(fixed_corner_padding, |this| {
                 this.child(div().w_full().h(px(bottom_padding)).flex_none())
             });
-        match placement.vertical {
+        let panel = match placement.vertical {
             helpers::AnchoredPopupVertical::Above { bottom } => panel.bottom(px(bottom)),
             helpers::AnchoredPopupVertical::Below { top } => panel.top(px(top)),
-        }
-        .into_any_element()
+        };
+        panel.into_any_element()
     }
 
     /// A searchable menu wrapped in a full-viewport occluded backdrop that

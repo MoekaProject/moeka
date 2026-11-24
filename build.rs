@@ -16,12 +16,14 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/index");
 
     let commit = git_output(&["rev-parse", "--short=12", "HEAD"]);
+    let source = git_output(&["rev-parse", "HEAD"]);
     let tag = git_output(&["describe", "--tags", "--exact-match", "HEAD"]);
 
     println!("cargo:rustc-env=MOEKA_GIT_COMMIT={commit}");
+    println!("cargo:rustc-env=MOEKA_GIT_SOURCE_SHA={source}");
     println!("cargo:rustc-env=MOEKA_GIT_TAG={tag}");
 
-    embedded_assets::generate();
+    embedded_assets::generate(&source);
 
     // `cfg!(windows)` in a build script describes the host, not the target, so
     // resources would silently vanish when cross-compiling.
@@ -40,7 +42,7 @@ fn main() {
 mod embedded_assets {
     use super::*;
 
-    pub(super) fn generate() {
+    pub(super) fn generate(source: &str) {
         println!("cargo:rerun-if-changed=assets");
 
         let mut files = Vec::new();
@@ -52,6 +54,9 @@ mod embedded_assets {
             .into_iter()
             .map(|file| (file.to_string_lossy().replace('\\', "/"), file))
             .collect();
+        if let Some(bundle) = remote_bundle(source) {
+            entries.push(("remote/servers.mrb".into(), bundle));
+        }
         entries.sort();
 
         let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
@@ -69,6 +74,48 @@ mod embedded_assets {
 
         std::fs::write(out_dir.join("assets.bin"), &blob).expect("write assets.bin");
         std::fs::write(out_dir.join("embedded_assets.rs"), index).expect("write index");
+    }
+
+    fn remote_bundle(source: &str) -> Option<PathBuf> {
+        println!("cargo:rerun-if-env-changed=MOEKA_REMOTE_BUNDLE");
+        println!("cargo:rerun-if-env-changed=MOEKA_REQUIRE_REMOTE_BUNDLE");
+        if std::env::var_os("CARGO_FEATURE_MAS").is_some() {
+            return None;
+        }
+        let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+        let cached = target_dir.join("remote/servers.mrb");
+        println!("cargo:rerun-if-changed={}", cached.display());
+        let bundle = std::env::var_os("MOEKA_REMOTE_BUNDLE")
+            .map(PathBuf::from)
+            .or_else(|| cached.is_file().then_some(cached));
+        let required = match std::env::var("MOEKA_REQUIRE_REMOTE_BUNDLE").as_deref() {
+            Ok("1") => true,
+            Ok("") | Err(_) => false,
+            Ok(_) => panic!("MOEKA_REQUIRE_REMOTE_BUNDLE must be 1 or unset"),
+        };
+        let Some(path) = bundle else {
+            assert!(
+                !required,
+                "SSH-capable packages require MOEKA_REMOTE_BUNDLE"
+            );
+            return None;
+        };
+        println!("cargo:rerun-if-changed={}", path.display());
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("read remote bundle {}: {error}", path.display()));
+        let bundle = moeka_ssh::bundle::Bundle::parse(&bytes)
+            .unwrap_or_else(|error| panic!("invalid remote bundle: {error}"));
+        bundle
+            .validate_identity(env!("CARGO_PKG_VERSION"), source)
+            .unwrap_or_else(|error| panic!("remote bundle identity mismatch: {error}"));
+        for target in moeka_ssh::bundle::TARGETS {
+            bundle.payload(target).unwrap_or_else(|error| {
+                panic!("invalid {} remote payload: {error}", target.name())
+            });
+        }
+        Some(path)
     }
 
     fn collect(dir: &Path, files: &mut Vec<PathBuf>) {

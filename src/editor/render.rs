@@ -59,6 +59,80 @@ mod tests {
         assert_eq!(sidebar_button_tab_bar_inset(80.0, 40.0, 240.0), 0.0);
         assert_eq!(sidebar_button_tab_bar_inset(0.0, 40.0, 0.0), 40.0);
     }
+
+    #[cfg(feature = "gpui-test-support")]
+    #[gpui::test]
+    fn global_sidebar_toggle_stays_visible_in_both_editor_modes(cx: &mut gpui::TestAppContext) {
+        use super::*;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            let mut editor = EditorView::new_with_mode(cx, true, false, Some("text"), false);
+            editor.embedded_editor = false;
+            editor.workspaces = vec![root.clone()];
+            editor.sidebar_root = root;
+            editor.sidebar_visible = true;
+            editor.styles.ui.spec.animations_enabled = false;
+            editor.set_sidebar_width_immediately(320.0);
+            editor
+        });
+        for simple in [false, true] {
+            cx.update(|_, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.app_settings.simple_mode = simple;
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            for visible in [true, false] {
+                let bounds = cx
+                    .debug_bounds("global-sidebar-toggle")
+                    .expect("titlebar sidebar button");
+                cx.update(|_, cx| {
+                    assert_eq!(editor.read(cx).sidebar_visible, visible);
+                });
+                cx.simulate_click(bounds.center(), Default::default());
+                cx.update(|_, cx| {
+                    assert_eq!(editor.read(cx).sidebar_visible, !visible);
+                });
+            }
+        }
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.workspaces.clear();
+                editor.sidebar_root = PathBuf::new();
+                editor.ui_language = UiLanguage::English;
+                cx.notify();
+            })
+        });
+        for simple in [false, true] {
+            cx.update(|_, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.app_settings.simple_mode = simple;
+                    cx.notify();
+                })
+            });
+            let bounds = cx.debug_bounds("global-sidebar-toggle").unwrap();
+            cx.simulate_click(bounds.center(), Default::default());
+            cx.update(|_, cx| {
+                assert!(matches!(
+                    editor.read(cx).context_menu.as_ref().map(|menu| &menu.kind),
+                    Some(ContextMenuKind::AddWorkspace)
+                ));
+            });
+            assert!(cx.debug_bounds("menu-item-Add Local Folder...").is_some());
+            if crate::platform::capabilities::CHILD_PROCESSES {
+                assert!(
+                    cx.debug_bounds("menu-item-Add SSH Remote Folder...")
+                        .is_some()
+                );
+            }
+            cx.update(|_, cx| {
+                editor.update(cx, |editor, cx| editor.close_context_menu_immediately(cx))
+            });
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -103,7 +177,10 @@ impl EditorView {
         let sidebar_background = self.sidebar_width()
             > self.window_controls_leading_inset() + self.tab_bar_height() * 0.5;
         let style = self.styles.sidebar_visibility_button(sidebar_background);
-        let title = if self.workspaces.is_empty() {
+        let has_workspace = !self.workspaces.is_empty()
+            || self.remote_workspace.is_some()
+            || self.remote_session_active();
+        let title = if !has_workspace {
             self.t(crate::i18n::TextKey::OpenFolder)
         } else {
             crate::i18n::sidebar_visibility_action_label(self.ui_language, self.sidebar_visible)
@@ -122,9 +199,15 @@ impl EditorView {
                 title,
                 Some(crate::editor::shortcut::hint("secondary-shift-s")),
                 cx,
-                |this, cx| {
-                    if this.workspaces.is_empty() {
-                        this.pick_workspace_folder(cx);
+                move |this, cx| {
+                    if !has_workspace {
+                        this.open_add_workspace_menu(
+                            gpui::point(
+                                px(this.window_controls_leading_inset()),
+                                px(this.tab_bar_height()),
+                            ),
+                            cx,
+                        );
                     } else {
                         this.toggle_sidebar_visibility(cx);
                     }
@@ -134,6 +217,7 @@ impl EditorView {
         tooltip::with_tooltip(
             div()
                 .id("global-sidebar-toggle")
+                .debug_selector(|| "global-sidebar-toggle".into())
                 .occlude()
                 .w(px(self.tab_bar_height()))
                 .h(px(self.tab_bar_height()))
@@ -164,10 +248,11 @@ impl EditorView {
                 )
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
                         cx.stop_propagation();
-                        if this.workspaces.is_empty() {
-                            this.pick_workspace_folder(cx);
+                        if !has_workspace {
+                            this.open_add_workspace_menu(event.position, cx);
                         } else {
                             this.toggle_sidebar_visibility(cx);
                         }
@@ -559,6 +644,7 @@ impl EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.prune_pdf_views();
         if !self.sidebar_root.as_os_str().is_empty() {
             self.ensure_sidebar_filter_input(cx);
         }
@@ -941,19 +1027,27 @@ impl Render for EditorView {
             self.ui_scale,
         )
         .id("editor-root")
-        .key_context(
-            if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
-                "MarkdownEditor Sidebar"
-            } else {
-                "MarkdownEditor"
-            },
-        )
+        .key_context(if self.sidebar_has_keyboard_focus() {
+            "MarkdownEditor Sidebar"
+        } else {
+            "MarkdownEditor"
+        })
         .track_focus(&self.focus_handle(cx))
         .capture_action(cx.listener(|this, _: &crate::actions::Escape, _, cx| {
+            if this.remote_input.is_some() {
+                this.cancel_remote_input(cx);
+                cx.stop_propagation();
+                return;
+            }
             this.clear_search_inputs(cx);
         }))
         .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
             if event.keystroke.key == "escape" {
+                if this.remote_input.is_some() {
+                    this.cancel_remote_input(cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 this.clear_search_inputs(cx);
             }
         }))
@@ -1062,6 +1156,7 @@ impl Render for EditorView {
         .on_action(cx.listener(Self::on_move_line_down))
         .on_action(cx.listener(Self::on_save))
         .on_action(cx.listener(Self::on_save_as))
+        .on_action(cx.listener(Self::on_connect_ssh))
         .on_action(cx.listener(Self::on_new_document))
         .on_action(cx.listener(Self::on_new_tab))
         .on_action(cx.listener(Self::on_close_active_tab))
@@ -1497,18 +1592,15 @@ impl Render for EditorView {
                     )
                 }),
         )
-        .when(
-            !self.embedded_editor && !self.editor_toolbar_enabled(),
-            |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .left(px(self.window_controls_leading_inset()))
-                        .top(px(-1.0))
-                        .child(self.render_global_sidebar_button(false, cx)),
-                )
-            },
-        )
+        .when(!self.embedded_editor, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .left(px(self.window_controls_leading_inset()))
+                    .top(px(-1.0))
+                    .child(self.render_global_sidebar_button(false, cx)),
+            )
+        })
         .when(pointer_dragging, |this| {
             let indicator_line = if self.sidebar_resizing {
                 let iw = self.scaled(self.styles.sidebar.sidebar_resize_active_indicator_width_px);
@@ -1753,6 +1845,12 @@ impl Render for EditorView {
             this.child(deferred(
                 self.render_motion_overlay(super::motion::OverlayKind::Dialog, cx),
             ))
+        })
+        .when(self.remote_input.is_some(), |this| {
+            this.child(deferred(self.render_motion_overlay(
+                super::motion::OverlayKind::RemoteInput,
+                cx,
+            )))
         })
         .when(!self.notifications.is_empty(), |this| {
             this.child(deferred(self.render_motion_overlay(

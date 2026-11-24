@@ -9,12 +9,14 @@ Moeka is a local-first Markdown editor built with Rust and GPUI for macOS, Windo
 ## Features
 
 - **GPU-powered performance**: a native Rust + GPUI editor supporting 120Hz displays, with on-demand rendering and background indexing. Actual frame rates depend on hardware and document workload.
-- **Rich Markdown, live**: Edit, Reading, and Source modes with tables, task lists, LaTeX math, Mermaid diagrams, and syntax highlighting.
+- **Rich Markdown, live**: Edit, Reading, and Source modes with tables, task lists, LaTeX math, Mermaid diagrams, and syntax highlighting. Source mode shares Markdown formatting commands and syntax assistance while keeping markup visible.
 - **Powerful editing**: multiple cursors, regex search, a command palette, tabs, split panes, outlines, and minimap navigation.
 - **Local-first knowledge**: organize workspaces, Wiki links, and attachments with full-text search, autosave, session recovery, and persistent undo.
 - **Multiple workspaces**: reorder workspace roots in one FileTree, with one workspace expanded at a time and the other roots kept above or below its scrolling file list. A shared starred-files section above all workspaces provides cross-workspace access. Switching preserves each workspace's FileTree selection, scroll position and loaded directories, as well as tabs, split panes, unsaved edits, and running terminals; workspace layouts restore on restart.
+- **SSH workspaces**: connect through system OpenSSH to Linux or macOS with an automatically installed, bundled helper. Browse, filter, search, watch, edit and save remote files without mirroring the workspace locally; disconnected drafts stay recoverable. Available outside Mac App Store builds; remote terminals, Git and language servers are not included.
 - **Agent collaboration**: the standard desktop build integrates installed Codex, Claude Code, GitHub Copilot, and Gemini CLI tools with document context.
 - **Beautiful exports**: share Markdown, HTML, PDF, and PNG with document formatting, code, formulas, and diagrams.
+- **PDF reading**: native previews with page thumbnails, document outlines, text selection, and full-text search.
 - **A personal writing space**: expressive themes, flexible typography, multilingual UI, and a focused minimal mode.
 
 ## Install on macOS

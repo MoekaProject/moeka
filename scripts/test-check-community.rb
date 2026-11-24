@@ -93,11 +93,15 @@ class CommunityChecksTest
     assert_equal %w[workflow_call workflow_dispatch], (document['on'] || document[true]).keys
     assert_equal false, document.fetch('concurrency').fetch('cancel-in-progress')
     jobs = document.fetch('jobs')
-    assert_equal %w[build sign], jobs.keys
+    assert_equal %w[remote_servers build sign], jobs.keys
+    assert_equal 'remote_servers', jobs.fetch('build').fetch('needs')
+    assert_equal true, jobs.fetch('remote_servers').fetch('with').fetch('sign_macos')
+    assert_equal '1', jobs.fetch('build').fetch('env').fetch('MOEKA_REQUIRE_REMOTE_BUNDLE')
     assert_equal 'build', jobs.fetch('sign').fetch('needs')
     assert_equal 'release-signing', jobs.fetch('sign').fetch('environment')
-    jobs.each_value do |job|
-      assert_equal "github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'", job.fetch('if')
+    %w[build sign].each do |name|
+      job = jobs.fetch(name)
+      assert_equal true, job.fetch('if').include?("github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'")
       checkout = job.fetch('steps').find { |step| step.fetch('uses', '').start_with?('actions/checkout@') }
       assert_equal '${{ github.sha }}', checkout.fetch('with').fetch('ref')
     end
@@ -126,7 +130,11 @@ class CommunityChecksTest
     assert_equal %w[APPLE_APP_SPECIFIC_PASSWORD APPLE_ID MACOS_CERTIFICATE_BASE64 MACOS_CERTIFICATE_PASSWORD],
                  jobs.fetch('macos').fetch('secrets').keys.sort
     assert_equal 'release-signing', jobs.fetch('preflight').fetch('environment')
-    assert_equal 'preflight', jobs.fetch('portable').fetch('needs')
+    assert_equal %w[preflight remote_servers], jobs.fetch('portable').fetch('needs')
+    assert_equal %w[preflight remote_servers], jobs.fetch('macos').fetch('needs')
+    assert_equal 'preflight', jobs.fetch('remote_servers').fetch('needs')
+    assert_equal true, jobs.fetch('remote_servers').fetch('with').fetch('sign_macos')
+    assert_equal '1', jobs.fetch('portable').fetch('env').fetch('MOEKA_REQUIRE_REMOTE_BUNDLE')
     assert_empty jobs.fetch('portable').to_s.scan(/secrets\./)
     assert_empty jobs.fetch('publish').to_s.scan(/MACOS_CERTIFICATE|APPLE_APP_SPECIFIC_PASSWORD|make signed|cargo build/)
     assert_equal({ 'contents' => 'write' }, jobs.fetch('publish').fetch('permissions'))

@@ -1106,7 +1106,7 @@ impl EditorView {
             cx.notify();
             return;
         }
-        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
+        if self.sidebar_has_keyboard_focus() {
             self.focused_sidebar_path = None;
             self.focused_workspace_root = None;
             cx.notify();
@@ -1329,6 +1329,7 @@ impl EditorView {
             if !self.active_file_kind().is_some_and(FileKind::is_markdown) {
                 self.reparse();
             }
+            self.sync_markdown_completion_after_edit("", cx);
             self.scroll_to_cursor();
             self.pause_blinking(cx);
             return;
@@ -1546,7 +1547,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
+        if self.sidebar_has_keyboard_focus() {
             self.sidebar_delete_focused(cx);
             return;
         }
@@ -1577,6 +1578,7 @@ impl EditorView {
             if !self.active_file_kind().is_some_and(FileKind::is_markdown) {
                 self.reparse();
             }
+            self.sync_markdown_completion_after_edit("", cx);
             self.scroll_to_cursor();
             self.pause_blinking(cx);
             return;
@@ -1700,7 +1702,7 @@ impl EditorView {
         if self.move_line_diff_selection_horizontal(false, false, cx) {
             return;
         }
-        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
+        if self.sidebar_has_keyboard_focus() {
             self.sidebar_nav_left(cx);
             return;
         }
@@ -1770,7 +1772,7 @@ impl EditorView {
         if self.move_line_diff_selection_horizontal(true, false, cx) {
             return;
         }
-        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
+        if self.sidebar_has_keyboard_focus() {
             self.sidebar_nav_right(cx);
             return;
         }
@@ -1821,12 +1823,15 @@ impl EditorView {
     }
 
     pub(crate) fn on_up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll_pdf(-0.08, None, cx) {
+            return;
+        }
         if self.move_line_diff_selection_vertical(false, false, cx) {
             return;
         }
         self.table_handles.selection = None;
         self.table_cell_selection = None;
-        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
+        if self.sidebar_has_keyboard_focus() {
             self.sidebar_nav_up(cx);
             return;
         }
@@ -1904,12 +1909,15 @@ impl EditorView {
     }
 
     pub(crate) fn on_down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll_pdf(0.08, None, cx) {
+            return;
+        }
         if self.move_line_diff_selection_vertical(true, false, cx) {
             return;
         }
         self.table_handles.selection = None;
         self.table_cell_selection = None;
-        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
+        if self.sidebar_has_keyboard_focus() {
             self.sidebar_nav_down(cx);
             return;
         }
@@ -2160,6 +2168,12 @@ impl EditorView {
     }
 
     pub(crate) fn on_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_pdf() {
+            if let Some(view) = self.active_pdf_view().cloned() {
+                view.update(cx, |view, cx| view.select_all(cx));
+            }
+            return;
+        }
         if self.line_diff_selection.is_some() {
             self.move_line_diff_selection_document_edge(false, false, cx);
             self.move_line_diff_selection_document_edge(true, true, cx);
@@ -2308,7 +2322,7 @@ impl EditorView {
     }
 
     pub(crate) fn on_enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
-        if self.focused_sidebar_path.is_some() || self.focused_workspace_root.is_some() {
+        if self.sidebar_has_keyboard_focus() {
             if self.sidebar_edit.is_some() {
                 self.commit_sidebar_edit(cx);
             } else {
@@ -2341,23 +2355,6 @@ impl EditorView {
                 return;
             }
         }
-        if self.source_mode {
-            if self.sidebar_edit.is_some() {
-                self.commit_sidebar_edit(cx);
-                return;
-            }
-            self.pending_code_fence = None;
-            self.checkpoint();
-            if self.active_file_kind().is_some_and(FileKind::is_markdown) {
-                self.apply_source_action(source_edit::SourceAction::Enter);
-            } else {
-                self.multi_cursor_insert("\n");
-                self.reparse();
-            }
-            self.scroll_to_cursor();
-            self.pause_blinking(cx);
-            return;
-        }
         if self.wiki_link_start.is_some() {
             self.confirm_wiki_link_selection(cx);
             return;
@@ -2368,6 +2365,40 @@ impl EditorView {
                 return;
             }
             self.dismiss_slash_menu(cx);
+        }
+        if self.source_mode {
+            if self.sidebar_edit.is_some() {
+                self.commit_sidebar_edit(cx);
+                return;
+            }
+            self.pending_code_fence = None;
+            self.checkpoint();
+            if self.active_file_kind().is_some_and(FileKind::is_markdown) {
+                self.apply_source_action(source_edit::SourceAction::Enter);
+                let lines = self
+                    .all_cursors_snapshot()
+                    .into_iter()
+                    .map(|cursor| self.buffer.offset_to_line_col(cursor.offset).0)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let mut renumbered = false;
+                for line in lines {
+                    if self
+                        .markdown_edit_decoration(line)
+                        .is_some_and(|decoration| decoration.block_type == BlockType::OrderedList)
+                    {
+                        renumbered |= self.normalize_ordered_list_near_line(line, true);
+                    }
+                }
+                if renumbered {
+                    self.reparse();
+                }
+            } else {
+                self.multi_cursor_insert("\n");
+                self.reparse();
+            }
+            self.scroll_to_cursor();
+            self.pause_blinking(cx);
+            return;
         }
         if self.sidebar_edit.is_some() {
             self.commit_sidebar_edit(cx);
@@ -2665,6 +2696,10 @@ impl EditorView {
             self.indent_code_selection(true, cx);
             return;
         }
+        if self.source_mode && self.offset_in_code_context(self.cursor.offset) {
+            self.indent_code_selection(true, cx);
+            return;
+        }
         if self.table_boundary_caret.is_some() {
             let _ = self.move_table_cursor_horizontal(true);
             self.pause_blinking(cx);
@@ -2710,6 +2745,10 @@ impl EditorView {
             self.indent_code_selection(false, cx);
             return;
         }
+        if self.source_mode && self.offset_in_code_context(self.cursor.offset) {
+            self.indent_code_selection(false, cx);
+            return;
+        }
         if self.table_boundary_caret.is_some() {
             let _ = self.move_table_cursor_horizontal(false);
             self.pause_blinking(cx);
@@ -2729,7 +2768,7 @@ impl EditorView {
 
         if has_list_line {
             self.unindent_selected_list_lines();
-        } else if has_selection || self.active_tab_is_non_markdown_text() {
+        } else if has_selection || self.active_tab_is_non_markdown_text() || self.source_mode {
             self.unindent_line_indices(&line_indices, unindent_width);
         }
         self.pause_blinking(cx);
@@ -2752,6 +2791,15 @@ impl EditorView {
     }
 
     pub(crate) fn on_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_pdf() {
+            if let Some(text) = self
+                .active_pdf_view()
+                .and_then(|view| view.read(cx).selected_text())
+            {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            }
+            return;
+        }
         if self.copy_line_diff_selection_to_clipboard(cx) {
             return;
         }
@@ -2962,6 +3010,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.scroll_pdf(0.0, Some(false), cx) {
+            return;
+        }
         if self.move_line_diff_selection_document_edge(false, false, cx) {
             return;
         }
@@ -2983,6 +3034,9 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.scroll_pdf(0.0, Some(true), cx) {
+            return;
+        }
         if self.move_line_diff_selection_document_edge(true, false, cx) {
             return;
         }
@@ -3237,6 +3291,9 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.scroll_pdf(0.9, None, cx) {
+            return;
+        }
         if self.line_diff_selection.is_some() {
             let mut remaining = self.editor_visible_height();
             while remaining > 0.0 {
@@ -3387,9 +3444,11 @@ impl EditorView {
     // ── Format actions ──────────────────────────────────────────────
 
     fn begin_markdown_format_edit(&mut self, cx: &mut Context<Self>) -> bool {
-        self.active_tab_is_markdown()
-            && self.begin_content_edit(cx)
-            && (self.table_boundary_caret.is_none() || self.insert_line_at_table_boundary(cx))
+        if !self.active_tab_uses_markdown_editor() || !self.begin_content_edit(cx) {
+            return false;
+        }
+        self.prepare_markdown_format_context();
+        self.table_boundary_caret.is_none() || self.insert_line_at_table_boundary(cx)
     }
 
     fn begin_markdown_block_format_edit(&mut self, cx: &mut Context<Self>) -> bool {
@@ -3488,13 +3547,7 @@ impl EditorView {
         if !self.begin_markdown_format_edit(cx) {
             return;
         }
-        self.checkpoint();
-        if self.app_settings.link_syntax == "wikilink" {
-            self.insert_wiki_image();
-        } else {
-            self.insert_link_or_image("![", "](image.png)", "alt");
-        }
-        self.pause_blinking(cx);
+        self.execute_format_menu_action(FormatMenuAction::Image, cx);
     }
 
     pub(crate) fn on_toggle_quote(
@@ -3561,7 +3614,7 @@ impl EditorView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_tab_is_markdown() {
+        if self.active_tab_uses_markdown_editor() {
             self.execute_format_menu_action(FormatMenuAction::Table, cx);
         }
     }
@@ -3575,9 +3628,7 @@ impl EditorView {
         if !self.begin_markdown_block_format_edit(cx) {
             return;
         }
-        self.checkpoint();
-        self.wrap_current_lines_as_code_block();
-        self.pause_blinking(cx);
+        self.execute_format_menu_action(FormatMenuAction::CodeBlock, cx);
     }
 
     pub(crate) fn on_insert_horizontal_rule(
@@ -3682,22 +3733,7 @@ impl EditorView {
         if !self.begin_markdown_block_format_edit(cx) {
             return;
         }
-        if let Some(level) = self
-            .current_heading_action()
-            .and_then(|action| match action {
-                FormatMenuAction::Heading1 => Some(1),
-                FormatMenuAction::Heading2 => Some(2),
-                FormatMenuAction::Heading3 => Some(3),
-                FormatMenuAction::Heading4 => Some(4),
-                FormatMenuAction::Heading5 => Some(5),
-                FormatMenuAction::Heading6 => Some(6),
-                _ => None,
-            })
-        {
-            self.checkpoint();
-            self.apply_heading(level);
-            self.pause_blinking(cx);
-        }
+        self.execute_format_menu_action(FormatMenuAction::Paragraph, cx);
     }
 
     pub(crate) fn on_zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
@@ -4296,7 +4332,7 @@ impl EditorView {
         lines.join("\n")
     }
 
-    fn normalize_text_for_save(&mut self) -> String {
+    pub(super) fn normalize_text_for_save(&mut self) -> String {
         let original_text = self.buffer.text().to_string();
         let mut text = if self.active_tab_is_markdown() {
             self.format_markdown_tables_for_save(&original_text)
@@ -4450,8 +4486,16 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
         if !self.active_tab_supports_persistent_save() {
+            return;
+        }
+        if self
+            .active_tab_id
+            .as_ref()
+            .is_some_and(|id| self.tabs.iter().any(|tab| &tab.id == id && tab.is_remote))
+        {
+            self.save_remote_active(false, window, cx);
             return;
         }
         let Some(index) = self.active_tab_index() else {
@@ -4560,8 +4604,16 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn on_save_as(&mut self, _: &SaveAs, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
         if !self.active_tab_supports_persistent_save() {
+            return;
+        }
+        if self
+            .active_tab_id
+            .as_ref()
+            .is_some_and(|id| self.tabs.iter().any(|tab| &tab.id == id && tab.is_remote))
+        {
+            self.save_remote_active(true, window, cx);
             return;
         }
         let Some(index) = self.active_tab_index() else {

@@ -117,7 +117,7 @@ fn attachment_folder_result_is_current(
 }
 
 fn capture_attachment_folder_bookmark(path: &std::path::Path) -> std::io::Result<String> {
-    let metadata = std::fs::metadata(path)?;
+    let metadata = moeka_fs::local::native::metadata(path)?;
     if !metadata.is_dir() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotADirectory,
@@ -1241,7 +1241,7 @@ impl EditorView {
         let path = crate::editor::config_paths::settings_file_path();
         // The file only exists once something has been persisted, so write the
         // current settings first to give the user a complete document to edit.
-        if !path.exists() {
+        if moeka_fs::local::native::metadata(&path).is_err() {
             self.app_settings.save();
         }
         self.open_path_in_permanent_tab(path, true, cx);
@@ -3417,7 +3417,7 @@ mod tests {
             std::io::ErrorKind::NotFound
         );
         let file = dir.path().join("not-a-folder");
-        std::fs::write(&file, b"test").unwrap();
+        moeka_fs::local::native::write(&file, b"test").unwrap();
         assert_eq!(
             capture_attachment_folder_bookmark(&file)
                 .unwrap_err()

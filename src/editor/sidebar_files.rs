@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use gpui::{AppContext, Context, Window};
@@ -138,10 +137,9 @@ impl EditorView {
         ) {
             return Err(rename_error.into());
         }
-        let destination_missing = dst
-            .symlink_metadata()
+        let destination_missing = moeka_fs::local::native::symlink_metadata(dst)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-        if !src.exists() || !destination_missing {
+        if moeka_fs::local::native::metadata(src).is_err() || !destination_missing {
             return Err(rename_error.into());
         }
 
@@ -194,7 +192,7 @@ impl EditorView {
         Self::move_path_with_fallback(
             src,
             dst,
-            |from, to| std::fs::rename(from, to),
+            |from, to| moeka_fs::local::native::rename(from, to),
             crate::platform::trash::move_to_trash,
         )
     }
@@ -339,6 +337,13 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.remote_session_active() {
+            self.notify_error(
+                crate::i18n::remote_text(self.ui_language, "local_action_blocked"),
+                cx,
+            );
+            return;
+        }
         let create_in_file_list = self.file_list_menu_origin;
         if create_in_file_list {
             self.file_list_pending_reveal_path = None;
@@ -394,6 +399,13 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.remote_session_active() {
+            self.notify_error(
+                crate::i18n::remote_text(self.ui_language, "local_action_blocked"),
+                cx,
+            );
+            return;
+        }
         self.expanded_dirs.insert(parent.clone());
         self.invalidate_sidebar_items_cache();
         let styles = self.sidebar_edit_text_input_styles();
@@ -489,7 +501,7 @@ impl EditorView {
                         let result =
                             fs_task::run_write("create file", new_path.clone(), move || {
                                 check_deadline()?;
-                                std::fs::OpenOptions::new()
+                                moeka_fs::local::native::OpenOptions::new()
                                     .write(true)
                                     .create_new(true)
                                     .open(create_path)
@@ -513,7 +525,7 @@ impl EditorView {
                         let result =
                             fs_task::run_write("create folder", new_path.clone(), move || {
                                 check_deadline()?;
-                                std::fs::create_dir(create_path)
+                                moeka_fs::local::native::create_dir(create_path)
                             })
                             .await;
                         this.update(cx, |editor, cx| {
@@ -648,7 +660,7 @@ impl EditorView {
 
     fn sidebar_destination_missing(path: &Path) -> std::io::Result<bool> {
         check_deadline()?;
-        match std::fs::symlink_metadata(path) {
+        match moeka_fs::local::native::symlink_metadata(path) {
             Ok(_) => Ok(false),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
             Err(error) => Err(error),
@@ -668,27 +680,10 @@ impl EditorView {
         }
 
         check_deadline()?;
-        if std::fs::metadata(src)?.is_file() {
-            let stem = src.file_stem().unwrap_or(name);
-            let extension = src.extension().filter(|ext| !ext.is_empty());
-            for suffix in 1.. {
-                let mut candidate = OsString::from(stem);
-                candidate.push(format!("-{suffix}"));
-                if let Some(extension) = extension {
-                    candidate.push(".");
-                    candidate.push(extension);
-                }
-                let candidate_path = target_dir.join(candidate);
-                if Self::sidebar_destination_missing(&candidate_path)? {
-                    return Ok(Some(candidate_path));
-                }
-            }
-        }
-
+        let file = moeka_fs::local::native::metadata(src)?.is_file();
+        let name = moeka_fs::path::NativePath::from_local(Path::new(name));
         for suffix in 1.. {
-            let mut candidate = OsString::from(name);
-            candidate.push(format!("-{suffix}"));
-            let candidate_path = target_dir.join(candidate);
+            let candidate_path = target_dir.join(name.numbered_name(suffix, file).to_local()?);
             if Self::sidebar_destination_missing(&candidate_path)? {
                 return Ok(Some(candidate_path));
             }
@@ -708,16 +703,16 @@ impl EditorView {
     ) -> std::io::Result<()> {
         check_deadline()?;
         // `symlink_metadata` keeps a symlinked directory from being walked into.
-        if std::fs::symlink_metadata(src)?.is_dir() {
+        if moeka_fs::local::native::symlink_metadata(src)?.is_dir() {
             check_deadline()?;
             if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent)?;
+                moeka_fs::local::native::create_dir_all(parent)?;
             }
             check_deadline()?;
-            std::fs::create_dir(dst)?;
+            moeka_fs::local::native::create_dir(dst)?;
             on_destination_created();
             check_deadline()?;
-            for entry in std::fs::read_dir(src)? {
+            for entry in moeka_fs::local::native::read_dir(src)? {
                 check_deadline()?;
                 let entry = entry?;
                 if entry.file_name().to_string_lossy().starts_with("._") {
@@ -732,12 +727,12 @@ impl EditorView {
 
         check_deadline()?;
         if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
+            moeka_fs::local::native::create_dir_all(parent)?;
         }
         check_deadline()?;
-        let mut source = std::fs::File::open(src)?;
+        let mut source = moeka_fs::local::native::File::open(src)?;
         check_deadline()?;
-        let mut destination = std::fs::OpenOptions::new()
+        let mut destination = moeka_fs::local::native::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(dst)?;
@@ -859,6 +854,10 @@ impl EditorView {
     }
 
     pub(crate) fn paste_into_dir(&mut self, target_dir: PathBuf, cx: &mut Context<Self>) {
+        if self.resource_clipboard.is_some() {
+            self.paste_resource_clipboard(moeka_fs::path::ResourcePath::local(&target_dir), cx);
+            return;
+        }
         let Some(clipboard) = self.file_clipboard.clone() else {
             return;
         };
@@ -1080,7 +1079,16 @@ impl EditorView {
     }
 
     pub(crate) fn switch_workspace(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let was_remote = self.remote_workspace_active;
+        self.remote_workspace_active = false;
         if path == self.sidebar_root {
+            if was_remote {
+                self.reset_sidebar_filter(cx);
+                self.sidebar_visible = true;
+                self.sync_sidebar_width_animation(cx);
+                session_store::persist_session(self);
+                cx.notify();
+            }
             return;
         }
         let reveal_sidebar = !self.sidebar_visible;
@@ -1224,8 +1232,8 @@ impl EditorView {
 #[cfg(test)]
 mod tests {
     use super::EditorView;
+    use moeka_fs::local::native as fs;
     use std::{
-        fs,
         future::Future,
         sync::Arc,
         task::{Context, Poll, Wake, Waker},

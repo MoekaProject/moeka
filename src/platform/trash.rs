@@ -1,6 +1,6 @@
 //! Local paths go to Trash; confirmed network volumes are deleted permanently.
 
-use std::fs;
+use moeka_fs::local::native as fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -39,23 +39,13 @@ fn delete_with(
 }
 
 fn deletion_path(path: &Path) -> anyhow::Result<PathBuf> {
-    anyhow::ensure!(
-        !path.as_os_str().is_empty(),
-        crate::i18n::runtime::RuntimeText::UnsafeDelete.to_string()
-    );
-    // absolute() can normalize "." and (on Windows) ".." into a deletable name.
-    anyhow::ensure!(
-        path.file_name().is_some(),
-        crate::i18n::runtime::RuntimeText::UnsafeDelete.to_string()
-    );
-    let absolute = std::path::absolute(path)?;
-    let name = absolute.file_name().ok_or_else(|| {
-        anyhow::anyhow!(crate::i18n::runtime::RuntimeText::UnsafeDelete.to_string())
-    })?;
-    let parent = absolute.parent().ok_or_else(|| {
-        anyhow::anyhow!(crate::i18n::runtime::RuntimeText::UnsafeDelete.to_string())
-    })?;
-    Ok(parent.canonicalize()?.join(name))
+    moeka_fs::trash::deletion_path(path).map_err(|error| {
+        if moeka_fs::trash::is_unsafe_target(&error) {
+            anyhow::anyhow!(crate::i18n::runtime::RuntimeText::UnsafeDelete.to_string())
+        } else {
+            error.into()
+        }
+    })
 }
 
 pub(crate) fn remove_permanently(path: &Path) -> std::io::Result<()> {
@@ -177,23 +167,16 @@ fn is_network_volume(_path: &Path, _metadata: &fs::Metadata) -> anyhow::Result<b
 
 fn trash_local(path: &Path) -> anyhow::Result<()> {
     check_deadline()?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        use trash::TrashContext;
-        use trash::macos::{DeleteMethod, TrashContextExtMacos};
-
-        // No Finder fallback: AppleEvents are forbidden in the App Store sandbox.
-        let mut context = TrashContext::new();
-        context.set_delete_method(DeleteMethod::NsFileManager);
-        check_deadline()?;
-        context.delete(path).map_err(anyhow::Error::from)
+        moeka_fs::trash::move_to_trash(path, &check_deadline).map_err(anyhow::Error::from)
     }
     #[cfg(windows)]
     {
         let path = path.to_owned();
         run_trash_on_thread(move || trash::delete(path).map_err(anyhow::Error::from))
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         trash::delete(path).map_err(anyhow::Error::from)
     }

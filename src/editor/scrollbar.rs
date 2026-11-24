@@ -452,8 +452,9 @@ impl EditorView {
                 )
             }
             PanelScrollbarKind::FileList => {
-                let metrics =
-                    VerticalScrollbarMetrics::from_scroll_handle(&self.file_list_scroll_handle)?;
+                let metrics = VerticalScrollbarMetrics::from_scroll_handle(
+                    self.active_file_list_scroll_handle(),
+                )?;
                 (metrics, self.last_window_height, 0.0)
             }
             PanelScrollbarKind::Info => {
@@ -513,12 +514,26 @@ impl EditorView {
         })
     }
 
-    fn active_sidebar_scrollbar_handle(&self) -> &ScrollHandle {
+    pub(super) fn active_sidebar_scrollbar_handle(&self) -> &ScrollHandle {
+        if self.remote_session_active()
+            && let Some(workspace) = &self.remote_workspace
+        {
+            return &workspace.tree_scroll;
+        }
         &self.sidebar_scroll_handle
     }
 
+    fn active_file_list_scroll_handle(&self) -> &ScrollHandle {
+        if self.remote_session_active()
+            && let Some(workspace) = &self.remote_workspace
+        {
+            return &workspace.file_list_scroll;
+        }
+        &self.file_list_scroll_handle
+    }
+
     pub(crate) fn sidebar_scrollbar_track_height(&self) -> f32 {
-        f32::from(self.sidebar_scroll_handle.bounds().size.height).max(1.0)
+        f32::from(self.active_sidebar_scrollbar_handle().bounds().size.height).max(1.0)
     }
 
     pub(crate) fn chat_terminal_scrollbar_track_height(&self) -> f32 {
@@ -536,7 +551,7 @@ impl EditorView {
         match kind {
             PanelScrollbarKind::Sidebar => Some(self.active_sidebar_scrollbar_handle()),
             PanelScrollbarKind::WorkspaceSearch => Some(&self.workspace_search_scroll_handle),
-            PanelScrollbarKind::FileList => Some(&self.file_list_scroll_handle),
+            PanelScrollbarKind::FileList => Some(self.active_file_list_scroll_handle()),
             PanelScrollbarKind::Info => Some(&self.info_panel_scroll_handle),
             PanelScrollbarKind::Outline => Some(&self.outline_panel_scroll_handle),
             PanelScrollbarKind::ChatTerminal => None,

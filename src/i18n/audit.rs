@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 fn rust_sources(directory: &Path, files: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(directory).unwrap() {
+    for entry in moeka_fs::local::native::read_dir(directory).unwrap() {
         let entry = entry.unwrap();
         if entry.file_type().unwrap().is_dir() {
             rust_sources(&entry.path(), files);
@@ -77,7 +77,7 @@ fn direct_ui_and_runtime_errors_do_not_embed_untranslated_prose() {
         if relative == "i18n.rs" || relative.starts_with("i18n/") || relative.starts_with("bin/") {
             continue;
         }
-        let source = std::fs::read_to_string(&path).unwrap();
+        let source = moeka_fs::local::native::read_to_string(&path).unwrap();
         for pattern in [&direct, &errors] {
             for captures in pattern.captures_iter(&source) {
                 let literal = &captures[1];

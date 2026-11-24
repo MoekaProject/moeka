@@ -2803,6 +2803,122 @@ impl EditorView {
     }
 
     pub(crate) fn render_outline_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.active_tab_is_pdf() {
+            if let Some(view) = self.active_pdf_view().cloned() {
+                if view.read(cx).info.is_none() {
+                    return div()
+                        .child(view.read(cx).error.clone().unwrap_or_else(|| {
+                            crate::i18n::runtime::RuntimeText::PdfLoading
+                                .text(self.ui_language)
+                                .to_string()
+                        }))
+                        .into_any_element();
+                }
+                let headings = view
+                    .read(cx)
+                    .info
+                    .as_ref()
+                    .map(|info| info.headings.clone())
+                    .unwrap_or_default();
+                let mut panel = div().id("pdf-outline").size_full().overflow_y_scroll();
+                if let Some(error) = view
+                    .read(cx)
+                    .info
+                    .as_ref()
+                    .and_then(|info| info.outline_error.clone())
+                {
+                    panel = panel.child(error);
+                }
+                if headings.is_empty() {
+                    panel = panel.child(
+                        crate::i18n::runtime::RuntimeText::PdfNoOutline.text(self.ui_language),
+                    );
+                }
+                let collapsed = view.read(cx).collapsed.clone();
+                let current_page = view.read(cx).page;
+                let active = headings
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, heading)| match &heading.target {
+                        super::pdf::LinkTarget::Page { page, .. }
+                        | super::pdf::LinkTarget::Fit { page, .. }
+                            if *page <= current_page =>
+                        {
+                            Some(index)
+                        }
+                        _ => None,
+                    })
+                    .next_back();
+                let mut hidden_depth = None;
+                for (index, heading) in headings.iter().cloned().enumerate() {
+                    if hidden_depth.is_some_and(|depth| heading.depth > depth) {
+                        continue;
+                    }
+                    hidden_depth = None;
+                    let children = headings
+                        .get(index + 1)
+                        .is_some_and(|next| next.depth > heading.depth);
+                    let folded = collapsed.contains(&index);
+                    if children && folded {
+                        hidden_depth = Some(heading.depth);
+                    }
+                    let navigation_view = view.clone();
+                    let fold_view = view.clone();
+                    let disclosure = div()
+                        .id(("pdf-heading-fold", index))
+                        .w(px(18.0))
+                        .child(if children {
+                            if folded { "›" } else { "⌄" }
+                        } else {
+                            ""
+                        })
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            fold_view.update(cx, |view, cx| {
+                                if !view.collapsed.remove(&index) {
+                                    view.collapsed.insert(index);
+                                }
+                                cx.stop_propagation();
+                                cx.notify();
+                            });
+                        });
+                    panel = panel.child(
+                        div()
+                            .id(("pdf-heading", index))
+                            .pl(px(12.0 + heading.depth as f32 * 12.0))
+                            .py_1()
+                            .flex()
+                            .flex_row()
+                            .cursor_pointer()
+                            .text_color(if active == Some(index) {
+                                self.theme.text_accent
+                            } else {
+                                self.theme.text_primary
+                            })
+                            .child(disclosure)
+                            .child(heading.title)
+                            .on_click(move |_, _, cx| {
+                                navigation_view.update(cx, |view, cx| {
+                                    if children
+                                        && matches!(
+                                            heading.target,
+                                            super::pdf::LinkTarget::Unsupported
+                                        )
+                                    {
+                                        if !view.collapsed.remove(&index) {
+                                            view.collapsed.insert(index);
+                                        }
+                                        cx.notify();
+                                    } else {
+                                        view.navigate(&heading.target, cx);
+                                    }
+                                });
+                            }),
+                    );
+                }
+                return panel.into_any_element();
+            }
+            return div().into_any_element();
+        }
         let headings = self.collect_outline_headings();
         let active_line = self.outline_rail_active_line(&headings);
         let ups = &self.styles.utility_panel;

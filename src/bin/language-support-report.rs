@@ -1,5 +1,5 @@
+use moeka_fs::local::native as fs;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};

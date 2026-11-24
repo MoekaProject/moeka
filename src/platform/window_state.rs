@@ -49,7 +49,7 @@ pub(crate) fn restore(cx: &App) -> Option<WindowBounds> {
         return None;
     }
 
-    let raw = std::fs::read_to_string(placement_path()).ok()?;
+    let raw = moeka_fs::local::native::read_to_string(placement_path()).ok()?;
     let stored: StoredPlacement = serde_json::from_str(&raw).ok()?;
     if !(stored.width.is_finite() && stored.height.is_finite())
         || stored.width < 1.0
@@ -95,7 +95,7 @@ pub(crate) fn save(bounds: WindowBounds) {
 
     let path = placement_path();
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = moeka_fs::local::native::create_dir_all(parent);
     }
     let _ = crate::editor::file_ops::atomic_write(&path, serialized.as_bytes());
 }

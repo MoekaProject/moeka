@@ -17,6 +17,7 @@ pub(super) enum OverlayKind {
     CommandPalette,
     LanguagePicker,
     Dialog,
+    RemoteInput,
     Notifications,
 }
 
@@ -28,6 +29,7 @@ impl OverlayKind {
             Self::CommandPalette => editor.command_palette_visible,
             Self::LanguagePicker => editor.language_picker_visible,
             Self::Dialog => editor.dialog.is_some(),
+            Self::RemoteInput => editor.remote_input.is_some(),
             Self::Notifications => !editor.notifications.is_empty(),
         }
     }
@@ -163,6 +165,7 @@ impl Render for MotionOverlay {
             OverlayKind::CommandPalette => editor.render_command_palette_overlay(cx),
             OverlayKind::LanguagePicker => editor.render_language_picker_overlay(cx),
             OverlayKind::Dialog => editor.render_dialog(cx),
+            OverlayKind::RemoteInput => editor.render_remote_input(cx),
             OverlayKind::Notifications => editor.render_notifications(cx),
         });
         div()

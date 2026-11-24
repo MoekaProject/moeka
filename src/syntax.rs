@@ -605,14 +605,14 @@ mod tests {
 
     #[test]
     fn every_bundled_syntax_file_is_registered() {
-        let expected: std::collections::BTreeSet<_> = std::fs::read_dir(
+        let expected: std::collections::BTreeSet<_> = moeka_fs::local::native::read_dir(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/syntaxes"),
         )
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "sublime-syntax"))
         .map(|path| {
-            let source = std::fs::read_to_string(path).unwrap();
+            let source = moeka_fs::local::native::read_to_string(path).unwrap();
             SyntaxDefinition::load_from_str(&source, true, None)
                 .unwrap()
                 .name

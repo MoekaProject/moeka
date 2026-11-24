@@ -111,7 +111,7 @@ fn prepare_file_action(path: &Path) -> io::Result<(PathBuf, bool)> {
         ));
     }
     let path = std::path::absolute(path)?;
-    let metadata = std::fs::metadata(&path)?;
+    let metadata = moeka_fs::local::native::metadata(&path)?;
     fs_task::check_deadline()?;
     Ok((path, metadata.is_dir()))
 }
@@ -518,7 +518,7 @@ mod tests {
             (dir.path().to_owned(), true)
         );
         let file = dir.path().join("binary.dat");
-        std::fs::write(&file, b"binary").unwrap();
+        moeka_fs::local::native::write(&file, b"binary").unwrap();
         assert_eq!(prepare_file_action(&file).unwrap(), (file, false));
     }
 

@@ -1,5 +1,5 @@
+use moeka_fs::local::native::{self as fs, File};
 use std::env;
-use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,

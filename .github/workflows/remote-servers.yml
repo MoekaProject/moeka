@@ -1,0 +1,187 @@
+name: Remote server bundle
+
+on:
+  workflow_call:
+    inputs:
+      sign_macos:
+        type: boolean
+        default: false
+    secrets:
+      MACOS_CERTIFICATE_BASE64:
+        required: false
+      MACOS_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: false
+    outputs:
+      artifact:
+        description: Verified four-target bundle from this source revision
+        value: ${{ jobs.bundle.outputs.artifact }}
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Remote helper ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+          - platform: linux-aarch64
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-22.04-arm
+          - platform: macos-x86_64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - platform: macos-aarch64
+            target: aarch64-apple-darwin
+            runner: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install static Linux compiler
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - uses: ./.github/actions/rust-build-cache
+        with:
+          target: ${{ matrix.target }}
+          environment: ${{ matrix.runner }}-remote-server
+      - name: Build, test and record native artifact identity
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+          MOEKA_REMOTE_SOURCE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$MOEKA_REMOTE_SOURCE_SHA"
+          export MOEKA_REMOTE_APP_VERSION="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          cargo test --release --locked -p moeka-fs -p moeka-ssh -p moeka-remote-server --target "$TARGET"
+          cargo build --release --locked -p moeka-remote-server --target "$TARGET"
+          mkdir -p remote
+          cp "target/$TARGET/release/moeka-remote-server" "remote/$PLATFORM.bin"
+          "remote/$PLATFORM.bin" --artifact-info > "remote/$PLATFORM.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: remote-unsigned-server-${{ matrix.platform }}-${{ github.sha }}
+          path: remote/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  sign_macos:
+    needs: build
+    if: inputs.sign_macos && github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    environment: release-signing
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-x86_64, macos-aarch64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Refuse blind notarization retries
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: test "$RUN_ATTEMPT" = 1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: remote-unsigned-server-${{ matrix.platform }}-${{ github.sha }}
+          path: remote
+      - name: Install temporary signing credentials
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          DEVELOPER_ID_APPLICATION: ${{ vars.DEVELOPER_ID_APPLICATION }}
+        run: bash scripts/ci-macos-signing.sh setup
+      - name: Sign and notarize the standalone helper before compression
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          MOEKA_REMOTE_SOURCE_SHA: ${{ github.sha }}
+          DEVELOPER_ID_APPLICATION: ${{ vars.DEVELOPER_ID_APPLICATION }}
+          SIGNING_KEYCHAIN: ${{ runner.temp }}/moeka-signing/signing.keychain-db
+          NOTARY_OUTPUT_DIR: ${{ runner.temp }}/remote-notary
+        run: bash scripts/sign-remote-server.sh remote "$PLATFORM"
+      - name: Remove temporary credentials
+        if: always()
+        run: bash scripts/ci-macos-signing.sh cleanup
+      - name: Retain notarization recovery material without credentials
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: remote-notary-${{ matrix.platform }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/remote-notary/
+          if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: remote-signed-server-${{ matrix.platform }}-${{ github.sha }}
+          path: remote/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  bundle:
+    needs: [build, sign_macos]
+    if: always() && needs.build.result == 'success' && (!inputs.sign_macos || needs.sign_macos.result == 'success')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    outputs:
+      artifact: ${{ steps.result.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: remote-unsigned-server-*-${{ github.sha }}
+          path: remote/
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: inputs.sign_macos
+        with:
+          pattern: remote-signed-server-*-${{ github.sha }}
+          path: remote/
+          merge-multiple: true
+      - name: Validate source, architecture, digest and completeness before bundling
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          app_version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          server_version="$(awk -F '"' '/^version = / { print $2; exit }' crates/moeka-remote-server/Cargo.toml)"
+          cargo run --release --locked -p moeka-ssh --bin moeka-remote-bundle -- \
+            remote/servers.mrb "$app_version" "$server_version" "$SOURCE_SHA" remote
+      - id: result
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: echo "artifact=remote-bundle-$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.result.outputs.artifact }}
+          path: remote/servers.mrb
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

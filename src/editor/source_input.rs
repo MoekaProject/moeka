@@ -239,7 +239,7 @@ impl EditorView {
         changed
     }
 
-    fn apply_source_plans(&mut self, plans: Vec<(SourceCursorEdit, bool)>) -> bool {
+    pub(super) fn apply_source_plans(&mut self, plans: Vec<(SourceCursorEdit, bool)>) -> bool {
         if !source_edit::validate(&self.buffer, &plans) {
             return false;
         }
@@ -258,10 +258,12 @@ impl EditorView {
         });
         let folded_anchors =
             (changed && !identical_change).then(|| self.snapshot_folded_anchor_offsets());
-        let fold_edits = changes
+        let mut fold_edits = changes
             .iter()
             .map(|edit| (edit.range.clone(), edit.text.len()))
             .collect::<Vec<_>>();
+        fold_edits.sort_by_key(|(range, len)| (range.start, range.end, *len));
+        fold_edits.dedup();
         if let Some(edit) = changes.first() {
             if identical_change {
                 self.queue_non_markdown_line_display_transfer(&edit.range, &edit.text);

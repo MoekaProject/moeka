@@ -873,8 +873,10 @@ impl EntityInputHandler for EditorView {
             // including every caret and exact (possibly reversed) selections.
             self.capture_typing_scroll_guard();
             self.pending_code_fence = None;
+            self.capture_slash_menu_anchor_before_edit();
             self.checkpoint_for_typing(new_text);
             self.apply_source_action(source_edit::SourceAction::Insert(new_text));
+            self.sync_markdown_completion_after_edit(new_text, cx);
             self.scroll_to_cursor();
             self.pause_blinking(cx);
             return;
@@ -1120,34 +1122,7 @@ impl EntityInputHandler for EditorView {
             self.scroll_to_cursor();
         }
         if !self.source_mode {
-            if self.slash_menu_start.is_some() {
-                self.update_slash_filter(cx);
-            } else if self.wiki_link_start.is_some() {
-                self.sync_wiki_link_menu(cx);
-            } else if self.table_source.is_some() {
-            } else if new_text == "[" && new_offset >= 2 {
-                let text = self.buffer.text();
-                if text.get(new_offset - 2..new_offset) == Some("[[") {
-                    let closer = input_ime::missing_wiki_link_closer(text, new_offset);
-                    if !closer.is_empty() {
-                        self.buffer.replace(new_offset..new_offset, closer);
-                        self.reparse();
-                    }
-                    self.cursor.move_to(new_offset, &self.buffer);
-                    self.ensure_wiki_link_menu_for_cursor(cx);
-                }
-            } else if self.maybe_open_wiki_link_menu_after_edit(cx) {
-            } else if new_text == "/" && self.active_tab_is_markdown() && !self.embedded_editor {
-                let (line, col) = self.buffer.offset_to_line_col(new_offset);
-                let line_content = self.buffer.line_content(line);
-                if input_ime::slash_menu_trigger(
-                    line_content,
-                    col,
-                    self.offset_in_code_context(new_offset),
-                ) {
-                    self.open_slash_menu(cx);
-                }
-            }
+            self.sync_markdown_completion_after_edit(new_text, cx);
         }
         self.pause_blinking(cx);
         if had_ime_composition {

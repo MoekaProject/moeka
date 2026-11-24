@@ -52,15 +52,17 @@ impl ImageViewElement {
                     dragging: false,
                 };
             };
-            let Some(path) = tab.path.as_ref() else {
-                return ImageViewPrepaintState {
-                    hitbox,
-                    image: None,
-                    dragging: false,
-                };
+            let key = if tab.is_remote {
+                tab.remote
+                    .as_ref()
+                    .and_then(|state| state.resource.as_ref())
+                    .map(super::remote::remote_image_cache_key)
+            } else {
+                tab.path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
             };
-            let key = path.to_string_lossy();
-            let Some(Some(image)) = editor.image_cache.get(key.as_ref()) else {
+            let Some(Some(image)) = key.as_ref().and_then(|key| editor.image_cache.get(key)) else {
                 return ImageViewPrepaintState {
                     hitbox,
                     image: None,

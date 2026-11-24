@@ -6,6 +6,9 @@ on:
       version:
         required: true
         type: string
+      remote_bundle_artifact:
+        type: string
+        default: ''
     secrets:
       MACOS_CERTIFICATE_BASE64:
         required: true
@@ -30,11 +33,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  remote_servers:
+    if: inputs.remote_bundle_artifact == '' && github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/remote-servers.yml
+    with:
+      sign_macos: true
+    secrets:
+      MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+
   build:
-    if: github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
+    needs: remote_servers
+    if: always() && !cancelled() && !failure() && github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
     name: Build unsigned app ${{ matrix.arch }}
     runs-on: macos-15
     timeout-minutes: 90
+    env:
+      MOEKA_REMOTE_BUNDLE: ${{ github.workspace }}/remote/servers.mrb
+      MOEKA_REQUIRE_REMOTE_BUNDLE: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -60,6 +78,10 @@ jobs:
         with:
           target: ${{ matrix.target }}
           environment: macos-15
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ inputs.remote_bundle_artifact || needs.remote_servers.outputs.artifact }}
+          path: remote
       - name: Build without signing credentials
         env:
           TARGET: ${{ matrix.target }}

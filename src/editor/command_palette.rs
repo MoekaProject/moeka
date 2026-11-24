@@ -207,7 +207,9 @@ impl EditorView {
         let label = crate::i18n::command_label(self.ui_language, "switch_workspace").to_lowercase();
         self.workspaces
             .iter()
-            .filter(|root| root.as_path() != self.sidebar_root.as_path())
+            .filter(|root| {
+                self.remote_workspace_active || root.as_path() != self.sidebar_root.as_path()
+            })
             .filter(|root| {
                 if query.is_empty() {
                     return true;

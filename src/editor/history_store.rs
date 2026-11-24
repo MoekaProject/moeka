@@ -1,4 +1,4 @@
-use std::fs;
+use moeka_fs::local::native as fs;
 use std::io;
 use std::path::{Path, PathBuf};
 

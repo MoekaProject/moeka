@@ -62,6 +62,44 @@ then creates the DMG and ZIP. It does not separately sign/notarize the DMG
 container. DMG layout uses Finder/AppleScript; verify it on the hosted runner.
 No `make publish` command runs in this workflow.
 
+### Embedded SSH helpers
+
+The [remote helper workflow](../../.github/workflows/remote-servers.yml) first
+builds Linux and macOS helpers natively for both architectures without secrets.
+For official and signed candidates, separate cache-free signing jobs validate
+the macOS helper provenance, sign and notarize each executable, and record its
+**signed** digest before the four payloads are compressed into one bundle.
+Standalone Mach-O executables cannot carry stapled tickets; their accepted
+notarization records are retained separately.
+
+All desktop package jobs require that complete bundle and validate its source
+SHA, application version, architecture and digests before embedding it.
+Unsigned candidates use unsigned helpers without accessing Apple credentials.
+Mac App Store builds omit the payloads and SSH entry points.
+
+Build-time and connection-time bundle checks use the same full source SHA.
+The shortened commit shown in the application is not a payload identity.
+Local non-MAS builds reuse a previously verified bundle at
+`target/remote/servers.mrb` when `MOEKA_REMOTE_BUNDLE` is unset. A stale cache
+fails the same source/version/payload validation rather than producing an app
+that installs an unrelated helper.
+
+The opt-in editor integration test uses real SSH with GPUI's test window, not a
+native application window. Point it at an isolated `moeka-loopback-test` SSH
+alias whose remote `HOME` is disposable, and use an embedded bundle matching
+the current source and native host architecture:
+
+```sh
+XDG_CONFIG_HOME="$TEST_ROOT/config" XDG_CACHE_HOME="$TEST_ROOT/cache" \
+MOEKA_REMOTE_BUNDLE="$BUNDLE" MOEKA_REQUIRE_REMOTE_BUNDLE=1 \
+MOEKA_LOOPBACK_CONFIG="$SSH_CONFIG" MOEKA_LOOPBACK_HOME="$REMOTE_TEST_HOME" \
+cargo test --release --locked --features gpui-test-support loopback_editor -- --ignored --nocapture
+```
+
+It verifies connection, rendered sidebars and thumbnails, opening, saving,
+search, starred-file rename rebinding, external changes, conflicting saves and
+disconnected drafts. It does not replace native UI or cross-platform acceptance.
+
 ## Failure and cleanup
 
 `ci-macos-signing.sh` deletes the imported P12 immediately after setup. Its
@@ -82,6 +120,10 @@ outcomes before requesting a new candidate run. Rerunning only a failed publish
 or Homebrew job reuses successful build jobs rather than signing again.
 Published-version immutability rules remain unchanged.
 
+`remote-notary-*` recovery artifacts retain each signed helper ZIP and submission
+result. The same no-blind-resubmission rule applies: establish the original
+submission's outcome before rebuilding, re-signing or making a new submission.
+
 For local use, `SIGNING_KEYCHAIN` and `NOTARY_KEYCHAIN` are optional; omitting them
 preserves the existing keychain lookup. `NOTARY_OUTPUT_DIR` optionally retains
 the submission archive and logs instead of deleting temporary files.
@@ -92,6 +134,7 @@ the submission archive and logs instead of deleting temporary files.
 make test-publish-release
 ruby scripts/test-check-community.rb
 ruby scripts/check-community.rb
+ruby scripts/test-remote-artifact.rb
 go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes=
 git diff --check
 ```

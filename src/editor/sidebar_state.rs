@@ -215,8 +215,30 @@ impl EditorView {
             + self.sidebar_starred_list_height()
     }
 
+    pub(super) fn visible_starred_resources(&self) -> Vec<moeka_fs::path::ResourcePath> {
+        self.visible_starred_sidebar_files()
+            .iter()
+            .map(|path| moeka_fs::path::ResourcePath::local(path))
+            .chain(
+                self.app_settings
+                    .starred_resources
+                    .iter()
+                    .filter(|resource| {
+                        matches!(resource.filesystem, moeka_fs::path::FilesystemId::Ssh(_))
+                            && (!self.sidebar_filter_active()
+                                || resource.path.file_name().is_some_and(|name| {
+                                    !self
+                                        .sidebar_filter_match_ranges(&name.to_string())
+                                        .is_empty()
+                                }))
+                    })
+                    .cloned(),
+            )
+            .collect()
+    }
+
     pub(super) fn sidebar_visible_starred_count(&self) -> usize {
-        self.visible_starred_sidebar_files().len()
+        self.visible_starred_resources().len()
     }
 
     pub(super) fn sidebar_starred_list_height(&self) -> f32 {
@@ -256,7 +278,7 @@ impl EditorView {
             height,
             index as f32 * row,
             (index + 1) as f32 * row,
-            (paths.len() as f32 * row - height).max(0.0),
+            (self.sidebar_visible_starred_count() as f32 * row - height).max(0.0),
         ) {
             self.sidebar_starred_scroll_handle
                 .set_offset(gpui::point(offset.x, px(-top)));
@@ -268,17 +290,26 @@ impl EditorView {
         index: usize,
         item_count: usize,
     ) -> bool {
+        self.ensure_file_tree_item_minimally_visible(&self.sidebar_scroll_handle, index, item_count)
+    }
+
+    pub(super) fn ensure_file_tree_item_minimally_visible(
+        &self,
+        scroll: &ScrollHandle,
+        index: usize,
+        item_count: usize,
+    ) -> bool {
         if item_count == 0 {
             return false;
         }
 
-        let bounds = self.sidebar_scroll_handle.bounds();
+        let bounds = scroll.bounds();
         let viewport_height = f32::from(bounds.size.height);
         if viewport_height <= 0.0 {
             return false;
         }
 
-        let offset = self.sidebar_scroll_handle.offset();
+        let offset = scroll.offset();
         let scroll_top = -f32::from(offset.y);
         let item_height = self.sidebar_item_height_px();
         let prefix_height = 0.0;
@@ -296,8 +327,7 @@ impl EditorView {
         ) else {
             return false;
         };
-        self.sidebar_scroll_handle
-            .set_offset(gpui::point(offset.x, px(-desired_top)));
+        scroll.set_offset(gpui::point(offset.x, px(-desired_top)));
         true
     }
 

@@ -46,6 +46,9 @@ git diff --check
 - **Editing**: one operation is one undo transaction; plan multi-cursor edits against the same original text. Preserve read-only behavior, structural content, literal composition/paste, and the viewport while the caret is visible.
 - **Caches**: propagate edit, theme, font, and zoom invalidation across affected panes and tabs. Previews and minimaps reuse accepted rendering resources within visibility and memory budgets.
 - **Consistency**: menus and the palette share validation and dispatch. Controls use semantic styles, readable contrast, and system motion preferences; presentation animation stays separate from document updates. Preserve settings/session compatibility.
+- **Resource menus**: local and SSH FileTree entries share menu order, selection rules and resource dispatch; tab menus share their resource section. Only native reveal and remote connection controls differ. Cross-filesystem transfers must verify copied content before removing a source.
+- Starred rows and FileList content/header controls share presentation across local and SSH resources. Retain accepted previews during refresh; a failed read must not trigger a render-driven retry loop.
+- Remote chat references use local snapshots retained for the window lifetime, including current open-buffer text. They are not a bidirectional filesystem mount; edits to those snapshots do not automatically upload to SSH.
 - **Localization**: use catalogs for UI and first-party runtime messages, including background/native helpers. Preserve external causes and document-controlled text; business logic uses stable identities rather than translated strings.
 - **Export**: HTML, PDF, and PNG share content and layout. Inspect text, images, formulas, and diagrams on each target platform.
 

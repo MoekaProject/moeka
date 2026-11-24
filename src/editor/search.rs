@@ -325,7 +325,10 @@ impl EditorView {
     }
 
     pub(crate) fn on_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.active_tab_supports_text_search() && !self.active_tab_is_terminal() {
+        if !self.active_tab_supports_text_search()
+            && !self.active_tab_is_terminal()
+            && !self.active_tab_is_pdf()
+        {
             return;
         }
         self.open_search(false, window, cx);
@@ -400,7 +403,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         let is_terminal = self.active_tab_is_terminal();
-        if !self.active_tab_supports_text_search() && !is_terminal {
+        if !self.active_tab_supports_text_search() && !is_terminal && !self.active_tab_is_pdf() {
             return;
         }
         self.pending_typing_scroll_guard = None;
@@ -592,6 +595,13 @@ impl EditorView {
     }
 
     pub(crate) fn dismiss_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_pdf()
+            && let Some(view) = self.active_pdf_view().cloned()
+        {
+            view.update(cx, |view, cx| {
+                view.search(String::new(), false, false, false, cx)
+            });
+        }
         self.search_visible = false;
         self.cancel_search_scan();
         self.search_matches.clear();
@@ -608,6 +618,17 @@ impl EditorView {
     }
 
     pub(crate) fn run_search(&mut self, cx: &mut Context<Self>) {
+        if self.active_tab_is_pdf() {
+            let query = self.search_query.clone();
+            let case = self.search_case_sensitive;
+            let word = self.search_whole_word;
+            let regex = self.search_use_regex;
+            if let Some(view) = self.active_pdf_view().cloned() {
+                view.update(cx, |view, cx| view.search(query, case, word, regex, cx));
+            }
+            cx.notify();
+            return;
+        }
         if let Some(tab_id) = self.active_terminal_tab_id() {
             self.run_terminal_search(&tab_id, cx);
             return;
@@ -786,6 +807,12 @@ impl EditorView {
     }
 
     pub(crate) fn search_navigate(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.active_tab_is_pdf() {
+            if let Some(view) = self.active_pdf_view().cloned() {
+                view.update(cx, |view, cx| view.search_navigate(forward, cx));
+            }
+            return;
+        }
         self.pending_typing_scroll_guard = None;
         if let Some(tab_id) = self.active_terminal_tab_id() {
             self.terminal_search_navigate(&tab_id, forward, cx);
@@ -955,15 +982,20 @@ impl EditorView {
             && !self.search_query.is_empty()
             && !self.search_matches.is_empty();
 
-        let match_count = if let Some(tab_id) = self.active_terminal_tab_id() {
+        let pdf = self.active_pdf_view().map(|view| view.read(cx));
+        let match_count = if let Some(pdf) = pdf {
+            pdf.search_matches.len()
+        } else if let Some(tab_id) = self.active_terminal_tab_id() {
             self.terminal_search_match_count(&tab_id)
         } else {
             self.search_matches.len()
         };
-        let current_idx = self.search_current_index;
+        let current_idx = pdf.map_or(self.search_current_index, |pdf| pdf.search_current);
         // A trailing ellipsis marks a total that is still climbing.
-        let scanning = !self.search_scan_complete;
-        let counter_text = if match_count > 0 {
+        let scanning = pdf.map_or(!self.search_scan_complete, |pdf| pdf.searching);
+        let counter_text = if let Some(error) = pdf.and_then(|pdf| pdf.search_error.clone()) {
+            error
+        } else if match_count > 0 {
             format!(
                 "{} / {}{}",
                 current_idx.map(|index| index + 1).unwrap_or(0),
@@ -1290,6 +1322,7 @@ impl EditorView {
         let mut container =
             crate::ui::surface::surface(&self.styles.search_surface(), self.ui_scale)
                 .id("search-bar")
+                .debug_selector(|| "search-bar".into())
                 .key_context("SearchBar EditorSearchBar")
                 .on_action(cx.listener(Self::switch_search_input))
                 .occlude()
@@ -1419,125 +1452,7 @@ impl EditorView {
     }
 }
 
-pub(crate) fn find_search_matches(
-    text: &str,
-    query: &str,
-    case_sensitive: bool,
-    whole_word: bool,
-    use_regex: bool,
-) -> Vec<Range<usize>> {
-    if query.is_empty() {
-        return Vec::new();
-    }
-
-    let mut matches = Vec::new();
-
-    if use_regex {
-        let regex = if case_sensitive {
-            regex::Regex::new(query)
-        } else {
-            regex::RegexBuilder::new(query)
-                .case_insensitive(true)
-                .build()
-        };
-        if let Ok(regex) = regex {
-            for found in regex.find_iter(text) {
-                if found.start() != found.end()
-                    && (!whole_word
-                        || (is_word_boundary(text, found.start())
-                            && is_word_boundary(text, found.end())))
-                {
-                    matches.push(found.start()..found.end());
-                }
-            }
-        }
-        return matches;
-    }
-
-    // Only a fold that can change byte lengths needs a map back to the original
-    // offsets; the other two cases stay 1:1 and skip an allocation per byte.
-    let (haystack, byte_map): (std::borrow::Cow<'_, str>, Option<Vec<usize>>) = if case_sensitive {
-        (std::borrow::Cow::Borrowed(text), None)
-    } else if text.is_ascii() && query.is_ascii() {
-        (std::borrow::Cow::Owned(text.to_ascii_lowercase()), None)
-    } else {
-        let (folded, map) = fold_with_original_byte_map(text);
-        (std::borrow::Cow::Owned(folded), Some(map))
-    };
-    let needle = if case_sensitive {
-        std::borrow::Cow::Borrowed(query)
-    } else if query.is_ascii() {
-        std::borrow::Cow::Owned(query.to_ascii_lowercase())
-    } else {
-        std::borrow::Cow::Owned(query.to_lowercase())
-    };
-    let needle = needle.as_ref();
-
-    let mut start = 0;
-    while let Some(position) = haystack[start..].find(needle) {
-        let folded_match_start = start + position;
-        let folded_match_end = folded_match_start + needle.len();
-        let (match_start, match_end) = if let Some(byte_map) = &byte_map {
-            (byte_map[folded_match_start], byte_map[folded_match_end])
-        } else {
-            (folded_match_start, folded_match_end)
-        };
-
-        if whole_word
-            && (!is_word_boundary(text, match_start) || !is_word_boundary(text, match_end))
-        {
-            start = next_char_boundary(&haystack, folded_match_start);
-            continue;
-        }
-
-        matches.push(match_start..match_end);
-        start = folded_match_end;
-    }
-
-    matches
-}
-
-fn fold_with_original_byte_map(text: &str) -> (String, Vec<usize>) {
-    let mut folded = String::new();
-    let mut byte_map = Vec::with_capacity(text.len() + 1);
-    byte_map.push(0);
-
-    for (original_start, ch) in text.char_indices() {
-        let original_end = original_start + ch.len_utf8();
-        for folded_ch in ch.to_lowercase() {
-            let folded_len = folded_ch.len_utf8();
-            folded.push(folded_ch);
-            for _ in 1..folded_len {
-                byte_map.push(original_start);
-            }
-            byte_map.push(original_end);
-        }
-    }
-
-    (folded, byte_map)
-}
-
-fn next_char_boundary(text: &str, index: usize) -> usize {
-    if index >= text.len() {
-        return text.len();
-    }
-    let next = index + text[index..].chars().next().map_or(1, char::len_utf8);
-    next.min(text.len())
-}
-
-fn is_word_boundary(text: &str, index: usize) -> bool {
-    if index == 0 || index >= text.len() {
-        return true;
-    }
-
-    let before = text[..index].chars().next_back();
-    let after = text[index..].chars().next();
-    !before.is_some_and(is_word_char) || !after.is_some_and(is_word_char)
-}
-
-fn is_word_char(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_'
-}
+pub(crate) use moeka_fs::search::{find_search_matches, is_word_boundary};
 
 #[cfg(test)]
 mod tests {

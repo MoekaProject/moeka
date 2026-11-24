@@ -36,7 +36,7 @@ pub(super) fn load_sidebar_directory(
     sort_mode: SidebarSortMode,
 ) -> std::io::Result<Vec<SidebarDirectoryChild>> {
     let mut children = Vec::new();
-    for entry in std::fs::read_dir(path)? {
+    for entry in moeka_fs::local::native::read_dir(path)? {
         crate::platform::fs_task::check_deadline()?;
         let entry = entry?;
         let entry_path = entry.path();
@@ -74,7 +74,7 @@ pub(super) fn load_sidebar_directory(
 /// FileList pane lists for that directory.
 fn count_dir_markdown_files(dir: &Path) -> std::io::Result<usize> {
     let mut count = 0;
-    for entry in std::fs::read_dir(dir)? {
+    for entry in moeka_fs::local::native::read_dir(dir)? {
         crate::platform::fs_task::check_deadline()?;
         let entry = entry?;
         let path = entry.path();
@@ -609,17 +609,31 @@ pub(super) struct DirectorySortKey {
     name: String,
     extension: String,
     is_dir: bool,
-    created: SystemTime,
+    created: i128,
 }
 
 impl DirectorySortKey {
     pub(super) fn new(path: &Path, name: &str, is_dir: bool, created: SystemTime) -> Self {
+        let created = match created.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(duration) => duration.as_nanos() as i128,
+            Err(error) => -(error.duration().as_nanos() as i128),
+        };
+        let mut key = Self::for_name(name, is_dir, created);
+        key.extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        key
+    }
+
+    pub(super) fn for_name(name: &str, is_dir: bool, created: i128) -> Self {
         Self {
             name: name.to_lowercase(),
-            extension: path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .unwrap_or("")
+            extension: name
+                .rsplit_once('.')
+                .filter(|(stem, _)| !stem.is_empty())
+                .map_or("", |(_, extension)| extension)
                 .to_ascii_lowercase(),
             is_dir,
             created,
@@ -648,7 +662,8 @@ impl DirectorySortKey {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::SystemTime};
+    use moeka_fs::local::native as fs;
+    use std::time::SystemTime;
 
     use super::{SidebarSortMode, load_sidebar_directory};
 

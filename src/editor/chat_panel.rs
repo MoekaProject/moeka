@@ -1836,8 +1836,12 @@ fn agent_cli_command_exists(agent_cli: ChatAgentCli) -> bool {
 
     let names = crate::platform::terminal::executable_names(agent_cli.command_name());
     let paths = chat_terminal_path_env();
-    env::split_paths(&paths)
-        .any(|directory| names.iter().any(|name| directory.join(name).is_file()))
+    env::split_paths(&paths).any(|directory| {
+        names.iter().any(|name| {
+            moeka_fs::local::native::metadata(directory.join(name))
+                .is_ok_and(|metadata| metadata.is_file())
+        })
+    })
 }
 
 /// PATH reported by the user's login shell. Finder-launched apps inherit a
@@ -2498,12 +2502,12 @@ impl EditorView {
             let path = link.path.clone();
             let result =
                 crate::platform::fs_task::run("validate terminal link", path.clone(), move || {
-                    if !std::fs::metadata(&path)?.is_file() {
+                    if !moeka_fs::local::native::metadata(&path)?.is_file() {
                         return Err(std::io::Error::other(
                             crate::i18n::runtime::RuntimeText::NotFile.to_string(),
                         ));
                     }
-                    std::fs::canonicalize(path)
+                    moeka_fs::local::native::canonicalize(path)
                 })
                 .await;
             let Some((path, open_epoch, opened_pane_id)) = this
@@ -2733,6 +2737,9 @@ impl EditorView {
             heading_title_cache: Default::default(),
             kind: TabKind::Terminal(agent_cli),
             path: None,
+            is_remote: false,
+            remote_binding_lost: false,
+            remote: None,
             file_kind: None,
             editor_left_aligned: false,
             reading_mode: false,
@@ -2746,6 +2753,7 @@ impl EditorView {
                 extra_cursors: Vec::new(),
             },
             image_view: ImageViewState::default(),
+            pdf_view: PdfViewState::default(),
             is_preview: false,
             is_dirty: false,
             is_deleted: false,
@@ -2849,6 +2857,137 @@ impl EditorView {
         }
         self.terminal_focus_history.retain(|id| id != tab_id);
         self.terminal_focus_history.push(tab_id.to_string());
+    }
+
+    pub(super) fn add_resources_to_chat(
+        &mut self,
+        resources: Vec<moeka_fs::path::ResourcePath>,
+        cx: &mut Context<Self>,
+    ) {
+        use super::resource_transfer::{ResourceFilesystem, transfer};
+        use moeka_fs::path::{FilesystemId, ResourcePath};
+        if resources
+            .iter()
+            .all(|resource| resource.filesystem == FilesystemId::Local)
+        {
+            match resources
+                .iter()
+                .map(ResourcePath::local_path)
+                .collect::<std::io::Result<Vec<_>>>()
+            {
+                Ok(paths) => self.add_paths_to_chat(&paths, cx),
+                Err(error) => self.notify_error(error.to_string(), cx),
+            }
+            return;
+        }
+        if !crate::platform::capabilities::CHILD_PROCESSES {
+            self.notify_error(self.message(crate::i18n::MessageKey::ChatUnavailable), cx);
+            return;
+        }
+        let sources = resources
+            .iter()
+            .map(|resource| {
+                self.resource_filesystem(resource)
+                    .map(|fs| (resource.clone(), fs))
+            })
+            .collect::<std::io::Result<Vec<_>>>();
+        let sources = match sources {
+            Ok(sources) => sources,
+            Err(error) => {
+                self.notify_error(error.to_string(), cx);
+                return;
+            }
+        };
+        let open_resources = self
+            .all_tabs()
+            .filter_map(|tab| {
+                let resource = tab
+                    .remote
+                    .as_ref()
+                    .and_then(|remote| remote.resource.clone())
+                    .or_else(|| tab.path.as_deref().map(ResourcePath::local))?;
+                resources
+                    .iter()
+                    .any(|root| super::file_tree::resource_is_within(&resource, root))
+                    .then_some(resource)
+            })
+            .collect::<Vec<_>>();
+        let snapshots = open_resources
+            .into_iter()
+            .filter_map(|resource| {
+                self.resource_text_snapshot(&resource)
+                    .map(|snapshot| (resource, snapshot))
+            })
+            .collect::<Vec<_>>();
+        let generation = self.remote_generation;
+        let root = self.sidebar_root.clone();
+        let terminal = self.chat_reference_terminal_id();
+        cx.spawn(async move |this, cx| {
+            let saved_snapshots = snapshots.clone();
+            let result = crate::platform::fs_task::run_write(
+                "Prepare chat resources",
+                PathBuf::from("ssh"),
+                move || {
+                    let directory = tempfile::Builder::new().prefix("moeka-chat-").tempdir()?;
+                    let target = ResourcePath::local(directory.path());
+                    let mut paths = Vec::new();
+                    for (source, filesystem) in sources {
+                        let destination = transfer(
+                            &filesystem,
+                            &ResourceFilesystem::Local,
+                            &source,
+                            &target,
+                            false,
+                        )?;
+                        for (resource, (_, text)) in &saved_snapshots {
+                            if let Some(path) = super::file_tree::rebase_transferred_resource(
+                                resource,
+                                &source,
+                                &destination,
+                            ) {
+                                moeka_fs::local::native::write(path.local_path()?, text)?;
+                            }
+                        }
+                        paths.push(destination.local_path()?);
+                    }
+                    Ok((directory, paths))
+                },
+            )
+            .await;
+            let _ = this.update(cx, |editor, cx| match result {
+                Ok((directory, paths)) => {
+                    if editor.remote_generation != generation
+                        || editor.sidebar_root != root
+                        || terminal
+                            .as_ref()
+                            .is_some_and(|id| editor.pane_id_for_tab(id).is_none())
+                    {
+                        editor.notify_error(
+                            editor.message(crate::i18n::MessageKey::ChatTargetChanged),
+                            cx,
+                        );
+                        return;
+                    }
+                    if snapshots.iter().any(|(resource, snapshot)| {
+                        editor.resource_text_snapshot(resource).as_ref() != Some(snapshot)
+                    }) {
+                        editor.notify_error(
+                            editor.message(crate::i18n::MessageKey::ChatChangedWhileSaving),
+                            cx,
+                        );
+                        return;
+                    }
+                    let reference = paths
+                        .iter()
+                        .map(|path| format!("@{} ", path.display()))
+                        .collect::<String>();
+                    editor.chat_resource_snapshots.push(directory);
+                    editor.add_reference_to_terminal(reference, terminal, cx);
+                }
+                Err(error) => editor.notify_error(error.to_string(), cx),
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn add_path_to_chat(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {

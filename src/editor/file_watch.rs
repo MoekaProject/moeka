@@ -63,12 +63,21 @@ impl FileObservation {
     }
 }
 
-fn observation_error(error: io::Error) -> FileObservation {
-    if error.kind() == io::ErrorKind::NotFound {
-        FileObservation::Missing
-    } else {
-        FileObservation::Unavailable(error.to_string())
+impl From<moeka_fs::local::Observation> for FileObservation {
+    fn from(observation: moeka_fs::local::Observation) -> Self {
+        use moeka_fs::local::Observation;
+        match observation {
+            Observation::File(bytes) => Self::File(bytes),
+            Observation::Directory => Self::Directory,
+            Observation::Missing => Self::Missing,
+            Observation::Unavailable(error) => Self::Unavailable(error.to_string()),
+        }
     }
+}
+
+#[cfg(test)]
+fn observation_error(error: io::Error) -> FileObservation {
+    moeka_fs::local::Observation::from_error(error).into()
 }
 
 pub(super) fn observe_paths(
@@ -80,18 +89,9 @@ pub(super) fn observe_paths(
         if observations.contains_key(&path) {
             continue;
         }
-        let observation = match std::fs::metadata(&path) {
-            Ok(metadata) if metadata.is_dir() => FileObservation::Directory,
-            Ok(metadata) if metadata.is_file() => {
-                crate::platform::fs_task::check_deadline()?;
-                match std::fs::read(&path) {
-                    Ok(bytes) => FileObservation::File(bytes),
-                    Err(error) => observation_error(error),
-                }
-            }
-            Ok(_) => FileObservation::Unavailable("not a regular file".into()),
-            Err(error) => observation_error(error),
-        };
+        let observation = moeka_fs::local::LocalFilesystem
+            .observe(&path, &crate::platform::fs_task::check_deadline)?
+            .into();
         observations.insert(path, observation);
     }
     Ok(observations)
@@ -345,7 +345,7 @@ enum DocStamp {
 }
 
 fn probe_doc_stamp(path: &Path) -> io::Result<DocStamp> {
-    match std::fs::metadata(path) {
+    match moeka_fs::local::native::metadata(path) {
         Ok(metadata) if metadata.is_dir() => Ok(DocStamp::Directory),
         Ok(metadata) if metadata.is_file() => Ok(DocStamp::File {
             len: metadata.len(),
@@ -371,7 +371,7 @@ fn stamp_modified_recently(stamp: DocStamp) -> bool {
 }
 
 fn read_dir_snapshot(dir: &Path) -> io::Result<Option<HashMap<std::ffi::OsString, bool>>> {
-    let entries = match std::fs::read_dir(dir) {
+    let entries = match moeka_fs::local::native::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -395,7 +395,7 @@ fn read_dir_snapshot(dir: &Path) -> io::Result<Option<HashMap<std::ffi::OsString
 fn read_file_list_markdown_stamps(
     dir: &Path,
 ) -> io::Result<HashMap<PathBuf, (u64, Option<std::time::SystemTime>)>> {
-    let entries = match std::fs::read_dir(dir) {
+    let entries = match moeka_fs::local::native::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
         Err(error) => return Err(error),
@@ -475,9 +475,9 @@ fn file_fingerprint(bytes: &[u8]) -> u64 {
 }
 
 fn resolved_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| {
+    moeka_fs::local::native::canonicalize(path).unwrap_or_else(|_| {
         path.parent()
-            .and_then(|parent| std::fs::canonicalize(parent).ok())
+            .and_then(|parent| moeka_fs::local::native::canonicalize(parent).ok())
             .zip(path.file_name())
             .map(|(parent, name)| parent.join(name))
             .unwrap_or_else(|| path.to_path_buf())
@@ -492,7 +492,9 @@ fn watch_targets(request: &WatchRequest) -> HashMap<PathBuf, RecursiveMode> {
     }
     for document in &request.documents {
         for path in [document.clone(), resolved_path(document)] {
-            if let Some(parent) = path.parent().filter(|parent| parent.is_dir()) {
+            if let Some(parent) = path.parent().filter(|parent| {
+                moeka_fs::local::native::metadata(parent).is_ok_and(|metadata| metadata.is_dir())
+            }) {
                 let parent = resolved_path(parent);
                 if root.as_ref().is_none_or(|root| !parent.starts_with(root)) {
                     targets.entry(parent).or_insert(RecursiveMode::NonRecursive);
@@ -604,8 +606,9 @@ impl FileWatch {
                 let Some(new_dir) = added_dirs.iter().find(|candidate| {
                     !paired_new_dirs.contains(*candidate)
                         && documents.iter().any(|doc| {
-                            doc.strip_prefix(old_dir)
-                                .is_ok_and(|rel| candidate.join(rel).exists())
+                            doc.strip_prefix(old_dir).is_ok_and(|rel| {
+                                moeka_fs::local::native::metadata(candidate.join(rel)).is_ok()
+                            })
                         })
                 }) else {
                     continue;
@@ -735,7 +738,7 @@ impl FileWatch {
                     checks.extend(request.documents.iter().cloned());
                 }
                 Err(error) => {
-                    if path.exists() {
+                    if moeka_fs::local::native::metadata(&path).is_ok() {
                         // Mounts that do not support native FSEvents/kqueue still
                         // reconcile via periodic directory and metadata polling.
                         self.poll_only_targets.insert(path, mode);
@@ -1140,7 +1143,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("note.md");
         let missing = directory.path().join("missing.md");
-        std::fs::write(&path, "contents").unwrap();
+        moeka_fs::local::native::write(&path, "contents").unwrap();
         let observations = observe_paths([
             path.clone(),
             directory.path().to_path_buf(),
@@ -1177,7 +1180,7 @@ mod tests {
     #[test]
     fn standalone_tabs_watch_deduplicated_parents_without_a_workspace() {
         let directory = tempfile::tempdir().unwrap();
-        let parent = std::fs::canonicalize(directory.path()).unwrap();
+        let parent = moeka_fs::local::native::canonicalize(directory.path()).unwrap();
         let documents = [parent.join("one.md"), parent.join("two.md")];
         let targets = watch_targets(&request(Path::new(""), &documents));
         assert_eq!(targets.len(), 1);
@@ -1187,11 +1190,11 @@ mod tests {
     #[test]
     fn workspace_and_external_parents_survive_workspace_switch_and_close() {
         let directory = tempfile::tempdir().unwrap();
-        let parent = std::fs::canonicalize(directory.path()).unwrap();
+        let parent = moeka_fs::local::native::canonicalize(directory.path()).unwrap();
         let first = parent.join("first");
         let second = parent.join("second");
-        std::fs::create_dir_all(first.join("nested")).unwrap();
-        std::fs::create_dir(&second).unwrap();
+        moeka_fs::local::native::create_dir_all(first.join("nested")).unwrap();
+        moeka_fs::local::native::create_dir(&second).unwrap();
         let documents = [first.join("nested/doc.md"), second.join("doc.md")];
         let mut watcher = FileWatch::new().unwrap();
         for root in [&first, &second, &PathBuf::new()] {
@@ -1222,14 +1225,14 @@ mod tests {
     fn polling_detects_remote_style_content_changes_without_events() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("note.md");
-        std::fs::write(&path, "old").unwrap();
+        moeka_fs::local::native::write(&path, "old").unwrap();
         let mut watcher = FileWatch::new().unwrap();
         for _ in 0..6 {
             watcher
                 .poll(request(Path::new(""), std::slice::from_ref(&path)))
                 .unwrap();
         }
-        std::fs::write(&path, "new text").unwrap();
+        moeka_fs::local::native::write(&path, "new text").unwrap();
         let mut changed = false;
         for _ in 0..6 {
             changed |= watcher
@@ -1249,8 +1252,8 @@ mod tests {
             .collect();
         let old_time = std::time::SystemTime::now() - Duration::from_secs(120);
         for path in &paths {
-            std::fs::write(path, "old").unwrap();
-            std::fs::File::options()
+            moeka_fs::local::native::write(path, "old").unwrap();
+            moeka_fs::local::native::File::options()
                 .write(true)
                 .open(path)
                 .unwrap()
@@ -1266,8 +1269,8 @@ mod tests {
             watcher.watcher.unwatch(path).unwrap();
         }
         for path in &paths {
-            std::fs::write(path, "new").unwrap();
-            std::fs::File::options()
+            moeka_fs::local::native::write(path, "new").unwrap();
+            moeka_fs::local::native::File::options()
                 .write(true)
                 .open(path)
                 .unwrap()
@@ -1353,13 +1356,13 @@ mod tests {
     fn registration_catches_changes_before_the_first_native_notification() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("note.md");
-        std::fs::write(&path, "old").unwrap();
+        moeka_fs::local::native::write(&path, "old").unwrap();
         let mut snapshot = super::super::EditorSnapshot {
             text: "old".into(),
             ..Default::default()
         };
         let mut watcher = FileWatch::new().unwrap();
-        std::fs::write(&path, "new before registration").unwrap();
+        moeka_fs::local::native::write(&path, "new before registration").unwrap();
         let batch = watcher
             .poll(request(Path::new(""), std::slice::from_ref(&path)))
             .unwrap();
@@ -1367,7 +1370,7 @@ mod tests {
             assert!(refresh_clean_snapshot(
                 &mut snapshot,
                 false,
-                std::fs::read_to_string(path).unwrap()
+                moeka_fs::local::native::read_to_string(path).unwrap()
             ));
         }
         assert_eq!(snapshot.text, "new before registration");
@@ -1379,10 +1382,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let real = directory.path().join("real");
         let alias = directory.path().join("alias");
-        std::fs::create_dir(&real).unwrap();
+        moeka_fs::local::native::create_dir(&real).unwrap();
         std::os::unix::fs::symlink(&real, &alias).unwrap();
         let path = alias.join("note.md");
-        std::fs::write(&path, "content").unwrap();
+        moeka_fs::local::native::write(&path, "content").unwrap();
         let mut watcher = FileWatch::new().unwrap();
         watcher
             .poll(request(Path::new(""), std::slice::from_ref(&path)))
@@ -1393,7 +1396,7 @@ mod tests {
             .send(Ok(Event::new(notify::EventKind::Modify(
                 notify::event::ModifyKind::Data(notify::event::DataChange::Content),
             ))
-            .add_path(std::fs::canonicalize(&path).unwrap())))
+            .add_path(moeka_fs::local::native::canonicalize(&path).unwrap())))
             .unwrap();
         let batch = watcher
             .poll(request(Path::new(""), std::slice::from_ref(&path)))
@@ -1420,10 +1423,10 @@ mod tests {
     #[test]
     fn native_parent_watch_reports_writes_atomic_replacement_and_followup_writes() {
         let directory = tempfile::tempdir().unwrap();
-        let path = std::fs::canonicalize(directory.path())
+        let path = moeka_fs::local::native::canonicalize(directory.path())
             .unwrap()
             .join("note.md");
-        std::fs::write(&path, "before").unwrap();
+        moeka_fs::local::native::write(&path, "before").unwrap();
         let (sender, receiver) = mpsc::channel();
         let mut watcher = notify::recommended_watcher(move |event| {
             let _ = sender.send(event);
@@ -1448,19 +1451,28 @@ mod tests {
                 }
             }
         };
-        std::fs::write(&path, "modified").unwrap();
+        moeka_fs::local::native::write(&path, "modified").unwrap();
         wait_for_path();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "modified");
+        assert_eq!(
+            moeka_fs::local::native::read_to_string(&path).unwrap(),
+            "modified"
+        );
         for _ in receiver.try_iter() {}
         let replacement = path.with_file_name("replacement.tmp");
-        std::fs::write(&replacement, "replacement").unwrap();
-        std::fs::rename(&replacement, &path).unwrap();
+        moeka_fs::local::native::write(&replacement, "replacement").unwrap();
+        moeka_fs::local::native::rename(&replacement, &path).unwrap();
         wait_for_path();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
+        assert_eq!(
+            moeka_fs::local::native::read_to_string(&path).unwrap(),
+            "replacement"
+        );
         for _ in receiver.try_iter() {}
-        std::fs::write(&path, "after replacement").unwrap();
+        moeka_fs::local::native::write(&path, "after replacement").unwrap();
         wait_for_path();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after replacement");
+        assert_eq!(
+            moeka_fs::local::native::read_to_string(&path).unwrap(),
+            "after replacement"
+        );
     }
 
     #[test]
@@ -1480,9 +1492,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let folder_a = root.join("folder-a");
-        std::fs::create_dir(&folder_a).unwrap();
+        moeka_fs::local::native::create_dir(&folder_a).unwrap();
         let open_doc = folder_a.join("open.md");
-        std::fs::write(&open_doc, "initial text").unwrap();
+        moeka_fs::local::native::write(&open_doc, "initial text").unwrap();
 
         let mut watcher = FileWatch::new().unwrap();
         let (_silent_tx, silent_rx) = mpsc::channel();
@@ -1504,7 +1516,7 @@ mod tests {
 
         // 1. External file creation in root (without native events).
         let created_file = root.join("created.md");
-        std::fs::write(&created_file, "# Created").unwrap();
+        moeka_fs::local::native::write(&created_file, "# Created").unwrap();
         let mut saw_create = false;
         for _ in 0..POLLS_PER_FALLBACK_SCAN {
             let batch = watcher.poll(make_request(&open_doc, &folder_a)).unwrap();
@@ -1517,7 +1529,7 @@ mod tests {
 
         // 2. External directory rename (folder-a -> folder-b) containing an open tab.
         let folder_b = root.join("folder-b");
-        std::fs::rename(&folder_a, &folder_b).unwrap();
+        moeka_fs::local::native::rename(&folder_a, &folder_b).unwrap();
         let relocated_doc = folder_b.join("open.md");
         let mut saw_dir_rename = false;
         let mut saw_relocated_doc = false;
@@ -1537,7 +1549,7 @@ mod tests {
         assert!(saw_relocated_doc);
 
         // 3. External file deletion in root.
-        std::fs::remove_file(&created_file).unwrap();
+        moeka_fs::local::native::remove_file(&created_file).unwrap();
         let mut saw_remove = false;
         for _ in 0..POLLS_PER_FALLBACK_SCAN {
             let batch = watcher

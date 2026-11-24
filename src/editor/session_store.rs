@@ -1,8 +1,9 @@
+use moeka_fs::local::native as fs;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::Duration;
-use std::{fs, io};
 
 use crate::platform::fs_task;
 
@@ -116,6 +117,16 @@ pub(crate) fn persist_session(editor: &EditorView) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config = &mut *cached;
     config.workspaces.roots = editor.workspaces.clone();
+    config.workspaces.ssh = editor
+        .remote_workspace
+        .as_ref()
+        .map(|workspace| config_store::SshRestore::Connected {
+            destination: workspace.destination.clone(),
+            config_file: workspace.config_file.clone(),
+            root: workspace.root.clone(),
+            active: editor.remote_workspace_active,
+        })
+        .or_else(|| editor.ssh_restore.clone());
     config.workspaces.active_root = if editor.active_workspace_root().as_os_str().is_empty() {
         None
     } else {
@@ -184,7 +195,7 @@ fn workspace_sessions_restore_hidden_layouts_without_loading_them(cx: &mut gpui:
         .map(|name| directory.path().join(name))
         .collect();
     for root in &roots {
-        std::fs::create_dir(root).unwrap();
+        moeka_fs::local::native::create_dir(root).unwrap();
     }
     let session = |number: usize| {
         let root = &roots[number];
@@ -403,6 +414,7 @@ pub(crate) fn restore_session(editor: &mut EditorView, cx: &mut Context<EditorVi
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     restore_session_config(editor, config, cx);
+    editor.resume_ssh_workspace(cx);
 }
 
 fn restore_session_config(
@@ -411,6 +423,7 @@ fn restore_session_config(
     cx: &mut Context<EditorView>,
 ) {
     let active_root = config.workspaces.active_root.clone().unwrap_or_default();
+    editor.ssh_restore = config.workspaces.ssh.take();
     if let Some(session) = config.workspace_sessions.remove(&active_root) {
         config.sessions = session;
     }
@@ -1148,6 +1161,8 @@ fn pending_tab_to_record(tab: &OpenTab, pending: &PendingTabRestore) -> TabSessi
     record.title = tab.title.clone();
     record.is_preview = tab.is_preview;
     record.is_pinned = tab.is_pinned;
+    record.is_remote = tab.is_remote || tab.remote.is_some();
+    record.remote = tab.remote.clone();
     record.view.editor_left_aligned = tab.editor_left_aligned;
     record.view.reading_mode = tab.reading_mode && !tab.source_mode;
     record.view.source_mode = tab.source_mode;
@@ -1168,6 +1183,7 @@ fn pending_tab_to_record(tab: &OpenTab, pending: &PendingTabRestore) -> TabSessi
             .map(|(offset, anchor)| ((*offset).min(len), (*anchor).min(len))));
     if text_changed {
         record.recovery.text = Some(tab.snapshot.text.clone());
+        record.recovery.clean_remote_snapshot = false;
     }
     if text_changed || view_changed {
         record.view = tab_to_record(tab).view;
@@ -1176,11 +1192,26 @@ fn pending_tab_to_record(tab: &OpenTab, pending: &PendingTabRestore) -> TabSessi
 }
 
 fn tab_to_record(tab: &OpenTab) -> TabSessionRecord {
+    let mut recovery = tab.recovery.clone();
+    if tab.is_remote
+        && !tab.is_dirty
+        && recovery.text.is_none()
+        && tab
+            .file_kind
+            .as_ref()
+            .is_some_and(FileKind::supports_text_buffer)
+        && !tab.remote_text_unavailable()
+    {
+        recovery.text = Some(tab.snapshot.text.clone());
+        recovery.clean_remote_snapshot = true;
+    }
     TabSessionRecord {
         id: tab.id.clone(),
         kind: serialize_tab_kind(tab.kind),
         title: tab.title.clone(),
         path: tab.path.clone(),
+        is_remote: tab.is_remote || tab.remote.is_some(),
+        remote: tab.remote.clone(),
         file_kind: tab.file_kind.as_ref().map(serialize_file_kind),
         agent_cli: tab.kind.terminal_agent().map(serialize_agent_cli),
         is_preview: tab.is_preview,
@@ -1194,8 +1225,9 @@ fn tab_to_record(tab: &OpenTab) -> TabSessionRecord {
             source_mode: tab.source_mode,
             source_word_wrap: tab.source_word_wrap,
             extra_cursors: tab.snapshot.extra_cursors.clone(),
+            pdf: tab.pdf_view,
         },
-        recovery: tab.recovery.clone(),
+        recovery,
         history: TabHistoryIndex {
             undo_log_path: tab.history.journal_path.clone(),
             source_identity: tab.history.source_identity.clone(),
@@ -1242,7 +1274,8 @@ fn restore_tab_metadata(record: &TabSessionRecord, ui_language: UiLanguage) -> O
         }
     });
     let snapshot = snapshot_for_record(record, text);
-    let is_dirty = record.recovery.text.is_some();
+    let is_dirty = record.recovery.text.is_some()
+        && !(record.is_remote && record.recovery.clean_remote_snapshot);
     let mut recovery = record.recovery.clone();
     if recovery.source_path.is_none() {
         recovery.source_path = record.path.clone();
@@ -1259,6 +1292,9 @@ fn restore_tab_metadata(record: &TabSessionRecord, ui_language: UiLanguage) -> O
         heading_title_cache: Default::default(),
         kind,
         path,
+        is_remote: record.is_remote || record.remote.is_some(),
+        remote_binding_lost: record.is_remote || record.remote.is_some(),
+        remote: record.remote.clone(),
         file_kind,
         editor_left_aligned: record.view.editor_left_aligned,
         reading_mode: record.view.reading_mode && !record.view.source_mode,
@@ -1266,6 +1302,7 @@ fn restore_tab_metadata(record: &TabSessionRecord, ui_language: UiLanguage) -> O
         source_word_wrap: record.view.source_word_wrap,
         snapshot,
         image_view: ImageViewState::default(),
+        pdf_view: record.view.pdf,
         is_preview: record.is_preview,
         is_dirty,
         is_deleted: false,
@@ -1366,14 +1403,22 @@ fn load_restored_tab(
             let (snapshot, source_kind) = load_file_snapshot(path, bytes);
             source_kind.supports_text_buffer().then_some(snapshot.text)
         });
-    history.saved_text = source_text.filter(|source_text| {
-        !is_dirty
-            || record
-                .recovery
-                .source_content_hash
-                .as_deref()
-                .is_some_and(|expected| file_ops::content_hash(source_text.as_bytes()) == expected)
-    });
+    history.saved_text = source_text
+        .filter(|source_text| {
+            !is_dirty
+                || record
+                    .recovery
+                    .source_content_hash
+                    .as_deref()
+                    .is_some_and(|expected| {
+                        file_ops::content_hash(source_text.as_bytes()) == expected
+                    })
+        })
+        .or_else(|| {
+            (record.is_remote && record.recovery.clean_remote_snapshot && !is_dirty)
+                .then(|| record.recovery.text.clone())
+                .flatten()
+        });
     let recovery = if is_dirty {
         let mut recovery = record.recovery.clone();
         if recovery.source_path.is_none() {
@@ -1520,7 +1565,11 @@ fn resolve_snapshot(
                     .collect(),
                 text,
             };
-            (None, snapshot, has_recovery_text)
+            (
+                None,
+                snapshot,
+                has_recovery_text && !(record.is_remote && record.recovery.clean_remote_snapshot),
+            )
         }),
         None => None,
     }
@@ -1602,6 +1651,9 @@ fn terminal_tab(record: &TabSessionRecord, agent_cli: ChatAgentCli) -> OpenTab {
         heading_title_cache: Default::default(),
         kind: TabKind::Terminal(agent_cli),
         path: None,
+        is_remote: false,
+        remote_binding_lost: false,
+        remote: None,
         file_kind: None,
         editor_left_aligned: false,
         reading_mode: false,
@@ -1615,6 +1667,7 @@ fn terminal_tab(record: &TabSessionRecord, agent_cli: ChatAgentCli) -> OpenTab {
             extra_cursors: Vec::new(),
         },
         image_view: ImageViewState::default(),
+        pdf_view: record.view.pdf,
         is_preview: false,
         is_dirty: false,
         is_deleted: false,
@@ -1629,6 +1682,7 @@ fn serialize_file_kind(kind: &FileKind) -> String {
         FileKind::Markdown => "markdown".to_string(),
         FileKind::Text => "text".to_string(),
         FileKind::Image => "image".to_string(),
+        FileKind::Pdf => "pdf".to_string(),
         FileKind::Binary => "binary".to_string(),
         FileKind::Code { language } => format!("code:{language}"),
     }
@@ -1639,6 +1693,7 @@ fn deserialize_file_kind(value: &str) -> Option<FileKind> {
         "markdown" => Some(FileKind::Markdown),
         "text" => Some(FileKind::Text),
         "image" => Some(FileKind::Image),
+        "pdf" => Some(FileKind::Pdf),
         "binary" => Some(FileKind::Binary),
         "whiteboard" => Some(FileKind::Text),
         _ => value.strip_prefix("code:").map(|language| FileKind::Code {
@@ -1654,6 +1709,9 @@ fn settings_tab(id: String, language: UiLanguage) -> OpenTab {
         title: crate::i18n::translate(language, crate::i18n::TextKey::SettingsTitle).to_string(),
         kind: TabKind::Settings,
         path: None,
+        is_remote: false,
+        remote_binding_lost: false,
+        remote: None,
         file_kind: None,
         editor_left_aligned: false,
         reading_mode: false,
@@ -1667,6 +1725,7 @@ fn settings_tab(id: String, language: UiLanguage) -> OpenTab {
             extra_cursors: Vec::new(),
         },
         image_view: ImageViewState::default(),
+        pdf_view: PdfViewState::default(),
         is_preview: false,
         is_dirty: false,
         is_deleted: false,
@@ -1922,6 +1981,73 @@ mod tests {
         assert!(!tab_to_record(&tab).view.source_mode);
         assert!(tab.source_word_wrap);
         assert!(tab_to_record(&tab).view.source_word_wrap);
+    }
+
+    #[test]
+    fn restored_remote_draft_keeps_authority_and_requires_matching_reconnect() {
+        let filesystem = moeka_fs::path::FilesystemId::Ssh([7; 32]);
+        let root = moeka_fs::path::ResourcePath {
+            filesystem: filesystem.clone(),
+            path: moeka_fs::path::NativePath::unix_absolute("/work/canonical").unwrap(),
+        };
+        let resource = root.join_child("note.md").unwrap();
+        let remote = config_store::RemoteTabState {
+            peer_scope: None,
+            destination: "dev-host".to_string(),
+            config_file: None,
+            root: root.clone(),
+            resource: Some(resource),
+            revision: Some(moeka_fs::backend::Revision {
+                size: 12,
+                sha256: [9; 32],
+            }),
+            save_uncertain: false,
+            pending_resource: None,
+            line_ending_crlf: true,
+        };
+        let mut record = text_tab_record(None, Some("unsaved remote draft"));
+        record.is_remote = true;
+        record.remote = Some(remote.clone());
+
+        let tab = restore_tab_from_record(&record, UiLanguage::English).unwrap();
+        assert!(tab.is_remote);
+        assert!(tab.is_dirty);
+        let mut clean = tab.clone();
+        clean.is_dirty = false;
+        clean.recovery = Default::default();
+        let cached = tab_to_record(&clean);
+        let offline = restore_tab_from_record(&cached, UiLanguage::English).unwrap();
+        assert!(!offline.is_dirty && offline.remote_binding_lost);
+        assert_eq!(offline.snapshot.text, clean.snapshot.text);
+        assert_eq!(
+            offline.history.saved_text.as_deref(),
+            Some(clean.snapshot.text.as_str())
+        );
+        let mut legacy = cached;
+        legacy.recovery = Default::default();
+        let unavailable = restore_tab_from_record(&legacy, UiLanguage::English).unwrap();
+        assert!(unavailable.remote_text_unavailable());
+        assert!(tab_to_record(&unavailable).recovery.text.is_none());
+        assert!(tab.remote_binding_lost);
+        assert_eq!(tab.path, None);
+        assert_eq!(tab.remote, Some(remote.clone()));
+
+        let saved = tab_to_record(&tab);
+        let encoded = serde_yaml::to_string(&saved).unwrap();
+        let decoded: TabSessionRecord = serde_yaml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.remote, Some(remote));
+        assert_eq!(decoded.remote.as_ref().unwrap().root.filesystem, filesystem);
+        assert_eq!(
+            decoded
+                .remote
+                .as_ref()
+                .unwrap()
+                .resource
+                .as_ref()
+                .unwrap()
+                .path,
+            moeka_fs::path::NativePath::unix_absolute("/work/canonical/note.md").unwrap()
+        );
     }
 
     #[test]
@@ -2336,6 +2462,8 @@ mod tests {
             kind: "editor".to_string(),
             title: "note.md".to_string(),
             path: source_path.clone(),
+            is_remote: false,
+            remote: None,
             file_kind: Some("markdown".to_string()),
             agent_cli: None,
             is_preview: false,
@@ -2349,9 +2477,11 @@ mod tests {
                 source_mode: false,
                 source_word_wrap: true,
                 extra_cursors: vec![(80, 70)],
+                pdf: Default::default(),
             },
             recovery: TabRecoveryState {
                 text: recovery_text.map(str::to_string),
+                clean_remote_snapshot: false,
                 source_path,
                 source_content_hash: None,
             },
@@ -2376,6 +2506,8 @@ mod tests {
             kind: "terminal".to_string(),
             title: ChatAgentCli::Terminal.label().to_string(),
             path: None,
+            is_remote: false,
+            remote: None,
             file_kind: None,
             agent_cli: Some(serialize_agent_cli(ChatAgentCli::Terminal)),
             is_preview: false,
@@ -2406,6 +2538,8 @@ mod tests {
                 kind: "terminal".to_string(),
                 title: agent.label().to_string(),
                 path: None,
+                is_remote: false,
+                remote: None,
                 file_kind: None,
                 agent_cli: Some(serialize_agent_cli(agent)),
                 is_preview: false,
@@ -2428,6 +2562,9 @@ mod tests {
                 heading_title_cache: Default::default(),
                 kind: TabKind::Editor,
                 path: None,
+                is_remote: false,
+                remote_binding_lost: false,
+                remote: None,
                 file_kind: Some(FileKind::Markdown),
                 editor_left_aligned: false,
                 reading_mode: false,
@@ -2441,6 +2578,7 @@ mod tests {
                     extra_cursors: Vec::new(),
                 },
                 image_view: ImageViewState::default(),
+                pdf_view: PdfViewState::default(),
                 is_preview: false,
                 is_dirty: false,
                 is_deleted: false,
@@ -2474,6 +2612,8 @@ mod tests {
             kind: "editor".to_string(),
             title: "note.md".to_string(),
             path: Some(source_path.clone()),
+            is_remote: false,
+            remote: None,
             file_kind: Some("markdown".to_string()),
             agent_cli: None,
             is_preview: false,
@@ -2487,6 +2627,7 @@ mod tests {
                 source_mode: false,
                 source_word_wrap: true,
                 extra_cursors: Vec::new(),
+                pdf: Default::default(),
             },
             recovery: TabRecoveryState::default(),
             history: TabHistoryIndex {

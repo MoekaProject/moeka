@@ -72,6 +72,7 @@ commands! {
     CopyPdf => ("copy_pdf", "Export", "Copy document as PDF"),
     CopyPng => ("copy_png", "Export", "Copy document as PNG"),
     OpenWorkspace => ("open_workspace", "File", "Open a workspace folder"),
+    ConnectSsh => ("connect_ssh", "File", "Connect to an SSH workspace"),
     ChooseWorkspace => ("switch_workspace", "File", "Switch workspace"),
     CloseWorkspace => ("close_workspace", "File", "Close the current workspace"),
     RevealFile => ("reveal_file", "File", "Reveal current file in the file manager"),
@@ -234,6 +235,7 @@ impl ExtraCommand {
             | Self::TerminalSettings => crate::platform::capabilities::CHILD_PROCESSES,
             Self::CheckUpdates | Self::InstallUpdate => crate::platform::capabilities::SELF_UPDATE,
             Self::CharacterPalette => cfg!(target_os = "macos"),
+            Self::ConnectSsh => crate::platform::capabilities::CHILD_PROCESSES,
             _ => true,
         }
     }
@@ -258,6 +260,7 @@ impl ExtraCommand {
             Paste => t(TextKey::Paste),
             CopyPlain => t(TextKey::CopyPlainText),
             OpenWorkspace => t(TextKey::OpenFolder),
+            ConnectSsh => i18n::remote_text(language, "connect"),
             ChooseWorkspace => i18n::command_label(language, "switch_workspace").into(),
             CloseWorkspace => t(TextKey::CloseFolder),
             RevealFile => t(TextKey::RevealInFinder),
@@ -648,11 +651,19 @@ impl EditorView {
             .unwrap_or(self.command_focus_is_text_input);
         let has_tab = self.active_tab_id.is_some();
         let text = self.active_tab_supports_text_buffer();
-        let markdown = self.active_tab_is_markdown();
+        let markdown = self.active_tab_uses_markdown_editor();
         let writable =
             text && !self.active_tab_is_read_only() && self.line_diff_selection.is_none();
         let root = !self.sidebar_root.as_os_str().is_empty();
+        let remote = self.remote_session_active();
         let terminal = self.active_tab_is_terminal();
+        let pdf = self.active_tab_is_pdf();
+        let pdf_match_count = self
+            .active_tab_id
+            .as_ref()
+            .and_then(|id| self.pdf_search_counts.get(id))
+            .copied()
+            .unwrap_or(0);
         let mut require = |condition: bool, key: &'static str| {
             if !condition && state.reason.is_none() {
                 state.enabled = false;
@@ -685,6 +696,19 @@ impl EditorView {
             require(markdown, "requires_markdown");
         }
         match id {
+            C::NewDocument | C::NewTab => require(
+                !remote || self.remote_workspace.is_some(),
+                "command_unavailable",
+            ),
+            C::OpenFile => require(!remote && root, "requires_workspace"),
+            C::QuickOpen | C::FindInFiles => require(
+                if remote {
+                    self.remote_workspace.is_some()
+                } else {
+                    root
+                },
+                "requires_workspace",
+            ),
             C::Save | C::SaveAs => {
                 require(self.active_tab_supports_persistent_save(), "requires_text")
             }
@@ -693,8 +717,7 @@ impl EditorView {
             }
             C::NextTab | C::PreviousTab => require(self.tabs.len() > 1, "requires_other_tab"),
             C::FocusNextPane => require(self.visible_pane_ids().len() > 1, "requires_other_pane"),
-            C::Find => require(text || terminal, "requires_text"),
-            C::FindInFiles | C::QuickOpen => require(root, "requires_workspace"),
+            C::Find => require(text || terminal || pdf, "requires_text"),
             C::Bold
             | C::Italic
             | C::Underline
@@ -738,7 +761,7 @@ impl EditorView {
             C::ReopenClosedTab => {
                 require(!self.recently_closed_tabs.is_empty(), "command_unavailable")
             }
-            C::SelectAll => require(input || text || terminal, "requires_text"),
+            C::SelectAll => require(input || text || terminal || pdf, "requires_text"),
             C::SelectNextOccurrence
             | C::SelectAllOccurrences
             | C::Fold
@@ -756,7 +779,8 @@ impl EditorView {
                     require(writable && !input, "requires_editable");
                 }
                 match extra {
-                    E::Copy | E::Paste => require(input || text || terminal, "requires_text"),
+                    E::Copy => require(input || text || terminal || pdf, "requires_text"),
+                    E::Paste => require(input || text || terminal, "requires_text"),
                     E::Cut | E::PastePlain => {
                         require(input || writable || terminal, "requires_editable")
                     }
@@ -769,10 +793,10 @@ impl EditorView {
                     | E::SelectWordRight
                     | E::SelectLineStart
                     | E::SelectLineEnd => require(input || text, "requires_text"),
+                    E::DocumentStart | E::DocumentEnd | E::PageDown => {
+                        require((text || pdf) && !input, "requires_text")
+                    }
                     E::SelectLine
-                    | E::DocumentStart
-                    | E::DocumentEnd
-                    | E::PageDown
                     | E::SelectDocumentStart
                     | E::SelectDocumentEnd
                     | E::ToggleFold
@@ -791,14 +815,22 @@ impl EditorView {
                     | E::KillLine
                     | E::Yank
                     | E::OpenLine => require(writable && !input, "requires_editable"),
-                    E::CloseWorkspace
-                    | E::FileList
+                    E::FileList
                     | E::StarredSection
                     | E::CollapseDirectories
                     | E::ExpandDirectories
                     | E::FilterFiles
                     | E::FileSort => require(root, "requires_workspace"),
-                    E::ChooseWorkspace => require(self.workspaces.len() > 1, "requires_workspace"),
+                    E::OpenWorkspace => {}
+                    E::ChooseWorkspace => require(
+                        if remote {
+                            !self.workspaces.is_empty()
+                        } else {
+                            self.workspaces.len() > 1
+                        },
+                        "requires_workspace",
+                    ),
+                    E::CloseWorkspace => require(root && !remote, "requires_workspace"),
                     E::RevealFile | E::LocateFile | E::CopyPath | E::AttachFile => {
                         require(self.current_file_path.is_some(), "requires_saved_file")
                     }
@@ -822,6 +854,8 @@ impl EditorView {
                         self.search_visible
                             && if let Some(tab) = self.active_terminal_tab_id() {
                                 self.terminal_search_match_count(&tab) > 0
+                            } else if pdf {
+                                pdf_match_count > 0
                             } else {
                                 !self.search_matches.is_empty()
                             },
@@ -1109,6 +1143,7 @@ impl EditorView {
             }
             E::FormatMarkdown => self.format_markdown_selection_or_prompt(cx),
             E::OpenWorkspace => self.pick_workspace_folder(cx),
+            E::ConnectSsh => self.on_connect_ssh(&crate::actions::ConnectSsh, window, cx),
             E::ChooseWorkspace => self.open_command_workspace_picker(window, cx),
             E::CloseWorkspace => self.close_workspace(&self.sidebar_root.clone(), cx),
             E::RevealFile | E::LocateFile | E::CopyPath | E::CopyRelativePath => {
@@ -1563,6 +1598,34 @@ mod tests {
         use gpui::{AppContext, IntoElement, Render, div, prelude::*};
 
         #[gpui::test]
+        fn pdf_command_capabilities_keep_reader_read_only(cx: &mut gpui::TestAppContext) {
+            let editor = cx.update(|cx| {
+                cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some("unchanged"), false))
+            });
+            editor.update(cx, |editor, _| {
+                editor.active_file_kind_cache = Some(FileKind::Pdf);
+                for command in [
+                    CommandId::Find,
+                    CommandId::SelectAll,
+                    CommandId::Extra(ExtraCommand::Copy),
+                ] {
+                    assert!(editor.command_state(command).enabled, "{command:?}");
+                }
+                for command in [
+                    CommandId::Save,
+                    CommandId::SaveAs,
+                    CommandId::Bold,
+                    CommandId::Undo,
+                    CommandId::Extra(ExtraCommand::Cut),
+                    CommandId::Extra(ExtraCommand::Paste),
+                ] {
+                    assert!(!editor.command_state(command).enabled, "{command:?}");
+                }
+                assert_eq!(editor.buffer.text(), "unchanged");
+            });
+        }
+
+        #[gpui::test]
         fn command_declared_actions_have_coverage_or_an_explicit_exclusion(
             cx: &mut gpui::TestAppContext,
         ) {
@@ -1590,6 +1653,10 @@ mod tests {
                     ("SidebarCreateFolder", "selected file-tree object"),
                     ("SidebarRename", "selected file-tree object"),
                     ("SidebarDelete", "selected file-tree object"),
+                    (
+                        "ConnectSsh",
+                        "SSH connection is dispatched by the connect_ssh command",
+                    ),
                     (
                         "NewChatTab",
                         "current-terminal shortcut; creation templates are registered separately",
@@ -1644,6 +1711,376 @@ mod tests {
                     .child(self.editor.clone())
                     .child(self.input.clone())
             }
+        }
+
+        #[gpui::test]
+        fn source_markdown_commands_match_edit_text_and_undo(cx: &mut gpui::TestAppContext) {
+            let editor = cx.update(|cx| {
+                cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some("word"), false))
+            });
+            let (_, cx) = cx.add_window_view(|_, _| EditorHarness(editor.clone()));
+            let commands = [
+                CommandId::Bold,
+                CommandId::Italic,
+                CommandId::Underline,
+                CommandId::Strikethrough,
+                CommandId::InlineCode,
+                CommandId::Link,
+                CommandId::Image,
+                CommandId::Quote,
+                CommandId::Todo,
+                CommandId::UnorderedList,
+                CommandId::OrderedList,
+                CommandId::Table,
+                CommandId::CodeBlock,
+                CommandId::HorizontalRule,
+                CommandId::Extra(ExtraCommand::Heading1),
+                CommandId::Extra(ExtraCommand::Heading2),
+                CommandId::Extra(ExtraCommand::Heading3),
+                CommandId::Extra(ExtraCommand::Heading4),
+                CommandId::Extra(ExtraCommand::Heading5),
+                CommandId::Extra(ExtraCommand::Heading6),
+                CommandId::Extra(ExtraCommand::Highlight),
+                CommandId::Extra(ExtraCommand::Superscript),
+                CommandId::Extra(ExtraCommand::Subscript),
+                CommandId::Extra(ExtraCommand::Footnote),
+                CommandId::Extra(ExtraCommand::WikiLink),
+                CommandId::Extra(ExtraCommand::Callout),
+                CommandId::Paragraph,
+            ];
+            for command in commands {
+                let initial = if command == CommandId::Paragraph {
+                    "# word"
+                } else {
+                    "word"
+                };
+                let mut outcomes = Vec::new();
+                for source in [false, true] {
+                    cx.update(|window, cx| {
+                        window.focus(&editor.read(cx).focus_handle);
+                        editor.update(cx, |editor, cx| {
+                            editor.discard_history_transaction();
+                            editor.close_context_menu_immediately(cx);
+                            editor.buffer = crate::buffer::Buffer::from_text(initial);
+                            editor.cursor = crate::cursor::Cursor {
+                                offset: initial.len(),
+                                anchor: 0,
+                            };
+                            editor.extra_cursors.clear();
+                            editor.source_mode = source;
+                            editor.embedded_editor = false;
+                            editor.app_settings.link_syntax = "markdown".into();
+                            editor.reparse();
+                            editor.command_origin = None;
+                            assert!(
+                                editor.command_state(command).enabled,
+                                "{}",
+                                command.config_key()
+                            );
+                            editor.on_run_command(
+                                &RunCommand {
+                                    id: command.config_key().into(),
+                                },
+                                window,
+                                cx,
+                            );
+                        });
+                    });
+                    cx.run_until_parked();
+                    cx.update(|window, cx| {
+                        editor.update(cx, |editor, cx| {
+                            assert_ne!(editor.buffer.text(), initial, "{}", command.config_key());
+                            assert_eq!(editor.source_mode, source);
+                            let text = if command == CommandId::Table {
+                                editor
+                                    .buffer
+                                    .text()
+                                    .lines()
+                                    .map(|line| {
+                                        line.split('|').map(str::trim).collect::<Vec<_>>().join("|")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            } else {
+                                editor.buffer.text().to_string()
+                            };
+                            outcomes.push((text, editor.cursor));
+                            editor.on_undo(&Undo, window, cx);
+                            assert_eq!(editor.buffer.text(), initial, "{}", command.config_key());
+                            assert_eq!(
+                                editor.cursor,
+                                crate::cursor::Cursor {
+                                    offset: initial.len(),
+                                    anchor: 0
+                                }
+                            );
+                        });
+                    });
+                }
+                assert_eq!(outcomes[0], outcomes[1], "{}", command.config_key());
+            }
+        }
+
+        #[gpui::test]
+        fn source_markdown_multicursor_formats_preserve_direction_and_single_undo(
+            cx: &mut gpui::TestAppContext,
+        ) {
+            let editor = cx.update(|cx| {
+                cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some("one\ntwo"), false))
+            });
+            let (_, cx) = cx.add_window_view(|_, _| EditorHarness(editor.clone()));
+            for (action, expected) in [
+                (FormatMenuAction::Bold, "**one**\n**two**"),
+                (FormatMenuAction::Highlight, "==one==\n==two=="),
+                (FormatMenuAction::WikiLink, "[[one]]\n[[two]]"),
+                (FormatMenuAction::Footnote, "[^one]\n[^two]"),
+            ] {
+                cx.update(|window, cx| {
+                    editor.update(cx, |editor, cx| {
+                        editor.discard_history_transaction();
+                        editor.close_context_menu_immediately(cx);
+                        editor.buffer = crate::buffer::Buffer::from_text("one\ntwo");
+                        editor.source_mode = true;
+                        editor.embedded_editor = false;
+                        editor.cursor = crate::cursor::Cursor {
+                            offset: 0,
+                            anchor: 3,
+                        };
+                        editor.extra_cursors = vec![crate::cursor::Cursor {
+                            offset: 7,
+                            anchor: 4,
+                        }];
+                        editor.reparse();
+                        editor.execute_format_menu_action(action, cx);
+                        assert_eq!(editor.buffer.text(), expected);
+                        assert_eq!(editor.extra_cursors.len(), 1);
+                        if action == FormatMenuAction::Bold {
+                            assert!(editor.cursor.offset < editor.cursor.anchor);
+                        }
+                        editor.commit_history_transaction();
+                        assert!(
+                            !editor.tabs[editor.active_tab_index().unwrap()]
+                                .history
+                                .undo_stack
+                                .is_empty()
+                        );
+                        editor.on_undo(&Undo, window, cx);
+                        assert_eq!(editor.buffer.text(), "one\ntwo");
+                        assert_eq!(
+                            editor.cursor,
+                            crate::cursor::Cursor {
+                                offset: 0,
+                                anchor: 3
+                            }
+                        );
+                        assert_eq!(
+                            editor.extra_cursors,
+                            vec![crate::cursor::Cursor {
+                                offset: 7,
+                                anchor: 4
+                            }]
+                        );
+                    });
+                });
+            }
+        }
+
+        #[gpui::test]
+        fn source_markdown_typing_completions_and_bound_keys(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                cx.bind_keys([
+                    gpui::KeyBinding::new("secondary-b", ToggleBold, Some("MarkdownEditor")),
+                    gpui::KeyBinding::new("enter", Enter, Some("MarkdownEditor")),
+                    gpui::KeyBinding::new("backspace", Backspace, Some("MarkdownEditor")),
+                    gpui::KeyBinding::new("escape", Escape, Some("MarkdownEditor")),
+                ])
+            });
+            let editor = cx.update(|cx| {
+                cx.new(|cx| {
+                    let mut editor =
+                        EditorView::new_with_mode(cx, true, false, Some("word"), false);
+                    editor.source_mode = true;
+                    editor.embedded_editor = false;
+                    editor.cursor.anchor = 0;
+                    editor.cursor.offset = 4;
+                    editor.reparse();
+                    editor
+                })
+            });
+            let (_, cx) = cx.add_window_view(|_, _| EditorHarness(editor.clone()));
+            cx.update(|window, cx| window.focus(&editor.read(cx).focus_handle));
+            cx.run_until_parked();
+            cx.simulate_keystrokes("secondary-b");
+            cx.update(|_, cx| assert_eq!(editor.read(cx).buffer.text(), "**word**"));
+            cx.update(|_, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.buffer = crate::buffer::Buffer::from_text("");
+                    editor.cursor = crate::cursor::Cursor {
+                        offset: 0,
+                        anchor: 0,
+                    };
+                    editor.reparse();
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            cx.simulate_input("/");
+            cx.update(|_, cx| assert_eq!(editor.read(cx).slash_menu_start, Some(0)));
+            cx.simulate_input("quote");
+            cx.update(|_, cx| assert_eq!(editor.read(cx).slash_filter, "quote"));
+            cx.simulate_keystrokes("enter");
+            cx.update(|window, cx| {
+                editor.update(cx, |editor, cx| {
+                    assert_eq!(editor.buffer.text(), "> [!TIP] ");
+                    assert!(editor.source_mode);
+                    editor.on_undo(&Undo, window, cx);
+                    assert_eq!(editor.buffer.text(), "/quote");
+                    editor.buffer = crate::buffer::Buffer::from_text("");
+                    editor.cursor = crate::cursor::Cursor {
+                        offset: 0,
+                        anchor: 0,
+                    };
+                    editor.reparse();
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            cx.simulate_input("[[");
+            cx.update(|_, cx| {
+                assert_eq!(editor.read(cx).buffer.text(), "[[]]");
+                assert_eq!(editor.read(cx).wiki_link_start, Some(0));
+            });
+            cx.simulate_input("page");
+            cx.update(|_, cx| assert_eq!(editor.read(cx).wiki_link_query, "page"));
+            cx.simulate_keystrokes("escape");
+            cx.update(|_, cx| {
+                assert!(editor.read(cx).wiki_link_start.is_none());
+                assert_eq!(editor.read(cx).buffer.text(), "[[page]]");
+            });
+        }
+
+        #[gpui::test]
+        fn source_markdown_literal_input_and_multiline_indentation(cx: &mut gpui::TestAppContext) {
+            use gpui::EntityInputHandler;
+            let editor = cx.update(|cx| {
+                cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some(""), false))
+            });
+            let (_, cx) = cx.add_window_view(|_, _| EditorHarness(editor.clone()));
+            cx.update(|window, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.source_mode = true;
+                    editor.embedded_editor = false;
+                    for text in [
+                        "```\n/\n```",
+                        "$$\n/\n$$",
+                        "---\ntitle: /\n---",
+                        "<div>/</div>",
+                        "[x](/)",
+                    ] {
+                        editor.close_context_menu_immediately(cx);
+                        editor.buffer = crate::buffer::Buffer::from_text(text);
+                        let offset = text.find('/').unwrap();
+                        editor.cursor.move_to(offset, &editor.buffer);
+                        editor.reparse();
+                        editor.replace_text_in_range(None, "/", window, cx);
+                        assert!(editor.slash_menu_start.is_none(), "{text}");
+                        assert!(editor.wiki_link_start.is_none(), "{text}");
+                    }
+                    editor.buffer = crate::buffer::Buffer::from_text("```\none\ntwo\n```");
+                    editor.cursor = crate::cursor::Cursor {
+                        offset: 11,
+                        anchor: 4,
+                    };
+                    editor.reparse();
+                    editor.on_tab(&Tab, window, cx);
+                    let indent = editor.current_indent_text();
+                    assert_eq!(
+                        editor.buffer.text(),
+                        format!("```\n{indent}one\n{indent}two\n```")
+                    );
+                    assert!(editor.cursor.offset > editor.cursor.anchor);
+                    editor.on_back_tab(&BackTab, window, cx);
+                    assert_eq!(editor.buffer.text(), "```\none\ntwo\n```");
+                    editor.on_undo(&Undo, window, cx);
+                    assert_eq!(
+                        editor.buffer.text(),
+                        format!("```\n{indent}one\n{indent}two\n```")
+                    );
+                    editor.on_undo(&Undo, window, cx);
+                    assert_eq!(editor.buffer.text(), "```\none\ntwo\n```");
+                    editor.buffer = crate::buffer::Buffer::from_text("one\ntwo\nlast");
+                    editor.cursor = crate::cursor::Cursor {
+                        offset: 8,
+                        anchor: 0,
+                    };
+                    editor.reparse();
+                    editor.execute_format_menu_action(FormatMenuAction::Heading2, cx);
+                    assert_eq!(editor.buffer.text(), "## one\n## two\nlast");
+                    editor.execute_format_menu_action(FormatMenuAction::Paragraph, cx);
+                    assert_eq!(editor.buffer.text(), "one\ntwo\nlast");
+                    editor.buffer = crate::buffer::Buffer::from_text("1. one\n2. two");
+                    editor.cursor.move_to(6, &editor.buffer);
+                    editor.reparse();
+                    editor.on_enter(&Enter, window, cx);
+                    assert_eq!(editor.buffer.text(), "1. one\n2. \n3. two");
+                    editor.on_undo(&Undo, window, cx);
+                    assert_eq!(editor.buffer.text(), "1. one\n2. two");
+                    editor.buffer = crate::buffer::Buffer::from_text("");
+                    editor.cursor.move_to(0, &editor.buffer);
+                    editor.reparse();
+                    editor.insert_pasted_text("[[page]] / **text**", cx);
+                    assert_eq!(editor.buffer.text(), "[[page]] / **text**");
+                    assert!(editor.wiki_link_start.is_none());
+                    editor.buffer = crate::buffer::Buffer::from_text("字");
+                    editor.cursor.move_to(0, &editor.buffer);
+                    editor.reparse();
+                    editor.replace_and_mark_text_in_range(None, "[[", None, window, cx);
+                    assert_eq!(editor.buffer.text(), "[[字");
+                    editor.replace_text_in_range(None, "[[page]]", window, cx);
+                    assert_eq!(editor.buffer.text(), "[[page]]字");
+                    assert!(editor.wiki_link_start.is_none());
+                    editor.embedded_read_only = true;
+                    editor.execute_format_menu_action(FormatMenuAction::Bold, cx);
+                    editor.on_toggle_bold(&ToggleBold, window, cx);
+                    assert_eq!(editor.buffer.text(), "[[page]]字");
+                    assert!(!editor.command_state(CommandId::Bold).enabled);
+                });
+            });
+        }
+
+        #[gpui::test]
+        fn source_markdown_shared_inline_ranges_toggle_once(cx: &mut gpui::TestAppContext) {
+            let editor = cx.update(|cx| {
+                cx.new(|cx| {
+                    EditorView::new_with_mode(cx, true, false, Some("**word**\n**next**"), false)
+                })
+            });
+            let (_, cx) = cx.add_window_view(|_, _| EditorHarness(editor.clone()));
+            cx.update(|window, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.source_mode = true;
+                    editor.cursor = crate::cursor::Cursor {
+                        offset: 3,
+                        anchor: 3,
+                    };
+                    editor.extra_cursors = vec![
+                        crate::cursor::Cursor {
+                            offset: 5,
+                            anchor: 5,
+                        },
+                        crate::cursor::Cursor {
+                            offset: 12,
+                            anchor: 12,
+                        },
+                    ];
+                    editor.reparse();
+                    editor.execute_format_menu_action(FormatMenuAction::Bold, cx);
+                    assert_eq!(editor.buffer.text(), "word\nnext");
+                    editor.on_undo(&Undo, window, cx);
+                    assert_eq!(editor.buffer.text(), "**word**\n**next**");
+                    assert_eq!(editor.extra_cursors.len(), 2);
+                })
+            });
         }
 
         #[gpui::test]

@@ -34,7 +34,7 @@ fn file_list_dir_for_entry(root: &Path, path: &Path, is_dir: bool) -> PathBuf {
 }
 
 /// Maximum number of bytes read from a file to extract title/preview.
-const FILE_LIST_READ_LIMIT: usize = 16 * 1024;
+pub(super) const FILE_LIST_READ_LIMIT: usize = 16 * 1024;
 /// Preview length in characters (markdown syntax stripped).
 const FILE_LIST_PREVIEW_CHARS: usize = 120;
 
@@ -100,9 +100,18 @@ pub(crate) struct FileListDetails {
     pub image_paths: Vec<String>,
 }
 
-struct FileListImageElement {
-    image: Arc<RenderImage>,
-    radius: Pixels,
+pub(super) struct FileListRowContent<'a> {
+    pub name: &'a str,
+    pub details: Option<&'a FileListDetails>,
+    pub modified: Option<SystemTime>,
+    pub created: Option<SystemTime>,
+    pub selected: bool,
+    pub thumbnail: Option<AnyElement>,
+}
+
+pub(super) struct FileListImageElement {
+    pub(super) image: Arc<RenderImage>,
+    pub(super) radius: Pixels,
 }
 
 impl IntoElement for FileListImageElement {
@@ -187,7 +196,7 @@ pub(crate) fn load_file_list_items(
     sort_mode: SidebarSortMode,
 ) -> std::io::Result<Vec<FileListItem>> {
     let mut items = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
+    for entry in moeka_fs::local::native::read_dir(dir)? {
         crate::platform::fs_task::check_deadline()?;
         let entry = entry?;
         let path = entry.path();
@@ -237,7 +246,7 @@ fn load_file_list_details(
         .collect()
 }
 
-fn extract_image_paths(text: &str) -> Vec<String> {
+pub(super) fn extract_image_paths(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut paths = Vec::new();
     let mut i = 0;
@@ -395,7 +404,7 @@ fn resolve_thumbnail_path(
         })
 }
 
-fn square_crop_render_image(image: RenderImage) -> RenderImage {
+pub(super) fn square_crop_render_image(image: RenderImage) -> RenderImage {
     let size = image.size(0);
     let Ok(width) = u32::try_from(size.width.0) else {
         return image;
@@ -413,6 +422,16 @@ fn square_crop_render_image(image: RenderImage) -> RenderImage {
     let side = width.min(height);
     let x0 = (width - side) / 2;
     let y0 = (height - side) / 2;
+    if side > 256 {
+        let Some(source) = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, bytes)
+        else {
+            return image;
+        };
+        let cropped = image::imageops::crop_imm(&source, x0, y0, side, side);
+        let resized =
+            image::imageops::resize(&*cropped, 256, 256, image::imageops::FilterType::Triangle);
+        return RenderImage::new([Frame::new(resized)]);
+    }
     let mut cropped = vec![0; (side as usize) * (side as usize) * 4];
     let source_stride = width as usize * 4;
     let dest_stride = side as usize * 4;
@@ -453,12 +472,7 @@ fn apply_file_list_snapshot(
 /// Reads up to `FILE_LIST_READ_LIMIT` bytes and converts them lossily; a
 /// trailing replacement char from a split UTF-8 sequence is dropped.
 fn read_file_head(path: &Path) -> std::io::Result<String> {
-    use std::io::Read;
-
-    let file = std::fs::File::open(path)?;
-    let mut buffer = Vec::with_capacity(FILE_LIST_READ_LIMIT.min(4096));
-    file.take(FILE_LIST_READ_LIMIT as u64)
-        .read_to_end(&mut buffer)?;
+    let (buffer, _) = moeka_fs::local::LocalFilesystem.read_preview(path, FILE_LIST_READ_LIMIT)?;
     let mut text = String::from_utf8_lossy(&buffer).into_owned();
     if text.ends_with('\u{fffd}') {
         text.pop();
@@ -696,6 +710,14 @@ impl EditorView {
     }
 
     pub(crate) fn toggle_file_list_visible(&mut self, cx: &mut Context<Self>) {
+        if self.remote_session_active() {
+            self.file_list_visible = !self.file_list_visible;
+            self.app_settings.file_list_visible = self.file_list_visible;
+            self.save_settings_in_background(cx);
+            self.sync_file_list_width_animation(cx);
+            cx.notify();
+            return;
+        }
         let reveal_dir = self.file_list_effective_dir();
         self.file_list_visible = !self.file_list_visible;
         self.file_list_resizing = false;
@@ -721,7 +743,7 @@ impl EditorView {
         }
     }
 
-    fn file_list_item_height_px(&self) -> f32 {
+    pub(super) fn file_list_item_height_px(&self) -> f32 {
         let ss = &self.styles.sidebar;
         self.scaled(
             2.0 * ss.file_list_item_padding_y_px
@@ -732,7 +754,7 @@ impl EditorView {
         )
     }
 
-    fn file_list_item_content_height_px(&self) -> f32 {
+    pub(super) fn file_list_item_content_height_px(&self) -> f32 {
         let ss = &self.styles.sidebar;
         ss.file_list_item_title_line_height_px
             + ss.file_list_item_gap_px
@@ -1025,7 +1047,7 @@ impl EditorView {
                     let pending = paths
                         .into_iter()
                         .map(|path| {
-                            let modified = std::fs::metadata(&path)
+                            let modified = moeka_fs::local::native::metadata(&path)
                                 .and_then(|metadata| metadata.modified())
                                 .map_err(|error| {
                                     std::io::Error::new(
@@ -1173,15 +1195,29 @@ impl EditorView {
     // ── Rendering ───────────────────────────────────────────────────
 
     fn render_file_list_header(&self, dir: &Path, cx: &mut Context<Self>) -> AnyElement {
+        self.render_resource_file_list_header(
+            moeka_fs::path::ResourcePath::local(dir),
+            dir == self.sidebar_root.as_path(),
+            self.file_list_items.len(),
+            cx,
+        )
+    }
+
+    pub(super) fn render_resource_file_list_header(
+        &self,
+        directory: moeka_fs::path::ResourcePath,
+        is_root: bool,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let ss = &self.styles.sidebar;
-        let name = if dir == self.sidebar_root.as_path() {
-            self.sidebar_root_name().to_uppercase()
-        } else {
-            dir.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| dir.display().to_string())
-        };
-        let create_parent = dir.to_path_buf();
+        let name = directory
+            .path
+            .file_name()
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| directory.path.to_string());
+        let name = if is_root { name.to_uppercase() } else { name };
+        let create_parent = directory;
 
         crate::ui::chrome::navigation_header(
             self.styles.navigation_header(true, false, false),
@@ -1216,7 +1252,7 @@ impl EditorView {
                     .truncate()
                     .child(name),
                 )
-                .child(self.render_sidebar_count_badge(self.file_list_items.len(), true, 0.0)),
+                .child(self.render_sidebar_count_badge(count, true, 0.0)),
         )
         .child(
             div()
@@ -1241,14 +1277,23 @@ impl EditorView {
                     cx,
                     move |this, _event, window, cx| {
                         this.file_list_menu_origin = true;
-                        this.start_create_file(create_parent.clone(), window, cx);
+                        if let Ok(path) = create_parent.local_path() {
+                            this.start_create_file(path, window, cx);
+                        } else {
+                            this.start_remote_sidebar_create(
+                                create_parent.clone(),
+                                false,
+                                window,
+                                cx,
+                            );
+                        }
                     },
                 )),
         )
         .into_any_element()
     }
 
-    fn render_file_list_edit_row(
+    pub(super) fn render_file_list_edit_row(
         &self,
         editor: &gpui::Entity<crate::text_input::TextInput>,
     ) -> AnyElement {
@@ -1419,78 +1464,58 @@ impl EditorView {
         .detach();
     }
 
-    fn render_file_list_item(&mut self, item: &FileListItem, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(SidebarEditMode::Rename {
-            path: ref rename_path,
-            ref editor,
-        }) = self.sidebar_edit
-            && self.sidebar_edit_in_file_list
-            && *rename_path == item.path
-        {
-            return self.render_file_list_edit_row(editor);
-        }
-
-        let thumbnail = self.file_list_item_image(item, cx);
+    pub(super) fn render_file_list_row_content(
+        &self,
+        item: FileListRowContent<'_>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let ss = &self.styles.sidebar;
-        let path = item.path.clone();
-        let is_selected = self.is_sidebar_item_selected(&path);
-        let is_active = self.current_file_path.as_deref() == Some(path.as_path());
-        let title_color = if is_selected || is_active {
+        let title_color = if item.selected {
             ss.file_list_item_selected_title_color
         } else {
             ss.file_list_item_title_color
         };
         let (title, title_suffix) =
             if self.file_list_display_mode == super::FileListDisplayMode::FileName {
-                let (base, suffix) = split_file_name_for_display(&item.name);
+                let (base, suffix) = split_file_name_for_display(item.name);
                 (base.to_string(), suffix.map(str::to_string))
             } else {
                 let title = item
                     .details
-                    .as_ref()
                     .and_then(|details| details.title.clone())
-                    .unwrap_or_else(|| split_file_name_for_display(&item.name).0.to_string());
+                    .unwrap_or_else(|| split_file_name_for_display(item.name).0.to_string());
                 (title, None)
             };
-        let modified_time_label =
-            crate::i18n::format_relative_time(self.ui_language, item.modified);
-        let created_time_label = self.file_list_created_time_label(item.created);
-        let modified_tooltip =
-            self.detailed_time_label(crate::i18n::TextKey::InfoModified, item.modified);
-        let created_tooltip =
-            self.detailed_time_label(crate::i18n::TextKey::InfoCreated, item.created);
+        let modified_time_label = item
+            .modified
+            .map(|time| crate::i18n::format_relative_time(self.ui_language, time))
+            .unwrap_or_default();
+        let created_time_label = item
+            .created
+            .map(|time| self.file_list_created_time_label(time))
+            .unwrap_or_default();
+        let modified_tooltip = item
+            .modified
+            .map(|time| self.detailed_time_label(crate::i18n::TextKey::InfoModified, time))
+            .unwrap_or_default();
+        let created_tooltip = item
+            .created
+            .map(|time| self.detailed_time_label(crate::i18n::TextKey::InfoCreated, time))
+            .unwrap_or_default();
         let preview = item
             .details
-            .as_ref()
             .map(|details| details.preview.clone())
             .unwrap_or_default();
         let preview_line_count = self.file_list_preview_line_count(&preview);
         let preview_height =
             self.scaled(ss.file_list_item_preview_line_height_px * preview_line_count as f32);
-        let click_path = path.clone();
-        let context_menu_path = path.clone();
-        let drag_paths = if self.selected_sidebar_paths.contains(&path) {
-            let mut paths = self
-                .selected_sidebar_paths
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>();
-            paths.sort();
-            paths
-        } else {
-            vec![path.clone()]
-        };
-        let drag_count = drag_paths.len();
-        let drag_label = item.name.clone();
-
         crate::ui::list::file_row(
             ss.file_row(),
             self.file_list_item_height_px(),
-            is_selected || is_active,
+            item.selected,
             self.sidebar_resizing || self.file_list_resizing,
             self.ui_scale,
         )
-        .id(SharedString::from(format!("file-list-{}", path.display())))
         .child(
             div()
                 .w_full()
@@ -1545,7 +1570,7 @@ impl EditorView {
                             )
                         }),
                 )
-                .when_some(thumbnail, |this, thumbnail| this.child(thumbnail)),
+                .when_some(item.thumbnail, |this, thumbnail| this.child(thumbnail)),
         )
         .child(
             crate::ui::typography::label(ss.file_time(), self.ui_scale)
@@ -1574,13 +1599,54 @@ impl EditorView {
                     None::<&'static str>,
                 )),
         )
+    }
+
+    fn render_file_list_item(&mut self, item: &FileListItem, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(SidebarEditMode::Rename { path, editor }) = &self.sidebar_edit
+            && self.sidebar_edit_in_file_list
+            && path == &item.path
+        {
+            return self.render_file_list_edit_row(editor);
+        }
+        let path = item.path.clone();
+        let thumbnail = self.file_list_item_image(item, cx);
+        let click_path = path.clone();
+        let context_menu_path = path.clone();
+        let mut drag_paths = if self.selected_sidebar_paths.contains(&path) {
+            self.selected_sidebar_paths
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            vec![path.clone()]
+        };
+        drag_paths.sort();
+        let drag_count = drag_paths.len();
+        let drag_label = item.name.clone();
+        self.render_file_list_row_content(
+            FileListRowContent {
+                name: &item.name,
+                details: item.details.as_ref(),
+                modified: Some(item.modified),
+                created: Some(item.created),
+                selected: self.is_sidebar_item_selected(&path)
+                    || self.current_file_path.as_ref() == Some(&path),
+                thumbnail,
+            },
+            cx,
+        )
+        .id(SharedString::from(format!("file-list-{}", path.display())))
         .on_click(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 cx.stop_propagation();
                 let mods = event.modifiers();
                 let secondary = mods.secondary();
                 let has_modifier = secondary || mods.shift;
-                this.sidebar_select_item(&click_path, mods.shift, secondary);
+                this.select_file_list_resource(
+                    &moeka_fs::path::ResourcePath::local(&click_path),
+                    mods.shift,
+                    secondary,
+                );
                 if !has_modifier {
                     // Unlike FileTree clicks this does not suppress the
                     // sidebar sync: activating the tab should reveal the
@@ -1605,10 +1671,20 @@ impl EditorView {
                 window.prevent_default();
                 cx.stop_propagation();
                 if !this.selected_sidebar_paths.contains(&context_menu_path) {
-                    this.sidebar_select_item(&context_menu_path, false, false);
+                    this.select_file_list_resource(
+                        &moeka_fs::path::ResourcePath::local(&context_menu_path),
+                        false,
+                        false,
+                    );
                 }
                 this.focused_sidebar_path = Some(context_menu_path.clone());
-                this.open_file_list_context_menu(context_menu_path.clone(), event.position, cx);
+                this.open_file_tree_resource_context_menu(
+                    moeka_fs::path::ResourcePath::local(&context_menu_path),
+                    false,
+                    event,
+                    window,
+                    cx,
+                );
                 this.file_list_menu_origin = true;
             }),
         )
@@ -1630,6 +1706,9 @@ impl EditorView {
     }
 
     pub(crate) fn render_file_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.remote_session_active() {
+            return self.render_remote_file_list(cx);
+        }
         self.refresh_file_list_if_needed(cx);
 
         let ss = self.styles.sidebar.clone();
@@ -1777,7 +1856,13 @@ impl EditorView {
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                         window.prevent_default();
                         cx.stop_propagation();
-                        this.open_sidebar_context_menu(menu_dir.clone(), true, event.position, cx);
+                        this.open_file_tree_resource_context_menu(
+                            moeka_fs::path::ResourcePath::local(&menu_dir),
+                            true,
+                            event,
+                            window,
+                            cx,
+                        );
                         this.file_list_menu_origin = true;
                     }),
                 )
@@ -1813,10 +1898,11 @@ impl EditorView {
                                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                                     window.prevent_default();
                                     cx.stop_propagation();
-                                    this.open_sidebar_context_menu(
-                                        menu_dir.clone(),
+                                    this.open_file_tree_resource_context_menu(
+                                        moeka_fs::path::ResourcePath::local(&menu_dir),
                                         true,
-                                        event.position,
+                                        event,
+                                        window,
                                         cx,
                                     );
                                     this.file_list_menu_origin = true;
@@ -1839,7 +1925,25 @@ impl EditorView {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::SystemTime};
+    #[test]
+    fn large_thumbnails_crop_the_center_and_bound_retained_raster_memory() {
+        let mut pixels = image::RgbaImage::from_pixel(1024, 512, image::Rgba([1, 2, 3, 255]));
+        for y in 0..512 {
+            for x in 256..768 {
+                pixels.put_pixel(x, y, image::Rgba([7, 8, 9, 255]));
+            }
+        }
+        let image =
+            super::square_crop_render_image(gpui::RenderImage::new([image::Frame::new(pixels)]));
+        assert_eq!(image.size(0).width.0, 256);
+        assert_eq!(image.size(0).height.0, 256);
+        let bytes = image.as_bytes(0).unwrap();
+        assert_eq!(bytes.len(), 256 * 256 * 4);
+        assert!(bytes.chunks_exact(4).all(|pixel| pixel == [7, 8, 9, 255]));
+    }
+
+    use moeka_fs::local::native as fs;
+    use std::time::SystemTime;
 
     use super::{
         FileListDetails, FileListItem, extract_image_paths, extract_title_and_preview,

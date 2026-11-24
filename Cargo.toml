@@ -1,4 +1,5 @@
 [workspace]
+members = ["crates/moeka-fs", "crates/moeka-ssh", "crates/moeka-remote-server"]
 
 [package]
 name = "moeka"
@@ -13,6 +14,9 @@ homepage = "https://moeka.app"
 readme = "README.md"
 publish = false
 
+[build-dependencies]
+moeka-ssh = { path = "crates/moeka-ssh" }
+
 [[bin]]
 name = "moeka"
 path = "src/main.rs"
@@ -24,6 +28,8 @@ mas = []
 gpui-test-support = ["gpui/test-support"]
 
 [dependencies]
+moeka-fs = { path = "crates/moeka-fs" }
+moeka-ssh = { path = "crates/moeka-ssh" }
 anyhow = "1"
 base64 = "0.22"
 alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "9d9640d" }
@@ -34,6 +40,7 @@ pulldown-cmark = { version = "0.13.0", default-features = false, features = [
 ] }
 unicode-segmentation = "1.10"
 image = "0.25"
+hayro = "0.9"
 lol_html = "2"
 jxl-oxide = { version = "0.12.6", default-features = false, features = ["image", "moxcms"] }
 syntect = { version = "5.2", default-features = false, features = [
@@ -46,6 +53,7 @@ notify = "8"
 rfd = "0.15"
 ureq = "2.12"
 regex = "1"
+glob = "0.3"
 percent-encoding = "2"
 directories = "5"
 serde = { version = "1", features = ["derive"] }

@@ -3,15 +3,41 @@ use gpui::Context;
 use super::*;
 
 impl EditorView {
+    pub(crate) fn sidebar_has_keyboard_focus(&self) -> bool {
+        self.focused_sidebar_path.is_some()
+            || self.focused_workspace_root.is_some()
+            || self.remote_sidebar_has_focus()
+    }
+
+    pub(crate) fn clear_sidebar_keyboard_focus(&mut self) {
+        self.focused_sidebar_path = None;
+        self.focused_workspace_root = None;
+        if let Some(workspace) = self.remote_workspace.as_mut() {
+            workspace.focused = None;
+        }
+    }
+
     pub(crate) fn sidebar_nav_up(&mut self, cx: &mut Context<Self>) {
+        if self.remote_sidebar_has_focus() {
+            self.navigate_remote_sidebar(-1, cx);
+            return;
+        }
         self.navigate_workspace_tree(-1, cx);
     }
 
     pub(crate) fn sidebar_nav_down(&mut self, cx: &mut Context<Self>) {
+        if self.remote_sidebar_has_focus() {
+            self.navigate_remote_sidebar(1, cx);
+            return;
+        }
         self.navigate_workspace_tree(1, cx);
     }
 
     pub(crate) fn sidebar_nav_left(&mut self, cx: &mut Context<Self>) {
+        if self.remote_sidebar_has_focus() {
+            self.remote_sidebar_nav_left(cx);
+            return;
+        }
         if self.focused_starred_path.as_ref() == self.focused_sidebar_path.as_ref()
             && self.focused_starred_path.is_some()
         {
@@ -46,6 +72,10 @@ impl EditorView {
     }
 
     pub(crate) fn sidebar_nav_right(&mut self, cx: &mut Context<Self>) {
+        if self.remote_sidebar_has_focus() {
+            self.remote_sidebar_nav_right(cx);
+            return;
+        }
         if self.focused_starred_path.as_ref() == self.focused_sidebar_path.as_ref()
             && self.focused_starred_path.is_some()
         {
@@ -62,8 +92,7 @@ impl EditorView {
                     cx.notify();
                 }
             } else {
-                self.switch_workspace(root.clone(), cx);
-                self.focus_workspace_row(root, cx);
+                self.activate_workspace_row(root, cx);
             }
             return;
         }
@@ -91,6 +120,10 @@ impl EditorView {
     }
 
     pub(crate) fn sidebar_confirm_focused(&mut self, cx: &mut Context<Self>) {
+        if self.remote_sidebar_has_focus() {
+            self.remote_sidebar_confirm_focused(cx);
+            return;
+        }
         if let Some(path) = self.focused_starred_path.clone()
             && self.focused_sidebar_path.as_ref() == Some(&path)
         {
@@ -99,8 +132,7 @@ impl EditorView {
             return;
         }
         if let Some(root) = self.focused_workspace_root.clone() {
-            self.switch_workspace(root.clone(), cx);
-            self.focus_workspace_row(root, cx);
+            self.activate_workspace_row(root, cx);
             return;
         }
         let path = match self.focused_sidebar_path.clone() {
@@ -120,6 +152,10 @@ impl EditorView {
     }
 
     pub(crate) fn sidebar_delete_focused(&mut self, cx: &mut Context<Self>) {
+        if self.remote_sidebar_has_focus() {
+            self.remote_sidebar_delete_focused(cx);
+            return;
+        }
         if self.focused_workspace_root.is_some() {
             return;
         }

@@ -1,5 +1,5 @@
+use moeka_fs::{backend::Revision, local::native as fs, path::ResourcePath};
 use std::collections::BTreeMap;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -114,6 +114,8 @@ pub(crate) struct SessionsFile {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub(crate) struct WorkspaceConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshRestore>,
     #[serde(default)]
     pub roots: Vec<PathBuf>,
     #[serde(default)]
@@ -122,6 +124,17 @@ pub(crate) struct WorkspaceConfig {
     /// can reopen folders the user granted access to in an earlier launch.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bookmarks: BTreeMap<PathBuf, String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub(crate) enum SshRestore {
+    Disconnected,
+    Connected {
+        destination: String,
+        config_file: Option<PathBuf>,
+        root: ResourcePath,
+        active: bool,
+    },
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
@@ -170,6 +183,10 @@ pub(crate) struct TabSessionRecord {
     #[serde(default)]
     pub path: Option<PathBuf>,
     #[serde(default)]
+    pub is_remote: bool,
+    #[serde(default)]
+    pub remote: Option<RemoteTabState>,
+    #[serde(default)]
     pub file_kind: Option<String>,
     /// Agent CLI identifier for terminal tabs (kind == "terminal").
     #[serde(default)]
@@ -187,7 +204,29 @@ pub(crate) struct TabSessionRecord {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct RemoteTabState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_scope: Option<[u8; 32]>,
+    pub destination: String,
+    #[serde(default)]
+    pub config_file: Option<PathBuf>,
+    pub root: ResourcePath,
+    #[serde(default)]
+    pub resource: Option<ResourcePath>,
+    #[serde(default)]
+    pub revision: Option<Revision>,
+    #[serde(default)]
+    pub save_uncertain: bool,
+    #[serde(default)]
+    pub pending_resource: Option<ResourcePath>,
+    #[serde(default)]
+    pub line_ending_crlf: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct TabViewState {
+    #[serde(default)]
+    pub pdf: super::PdfViewState,
     #[serde(default)]
     pub cursor_offset: usize,
     #[serde(default)]
@@ -209,6 +248,7 @@ pub(crate) struct TabViewState {
 impl Default for TabViewState {
     fn default() -> Self {
         Self {
+            pdf: super::PdfViewState::default(),
             cursor_offset: 0,
             cursor_anchor: 0,
             scroll_offset: 0.0,
@@ -227,6 +267,8 @@ pub(crate) fn default_source_word_wrap() -> bool {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub(crate) struct TabRecoveryState {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clean_remote_snapshot: bool,
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
@@ -287,10 +329,13 @@ pub(crate) fn load_settings() -> AppSettings {
 /// settings file can be rejected with a message.
 pub(crate) fn load_settings_strict() -> Result<AppSettings, String> {
     let path = config_paths::settings_file_path();
-    if !path.exists() {
-        return Ok(AppSettings::default());
-    }
-    let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(AppSettings::default());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     serde_yaml::from_str::<SettingsFile>(&content)
         .map(|file| file.settings)
         .map_err(|error| error.to_string())
@@ -349,11 +394,11 @@ fn default_schema_version() -> u32 {
 }
 
 fn load_yaml_file<T: serde::de::DeserializeOwned + Default>(path: &Path) -> io::Result<T> {
-    if !path.exists() {
-        return Ok(T::default());
-    }
-
-    let content = fs::read_to_string(path)?;
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(error) => return Err(error),
+    };
     match serde_yaml::from_str::<T>(&content) {
         Ok(value) => Ok(value),
         Err(error) => {
@@ -509,6 +554,7 @@ mod tests {
             file_list_display_mode: "title".to_string(),
             date_time_format: "%Y-%m-%d %H:%M".to_string(),
             starred_files: Vec::new(),
+            starred_resources: Vec::new(),
             keybindings: std::collections::BTreeMap::new(),
         }
     }
@@ -521,6 +567,17 @@ mod tests {
         let config = load_yaml_file::<SettingsFile>(&path).unwrap();
 
         assert_eq!(config, SettingsFile::default());
+    }
+
+    #[test]
+    fn config_read_failures_are_not_treated_as_missing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings\0.yaml");
+        let expected = fs::read_to_string(&path).unwrap_err();
+        assert_ne!(expected.kind(), io::ErrorKind::NotFound);
+        let actual = load_yaml_file::<SettingsFile>(&path).unwrap_err();
+        assert_eq!(actual.kind(), expected.kind());
+        assert_eq!(actual.raw_os_error(), expected.raw_os_error());
     }
 
     #[test]
@@ -559,6 +616,25 @@ mod tests {
     }
 
     #[test]
+    fn removed_liquid_glass_setting_is_ignored_and_not_saved() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.yaml");
+        fs::write(&path, "settings: {}\n").unwrap();
+        let expected = load_yaml_file::<SettingsFile>(&path).unwrap();
+        fs::write(&path, "settings:\n  ui_liquid_glass: true\n").unwrap();
+
+        let config = load_yaml_file::<SettingsFile>(&path).unwrap();
+        assert_eq!(config, expected);
+
+        save_yaml_file(&path, &config).unwrap();
+        assert!(
+            !fs::read_to_string(&path)
+                .unwrap()
+                .contains("ui_liquid_glass")
+        );
+    }
+
+    #[test]
     fn legacy_format_toolbar_setting_is_ignored_and_not_saved() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.yaml");
@@ -586,6 +662,7 @@ mod tests {
                 roots: vec![PathBuf::from("/tmp/project")],
                 active_root: Some(PathBuf::from("/tmp/project")),
                 bookmarks: BTreeMap::from([(PathBuf::from("/tmp/project"), "Ym9va".to_string())]),
+                ssh: None,
             },
             ..SessionsFile::default()
         };
@@ -774,6 +851,8 @@ mod tests {
                 kind: "editor".to_string(),
                 title: "note.md".to_string(),
                 path: Some(source_path.clone()),
+                is_remote: false,
+                remote: None,
                 file_kind: Some("markdown".to_string()),
                 agent_cli: None,
                 is_preview: false,
@@ -787,9 +866,11 @@ mod tests {
                     source_mode: false,
                     source_word_wrap: true,
                     extra_cursors: vec![(9, 3)],
+                    pdf: Default::default(),
                 },
                 recovery: TabRecoveryState {
                     text: Some("unsaved draft".to_string()),
+                    clean_remote_snapshot: false,
                     source_path: Some(source_path),
                     source_content_hash: Some("abc123".to_string()),
                 },
