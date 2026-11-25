@@ -232,7 +232,7 @@ publish:
 	@test "$(TAG)" = "v$(VERSION)" || { echo "TAG must match Cargo.toml: v$(VERSION)" >&2; exit 1; }
 	@GH_PAGER=cat gh workflow run publish.yml --repo MoekaProject/moeka --ref main -f version="$(VERSION)" -f prerelease=false
 
-.PHONY: publish-homebrew homebrew-check test-publish-homebrew
+.PHONY: publish-homebrew homebrew-check test-publish-homebrew test-loopback-ssh
 publish-homebrew:
 	@test "$${GITHUB_ACTIONS:-}" = true || { echo "Rerun only the Homebrew job in the official release workflow." >&2; exit 1; }
 	@bash scripts/publish-homebrew.sh "$(TAG)"
@@ -242,6 +242,9 @@ homebrew-check:
 
 test-publish-homebrew:
 	@bash scripts/test-publish-homebrew.sh
+
+test-loopback-ssh:
+	@bash scripts/test-loopback-ssh.sh
 
 publish-beta:
 	@test "$(TAG)" = "v$(VERSION)" || { echo "TAG must match Cargo.toml: v$(VERSION)" >&2; exit 1; }

@@ -2181,6 +2181,7 @@ impl EditorView {
             count,
             paste_count > 0,
             remote,
+            self.resource_connection_available(&resource),
         )
         .into_iter()
         .map(|action| {
@@ -6360,16 +6361,6 @@ impl EditorView {
                     self.scaled(self.styles.context_menu.menu_sidebar_width_px),
                 )
             }
-            ContextMenuKind::WorkspaceRoot { path } => (
-                self.render_file_tree_resource_context_menu(
-                    moeka_fs::path::ResourcePath::local(path),
-                    true,
-                    true,
-                    self.remote_generation,
-                    cx,
-                ),
-                self.scaled(self.styles.context_menu.menu_sidebar_width_px),
-            ),
             ContextMenuKind::Sidebar { path, is_dir } => (
                 self.render_file_tree_resource_context_menu(
                     moeka_fs::path::ResourcePath::local(path),

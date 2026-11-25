@@ -362,10 +362,6 @@ mod tests {
         let (_, cx) = cx.add_window_view(|_, cx| {
             TreeHarness(editor.clone(), cx.observe(&editor, |_, _, cx| cx.notify()))
         });
-        let selectors: Vec<&'static str> = roots
-            .iter()
-            .map(|root| &*Box::leak(format!("workspace-root-{}", root.display()).into_boxed_str()))
-            .collect();
         let selected = snapshots[0][20].path.clone();
         let retained_handle = cx.update(|_, cx| {
             editor.update(cx, |editor, cx| {
@@ -382,8 +378,11 @@ mod tests {
             })
         });
         cx.run_until_parked();
-        let b_bounds = cx.debug_bounds(selectors[1]).unwrap();
-        cx.simulate_click(b_bounds.center(), Default::default());
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.activate_workspace_row(roots[1].clone(), cx);
+            })
+        });
         cx.update(|_, cx| {
             editor.update(cx, |editor, cx| {
                 assert_eq!(editor.sidebar_root, roots[1]);
@@ -401,8 +400,11 @@ mod tests {
             })
         });
         cx.run_until_parked();
-        let a_bounds = cx.debug_bounds(selectors[0]).unwrap();
-        cx.simulate_click(a_bounds.center(), Default::default());
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.activate_workspace_row(roots[0].clone(), cx);
+            })
+        });
         cx.update(|_, cx| {
             editor.update(cx, |editor, _| {
                 assert_eq!(editor.sidebar_root, roots[0]);
@@ -423,8 +425,11 @@ mod tests {
                 );
             })
         });
-        let b_bounds = cx.debug_bounds(selectors[1]).unwrap();
-        cx.simulate_click(b_bounds.center(), Default::default());
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.activate_workspace_row(roots[1].clone(), cx);
+            })
+        });
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(20));
         cx.run_until_parked();
@@ -494,17 +499,19 @@ mod tests {
             .iter()
             .map(|path| &*Box::leak(format!("sidebar-starred-{}", path.display()).into_boxed_str()))
             .collect();
-        let root_selectors: Vec<&'static str> = roots
-            .iter()
-            .map(|path| &*Box::leak(format!("workspace-root-{}", path.display()).into_boxed_str()))
-            .collect();
         let starred_bounds = cx.debug_bounds("sidebar-starred-section").unwrap();
-        for selector in &root_selectors {
-            assert!(
-                cx.debug_bounds(selector).unwrap().origin.y
-                    >= starred_bounds.origin.y + starred_bounds.size.height
-            );
-        }
+        let active_root =
+            &*Box::leak(format!("workspace-root-{}", roots[0].display()).into_boxed_str());
+        assert!(
+            cx.debug_bounds(active_root).unwrap().origin.y
+                >= starred_bounds.origin.y + starred_bounds.size.height
+        );
+        assert!(
+            cx.debug_bounds(Box::leak(
+                format!("workspace-root-{}", roots[1].display()).into_boxed_str()
+            ))
+            .is_none()
+        );
         let second = cx
             .debug_bounds(star_selectors[1])
             .expect("cross-workspace star");
@@ -523,7 +530,7 @@ mod tests {
         }
         cx.update(|_, cx| {
             editor.update(cx, |editor, cx| {
-                editor.focus_workspace_row(roots[0].clone(), cx);
+                editor.focus_workspace_row(roots[1].clone(), cx);
                 editor.sidebar_nav_up(cx);
                 assert_eq!(editor.focused_starred_path.as_ref(), Some(&stars[1]));
                 editor.sidebar_nav_up(cx);
@@ -535,9 +542,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn workspace_roots_are_grouped_above_the_tree_and_keep_their_order_on_activation(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn sidebar_shows_only_the_active_workspace_above_the_tree(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         let roots: Vec<_> = ["a", "b", "c", "d"]
             .iter()
@@ -552,7 +557,6 @@ mod tests {
                 editor.workspaces = roots.clone();
                 editor.sidebar_root = roots[1].clone();
                 editor.expanded_dirs.insert(roots[1].clone());
-                editor.styles.sidebar.sidebar_root_region_max_fraction = 0.5;
                 editor.sidebar_visible = true;
                 editor.set_sidebar_width_immediately(320.0);
                 editor.last_window_height = 600.0;
@@ -580,118 +584,25 @@ mod tests {
             .iter()
             .map(|path| &*Box::leak(format!("workspace-root-{}", path.display()).into_boxed_str()))
             .collect();
-        let before: Vec<_> = selectors
-            .iter()
-            .map(|name| cx.debug_bounds(name).unwrap())
-            .collect();
-        for rows in before.windows(2) {
-            assert_eq!(rows[0].bottom(), rows[1].top());
-        }
+        assert!(cx.debug_bounds(selectors[0]).is_none());
+        let active = cx.debug_bounds(selectors[1]).expect("active workspace");
+        assert!(cx.debug_bounds(selectors[2]).is_none());
+        assert!(cx.debug_bounds(selectors[3]).is_none());
         let subtree = cx.debug_bounds("sidebar-tree-region").unwrap();
-        assert!(before[3].bottom() <= subtree.top());
+        assert!(active.bottom() <= subtree.top());
         for action in ["sidebar-header-sort", "sidebar-header-create"] {
-            assert!(before[1].contains(&cx.debug_bounds(action).unwrap().center()));
+            assert!(active.contains(&cx.debug_bounds(action).unwrap().center()));
         }
         cx.update(|_, cx| {
             editor.update(cx, |editor, cx| {
-                editor.pending_sidebar_scroll_top.set(None);
-                editor
-                    .sidebar_scroll_handle
-                    .set_offset(gpui::point(px(0.0), px(-500.0)));
-                cx.notify();
+                editor.switch_workspace(roots[2].clone(), cx);
             })
         });
         cx.run_until_parked();
-        for (index, selector) in selectors.iter().enumerate() {
-            assert_eq!(cx.debug_bounds(selector).unwrap(), before[index]);
-        }
-        cx.update(|_, cx| {
-            editor.update(cx, |editor, cx| {
-                editor.reorder_workspace(&roots[3], &roots[0], false, cx);
-                assert_eq!(
-                    editor.workspaces,
-                    vec![
-                        roots[3].clone(),
-                        roots[0].clone(),
-                        roots[1].clone(),
-                        roots[2].clone()
-                    ]
-                );
-                assert_eq!(editor.sidebar_root, roots[1]);
-                assert_eq!(editor.sidebar_scroll_handle.offset().y, px(-500.0));
-                editor.focus_workspace_row(roots[0].clone(), cx);
-                editor.sidebar_nav_right(cx);
-                assert_eq!(editor.sidebar_root, roots[0]);
-                editor.sidebar_nav_left(cx);
-                assert_eq!(editor.sidebar_root, roots[0]);
-            })
-        });
-        cx.run_until_parked();
-        let target = cx.debug_bounds(selectors[2]).unwrap();
-        cx.simulate_mouse_down(target.center(), MouseButton::Right, Default::default());
-        cx.simulate_mouse_up(target.center(), MouseButton::Right, Default::default());
-        cx.update(|_, cx| editor.update(cx, |editor, cx| {
-            assert_eq!(editor.sidebar_root, roots[0]);
-            assert!(matches!(&editor.context_menu, Some(menu) if matches!(&menu.kind, ContextMenuKind::WorkspaceRoot { path } if path == &roots[2])));
-            editor.close_context_menu_immediately(cx);
-        }));
-        cx.simulate_click(target.center(), Default::default());
-        cx.update(|_, cx| {
-            editor.update(cx, |editor, _| {
-                assert_eq!(editor.sidebar_root, roots[2]);
-            })
-        });
-        for action in ["sidebar-header-sort", "sidebar-header-create"] {
-            assert!(
-                cx.debug_bounds(selectors[2])
-                    .unwrap()
-                    .contains(&cx.debug_bounds(action).unwrap().center())
-            );
-        }
-        let from = cx.debug_bounds(selectors[1]).unwrap().center();
-        let target = cx.debug_bounds(selectors[3]).unwrap();
-        let to = gpui::point(target.center().x, target.origin.y + px(2.0));
-        cx.simulate_mouse_down(from, MouseButton::Left, Default::default());
-        cx.simulate_mouse_move(
-            from + gpui::point(px(8.0), px(0.0)),
-            MouseButton::Left,
-            Default::default(),
-        );
-        cx.simulate_mouse_move(to, MouseButton::Left, Default::default());
-        cx.simulate_mouse_up(to, MouseButton::Left, Default::default());
-        cx.update(|_, cx| {
-            editor.update(cx, |editor, _| {
-                assert_eq!(
-                    editor.sidebar_root, roots[2],
-                    "reordering must not activate a root"
-                );
-                assert_eq!(editor.workspaces[0], roots[1]);
-            })
-        });
-        cx.update(|_, cx| {
-            editor.update(cx, |editor, cx| {
-                editor.styles.sidebar.sidebar_root_region_max_fraction = 0.12;
-                editor.styles.sidebar.sidebar_min_tree_rows = 4.0;
-                editor
-                    .workspaces
-                    .extend((0..20).map(|index| directory.path().join(format!("extra-{index}"))));
-                cx.notify();
-            })
-        });
-        cx.run_until_parked();
-        let subtree = cx.debug_bounds("sidebar-tree-region").unwrap();
-        let roots_region = cx.debug_bounds("workspace-roots").unwrap();
-        cx.update(|_, cx| {
-            editor.update(cx, |editor, _| {
-                let available = editor.last_window_height
-                    - editor.tab_bar_height()
-                    - editor.scaled(editor.styles.sidebar.sidebar_header_height_px) * 2.0
-                    - editor.sidebar_item_height_px() * 4.0;
-                assert!(f32::from(roots_region.size.height) <= available * 0.12 + 1.0);
-                assert!(f32::from(subtree.size.height) >= editor.sidebar_item_height_px() * 4.0);
-                assert!(editor.workspace_roots_scroll.max_offset().height > px(0.0));
-            })
-        });
+        assert!(cx.debug_bounds(selectors[0]).is_none());
+        assert!(cx.debug_bounds(selectors[1]).is_none());
+        assert!(cx.debug_bounds(selectors[2]).is_some());
+        assert!(cx.debug_bounds(selectors[3]).is_none());
     }
 
     #[gpui::test]
@@ -795,6 +706,12 @@ mod tests {
             .map(|root| &*Box::leak(format!("workspace-root-{}", root.display()).into_boxed_str()))
             .collect();
         for index in [0, 1, 0] {
+            cx.update(|_, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.switch_workspace(roots[index].clone(), cx);
+                })
+            });
+            cx.run_until_parked();
             let bounds = cx.debug_bounds(selectors[index]).unwrap();
             cx.simulate_click(bounds.center(), Default::default());
             cx.update(|_, cx| {
@@ -814,7 +731,7 @@ mod tests {
                 assert_eq!(editor.file_list_dir, roots[0].join("nested"));
                 editor.focus_workspace_row(roots[0].clone(), cx);
                 editor.sidebar_nav_down(cx);
-                assert_eq!(editor.focused_workspace_root.as_ref(), Some(&roots[1]));
+                assert_ne!(editor.focused_workspace_root.as_ref(), Some(&roots[1]));
             })
         });
     }
@@ -851,7 +768,11 @@ impl EditorView {
                     .map(|path| (TreeEntryKind::Starred, path)),
             );
         }
-        for root in &self.workspaces {
+        for root in self
+            .workspaces
+            .iter()
+            .filter(|root| self.sidebar_lists_local_workspace(root))
+        {
             rows.push((TreeEntryKind::Workspace, root.clone()));
         }
         rows.extend(
@@ -976,13 +897,10 @@ impl EditorView {
             cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
-                this.focus_workspace_row(root.clone(), cx);
-                this.open_context_menu(
-                    ContextMenu {
-                        position: event.position,
-                        kind: ContextMenuKind::WorkspaceRoot { path: root.clone() },
-                    },
-                    true,
+                this.open_workspace_resource_context_menu(
+                    moeka_fs::path::ResourcePath::local(&root),
+                    event,
+                    window,
                     cx,
                 );
             })

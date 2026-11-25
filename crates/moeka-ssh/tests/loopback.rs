@@ -21,8 +21,10 @@ fn loopback_install_reuse_files_search_watch_and_restart_outcomes() {
     let home = std::env::var("MOEKA_LOOPBACK_HOME").expect("disposable remote HOME");
     let binary =
         PathBuf::from(std::env::var_os("MOEKA_LOOPBACK_SERVER").expect("native server binary"));
+    let destination = std::env::var("MOEKA_LOOPBACK_DESTINATION")
+        .unwrap_or_else(|_| "moeka-loopback-test".into());
     let options = SshOptions {
-        destination: "moeka-loopback-test".into(),
+        destination,
         port: None,
         config_file: Some(config),
     };
@@ -57,19 +59,21 @@ fn loopback_install_reuse_files_search_watch_and_restart_outcomes() {
             .iter()
             .any(|capability| capability == "page_credit_window")
     );
-    let root_text = format!("{home}/workspace-{}", std::process::id());
-    let root = NativePath::Unix(root_text.as_bytes().to_vec());
+    let requested_root_text = format!("{home}/workspace-{}", std::process::id());
+    let requested_root = NativePath::Unix(requested_root_text.as_bytes().to_vec());
     for protected in [
         NativePath::Unix(b"/".to_vec()),
         NativePath::Unix(home.as_bytes().to_vec()),
     ] {
         assert_eq!(remote.trash(&protected).unwrap_err().kind, "InvalidInput");
     }
+    remote.create_dir(&requested_root, true).unwrap();
+    let root = remote.canonicalize(&requested_root).unwrap();
+    let root_text = root.to_string();
     let file = NativePath::Unix(format!("{root_text}/note.md").into_bytes());
-    remote.create_dir(&root, true).unwrap();
     assert_eq!(
-        remote.canonicalize(&root).unwrap().to_local().unwrap(),
-        fs::canonicalize(&root_text).unwrap()
+        root.to_local().unwrap(),
+        fs::canonicalize(&requested_root_text).unwrap()
     );
     let text = "first needle\nsecond needle\n";
     let request = SaveRequest {

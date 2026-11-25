@@ -123,6 +123,8 @@ pub(crate) struct WorkspaceConfig {
     pub roots: Vec<PathBuf>,
     #[serde(default)]
     pub active_root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<super::workspace_strip::WorkspaceKey>,
     /// Base64 security-scoped bookmarks keyed by root, so the sandboxed build
     /// can reopen folders the user granted access to in an earlier launch.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -667,6 +669,9 @@ mod tests {
                 bookmarks: BTreeMap::from([(PathBuf::from("/tmp/project"), "Ym9va".to_string())]),
                 ssh: None,
                 ssh_more: Vec::new(),
+                order: vec![crate::editor::workspace_strip::WorkspaceKey::Local(
+                    PathBuf::from("/tmp/project"),
+                )],
             },
             ..SessionsFile::default()
         };

@@ -117,6 +117,7 @@ pub(crate) fn persist_session(editor: &EditorView) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config = &mut *cached;
     config.workspaces.roots = editor.workspaces.clone();
+    config.workspaces.order = editor.workspace_strip_order.clone();
     config.workspaces.ssh = editor
         .remote_workspace
         .as_ref()
@@ -247,6 +248,10 @@ fn workspace_sessions_restore_hidden_layouts_without_loading_them(cx: &mut gpui:
         workspaces: config_store::WorkspaceConfig {
             roots: roots.clone(),
             active_root: Some(roots[0].clone()),
+            order: vec![
+                super::workspace_strip::WorkspaceKey::Local(roots[1].clone()),
+                super::workspace_strip::WorkspaceKey::Local(roots[0].clone()),
+            ],
             ..Default::default()
         },
         sessions: session(0),
@@ -263,6 +268,13 @@ fn workspace_sessions_restore_hidden_layouts_without_loading_them(cx: &mut gpui:
     editor.update(cx, |editor, cx| {
         restore_session_config(editor, config, cx);
         assert_eq!(editor.workspaces, roots);
+        assert_eq!(
+            editor.workspace_strip_order,
+            vec![
+                super::workspace_strip::WorkspaceKey::Local(roots[1].clone()),
+                super::workspace_strip::WorkspaceKey::Local(roots[0].clone()),
+            ]
+        );
         assert_eq!(editor.visible_pane_ids().len(), 2);
         assert_eq!(editor.pane_ids().len(), 4);
         assert_eq!(
@@ -437,6 +449,7 @@ fn restore_session_config(
     let active_root = config.workspaces.active_root.clone().unwrap_or_default();
     editor.ssh_restore = config.workspaces.ssh.take();
     editor.ssh_restore_more = std::mem::take(&mut config.workspaces.ssh_more);
+    editor.workspace_strip_order = std::mem::take(&mut config.workspaces.order);
     if let Some(session) = config.workspace_sessions.remove(&active_root) {
         config.sessions = session;
     }

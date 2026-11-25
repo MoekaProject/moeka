@@ -184,38 +184,49 @@ impl EditorView {
         let ss = self.styles.status_bar();
         let title_color = ss.title;
         let value_color = ss.value;
-        if let Some(summary) = self.active_terminal_status_summary() {
-            return self.render_terminal_status_bar(summary, title_color, value_color);
-        }
-        let cursor_label = self.cursor_status_label();
-        let (indent_title, indent_value) = self.indent_settings.status_parts(self.ui_language);
-        let language_value = self.language_status_label();
-        crate::ui::chrome::status_bar(
+        let bar = crate::ui::chrome::status_bar(
             self.styles.status_bar(),
             self.ui_scale,
             self.styles.status_bar_padding_left_px,
         )
         .id("editor-status-bar")
-        .justify_end()
-        .child(div().flex_1())
-        .child(self.render_status_bar_label(cursor_label, value_color))
-        .child(self.render_status_bar_button(
-            indent_title,
-            indent_value,
-            title_color,
-            value_color,
-            Some(StatusBarAction::OpenIndentationMenu),
-            cx,
-        ))
-        .child(self.render_status_bar_button(
-            crate::i18n::status_language_label(self.ui_language),
-            language_value,
-            title_color,
-            value_color,
-            Some(StatusBarAction::OpenLanguagePicker),
-            cx,
-        ))
-        .into_any_element()
+        .debug_selector(|| "editor-status-bar".into())
+        .when(self.workspace_strip_visible(), |this| {
+            this.child(self.render_workspace_strip(cx))
+        })
+        .when(!self.workspace_strip_visible(), |this| {
+            this.child(div().flex_1().min_w(px(0.0)))
+        });
+        if self.tabs.is_empty() || self.active_tab_is_settings() {
+            return bar.into_any_element();
+        }
+        if let Some(summary) = self.active_terminal_status_summary() {
+            return bar
+                .child(self.render_terminal_status_bar(summary, title_color, value_color))
+                .into_any_element();
+        }
+        let cursor_label = self.cursor_status_label();
+        let (indent_title, indent_value) = self.indent_settings.status_parts(self.ui_language);
+        let language_value = self.language_status_label();
+        bar.justify_end()
+            .child(self.render_status_bar_label(cursor_label, value_color))
+            .child(self.render_status_bar_button(
+                indent_title,
+                indent_value,
+                title_color,
+                value_color,
+                Some(StatusBarAction::OpenIndentationMenu),
+                cx,
+            ))
+            .child(self.render_status_bar_button(
+                crate::i18n::status_language_label(self.ui_language),
+                language_value,
+                title_color,
+                value_color,
+                Some(StatusBarAction::OpenLanguagePicker),
+                cx,
+            ))
+            .into_any_element()
     }
 
     fn render_terminal_status_bar(
@@ -230,52 +241,51 @@ impl EditorView {
             crate::i18n::terminal_scrollback_label(self.ui_language, offset, history_size)
         });
 
-        crate::ui::chrome::status_bar(
-            self.styles.status_bar(),
-            self.ui_scale,
-            self.styles.status_bar_padding_left_px,
-        )
-        .id("terminal-status-bar")
-        .child(
-            div()
-                .h_full()
-                .flex_1()
-                .min_w(px(0.0))
-                .px(px(self.scaled(self.styles.status_bar().padding_x_px)))
-                .flex()
-                .items_center()
-                .gap(px(self.scaled(self.styles.status_bar().item_gap_px)))
-                .child(
-                    gpui::svg()
-                        .path(summary.agent.icon_path())
-                        .size(px(self.scaled(self.styles.status_bar().icon_size_px)))
-                        .flex_none()
-                        .text_color(title_color),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .text_color(title_color)
-                        .child(agent_label),
-                )
-                .when(show_title, |this| {
-                    this.child(div().flex_none().text_color(value_color).child("·"))
-                        .child(
-                            div()
-                                .min_w(px(0.0))
-                                .overflow_hidden()
-                                .truncate()
-                                .whitespace_nowrap()
-                                .text_color(value_color)
-                                .child(summary.title),
-                        )
-                }),
-        )
-        .when_some(scrollback, |this, scrollback| {
-            this.child(self.render_status_bar_label(scrollback, value_color))
-        })
-        .into_any_element()
+        div()
+            .id("terminal-status-bar")
+            .h_full()
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .h_full()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .px(px(self.scaled(self.styles.status_bar().padding_x_px)))
+                    .flex()
+                    .items_center()
+                    .gap(px(self.scaled(self.styles.status_bar().item_gap_px)))
+                    .child(
+                        gpui::svg()
+                            .path(summary.agent.icon_path())
+                            .size(px(self.scaled(self.styles.status_bar().icon_size_px)))
+                            .flex_none()
+                            .text_color(title_color),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .text_color(title_color)
+                            .child(agent_label),
+                    )
+                    .when(show_title, |this| {
+                        this.child(div().flex_none().text_color(value_color).child("·"))
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .truncate()
+                                    .whitespace_nowrap()
+                                    .text_color(value_color)
+                                    .child(summary.title),
+                            )
+                    }),
+            )
+            .when_some(scrollback, |this, scrollback| {
+                this.child(self.render_status_bar_label(scrollback, value_color))
+            })
+            .into_any_element()
     }
 
     fn render_status_bar_label(&self, label: String, color: gpui::Hsla) -> AnyElement {

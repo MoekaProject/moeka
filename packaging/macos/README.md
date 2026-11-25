@@ -80,9 +80,11 @@ Mac App Store builds omit the payloads and SSH entry points.
 Build-time and connection-time bundle checks use the same full source SHA.
 The shortened commit shown in the application is not a payload identity.
 Local non-MAS builds reuse a previously verified bundle at
-`target/remote/servers.mrb` when `MOEKA_REMOTE_BUNDLE` is unset. A stale cache
-fails the same source/version/payload validation rather than producing an app
-that installs an unrelated helper.
+`target/remote/servers.mrb` when `MOEKA_REMOTE_BUNDLE` is unset. A stale or
+invalid implicit cache is ignored and rebuilt from the current source as a
+development bundle. Explicit `MOEKA_REMOTE_BUNDLE` inputs and all builds with
+`MOEKA_REQUIRE_REMOTE_BUNDLE=1` still fail source/version/payload validation
+rather than producing an app that installs an unrelated helper.
 
 Without any bundle, `build.rs` compiles the helper itself (into
 `target/remote-dev`) for the host and every other target whose Rust standard
@@ -94,15 +96,25 @@ source SHA and version. Set `MOEKA_SKIP_DEV_REMOTE_BUNDLE=1` to skip this.
 Packages built with `MOEKA_REQUIRE_REMOTE_BUNDLE=1` still need all four
 targets.
 
-The opt-in editor integration test uses real SSH with GPUI's test window, not a
-native application window. Point it at an isolated `moeka-loopback-test` SSH
-alias whose remote `HOME` is disposable, and use an embedded bundle matching
-the current source and native host architecture:
+The opt-in integration tests use real SSH with GPUI's test window, not a
+native application window. The recommended command creates an isolated sshd
+with a dynamic localhost port, disposable keys/config/HOME, and removes all of
+them when it exits:
+
+```sh
+make test-loopback-ssh
+```
+
+For an externally managed fixture, provide any SSH destination through
+`MOEKA_LOOPBACK_DESTINATION`; no fixed alias is required. Its remote `HOME`
+must be disposable, and the bundle must match the current source and native
+host architecture:
 
 ```sh
 XDG_CONFIG_HOME="$TEST_ROOT/config" XDG_CACHE_HOME="$TEST_ROOT/cache" \
 MOEKA_REMOTE_BUNDLE="$BUNDLE" MOEKA_REQUIRE_REMOTE_BUNDLE=1 \
 MOEKA_LOOPBACK_CONFIG="$SSH_CONFIG" MOEKA_LOOPBACK_HOME="$REMOTE_TEST_HOME" \
+MOEKA_LOOPBACK_DESTINATION="$SSH_DESTINATION" \
 cargo test --release --locked --features gpui-test-support loopback_editor -- --ignored --nocapture
 ```
 

@@ -375,9 +375,6 @@ pub(crate) struct ContextSubmenuAim {
 pub(crate) enum ContextMenuKind {
     SidebarSettings,
     AddWorkspace,
-    WorkspaceRoot {
-        path: PathBuf,
-    },
     Sidebar {
         path: PathBuf,
         is_dir: bool,
@@ -2470,6 +2467,7 @@ pub struct EditorView {
     pub(crate) focused_workspace_root: Option<PathBuf>,
     pub(crate) workspace_roots_scroll: ScrollHandle,
     pub(crate) workspace_strip_scroll: ScrollHandle,
+    pub(crate) workspace_strip_order: Vec<workspace_strip::WorkspaceKey>,
     pub(crate) workspace_strip_drop_target: Option<(workspace_strip::WorkspaceKey, bool)>,
     pub(crate) workspace_drop_target: Option<(PathBuf, bool)>,
     pub(crate) workspace_drag_scroll: Option<Task<()>>,
@@ -3572,6 +3570,7 @@ impl EditorView {
             focused_workspace_root: None,
             workspace_roots_scroll: ScrollHandle::new(),
             workspace_strip_scroll: ScrollHandle::new(),
+            workspace_strip_order: Vec::new(),
             workspace_strip_drop_target: None,
             workspace_drop_target: None,
             workspace_drag_scroll: None,

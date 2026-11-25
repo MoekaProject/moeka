@@ -1467,9 +1467,6 @@ impl Render for EditorView {
                         .overflow_hidden()
                         .flex()
                         .flex_col()
-                        .when(self.workspace_strip_visible(), |this| {
-                            this.child(self.render_workspace_strip(cx))
-                        })
                         .when(show_empty_workspace, |this| {
                             // Empty state: no tabs open
                             let bg_hover = self.styles.sidebar.sidebar_item_hover_bg;
@@ -1478,7 +1475,11 @@ impl Render for EditorView {
                             let file_drop_bg = self.styles.self_drawn.colors.drop_overlay;
                             this.child(
                                 div()
+                                    .id("empty-workspace-content")
+                                    .debug_selector(|| "empty-workspace-content".into())
                                     .flex_1()
+                                    .min_h(px(0.0))
+                                    .overflow_hidden()
                                     .flex()
                                     .flex_col()
                                     .items_center()
@@ -1553,7 +1554,8 @@ impl Render for EditorView {
                         })
                         .when(!show_empty_workspace, |this| {
                             this.child(self.render_workspace_content_column(window, cx))
-                        }),
+                        })
+                        .child(self.render_status_bar(cx)),
                 )
                 .when(self.should_render_right_panels(), |this| {
                     this.child(self.render_right_panels(cx))

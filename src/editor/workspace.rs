@@ -3,8 +3,14 @@ use gpui::px;
 
 pub(crate) struct WorkspaceClose {
     root: PathBuf,
-    remote_generation: Option<u64>,
+    remote: Option<RemoteWorkspaceClose>,
     approved: HashMap<String, String>,
+}
+
+struct RemoteWorkspaceClose {
+    generation: Option<u64>,
+    destination: String,
+    root: moeka_fs::path::ResourcePath,
 }
 
 #[cfg(all(test, feature = "gpui-test-support"))]
@@ -407,19 +413,41 @@ impl EditorView {
         }
         self.workspace_close = Some(WorkspaceClose {
             root: root.to_path_buf(),
-            remote_generation: None,
+            remote: None,
             approved: HashMap::new(),
         });
         self.continue_workspace_close(cx);
     }
 
     pub(super) fn request_close_remote_workspace(&mut self, cx: &mut Context<Self>) {
-        if self.remote_workspace.is_none() {
+        let Some(workspace) = self.remote_workspace.as_ref() else {
             return;
-        }
+        };
         self.workspace_close = Some(WorkspaceClose {
             root: PathBuf::new(),
-            remote_generation: Some(self.remote_generation),
+            remote: Some(RemoteWorkspaceClose {
+                generation: Some(self.remote_generation),
+                destination: workspace.destination.clone(),
+                root: workspace.root.clone(),
+            }),
+            approved: HashMap::new(),
+        });
+        self.continue_workspace_close(cx);
+    }
+
+    pub(super) fn request_close_pending_remote_workspace(
+        &mut self,
+        destination: String,
+        root: moeka_fs::path::ResourcePath,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_close = Some(WorkspaceClose {
+            root: PathBuf::new(),
+            remote: Some(RemoteWorkspaceClose {
+                generation: None,
+                destination,
+                root,
+            }),
             approved: HashMap::new(),
         });
         self.continue_workspace_close(cx);
@@ -429,14 +457,11 @@ impl EditorView {
         let Some(close) = &self.workspace_close else {
             return Vec::new();
         };
-        if close.remote_generation.is_some() {
-            let Some(workspace) = &self.remote_workspace else {
-                return Vec::new();
-            };
+        if let Some(target) = &close.remote {
             self.all_tabs()
                 .filter(|tab| {
                     tab.remote.as_ref().is_some_and(|remote| {
-                        remote.root == workspace.root && remote.destination == workspace.destination
+                        remote.root == target.root && remote.destination == target.destination
                     })
                 })
                 .map(|tab| tab.id.clone())
@@ -499,11 +524,20 @@ impl EditorView {
         else {
             return;
         };
-        let remote_generation = self
-            .workspace_close
+        let remote = self.workspace_close.as_ref().and_then(|close| {
+            close.remote.as_ref().map(|target| {
+                (
+                    target.generation,
+                    target.destination.clone(),
+                    target.root.clone(),
+                )
+            })
+        });
+        if remote
             .as_ref()
-            .and_then(|close| close.remote_generation);
-        if remote_generation.is_some_and(|generation| generation != self.remote_generation) {
+            .and_then(|(generation, ..)| *generation)
+            .is_some_and(|generation| generation != self.remote_generation)
+        {
             self.workspace_close = None;
             self.notify_error(
                 crate::i18n::remote_text(self.ui_language, "wrong_connection"),
@@ -548,11 +582,13 @@ impl EditorView {
         for id in ids {
             self.close_tab(&id, cx);
         }
-        if remote_generation.is_some() {
-            let key = self.remote_view_key_of_current();
-            self.disconnect_remote(cx);
-            if let Some(key) = key {
+        if let Some((generation, destination, remote_root)) = remote {
+            let key = remote_view_key(&destination, &remote_root);
+            if generation.is_some() {
+                self.disconnect_remote(cx);
                 self.discard_view(&key);
+            } else {
+                self.forget_pending_ssh_workspace_root(&destination, &remote_root, cx);
             }
         } else {
             self.finish_close_workspace(&root, cx);

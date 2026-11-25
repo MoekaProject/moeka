@@ -2960,11 +2960,7 @@ impl EditorView {
                 Self::navigate_tab_history_forward,
             ))
             .into_any_element();
-        // The workspace strip above carries the window-control clearance.
-        let leading_left_margin = if self.embedded_editor
-            || !is_top_left_pane
-            || self.workspace_strip_visible()
-        {
+        let leading_left_margin = if self.embedded_editor || !is_top_left_pane {
             0.0
         } else {
             super::render::sidebar_button_tab_bar_inset(
@@ -2994,10 +2990,9 @@ impl EditorView {
             .justify_end()
             .when_some(toggle_actions, |this, actions| this.child(actions))
             // Leaves room for the caption buttons the window draws on top.
-            .when(
-                is_top_right_pane && !self.workspace_strip_visible(),
-                |this| this.pr(px(self.window_caption_trailing_inset())),
-            );
+            .when(is_top_right_pane, |this| {
+                this.pr(px(self.window_caption_trailing_inset()))
+            });
 
         let tab_bar = div()
             .id("tab-bar")

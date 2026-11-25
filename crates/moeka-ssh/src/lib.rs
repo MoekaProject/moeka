@@ -527,6 +527,7 @@ mod tests {
         assert!(args.contains(&"BatchMode=yes".into()));
         assert_eq!(quote_shell("a'b").unwrap(), "'a'\\''b'");
         assert!(args.contains(&"config with spaces".into()));
+        assert!(args.windows(2).any(|args| args == ["-p", "2222"]));
         assert!(
             SshOptions {
                 destination: "-oProxyCommand=bad".into(),

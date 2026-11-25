@@ -34,8 +34,19 @@ pub(super) fn resource_menu_actions(
     count: usize,
     paste: bool,
     remote: bool,
+    connected: bool,
 ) -> Vec<ResourceMenuAction> {
     use ResourceMenuAction::*;
+    if remote && !connected {
+        return vec![
+            CopyPath,
+            CopyRelativePath,
+            Separator,
+            CloseWorkspace,
+            Separator,
+            Refresh,
+        ];
+    }
     let mut actions = vec![NewFile, NewDirectory, Separator];
     if root {
         if paste {
@@ -205,8 +216,8 @@ mod resource_menu_tests {
             (false, false, true, 1, false),
             (false, false, true, 3, true),
         ] {
-            let local = resource_menu_actions(root, directory, markdown, count, paste, false);
-            let remote = resource_menu_actions(root, directory, markdown, count, paste, true);
+            let local = resource_menu_actions(root, directory, markdown, count, paste, false, true);
+            let remote = resource_menu_actions(root, directory, markdown, count, paste, true, true);
             assert_eq!(common(local), common(remote.clone()));
             assert_eq!(remote.contains(&Rename), !root && count == 1);
             assert_eq!(remote.contains(&Paste), paste);
@@ -218,7 +229,9 @@ mod resource_menu_tests {
             assert!(!root || !remote.contains(&Delete));
         }
         assert_eq!(
-            common(resource_menu_actions(false, false, true, 2, true, true)),
+            common(resource_menu_actions(
+                false, false, true, 2, true, true, true
+            )),
             vec![
                 NewFile,
                 NewDirectory,
@@ -451,6 +464,58 @@ pub(super) fn select_tree_item<T: Clone + Eq + std::hash::Hash>(
 }
 
 impl EditorView {
+    pub(super) fn resource_connection_available(&self, resource: &ResourcePath) -> bool {
+        if resource.filesystem == FilesystemId::Local {
+            return true;
+        }
+        self.remote_workspace
+            .iter()
+            .chain(&self.parked_remote_workspaces)
+            .any(|workspace| {
+                workspace.filesystem.identity() == &resource.filesystem
+                    && resource_is_within(resource, &workspace.root)
+            })
+    }
+
+    pub(super) fn open_workspace_resource_context_menu(
+        &mut self,
+        resource: ResourcePath,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Ok(path) = resource.local_path() {
+            self.focus_workspace_row(path, cx);
+        } else if !self.focus_remote_workspace_for_resource(&resource, cx)
+            && self.pending_ssh_workspace_for_root(&resource).is_none()
+        {
+            self.notify_error(
+                crate::i18n::remote_text(self.ui_language, "wrong_connection"),
+                cx,
+            );
+            return;
+        }
+        window.prevent_default();
+        cx.stop_propagation();
+        if !self.file_tree_resource_selected(&resource) {
+            self.select_file_tree_resource(&resource, false, false);
+        }
+        self.open_context_menu(
+            ContextMenu {
+                position: event.position,
+                kind: ContextMenuKind::FileTreeResource {
+                    resource,
+                    is_dir: true,
+                    is_root: true,
+                    generation: self.remote_generation,
+                },
+            },
+            true,
+            cx,
+        );
+        window.focus(&self.focus_handle);
+    }
+
     pub(super) fn select_file_list_resource(
         &mut self,
         resource: &ResourcePath,
@@ -1167,6 +1232,10 @@ impl EditorView {
             CloseWorkspace => {
                 if let Some(path) = local {
                     self.close_workspace(&path, cx);
+                } else if let Some((destination, root)) =
+                    self.pending_ssh_workspace_for_root(resource)
+                {
+                    self.request_close_pending_remote_workspace(destination, root, cx);
                 } else {
                     self.request_close_remote_workspace(cx);
                 }
@@ -1176,7 +1245,13 @@ impl EditorView {
                     self.reveal_in_file_manager(&path, cx);
                 }
             }
-            Refresh => self.refresh_remote_tree(cx),
+            Refresh => {
+                if self.pending_ssh_workspace_for_root(resource).is_some() {
+                    self.retry_pending_ssh_workspace_root(resource, cx);
+                } else {
+                    self.refresh_remote_tree(cx);
+                }
+            }
             Disconnect => self.disconnect_remote(cx),
             NewFile | NewDirectory | Paste => {
                 let parent = if directory {
@@ -1257,6 +1332,9 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> bool {
         if resource.filesystem == FilesystemId::Local {
+            return true;
+        }
+        if self.pending_ssh_workspace_for_root(resource).is_some() {
             return true;
         }
         if self.remote_generation == generation

@@ -583,9 +583,15 @@ fn open_remote_filesystem(
     config_file: Option<PathBuf>,
     language: UiLanguage,
 ) -> io::Result<Arc<SshFilesystem>> {
+    let (ssh_destination, port) = parse_ssh_endpoint(&destination).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::i18n::remote_text(language, "connect_instruction"),
+        )
+    })?;
     let options = SshOptions {
-        destination: destination.clone(),
-        port: None,
+        destination: ssh_destination,
+        port,
         config_file,
     };
     let bytes = crate::embedded_asset("remote/servers.mrb").ok_or_else(|| {
@@ -860,6 +866,43 @@ fn parse_connect_input(value: &str, language: UiLanguage) -> io::Result<(String,
         ));
     }
     Ok((destination.to_string(), NativePath::unix_absolute(path)?))
+}
+
+fn parse_ssh_endpoint(value: &str) -> Option<(String, Option<u16>)> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_whitespace) {
+        return None;
+    }
+    if let Some(bracket) = value.rfind('[')
+        && let Some(end) = value[bracket..].find(']').map(|offset| bracket + offset)
+    {
+        let prefix = &value[..bracket];
+        let host = &value[bracket + 1..end];
+        let suffix = &value[end + 1..];
+        if host.is_empty() || !prefix.is_empty() && !prefix.ends_with('@') {
+            return None;
+        }
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            Some(
+                suffix
+                    .strip_prefix(':')?
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|port| *port != 0)?,
+            )
+        };
+        return Some((format!("{prefix}{host}"), port));
+    }
+    let Some((destination, port)) = value.rsplit_once(':') else {
+        return Some((value.to_string(), None));
+    };
+    if destination.is_empty() || destination.contains(':') {
+        return Some((value.to_string(), None));
+    }
+    let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
+    Some((destination.to_string(), Some(port)))
 }
 
 fn remote_input_placeholder(mode: &RemoteInputMode, language: UiLanguage) -> String {
@@ -2158,9 +2201,19 @@ impl EditorView {
             self.connect_remote(&destination, config, cx);
             return;
         }
+        let Some((ssh_destination, port)) = parse_ssh_endpoint(&destination) else {
+            if let Some(input) = self.remote_input.as_mut() {
+                input.error = Some(crate::i18n::remote_text(
+                    self.ui_language,
+                    "connect_instruction",
+                ));
+            }
+            cx.notify();
+            return;
+        };
         let options = SshOptions {
-            destination: destination.clone(),
-            port: None,
+            destination: ssh_destination,
+            port,
             config_file: None,
         };
         if let Err(error) = options.command() {
@@ -6541,15 +6594,25 @@ impl EditorView {
             )
             .collect();
         rows.sort_by_key(|(serial, _)| *serial);
-        let strip = self.workspace_strip_visible();
         let mut elements: Vec<AnyElement> = rows
             .into_iter()
-            // The strip lists every workspace; the sidebar keeps the active one.
-            .filter(|(_, parked)| !strip || (parked.is_none() && self.remote_workspace_active))
+            .filter(|(_, parked)| {
+                parked.is_none()
+                    && self.remote_workspace.as_ref().is_some_and(|workspace| {
+                        self.live_view.as_ref()
+                            == Some(&workspace::remote_view_key(
+                                &workspace.destination,
+                                &workspace.root,
+                            ))
+                    })
+            })
             .map(|(_, parked)| self.render_remote_workspace_row(parked, cx))
             .collect();
-        if !strip {
-            for (index, pending) in self.pending_ssh_workspaces().into_iter().enumerate() {
+        for (index, pending) in self.pending_ssh_workspaces().into_iter().enumerate() {
+            let active = self.live_view.as_ref().is_some_and(|key| {
+                *key == workspace::remote_view_key(&pending.destination, &pending.root)
+            });
+            if active {
                 elements.push(self.render_pending_remote_workspace_row(index, pending, cx));
             }
         }
@@ -6578,7 +6641,9 @@ impl EditorView {
     }
 
     /// Display name and whether it failed, for each saved workspace still connecting.
-    pub(super) fn pending_ssh_workspace_labels(&self) -> Vec<(String, bool)> {
+    pub(super) fn pending_ssh_workspace_labels(
+        &self,
+    ) -> Vec<(String, ResourcePath, String, bool, bool)> {
         self.pending_ssh_workspaces()
             .into_iter()
             .map(|pending| {
@@ -6596,25 +6661,83 @@ impl EditorView {
                     .map(|name| name.to_string())
                     .unwrap_or_else(|| pending.root.path.to_string())
                     .to_uppercase();
-                (name, failed)
+                let active = self.live_view.as_ref().is_some_and(|key| {
+                    *key == workspace::remote_view_key(&pending.destination, &pending.root)
+                });
+                (pending.destination, pending.root, name, failed, active)
             })
             .collect()
     }
 
-    pub(super) fn retry_pending_ssh_workspace_at(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(super) fn activate_pending_ssh_workspace_at(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
         let Some(pending) = self.pending_ssh_workspaces().into_iter().nth(index) else {
             return;
         };
-        let failed = match pending.extra {
-            None => self.ssh_restore_error.is_some(),
-            Some(_) => self.ssh_restore_errors.contains_key(&Self::ssh_restore_key(
+        self.show_view(
+            Some(workspace::remote_view_key(
                 &pending.destination,
-                &pending.root.path,
+                &pending.root,
             )),
-        };
-        if failed {
+            cx,
+        );
+        self.sidebar_visible = true;
+        self.sync_sidebar_width_animation(cx);
+        session_store::persist_session(self);
+        cx.notify();
+    }
+
+    pub(super) fn pending_ssh_workspace_index(
+        &self,
+        destination: &str,
+        root: &ResourcePath,
+    ) -> Option<usize> {
+        self.pending_ssh_workspaces()
+            .iter()
+            .position(|pending| pending.destination == destination && pending.root == *root)
+    }
+
+    pub(super) fn pending_ssh_workspace_for_root(
+        &self,
+        root: &ResourcePath,
+    ) -> Option<(String, ResourcePath)> {
+        self.pending_ssh_workspaces()
+            .into_iter()
+            .find(|pending| pending.root == *root)
+            .map(|pending| (pending.destination, pending.root))
+    }
+
+    pub(super) fn retry_pending_ssh_workspace_root(
+        &mut self,
+        root: &ResourcePath,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pending) = self
+            .pending_ssh_workspaces()
+            .into_iter()
+            .find(|pending| pending.root == *root)
+        {
             self.retry_pending_ssh_workspace(pending, cx);
         }
+    }
+
+    pub(super) fn forget_pending_ssh_workspace_root(
+        &mut self,
+        destination: &str,
+        root: &ResourcePath,
+        cx: &mut Context<Self>,
+    ) {
+        let key = workspace::remote_view_key(destination, root);
+        if self.live_view.as_ref() == Some(&key) {
+            self.show_view(None, cx);
+        }
+        self.forget_pending_ssh_restore(destination, root);
+        self.discard_view(&key);
+        session_store::persist_session(self);
+        cx.notify();
     }
 
     /// Makes the SSH workspace with this connection serial the active one.
@@ -6634,36 +6757,6 @@ impl EditorView {
                     workspace.file_list_dir = root.clone();
                 }
                 self.load_remote_directory(root, cx);
-            }
-        }
-    }
-
-    /// Moves one SSH workspace next to another in the displayed order.
-    pub(super) fn reorder_remote_workspaces(&mut self, source: u64, target: u64, after: bool) {
-        if source == target {
-            return;
-        }
-        let mut order: Vec<u64> = self
-            .remote_workspaces_in_order()
-            .into_iter()
-            .map(|(serial, ..)| serial)
-            .collect();
-        let (Some(from), true) = (
-            order.iter().position(|serial| *serial == source),
-            order.contains(&target),
-        ) else {
-            return;
-        };
-        let moved = order.remove(from);
-        let to = order.iter().position(|serial| *serial == target).unwrap() + usize::from(after);
-        order.insert(to, moved);
-        for workspace in self
-            .remote_workspace
-            .iter_mut()
-            .chain(self.parked_remote_workspaces.iter_mut())
-        {
-            if let Some(position) = order.iter().position(|serial| *serial == workspace.serial) {
-                workspace.serial = position as u64;
             }
         }
     }
@@ -6703,53 +6796,57 @@ impl EditorView {
             },
         );
         let label = format!("[{state}] {name}");
-        let tooltip = error.clone().unwrap_or_else(|| state.to_string());
-        let offline = error.is_some();
-        super::tooltip::with_tooltip(
-            crate::ui::list::tree_row(
-                self.styles.sidebar_tree_row(),
-                Default::default(),
-                self.ui_scale,
-            )
-            .opacity(0.5)
-            .id(("pending-ssh-root", index))
-            .pl(px(self.scaled(ss.sidebar_root_padding_x_px)))
-            .pr(px(self.scaled(ss.sidebar_item_padding_right_px)))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(self.scaled(ss.sidebar_item_gap_px)))
-            .child(
-                gpui::svg()
-                    .path(ROOT_SVG_PATH)
-                    .size(px(self.scaled(ss.sidebar_header_root_icon_size_px)))
-                    .flex_none()
-                    .text_color(ss.sidebar_item_icon_color),
-            )
-            .child(
-                crate::ui::typography::badge(self.styles.sidebar_kind_badge(false), self.ui_scale)
-                    .flex_none()
-                    .child("REMOTE"),
-            )
-            .child(
-                crate::ui::typography::label(
-                    self.styles.workspace_root_label(false),
-                    self.ui_scale,
-                )
+        let active = self.live_view.as_ref().is_some_and(|key| {
+            *key == workspace::remote_view_key(&pending.destination, &pending.root)
+        });
+        let root = pending.root.clone();
+        crate::ui::list::tree_row(
+            self.styles.sidebar_tree_row(),
+            crate::style::TreeRowState {
+                selected: active,
+                resizing: self.sidebar_resizing,
+                ..Default::default()
+            },
+            self.ui_scale,
+        )
+        .opacity(0.5)
+        .id(("pending-ssh-root", index))
+        .debug_selector(move || format!("pending-ssh-root-{index}"))
+        .pl(px(self.scaled(ss.sidebar_root_padding_x_px)))
+        .pr(px(self.scaled(ss.sidebar_item_padding_right_px)))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(self.scaled(ss.sidebar_item_gap_px)))
+        .child(
+            gpui::svg()
+                .path(ROOT_SVG_PATH)
+                .size(px(self.scaled(ss.sidebar_header_root_icon_size_px)))
+                .flex_none()
+                .text_color(ss.sidebar_item_icon_color),
+        )
+        .child(
+            crate::ui::typography::badge(self.styles.sidebar_kind_badge(false), self.ui_scale)
+                .flex_none()
+                .child("REMOTE"),
+        )
+        .child(
+            crate::ui::typography::label(self.styles.workspace_root_label(false), self.ui_scale)
                 .min_w(px(0.0))
                 .flex_1()
                 .truncate()
                 .child(label),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if offline {
-                    this.retry_pending_ssh_workspace(pending.clone(), cx);
-                }
-            })),
-            cx.entity(),
-            tooltip,
-            None::<SharedString>,
         )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.activate_pending_ssh_workspace_at(index, cx);
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                this.open_workspace_resource_context_menu(root.clone(), event, window, cx);
+            }),
+        )
+        .into_any_element()
     }
 
     /// One sidebar row per connected SSH workspace: the active one (`None`)
@@ -6765,7 +6862,10 @@ impl EditorView {
         }) else {
             return div().into_any_element();
         };
-        let current = parked.is_none() && self.remote_workspace_active;
+        let current = parked.is_none()
+            && self.live_view.as_ref().is_some_and(|key| {
+                *key == workspace::remote_view_key(&workspace.destination, &workspace.root)
+            });
         let ss = &self.styles.sidebar;
         let root = workspace.root.clone();
         let mut label = root
@@ -6890,12 +6990,7 @@ impl EditorView {
             cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
-                if let Some(index) = parked {
-                    // The menu acts on the active workspace.
-                    this.switch_remote_workspace(index, cx);
-                    this.activate_remote_workspace(cx);
-                }
-                this.open_file_tree_resource_context_menu(root.clone(), true, event, window, cx);
+                this.open_workspace_resource_context_menu(root.clone(), event, window, cx);
             }),
         )
         .into_any_element()
@@ -7041,6 +7136,33 @@ mod tests {
         assert_eq!(ssh_directory_query("/a b/"), Some(("/a b", "")));
         assert_eq!(ssh_directory_query("relative"), None);
         assert_eq!(ssh_directory_query("/a\0b"), None);
+    }
+
+    #[test]
+    fn ssh_endpoints_accept_local_test_ports_and_bracketed_ipv6() {
+        assert_eq!(
+            parse_ssh_endpoint("127.0.0.1:2222"),
+            Some(("127.0.0.1".into(), Some(2222)))
+        );
+        assert_eq!(
+            parse_ssh_endpoint("user@127.0.0.1:2222"),
+            Some(("user@127.0.0.1".into(), Some(2222)))
+        );
+        assert_eq!(
+            parse_ssh_endpoint("[::1]:2222"),
+            Some(("::1".into(), Some(2222)))
+        );
+        assert_eq!(
+            parse_ssh_endpoint("user@[::1]"),
+            Some(("user@::1".into(), None))
+        );
+        assert_eq!(
+            parse_ssh_endpoint("configured-alias"),
+            Some(("configured-alias".into(), None))
+        );
+        assert_eq!(parse_ssh_endpoint("host:not-a-port"), None);
+        assert_eq!(parse_ssh_endpoint("host:0"), None);
+        assert_eq!(parse_ssh_endpoint("host name:22"), None);
     }
 
     #[cfg(feature = "gpui-test-support")]
@@ -7327,8 +7449,10 @@ mod tests {
             PathBuf::from(std::env::var_os("MOEKA_LOOPBACK_CONFIG").expect("loopback SSH config"));
         let home =
             PathBuf::from(std::env::var_os("MOEKA_LOOPBACK_HOME").expect("disposable remote HOME"));
+        let destination = std::env::var("MOEKA_LOOPBACK_DESTINATION")
+            .unwrap_or_else(|_| "moeka-loopback-test".into());
         let options = SshOptions {
-            destination: "moeka-loopback-test".into(),
+            destination: destination.clone(),
             config_file: Some(config.clone()),
             port: None,
         };
@@ -7383,12 +7507,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             editor.update(cx, |editor, cx| {
-                editor.open_remote_input(
-                    RemoteInputMode::Connect,
-                    "moeka-loopback-test".into(),
-                    window,
-                    cx,
-                );
+                editor.open_remote_input(RemoteInputMode::Connect, destination.clone(), window, cx);
                 editor
                     .remote_input
                     .as_mut()
@@ -7401,7 +7520,7 @@ mod tests {
                 let input = editor.remote_input.as_ref().unwrap();
                 assert_eq!(
                     input.ssh_picker.as_ref().unwrap().destination.as_deref(),
-                    Some("moeka-loopback-test")
+                    Some(destination.as_str())
                 );
                 assert!(input.ssh_picker.as_ref().unwrap().connecting);
                 assert_eq!(input.editor.read(cx).text(), "");
@@ -7558,7 +7677,13 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("sidebar-edit-row").is_some());
         cx.update(|_, cx| {
-            editor.update(cx, |editor, cx| editor.cancel_remote_sidebar_edit(cx));
+            editor.update(cx, |editor, cx| {
+                editor.cancel_remote_sidebar_edit(cx);
+                // The harness renders panels directly instead of through the
+                // root view that normally synchronizes restored panel widths.
+                editor.file_list_visible = false;
+                editor.sync_panel_display_state();
+            });
         });
         assert!(
             cx.debug_bounds(Box::leak(
@@ -7580,13 +7705,29 @@ mod tests {
                 root.join_child("nested-folder").unwrap(),
             )
         });
-        let note_selector =
-            Box::leak(format!("remote-{}", resource_key(&note_resource)).into_boxed_str());
+        let file_list_visible = cx.update(|_, cx| editor.read(cx).file_list_visible);
+        let note_selector = Box::leak(
+            format!(
+                "{}{}",
+                if file_list_visible {
+                    "remote-file-list-"
+                } else {
+                    "remote-"
+                },
+                resource_key(&note_resource)
+            )
+            .into_boxed_str(),
+        );
+        cx.run_until_parked();
         let note_bounds = cx
             .debug_bounds(note_selector)
             .expect("shared remote file row");
         cx.update(|_, cx| {
-            let row_height = editor.read(cx).sidebar_item_height_px();
+            let row_height = if file_list_visible {
+                editor.read(cx).file_list_item_height_px()
+            } else {
+                editor.read(cx).sidebar_item_height_px()
+            };
             assert!(
                 (f32::from(note_bounds.size.height) - row_height).abs() < 0.5,
                 "remote row={} expected={row_height}",
@@ -7701,12 +7842,22 @@ mod tests {
         });
         cx.update(|_, cx| {
             editor.update(cx, |editor, cx| {
+                editor.file_list_visible = true;
+                editor.sync_panel_display_state();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
                 let remote_tab = editor.active_tab_id.clone().unwrap();
-                editor.switch_to_tab(&local_tab, cx);
+                let remote_serial = editor.remote_workspace.as_ref().unwrap().serial;
+                editor.activate_workspace_row(local_workspace.path().to_path_buf(), cx);
                 assert!(!editor.remote_workspace_active);
                 assert_eq!(editor.buffer.text(), "# local draft");
-                editor.switch_to_tab(&remote_tab, cx);
+                editor.activate_remote_workspace_serial(remote_serial, cx);
                 assert!(editor.remote_workspace_active);
+                assert_eq!(editor.active_tab_id.as_deref(), Some(remote_tab.as_str()));
                 assert!(editor.buffer.text().starts_with("# initial needle"));
             })
         });
@@ -7844,14 +7995,6 @@ mod tests {
         wait_for(cx, &editor, "external reload", |editor| {
             editor.buffer.text() == "# externally changed\n"
         });
-        let epoch = cx.update(|_, cx| {
-            editor
-                .read(cx)
-                .remote_workspace
-                .as_ref()
-                .unwrap()
-                .resource_epoch
-        });
         cx.update(|_, cx| {
             editor.update(cx, |editor, _| {
                 editor
@@ -7864,9 +8007,7 @@ mod tests {
         fs::write(&renamed_path, "# competing writer\n").unwrap();
         wait_for(cx, &editor, "dirty refresh", |editor| {
             editor.remote_workspace.as_ref().is_some_and(|workspace| {
-                workspace.resource_epoch != epoch
-                    && !workspace.document_refresh_running
-                    && workspace.documents_to_refresh.is_empty()
+                !workspace.document_refresh_running && workspace.documents_to_refresh.is_empty()
             })
         });
         cx.update(|window, cx| {
@@ -7910,12 +8051,16 @@ mod tests {
             fs::read_to_string(&renamed_path).unwrap(),
             "# competing writer\n"
         );
-        cx.update(|_, cx| {
+        let remote_view = cx.update(|_, cx| {
             editor.update(cx, |editor, cx| {
                 assert_eq!(editor.buffer.text(), "# unsaved draft\n");
+                let workspace = editor.remote_workspace.as_ref().unwrap();
+                let remote_view =
+                    workspace::remote_view_key(&workspace.destination, &workspace.root);
                 editor
                     .open_remote_file(renamed.parent().unwrap().join_child("late.md").unwrap(), cx);
                 editor.disconnect_remote(cx);
+                remote_view
             })
         });
         for _ in 0..50 {
@@ -7924,16 +8069,19 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         cx.update(|_, cx| {
-            let editor = editor.read(cx);
-            assert!(editor.remote_workspace.is_none());
-            assert_eq!(
-                editor.tabs.len(),
-                tab_count,
-                "closed connection must reject late opens"
-            );
-            assert_eq!(editor.buffer.text(), "# unsaved draft\n");
-            let tab = &editor.tabs[editor.active_tab_index().unwrap()];
-            assert!(tab.is_dirty && tab.remote_binding_lost);
+            editor.update(cx, |editor, cx| {
+                assert!(editor.remote_workspace.is_none());
+                assert_eq!(editor.buffer.text(), "# local draft");
+                editor.show_view(Some(remote_view.clone()), cx);
+                assert_eq!(
+                    editor.tabs.len(),
+                    tab_count,
+                    "closed connection must reject late opens"
+                );
+                assert_eq!(editor.buffer.text(), "# unsaved draft\n");
+                let tab = &editor.tabs[editor.active_tab_index().unwrap()];
+                assert!(tab.is_dirty && tab.remote_binding_lost);
+            })
         });
     }
 

@@ -220,9 +220,6 @@ impl EditorView {
                     .overflow_hidden()
                     .child(self.render_pane_layout(&layout, &mut Vec::new(), window, cx)),
             )
-            .when(!self.active_tab_is_settings(), |this| {
-                this.child(self.render_status_bar(cx))
-            })
             .into_any_element()
     }
 

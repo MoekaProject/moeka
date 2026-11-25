@@ -91,8 +91,9 @@ mod embedded_assets {
             .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
         let cached = target_dir.join("remote/servers.mrb");
         println!("cargo:rerun-if-changed={}", cached.display());
-        let bundle = std::env::var_os("MOEKA_REMOTE_BUNDLE")
-            .map(PathBuf::from)
+        let explicit = std::env::var_os("MOEKA_REMOTE_BUNDLE").map(PathBuf::from);
+        let bundle = explicit
+            .clone()
             .or_else(|| cached.is_file().then_some(cached));
         let required = match std::env::var("MOEKA_REQUIRE_REMOTE_BUNDLE").as_deref() {
             Ok("1") => true,
@@ -107,21 +108,35 @@ mod embedded_assets {
             return dev_bundle(source);
         };
         println!("cargo:rerun-if-changed={}", path.display());
-        let bytes = std::fs::read(&path)
-            .unwrap_or_else(|error| panic!("read remote bundle {}: {error}", path.display()));
-        let bundle = moeka_ssh::bundle::Bundle::parse(&bytes)
-            .unwrap_or_else(|error| panic!("invalid remote bundle: {error}"));
-        bundle
-            .validate_identity(env!("CARGO_PKG_VERSION"), source)
-            .unwrap_or_else(|error| panic!("remote bundle identity mismatch: {error}"));
-        assert!(
-            bundle.is_complete() || !required,
-            "SSH-capable packages require a bundle with every remote target"
-        );
-        for payload in &bundle.manifest().payloads {
-            bundle.payload(payload.target).unwrap_or_else(|error| {
-                panic!("invalid {} remote payload: {error}", payload.target.name())
+        let verified = std::fs::read(&path)
+            .map_err(|error| format!("read remote bundle {}: {error}", path.display()))
+            .and_then(|bytes| {
+                let bundle = moeka_ssh::bundle::Bundle::parse(&bytes)
+                    .map_err(|error| format!("invalid remote bundle: {error}"))?;
+                bundle
+                    .validate_identity(env!("CARGO_PKG_VERSION"), source)
+                    .map_err(|error| format!("remote bundle identity mismatch: {error}"))?;
+                if required && !bundle.is_complete() {
+                    return Err(
+                        "SSH-capable packages require a bundle with every remote target".into(),
+                    );
+                }
+                for payload in &bundle.manifest().payloads {
+                    bundle.payload(payload.target).map_err(|error| {
+                        format!("invalid {} remote payload: {error}", payload.target.name())
+                    })?;
+                }
+                Ok(())
             });
+        match verified {
+            Ok(()) => {}
+            Err(error) if explicit.is_none() && !required => {
+                println!(
+                    "cargo:warning={error}; rebuilding the local development bundle for {source}"
+                );
+                return dev_bundle(source);
+            }
+            Err(error) => panic!("{error}"),
         }
         Some(path)
     }
