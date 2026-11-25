@@ -141,7 +141,8 @@ pub(super) fn rebase_transferred_resource(
     }
     let mut rebased = destination.clone();
     for part in parts.into_iter().rev() {
-        rebased = rebased.join_native_child(&part).ok()?;
+        rebased =
+            rebased.with_path(super::resource_transfer::join_name(&rebased.path, &part).ok()?);
     }
     Some(rebased)
 }
@@ -284,6 +285,18 @@ mod resource_menu_tests {
                 .unwrap(),
             directory.path().join("日本語.md")
         );
+        let windows_destination = ResourcePath {
+            filesystem: FilesystemId::Ssh([3; 32]),
+            path: moeka_fs::path::NativePath::Windows(r"C:\notes".encode_utf16().collect()),
+        };
+        assert_eq!(
+            rebase_transferred_resource(&child, &root, &windows_destination)
+                .unwrap()
+                .path,
+            moeka_fs::path::NativePath::Windows(r"C:\notes\日本語.md".encode_utf16().collect())
+        );
+        let invalid = root.with_path(moeka_fs::path::NativePath::Unix(b"/notes/\xff".to_vec()));
+        assert!(rebase_transferred_resource(&invalid, &root, &windows_destination).is_none());
     }
 
     #[cfg(feature = "gpui-test-support")]

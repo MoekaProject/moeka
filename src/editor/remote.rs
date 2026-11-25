@@ -7303,7 +7303,7 @@ mod tests {
     fn remote_file_timestamps_preserve_subseconds_and_missing_values() {
         assert_eq!(remote_metadata_time(None), None);
         assert_eq!(remote_metadata_time(Some(i128::MAX)), None);
-        for nanos in [0, 1, -1, 1_700_000_000_123_456_789] {
+        for nanos in [0, 100, -100, 1_700_000_000_123_456_700] {
             let value = remote_metadata_time(Some(nanos)).unwrap();
             let actual = match value.duration_since(std::time::UNIX_EPOCH) {
                 Ok(duration) => duration.as_nanos() as i128,

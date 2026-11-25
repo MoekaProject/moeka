@@ -4,7 +4,7 @@ members = ["crates/moeka-fs", "crates/moeka-ssh", "crates/moeka-remote-server"]
 [package]
 name = "moeka"
 default-run = "moeka"
-version = "0.1.39"
+version = "0.1.40"
 edition = "2024"
 rust-version = "1.97"
 description = "A local-first Markdown editor with live rendering, workspaces, and native desktop tools"

@@ -728,7 +728,7 @@ fn destination(
     ))
 }
 
-fn join_name(parent: &NativePath, name: &NativePath) -> io::Result<NativePath> {
+pub(super) fn join_name(parent: &NativePath, name: &NativePath) -> io::Result<NativePath> {
     match (parent, name) {
         (NativePath::Unix(_), NativePath::Windows(units)) => {
             let name = String::from_utf16(units).map_err(|_| invalid("nonportable_filename"))?;
