@@ -6,6 +6,9 @@ on:
       sign_macos:
         type: boolean
         default: false
+      source_sha:
+        type: string
+        default: ''
     secrets:
       MACOS_CERTIFICATE_BASE64:
         required: false
@@ -48,7 +51,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.source_sha || github.sha }}
           persist-credentials: false
       - name: Install static Linux compiler
         if: runner.os == 'Linux'
@@ -63,7 +66,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           PLATFORM: ${{ matrix.platform }}
-          MOEKA_REMOTE_SOURCE_SHA: ${{ github.sha }}
+          MOEKA_REMOTE_SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -76,7 +79,7 @@ jobs:
           "remote/$PLATFORM.bin" --artifact-info > "remote/$PLATFORM.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: remote-unsigned-server-${{ matrix.platform }}-${{ github.sha }}
+          name: remote-unsigned-server-${{ matrix.platform }}-${{ inputs.source_sha || github.sha }}
           path: remote/
           if-no-files-found: error
           retention-days: 7
@@ -95,7 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.source_sha || github.sha }}
           persist-credentials: false
       - name: Refuse blind notarization retries
         env:
@@ -103,7 +106,7 @@ jobs:
         run: test "$RUN_ATTEMPT" = 1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: remote-unsigned-server-${{ matrix.platform }}-${{ github.sha }}
+          name: remote-unsigned-server-${{ matrix.platform }}-${{ inputs.source_sha || github.sha }}
           path: remote
       - name: Install temporary signing credentials
         env:
@@ -117,7 +120,7 @@ jobs:
       - name: Sign and notarize the standalone helper before compression
         env:
           PLATFORM: ${{ matrix.platform }}
-          MOEKA_REMOTE_SOURCE_SHA: ${{ github.sha }}
+          MOEKA_REMOTE_SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
           DEVELOPER_ID_APPLICATION: ${{ vars.DEVELOPER_ID_APPLICATION }}
           SIGNING_KEYCHAIN: ${{ runner.temp }}/moeka-signing/signing.keychain-db
           NOTARY_OUTPUT_DIR: ${{ runner.temp }}/remote-notary
@@ -129,14 +132,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: remote-notary-${{ matrix.platform }}-${{ github.sha }}-${{ github.run_attempt }}
+          name: remote-notary-${{ matrix.platform }}-${{ inputs.source_sha || github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/remote-notary/
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: remote-signed-server-${{ matrix.platform }}-${{ github.sha }}
+          name: remote-signed-server-${{ matrix.platform }}-${{ inputs.source_sha || github.sha }}
           path: remote/
           if-no-files-found: error
           retention-days: 7
@@ -152,22 +155,22 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.source_sha || github.sha }}
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: remote-unsigned-server-*-${{ github.sha }}
+          pattern: remote-unsigned-server-*-${{ inputs.source_sha || github.sha }}
           path: remote/
           merge-multiple: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: inputs.sign_macos
         with:
-          pattern: remote-signed-server-*-${{ github.sha }}
+          pattern: remote-signed-server-*-${{ inputs.source_sha || github.sha }}
           path: remote/
           merge-multiple: true
       - name: Validate source, architecture, digest and completeness before bundling
         env:
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
         run: |
           set -euo pipefail
           app_version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
@@ -176,7 +179,7 @@ jobs:
             remote/servers.mrb "$app_version" "$server_version" "$SOURCE_SHA" remote
       - id: result
         env:
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
         run: echo "artifact=remote-bundle-$SOURCE_SHA" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

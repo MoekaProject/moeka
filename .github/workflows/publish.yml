@@ -15,6 +15,10 @@ on:
         description: Run the full build/signing pipeline and verify artifacts without publishing or updating tags/Cask
         type: boolean
         default: false
+      source_tag:
+        description: Existing immutable source tag to publish instead of the current main commit
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -29,10 +33,32 @@ jobs:
     runs-on: macos-15
     environment: release-signing
     timeout-minutes: 10
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve the immutable source tag
+        id: source
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          set -euo pipefail
+          source_sha="$GITHUB_SHA"
+          if [[ -n "$SOURCE_TAG" ]]; then
+            test "$SOURCE_TAG" = "v$VERSION"
+            source_sha=$(git rev-parse --verify "refs/tags/$SOURCE_TAG^{commit}")
+            remote_sha=$(git ls-remote origin "refs/tags/$SOURCE_TAG^{}" | cut -f1)
+            test "$remote_sha" = "$source_sha"
+          fi
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.source.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Validate committed version and remote release state
@@ -40,6 +66,9 @@ jobs:
           VERSION: ${{ inputs.version }}
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_ONLY: ${{ inputs.candidate_only }}
+          MOEKA_RELEASE_SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          MOEKA_RELEASE_SOURCE_TAG: ${{ inputs.source_tag }}
+          MOEKA_RELEASE_CHECKOUT: ${{ github.workspace }}
         run: |
           set -euo pipefail
           python3 scripts/release-artifacts.py version --version "$VERSION"
@@ -47,7 +76,9 @@ jobs:
           gh auth setup-git
           test -f "packaging/release-notes/v$VERSION.md"
           if [[ "$CANDIDATE_ONLY" != true ]]; then
-            bash scripts/publish-release.sh check "v$VERSION"
+            mkdir -p "$RUNNER_TEMP/release-tools"
+            git show "$GITHUB_SHA:scripts/publish-release.sh" > "$RUNNER_TEMP/release-tools/publish-release.sh"
+            bash "$RUNNER_TEMP/release-tools/publish-release.sh" check "v$VERSION"
           fi
       - name: Validate Apple credentials before building any release artifacts
         env:
@@ -67,6 +98,7 @@ jobs:
     uses: ./.github/workflows/remote-servers.yml
     with:
       sign_macos: true
+      source_sha: ${{ needs.preflight.outputs.source_sha }}
     secrets:
       MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -79,6 +111,7 @@ jobs:
     with:
       version: ${{ inputs.version }}
       remote_bundle_artifact: ${{ needs.remote_servers.outputs.artifact }}
+      source_sha: ${{ needs.preflight.outputs.source_sha }}
     secrets:
       MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -116,7 +149,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Install Linux build dependencies
         if: matrix.platform == 'linux'
@@ -162,10 +196,13 @@ jobs:
           VERSION: ${{ inputs.version }}
           PLATFORM: ${{ matrix.platform }}
           ARCH: ${{ matrix.arch }}
-        run: python scripts/release-artifacts.py record --version "$VERSION" --platform "$PLATFORM" --arch "$ARCH"
+          MOEKA_RELEASE_SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: |
+          git show "$GITHUB_SHA:scripts/release-artifacts.py" > "$RUNNER_TEMP/release-artifacts.py"
+          python "$RUNNER_TEMP/release-artifacts.py" record --version "$VERSION" --platform "$PLATFORM" --arch "$ARCH"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-package-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
+          name: release-package-${{ matrix.platform }}-${{ matrix.arch }}-${{ needs.preflight.outputs.source_sha }}
           path: |
             dist/Moeka-${{ matrix.platform }}-${{ matrix.arch }}.zip
             dist/manifest.json
@@ -174,32 +211,35 @@ jobs:
           compression-level: 0
 
   verify-candidate:
-    needs: [macos, portable]
+    needs: [preflight, macos, portable]
     if: inputs.candidate_only && github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: signed-candidate-macos-*-${{ github.sha }}
+          pattern: signed-candidate-macos-*-${{ needs.preflight.outputs.source_sha }}
           path: incoming/macos
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: release-package-*-${{ github.sha }}
+          pattern: release-package-*-${{ needs.preflight.outputs.source_sha }}
           path: incoming/portable
       - name: Verify all candidate artifacts without publication
         env:
           VERSION: ${{ inputs.version }}
+          MOEKA_RELEASE_SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
         run: |
-          python3 scripts/release-artifacts.py collect --version "$VERSION" --source incoming
-          python3 scripts/release-artifacts.py verify --version "$VERSION"
+          git show "$GITHUB_SHA:scripts/release-artifacts.py" > "$RUNNER_TEMP/release-artifacts.py"
+          python3 "$RUNNER_TEMP/release-artifacts.py" collect --version "$VERSION" --source incoming
+          python3 "$RUNNER_TEMP/release-artifacts.py" verify --version "$VERSION"
 
   publish:
-    needs: [macos, portable]
+    needs: [preflight, macos, portable]
     if: inputs.candidate_only != true && github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -209,37 +249,45 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.preflight.outputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: signed-candidate-macos-*-${{ github.sha }}
+          pattern: signed-candidate-macos-*-${{ needs.preflight.outputs.source_sha }}
           path: incoming/macos
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: release-package-*-${{ github.sha }}
+          pattern: release-package-*-${{ needs.preflight.outputs.source_sha }}
           path: incoming/portable
       - name: Verify all six platform groups and eight attachments
         env:
           VERSION: ${{ inputs.version }}
+          MOEKA_RELEASE_SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
         run: |
           set -euo pipefail
-          python3 scripts/release-artifacts.py collect --version "$VERSION" --source incoming
+          git show "$GITHUB_SHA:scripts/release-artifacts.py" > "$RUNNER_TEMP/release-artifacts.py"
+          python3 "$RUNNER_TEMP/release-artifacts.py" collect --version "$VERSION" --source incoming
           rm -r incoming
       - name: Publish verified artifacts without building or signing
         env:
           VERSION: ${{ inputs.version }}
           PRERELEASE: ${{ inputs.prerelease }}
           GH_TOKEN: ${{ github.token }}
+          MOEKA_RELEASE_SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          MOEKA_RELEASE_SOURCE_TAG: ${{ inputs.source_tag }}
+          MOEKA_RELEASE_CHECKOUT: ${{ github.workspace }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           gh auth setup-git
+          mkdir -p "$RUNNER_TEMP/release-tools"
+          git show "$GITHUB_SHA:scripts/publish-release.sh" > "$RUNNER_TEMP/release-tools/publish-release.sh"
+          export MOEKA_RELEASE_ARTIFACTS_SCRIPT="$RUNNER_TEMP/release-artifacts.py"
           mode=publish
           if [[ "$PRERELEASE" == true ]]; then mode=publish-beta; fi
-          bash scripts/publish-release.sh "$mode" "v$VERSION"
+          bash "$RUNNER_TEMP/release-tools/publish-release.sh" "$mode" "v$VERSION"
           printf 'Release: https://github.com/MoekaProject/moeka/releases/tag/v%s\n' "$VERSION" >> "$GITHUB_STEP_SUMMARY"
 
   homebrew:

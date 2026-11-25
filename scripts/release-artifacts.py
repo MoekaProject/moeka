@@ -127,7 +127,11 @@ def main():
     parser.add_argument("--platform", choices=("macos", "windows", "linux"))
     parser.add_argument("--arch", choices=("arm64", "x86_64"))
     args = parser.parse_args()
-    expected = identity(args.version, os.environ["GITHUB_SHA"], os.environ["GITHUB_RUN_ID"])
+    expected = identity(
+        args.version,
+        os.environ.get("MOEKA_RELEASE_SOURCE_SHA") or os.environ["GITHUB_SHA"],
+        os.environ["GITHUB_RUN_ID"],
+    )
     verify_version(Path.cwd(), args.version)
     if args.operation == "record":
         record(args.directory, args.platform, args.arch, expected)

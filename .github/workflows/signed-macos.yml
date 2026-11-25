@@ -9,6 +9,9 @@ on:
       remote_bundle_artifact:
         type: string
         default: ''
+      source_sha:
+        type: string
+        default: ''
     secrets:
       MACOS_CERTIFICATE_BASE64:
         required: true
@@ -38,6 +41,7 @@ jobs:
     uses: ./.github/workflows/remote-servers.yml
     with:
       sign_macos: true
+      source_sha: ${{ inputs.source_sha }}
     secrets:
       MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -64,12 +68,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Verify version and source
         env:
           EXPECTED_VERSION: ${{ inputs.version }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
@@ -93,7 +98,7 @@ jobs:
           shasum -a 256 candidate/unsigned-app.zip > candidate/SHA256SUMS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: unsigned-signing-input-${{ matrix.arch }}-${{ github.sha }}
+          name: unsigned-signing-input-${{ matrix.arch }}-${{ inputs.source_sha || github.sha }}
           path: candidate/
           if-no-files-found: error
           retention-days: 7
@@ -113,7 +118,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Refuse blind notarization retries
         env:
@@ -125,7 +131,7 @@ jobs:
           fi
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: unsigned-signing-input-${{ matrix.arch }}-${{ github.sha }}
+          name: unsigned-signing-input-${{ matrix.arch }}-${{ inputs.source_sha || github.sha }}
           path: candidate
       - name: Verify and extract the same-run unsigned app
         env:
@@ -164,15 +170,17 @@ jobs:
             "$DEVELOPER_ID_APPLICATION" moeka-ci
       - name: Record candidate provenance and hashes
         env:
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
           VERSION: ${{ inputs.version }}
           ARCH: ${{ matrix.arch }}
+          MOEKA_RELEASE_SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
         run: |
           set -euo pipefail
           printf 'version=%s\nsource_sha=%s\nrun_id=%s\narch=%s\n' \
             "$VERSION" "$SOURCE_SHA" "$GITHUB_RUN_ID" "$ARCH" > dist/build-info.txt
           (cd dist && shasum -a 256 "Moeka-macos-$ARCH.dmg" "Moeka-macos-$ARCH.zip" > SHA256SUMS)
-          python3 scripts/release-artifacts.py record --version "$VERSION" --platform macos --arch "$ARCH"
+          git show "$GITHUB_SHA:scripts/release-artifacts.py" > "$RUNNER_TEMP/release-artifacts.py"
+          python3 "$RUNNER_TEMP/release-artifacts.py" record --version "$VERSION" --platform macos --arch "$ARCH"
       - name: Remove signing credentials
         if: always()
         run: bash scripts/ci-macos-signing.sh cleanup
@@ -180,7 +188,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: notarization-recovery-${{ matrix.arch }}-${{ github.sha }}-${{ github.run_attempt }}
+          name: notarization-recovery-${{ matrix.arch }}-${{ inputs.source_sha || github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/moeka-notary-results/
           if-no-files-found: ignore
           retention-days: 14
@@ -188,7 +196,7 @@ jobs:
       - name: Upload verified signed candidates
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: signed-candidate-macos-${{ matrix.arch }}-${{ inputs.version }}-${{ github.sha }}
+          name: signed-candidate-macos-${{ matrix.arch }}-${{ inputs.version }}-${{ inputs.source_sha || github.sha }}
           path: dist/
           if-no-files-found: error
           retention-days: 14

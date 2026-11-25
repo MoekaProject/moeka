@@ -19,7 +19,7 @@ if [[ "$mode" != check ]]; then
         && "${GITHUB_REF:-}" == refs/heads/main ]] \
         || die 'Official publication runs in GitHub Actions on main only; use make publish to dispatch it.'
 fi
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+root=${MOEKA_RELEASE_CHECKOUT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 cd "$root"
 source "$root/scripts/release-network.sh"
 for tool in git gh shasum cmp; do
@@ -91,7 +91,13 @@ local_checks() {
     head=$(git rev-parse --verify 'HEAD^{commit}')
     if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
         [[ "${GITHUB_REPOSITORY:-}" == MoekaProject/moeka && "${GITHUB_REF:-}" == refs/heads/main \
-            && "${GITHUB_SHA:-}" == "$head" ]] || die 'CI must check out its exact main dispatch SHA.'
+            && "${MOEKA_RELEASE_SOURCE_SHA:-${GITHUB_SHA:-}}" == "$head" ]] \
+            || die 'CI must check out its verified release source.'
+        if [[ -n "${MOEKA_RELEASE_SOURCE_SHA:-}" && "$head" != "${GITHUB_SHA:-}" ]]; then
+            [[ "$tag" == "${MOEKA_RELEASE_SOURCE_TAG:-}" ]] || die 'Release source tag mismatch.'
+            git show-ref --verify --quiet "refs/tags/$tag" \
+                || die 'A tagged release source requires an existing tag.'
+        fi
     else
         branch=$(git symbolic-ref --quiet --short HEAD) || die 'Detached HEAD is not publishable.'
         [[ "$branch" == main ]] || die 'Publish from main only.'
@@ -100,7 +106,8 @@ local_checks() {
         [[ "$(git rev-parse '@{upstream}')" == "$head" ]] || die 'HEAD differs from upstream; sync main separately (no automatic branch push).'
     fi
     remote_main=$(release_retry_read git ls-remote --exit-code origin refs/heads/main) || die 'Cannot verify live origin/main.'
-    [[ "$remote_main" == "$head"$'\trefs/heads/main' ]] || die 'Live origin/main differs from HEAD.'
+    [[ "$remote_main" == "${GITHUB_SHA:-$head}"$'\trefs/heads/main' ]] \
+        || die 'Live origin/main differs from the dispatch SHA.'
     version=$(awk -F '"' '/^\[package\]/ {package=1; next} /^\[/ {package=0} package && /^version = / {print $2; exit}' Cargo.toml)
     [[ "$tag" == "v$version" ]] || die 'Tag/version mismatch with Cargo.toml.'
     for file in LICENSE THIRD_PARTY_NOTICES.md Cargo.lock; do
@@ -142,7 +149,7 @@ assets=(Moeka-macos-arm64.dmg Moeka-macos-x86_64.dmg
         Moeka-windows-arm64.zip Moeka-windows-x86_64.zip
     Moeka-linux-arm64.zip Moeka-linux-x86_64.zip)
     [[ ! -L dist ]] || die 'Unsafe dist symlink.'
-python3 scripts/release-artifacts.py verify --version "${tag#v}" \
+python3 "${MOEKA_RELEASE_ARTIFACTS_SCRIPT:-scripts/release-artifacts.py}" verify --version "${tag#v}" \
     || die 'CI release artifacts failed provenance verification.'
 notes_file="packaging/release-notes/$tag.md"
 [[ -s "$notes_file" && ! -L "$notes_file" ]] || die 'Committed release notes are required.'

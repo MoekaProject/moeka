@@ -103,7 +103,7 @@ class CommunityChecksTest
       job = jobs.fetch(name)
       assert_equal true, job.fetch('if').include?("github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'")
       checkout = job.fetch('steps').find { |step| step.fetch('uses', '').start_with?('actions/checkout@') }
-      assert_equal '${{ github.sha }}', checkout.fetch('with').fetch('ref')
+      assert_equal '${{ inputs.source_sha || github.sha }}', checkout.fetch('with').fetch('ref')
     end
     assert_empty jobs.fetch('build').to_s.scan(/secrets\./)
     steps = jobs.fetch('sign').fetch('steps')
@@ -124,7 +124,7 @@ class CommunityChecksTest
     assert_empty CommunityChecks.workflow(document, path)
     assert_equal ['workflow_dispatch'], (document['on'] || document[true]).keys
     jobs = document.fetch('jobs')
-    assert_equal %w[macos portable], jobs.fetch('publish').fetch('needs')
+    assert_equal %w[preflight macos portable], jobs.fetch('publish').fetch('needs')
     assert_equal 'publish', jobs.fetch('homebrew').fetch('needs')
     assert_equal './.github/workflows/signed-macos.yml', jobs.fetch('macos').fetch('uses')
     assert_equal %w[APPLE_APP_SPECIFIC_PASSWORD APPLE_ID MACOS_CERTIFICATE_BASE64 MACOS_CERTIFICATE_PASSWORD],
@@ -152,7 +152,7 @@ class CommunityChecksTest
     unsafe = Marshal.load(Marshal.dump(document))
     unsafe['jobs']['publish']['if'].sub!('inputs.candidate_only != true && ', '')
     refute_empty CommunityChecks.workflow(unsafe, path)
-    assert_equal %w[macos portable], jobs.fetch('verify-candidate').fetch('needs')
+    assert_equal %w[preflight macos portable], jobs.fetch('verify-candidate').fetch('needs')
     assert_empty jobs.fetch('verify-candidate').to_s.scan(/secrets\.|contents.*write|gh release|git push/)
     %w[preflight publish homebrew verify-candidate].each do |name|
       assert_empty jobs.fetch(name).to_s.scan(/rust-build-cache|sccache|rust-cache/)

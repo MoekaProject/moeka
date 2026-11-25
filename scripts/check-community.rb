@@ -86,7 +86,7 @@ module CommunityChecks
                            Array(events) == ['workflow_dispatch'] &&
                            job['if'] == expected_condition &&
                            job['permissions'] == { 'contents' => 'write' } &&
-                           ((job_name == 'publish' && job['needs'] == %w[macos portable]) ||
+                           ((job_name == 'publish' && job['needs'] == %w[preflight macos portable]) ||
                             (job_name == 'homebrew' && job['needs'] == 'publish'))
         errors << "#{name}/#{job_name}: only reviewed publication and Cask jobs may request contents write access" unless official_release_job
       end

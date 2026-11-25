@@ -201,7 +201,7 @@ count=0
 fixture() {
     count=$((count + 1))
     export FIXTURE="$work/case-$count" SCENARIO=$1
-    unset BRANCH_FIXTURE UPSTREAM_FIXTURE GITHUB_ACTIONS
+    unset BRANCH_FIXTURE UPSTREAM_FIXTURE GITHUB_ACTIONS GITHUB_SHA GITHUB_REF GITHUB_REPOSITORY MOEKA_RELEASE_SOURCE_SHA MOEKA_RELEASE_SOURCE_TAG
     mkdir -p "$FIXTURE/"{scripts,packaging/release-notes,git-common,remote}
     cp "$helper" "$FIXTURE/scripts/publish-release.sh"
     cp "${helper%/*}/release-network.sh" "$FIXTURE/scripts/release-network.sh"
@@ -257,6 +257,15 @@ fixture branch; export BRANCH_FIXTURE=feature; reject 'main only' check v9.8.7
 fixture upstream; export UPSTREAM_FIXTURE=imeoer/main; reject 'track origin/main' check v9.8.7
 fixture behind; reject 'differs from upstream' check v9.8.7
 fixture stale-upstream; reject 'Live origin/main' check v9.8.7
+fixture stale-upstream
+touch "$FIXTURE/local-tag" "$FIXTURE/source-tag"
+export GITHUB_ACTIONS=true GITHUB_REPOSITORY=MoekaProject/moeka GITHUB_REF=refs/heads/main
+export GITHUB_SHA="$OTHER_FIXTURE" MOEKA_RELEASE_SOURCE_SHA="$HEAD_FIXTURE" MOEKA_RELEASE_SOURCE_TAG=v9.8.7
+invoke check v9.8.7 || fail 'Existing tagged source rejected with a different main dispatch SHA'
+(cd "$FIXTURE" && GITHUB_RUN_ID=1234 python3 scripts/release-artifacts.py verify --version 9.8.7 >/dev/null) \
+    || fail 'Artifact verification used the dispatch SHA instead of the tagged source'
+MOEKA_RELEASE_SOURCE_TAG=v9.8.8 reject 'Release source tag mismatch' check v9.8.7
+echo 'PASS immutable tagged source and mismatched tag refusal'
 fixture version; reject 'Tag/version mismatch' check v9.8.8
 fixture tag-mismatch; reject 'Local tag mismatch' publish v9.8.7
 fixture remote-tag-mismatch; reject 'Remote tag mismatch' publish v9.8.7
