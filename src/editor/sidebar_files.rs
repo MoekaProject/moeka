@@ -520,6 +520,7 @@ impl EditorView {
                 let trimmed = value.trim();
                 if !trimmed.is_empty() {
                     let new_path = parent.join(trimmed);
+                    let parent = parent.clone();
                     cx.spawn(async move |this, cx| {
                         let create_path = new_path.clone();
                         let result =
@@ -536,6 +537,12 @@ impl EditorView {
                                     new_path.display()
                                 );
                                 editor.notify_error(message, cx);
+                                return;
+                            }
+                            if editor.remote_workspace_active
+                                || editor.workspace_root_for_path(&parent)
+                                    != Some(editor.sidebar_root.clone())
+                            {
                                 return;
                             }
                             editor.expanded_dirs.insert(new_path.clone());
@@ -565,6 +572,11 @@ impl EditorView {
                 new_path.display()
             );
             self.notify_error(message, cx);
+            return;
+        }
+        if self.remote_workspace_active
+            || self.workspace_root_for_path(&parent) != Some(self.sidebar_root.clone())
+        {
             return;
         }
         self.schedule_sidebar_directory_refresh(parent.clone(), cx);

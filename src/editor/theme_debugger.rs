@@ -60,10 +60,12 @@ impl EditorView {
         self.styles.ui.base_spec.animations_enabled =
             crate::ui::motion::enabled(self.system_reduced_motion);
         let ui_theme = self.app_settings.ui_theme_for(self.theme_kind);
-        self.styles = self.styles.retheme(
+        let dark_sidebar_theme = self.app_settings.dark_theme_kind().build();
+        self.styles = self.styles.retheme_with_sidebar_theme(
             &self.theme,
             &ui_theme,
             self.app_settings.sidebar_always_dark,
+            &dark_sidebar_theme,
         );
         self.styles.editor.editor_font_size_px = self.app_settings.effective_editor_font_size();
         self.styles.editor.editor_paragraph_line_height_factor = self.app_settings.line_height;
@@ -101,15 +103,13 @@ impl EditorView {
     pub(crate) fn set_ui_appearance(
         &mut self,
         corners: crate::style::UiCorners,
-        elevation: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.app_settings.ui_corners == corners && self.app_settings.ui_elevation == elevation {
+        if self.app_settings.ui_corners == corners {
             return;
         }
 
         self.app_settings.ui_corners = corners;
-        self.app_settings.ui_elevation = elevation;
         self.set_ui_style_spec(self.app_settings.ui_style_spec(), cx);
         self.app_settings.save();
     }
@@ -1322,6 +1322,35 @@ fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::format_theme_debugger_export;
+
+    #[cfg(feature = "gpui-test-support")]
+    #[gpui::test]
+    fn light_theme_keeps_selected_dark_palette_for_always_dark_sidebar(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext;
+
+        let editor = cx.update(|cx| {
+            cx.new(|cx| super::EditorView::new_with_mode(cx, true, false, Some(""), false))
+        });
+        cx.update(|cx| {
+            editor.update(cx, |editor, cx| {
+                editor.app_settings.sidebar_always_dark = true;
+                editor.set_theme(crate::theme::ThemeKind::DraculaNight, cx);
+                editor.set_theme(crate::theme::ThemeKind::PorcelainMist, cx);
+                assert_eq!(
+                    editor.styles.sidebar.sidebar_bg,
+                    crate::theme::ThemeKind::DraculaNight.build().bg_secondary
+                );
+                editor.app_settings.sidebar_always_dark = false;
+                editor.refresh_theme_styles(false, cx);
+                assert_eq!(
+                    editor.styles.sidebar.sidebar_bg,
+                    crate::theme::ThemeKind::PorcelainMist.build().bg_secondary
+                );
+            });
+        });
+    }
 
     #[test]
     fn runtime_ui_spec_survives_theme_and_sidebar_round_trips() {

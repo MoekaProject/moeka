@@ -16,7 +16,160 @@ struct RemoteWorkspaceClose {
 #[cfg(all(test, feature = "gpui-test-support"))]
 mod tests {
     use super::*;
+    use crate::editor::workspace_strip::WorkspaceKey;
     use gpui::AppContext as _;
+    use std::sync::Arc;
+
+    #[gpui::test]
+    fn starred_view_state_and_entries_follow_local_workspace_switches(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        moeka_fs::local::native::create_dir(&first).unwrap();
+        moeka_fs::local::native::create_dir(&second).unwrap();
+        let editor = cx
+            .update(|cx| cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some(""), false)));
+        editor.update(cx, |editor, cx| {
+            editor.workspaces = vec![first.clone(), second.clone()];
+            editor.sidebar_root = first.clone();
+            let first_key = WorkspaceKey::Local(first.clone());
+            let second_key = WorkspaceKey::Local(second.clone());
+            editor.app_settings.stars_for_mut(&first_key).files = vec![first.join("star.md")];
+            editor.app_settings.stars_for_mut(&first_key).collapsed = true;
+            editor.app_settings.stars_for_mut(&second_key).files = vec![second.join("star.md")];
+            editor.focused_starred_path = Some(first.join("star.md"));
+            editor.sidebar_starred_collapsed = true;
+            editor.switch_workspace(second.clone(), cx);
+            assert_eq!(
+                editor.visible_starred_sidebar_files(),
+                vec![second.join("star.md")]
+            );
+            assert!(!editor.sidebar_starred_collapsed);
+            assert!(editor.focused_starred_path.is_none());
+            editor.focused_starred_path = Some(second.join("star.md"));
+            editor.switch_workspace(first.clone(), cx);
+            assert_eq!(
+                editor.visible_starred_sidebar_files(),
+                vec![first.join("star.md")]
+            );
+            assert!(editor.sidebar_starred_collapsed);
+            assert_eq!(editor.focused_starred_path, Some(first.join("star.md")));
+            editor.switch_workspace(second.clone(), cx);
+            assert_eq!(editor.focused_starred_path, Some(second.join("star.md")));
+        });
+    }
+
+    #[gpui::test]
+    fn starred_view_state_isolated_between_local_and_ssh(cx: &mut gpui::TestAppContext) {
+        use moeka_fs::path::{FilesystemId, NativePath, ResourcePath};
+        let directory = tempfile::tempdir().unwrap();
+        let root = ResourcePath {
+            filesystem: FilesystemId::Ssh([7; 32]),
+            path: NativePath::unix_absolute("/work").unwrap(),
+        };
+        let remote_key = WorkspaceKey::Remote {
+            destination: "host".into(),
+            root: root.clone(),
+        };
+        let remote_view = remote_view_key("host", &root);
+        let other_root = ResourcePath {
+            filesystem: FilesystemId::Ssh([8; 32]),
+            path: NativePath::unix_absolute("/other").unwrap(),
+        };
+        let other_view = remote_view_key("other-host", &other_root);
+        let editor = cx
+            .update(|cx| cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some(""), false)));
+        editor.update(cx, |editor, cx| {
+            editor.sidebar_root = directory.path().to_path_buf();
+            let local_key = editor.active_starred_workspace_key();
+            editor.app_settings.stars_for_mut(&local_key).files =
+                vec![directory.path().join("star.md")];
+            editor.ssh_restore = Some(config_store::SshRestore::Connected {
+                destination: "host".into(),
+                config_file: None,
+                root: root.clone(),
+                active: true,
+            });
+            editor.ssh_restore_more = vec![config_store::SshRestore::Connected {
+                destination: "other-host".into(),
+                config_file: None,
+                root: other_root.clone(),
+                active: false,
+            }];
+            editor.show_view(Some(remote_view.clone()), cx);
+            assert_eq!(editor.active_starred_workspace_key(), remote_key);
+            assert!(editor.visible_starred_sidebar_files().is_empty());
+            editor.app_settings.stars_for_mut(&remote_key).resources = vec![root.clone()];
+            editor.focused_starred_path = Some(PathBuf::from("remote-focus"));
+            editor.show_view(Some(other_view), cx);
+            assert_eq!(
+                editor.active_starred_workspace_key(),
+                WorkspaceKey::Remote {
+                    destination: "other-host".into(),
+                    root: other_root,
+                }
+            );
+            assert!(editor.visible_starred_resources().is_empty());
+            editor.show_view(None, cx);
+            assert_eq!(
+                editor.visible_starred_sidebar_files(),
+                vec![directory.path().join("star.md")]
+            );
+            assert!(editor.focused_starred_path.is_none());
+            editor.show_view(Some(remote_view), cx);
+            assert_eq!(editor.visible_starred_resources(), vec![root]);
+            assert_eq!(
+                editor.focused_starred_path,
+                Some(PathBuf::from("remote-focus"))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn image_tab_remains_renderable_after_switching_to_remote_view(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let image_path = directory.path().join("photo.png");
+        image::RgbaImage::new(8, 4).save(&image_path).unwrap();
+        let image_key = image_path.to_string_lossy().into_owned();
+        let image = Arc::new(gpui::RenderImage::new([image::Frame::new(
+            image::RgbaImage::new(8, 4),
+        )]));
+        let editor = cx
+            .update(|cx| cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some(""), false)));
+        editor.update(cx, |editor, cx| {
+            editor.workspaces.push(directory.path().to_path_buf());
+            editor.sidebar_root = directory.path().to_path_buf();
+            editor.tabs[0].path = Some(image_path.clone());
+            editor.tabs[0].file_kind = Some(FileKind::Image);
+            editor.current_file_path = Some(image_path);
+            editor.active_file_kind_cache = Some(FileKind::Image);
+            editor
+                .image_cache
+                .insert(image_key.clone(), Some(image.clone()));
+            let key = PathBuf::from(format!("{REMOTE_VIEW_PREFIX}host\u{0}/work"));
+            editor.show_view(Some(key), cx);
+            editor.create_remote_scratch_tab(cx);
+            editor.show_view(None, cx);
+            assert!(editor.active_tab_is_image());
+            assert!(
+                editor.image_cache.contains_key(&image_key),
+                "returning to the view should start reloading the image"
+            );
+        });
+        cx.run_until_parked();
+        editor.update(cx, |editor, _| {
+            assert!(
+                editor
+                    .image_cache
+                    .get(&image_key)
+                    .and_then(Option::as_ref)
+                    .is_some(),
+                "the image renderer needs a decoded image after returning to its workspace"
+            );
+        });
+    }
 
     #[gpui::test]
     fn each_workspace_view_keeps_its_own_tabs_and_tab_activation_never_switches_views(
@@ -198,6 +351,8 @@ pub(crate) struct WorkspaceState {
     pub history: Vec<TabNavigationTarget>,
     pub history_index: usize,
     pub closed_tabs: Vec<OpenTab>,
+    pub starred_scroll: ScrollHandle,
+    pub focused_starred_path: Option<PathBuf>,
     pub tree: WorkspaceTreeState,
 }
 
@@ -252,6 +407,8 @@ impl WorkspaceState {
             history: Vec::new(),
             history_index: 0,
             closed_tabs: Vec::new(),
+            starred_scroll: ScrollHandle::new(),
+            focused_starred_path: None,
             tree: WorkspaceTreeState::default(),
         }
     }
@@ -274,6 +431,91 @@ pub(crate) fn is_remote_view_key(key: &Path) -> bool {
 }
 
 impl EditorView {
+    pub(crate) fn active_starred_workspace_key(&self) -> workspace_strip::WorkspaceKey {
+        use workspace_strip::WorkspaceKey;
+        if self.remote_workspace_active {
+            if let Some(workspace) = self.remote_workspace.as_ref().filter(|workspace| {
+                self.live_view.as_ref().is_none_or(|key| {
+                    *key == remote_view_key(&workspace.destination, &workspace.root)
+                })
+            }) {
+                return WorkspaceKey::Remote {
+                    destination: workspace.destination.clone(),
+                    root: workspace.root.clone(),
+                };
+            }
+            if let Some(config_store::SshRestore::Connected {
+                destination,
+                root,
+                active: true,
+                ..
+            }) = self.ssh_restore.as_ref().filter(|restore| {
+                matches!(restore, config_store::SshRestore::Connected { destination, root, .. }
+                    if self.live_view.as_ref().is_none_or(|key| *key == remote_view_key(destination, root)))
+            })
+            {
+                return WorkspaceKey::Remote {
+                    destination: destination.clone(),
+                    root: root.clone(),
+                };
+            }
+            if let Some((destination, root, ..)) = self
+                .pending_ssh_workspace_labels()
+                .into_iter()
+                .find(|(_, _, _, _, active)| *active)
+            {
+                return WorkspaceKey::Remote { destination, root };
+            }
+            return WorkspaceKey::Local(self.live_view_key());
+        }
+        WorkspaceKey::Local(self.sidebar_root.clone())
+    }
+
+    fn restore_starred_view(&mut self, state: &mut WorkspaceState) {
+        self.sidebar_starred_scroll_handle =
+            std::mem::replace(&mut state.starred_scroll, ScrollHandle::new());
+        self.focused_starred_path = state.focused_starred_path.take();
+        self.sidebar_starred_collapsed = self
+            .app_settings
+            .stars_for(&self.active_starred_workspace_key())
+            .is_some_and(|stars| stars.collapsed);
+        self.sidebar_starred_motion = None;
+    }
+
+    fn reload_active_image_if_missing(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self
+            .active_tab_index()
+            .and_then(|index| self.tabs.get(index))
+        else {
+            return;
+        };
+        if !tab.file_kind.as_ref().is_some_and(FileKind::is_image) {
+            return;
+        }
+        let path = (!tab.is_remote)
+            .then(|| {
+                tab.path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
+            .flatten();
+        let remote = (!tab.remote_binding_lost)
+            .then(|| tab.remote.as_ref().and_then(|state| state.resource.clone()))
+            .flatten();
+        if let Some(resource) = remote
+            && !self
+                .image_cache
+                .contains_key(&remote::remote_image_cache_key(&resource))
+        {
+            self.queue_remote_tab_image(resource, cx);
+        }
+        if let Some(path) = path
+            && !self.image_cache.contains_key(&path)
+        {
+            self.queue_image_load(path, cx);
+        }
+    }
+
     /// The key of the tab view currently on screen: a local root, or an SSH view key.
     pub(crate) fn live_view_key(&self) -> PathBuf {
         self.live_view
@@ -296,6 +538,9 @@ impl EditorView {
             .clone()
             .unwrap_or_else(|| self.sidebar_root.clone());
         let mut state = WorkspaceState::new(&key, self.pane_layout.clone(), self.focused_pane_id);
+        state.starred_scroll =
+            std::mem::replace(&mut self.sidebar_starred_scroll_handle, ScrollHandle::new());
+        state.focused_starred_path = self.focused_starred_path.take();
         state.history = std::mem::take(&mut self.tab_navigation_history);
         state.history_index = self.tab_navigation_index;
         state.closed_tabs = std::mem::take(&mut self.recently_closed_tabs);
@@ -304,12 +549,13 @@ impl EditorView {
 
     /// Brings the view stored under `key` (or a fresh one) onto the screen.
     fn restore_view(&mut self, key: &Path, cx: &mut Context<Self>) {
-        let state = self.workspace_states.remove(key).unwrap_or_else(|| {
+        let mut state = self.workspace_states.remove(key).unwrap_or_else(|| {
             let id = self.next_pane_id;
             self.next_pane_id += 1;
             self.panes.push(Pane::new(id));
             WorkspaceState::new(key, PaneLayout::Leaf(id), id)
         });
+        self.restore_starred_view(&mut state);
         self.pane_layout = state.layout;
         self.focus_pane(state.focused_pane, cx);
         if state.needs_hydration {
@@ -348,13 +594,23 @@ impl EditorView {
         if adopt_unscoped {
             // Tabs opened before any workspace existed belong to the first one.
             self.live_view = target;
+            self.remote_workspace_active = true;
+            self.sidebar_starred_collapsed = self
+                .app_settings
+                .stars_for(&self.active_starred_workspace_key())
+                .is_some_and(|stars| stars.collapsed);
+            self.sidebar_starred_scroll_handle = ScrollHandle::new();
+            self.focused_starred_path = None;
+            self.sidebar_starred_motion = None;
         } else {
             self.stash_live_view();
             self.live_view = target.clone();
+            self.remote_workspace_active = target.is_some();
             let key = target.unwrap_or_else(|| self.sidebar_root.clone());
             self.restore_view(&key, cx);
         }
         self.remote_workspace_active = self.live_view.is_some();
+        self.reload_active_image_if_missing(cx);
         session_store::persist_session(self);
         cx.notify();
     }
@@ -650,6 +906,11 @@ impl EditorView {
             history: std::mem::take(&mut self.tab_navigation_history),
             history_index: self.tab_navigation_index,
             closed_tabs: std::mem::take(&mut self.recently_closed_tabs),
+            starred_scroll: std::mem::replace(
+                &mut self.sidebar_starred_scroll_handle,
+                ScrollHandle::new(),
+            ),
+            focused_starred_path: self.focused_starred_path.take(),
             tree: WorkspaceTreeState {
                 scroll: std::mem::replace(&mut self.sidebar_scroll_handle, ScrollHandle::new()),
                 file_list_scroll: std::mem::replace(
@@ -674,14 +935,16 @@ impl EditorView {
 
     pub(super) fn activate_workspace_state(&mut self, cx: &mut Context<Self>) {
         let root = self.sidebar_root.clone();
-        let state = self.workspace_states.remove(&root).unwrap_or_else(|| {
+        let mut state = self.workspace_states.remove(&root).unwrap_or_else(|| {
             let id = self.next_pane_id;
             self.next_pane_id += 1;
             self.panes.push(Pane::new(id));
             WorkspaceState::new(&root, PaneLayout::Leaf(id), id)
         });
+        self.restore_starred_view(&mut state);
         self.pane_layout = state.layout;
         self.focus_pane(state.focused_pane, cx);
+        self.reload_active_image_if_missing(cx);
         if state.needs_hydration {
             session_store::hydrate_visible_workspace(self);
             self.invalidate_active_file_panel_caches();

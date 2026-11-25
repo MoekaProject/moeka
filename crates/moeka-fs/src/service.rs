@@ -62,6 +62,7 @@ pub enum Request {
         expected_build: Option<BuildIdentity>,
     },
     PeerIdentity,
+    HomeDirectory,
     Metadata {
         path: NativePath,
         follow: bool,
@@ -670,6 +671,13 @@ impl Service {
         }
         match request {
             Request::Hello { .. } => unreachable!(),
+            Request::HomeDirectory => {
+                let home = std::env::var_os("HOME")
+                    .ok_or_else(|| FsError::invalid("home_directory", "HOME is not set"))?;
+                self.backend
+                    .canonicalize(&NativePath::from_local(std::path::Path::new(&home)))
+                    .map(Response::Path)
+            }
             Request::PeerIdentity => crate::peer::identity()
                 .map(Response::PeerIdentity)
                 .map_err(|error| FsError::from_io("peer_identity", None, error)),
@@ -1275,6 +1283,20 @@ mod tests {
             })
             .unwrap();
         service
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_directory_uses_the_server_environment() {
+        let home = std::env::var_os("HOME").expect("test HOME");
+        let response = ready_service().execute(Request::HomeDirectory).unwrap();
+        let Response::Path(path) = response else {
+            panic!("expected home directory path");
+        };
+        assert_eq!(
+            path.to_local().unwrap(),
+            std::fs::canonicalize(std::path::Path::new(&home)).unwrap()
+        );
     }
 
     #[test]

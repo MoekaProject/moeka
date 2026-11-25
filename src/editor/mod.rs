@@ -375,10 +375,6 @@ pub(crate) struct ContextSubmenuAim {
 pub(crate) enum ContextMenuKind {
     SidebarSettings,
     AddWorkspace,
-    Sidebar {
-        path: PathBuf,
-        is_dir: bool,
-    },
     RemoteCreate {
         parent: moeka_fs::path::ResourcePath,
         generation: u64,
@@ -2680,6 +2676,7 @@ pub struct EditorView {
     pub(crate) sidebar_drag_hover_target: Option<PathBuf>,
     /// Drag-hover directory awaiting delayed expansion.
     pub(crate) sidebar_drag_expand_hover_dir: Option<PathBuf>,
+    pub(crate) remote_drag_expand_hover_dir: Option<moeka_fs::path::ResourcePath>,
     /// Child hit position for the current drag move; prevents the tree from clearing hover in the same frame.
     pub(crate) sidebar_drag_child_hover_position: Option<(f32, f32)>,
     /// Autoscroll task for dragging near the visible sidebar edge.
@@ -2689,8 +2686,10 @@ pub struct EditorView {
     pub(crate) suppress_fold_for_empty_selection_drag: bool,
     /// Delayed drag-hover expansion task.
     pub(crate) sidebar_drag_expand_task: Option<Task<()>>,
+    pub(crate) remote_drag_expand_task: Option<Task<()>>,
     /// Directories automatically expanded on drag hover and eligible to collapse afterward.
     pub(crate) sidebar_drag_auto_expanded_dirs: HashSet<PathBuf>,
+    pub(crate) remote_drag_auto_expanded_dirs: HashSet<moeka_fs::path::ResourcePath>,
     /// Shared so the render path can take a handle per frame instead of deep
     /// copying every entry (and its `PathBuf`) on each repaint.
     pub(crate) sidebar_items_cache: Rc<Vec<SidebarItem>>,
@@ -3098,10 +3097,12 @@ impl EditorView {
         let ui_theme = app_settings.ui_theme_for(theme_kind);
         let mut ui_spec = app_settings.ui_style_spec();
         ui_spec.animations_enabled = false;
-        let mut styles = crate::style::Styles::from_theme_with_spec(
+        let dark_sidebar_theme = app_settings.dark_theme_kind().build();
+        let mut styles = crate::style::Styles::from_theme_with_spec_and_sidebar_theme(
             &theme,
             &ui_theme,
             app_settings.sidebar_always_dark,
+            &dark_sidebar_theme,
             ui_spec,
         );
         // Keep Markdown headings at their original sizes while rendering body
@@ -3514,13 +3515,16 @@ impl EditorView {
             focused_starred_path: None,
             sidebar_drag_hover_target: None,
             sidebar_drag_expand_hover_dir: None,
+            remote_drag_expand_hover_dir: None,
             sidebar_drag_child_hover_position: None,
             sidebar_drag_scroll_task: None,
             selection_drag_scroll_task: None,
             selection_drag_position: None,
             suppress_fold_for_empty_selection_drag: false,
             sidebar_drag_expand_task: None,
+            remote_drag_expand_task: None,
             sidebar_drag_auto_expanded_dirs: HashSet::new(),
+            remote_drag_auto_expanded_dirs: HashSet::new(),
             sidebar_items_cache: Rc::new(Vec::new()),
             sidebar_filter: sidebar_filter::SidebarFilter::default(),
             sidebar_motion_view: None,
@@ -3809,6 +3813,14 @@ impl EditorView {
             if restore_session {
                 session_store::restore_session(&mut this, cx);
             }
+            let workspace = this.active_starred_workspace_key();
+            if this.app_settings.migrate_legacy_stars(&workspace) {
+                this.save_settings_in_background(cx);
+            }
+            this.sidebar_starred_collapsed = this
+                .app_settings
+                .stars_for(&workspace)
+                .is_some_and(|stars| stars.collapsed);
             if this.decorations.is_empty() {
                 this.reparse();
             }
@@ -5510,6 +5522,9 @@ impl EditorView {
                 }
                 editor.with_pane_if_alive(source.pane_id(), |editor| {
                     if !source.is_current(editor) {
+                        if editor.image_cache.get(&path).is_some_and(Option::is_none) {
+                            editor.image_cache.remove(&path);
+                        }
                         return;
                     }
                     match result {

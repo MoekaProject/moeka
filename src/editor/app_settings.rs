@@ -117,8 +117,6 @@ impl<'de> serde::Deserialize<'de> for MinimapPosition {
 pub(crate) struct AppSettings {
     #[serde(default)]
     pub ui_corners: crate::style::UiCorners,
-    #[serde(default)]
-    pub ui_elevation: bool,
     #[serde(default = "default_theme")]
     pub theme: String,
     /// `auto` follows the system appearance; `light`/`dark` pin it.
@@ -166,10 +164,12 @@ pub(crate) struct AppSettings {
     pub file_list_visible: bool,
     #[serde(default = "default_date_time_format")]
     pub date_time_format: String,
-    #[serde(default = "default_starred_files")]
+    #[serde(default, skip_serializing)]
     pub starred_files: Vec<PathBuf>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing)]
     pub starred_resources: Vec<moeka_fs::path::ResourcePath>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_stars: Vec<WorkspaceStars>,
     #[serde(default = "default_outline_rail_visible")]
     pub outline_rail_visible: bool,
     #[serde(default, alias = "minimap_visible")]
@@ -307,8 +307,15 @@ fn default_file_list_visible() -> bool {
     true
 }
 
-fn default_starred_files() -> Vec<PathBuf> {
-    Vec::new()
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct WorkspaceStars {
+    pub workspace: super::workspace_strip::WorkspaceKey,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<moeka_fs::path::ResourcePath>,
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 fn default_outline_rail_visible() -> bool {
@@ -371,7 +378,6 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             ui_corners: crate::style::UiCorners::default(),
-            ui_elevation: false,
             theme: default_theme(),
             theme_mode: ThemeMode::Auto.as_str().to_string(),
             dark_theme: default_dark_theme(),
@@ -395,8 +401,9 @@ impl Default for AppSettings {
             workspace_search_width: None,
             file_list_visible: default_file_list_visible(),
             date_time_format: default_date_time_format(),
-            starred_files: default_starred_files(),
+            starred_files: Vec::new(),
             starred_resources: Vec::new(),
+            workspace_stars: Vec::new(),
             outline_rail_visible: default_outline_rail_visible(),
             minimap_position: MinimapPosition::default(),
             minimap_last_side: None,
@@ -429,7 +436,6 @@ impl AppSettings {
         crate::style::UiStyleSpec {
             appearance: crate::style::UiAppearance {
                 corners: self.ui_corners,
-                elevation: self.ui_elevation,
             },
             ..Default::default()
         }
@@ -648,63 +654,148 @@ impl AppSettings {
         self.date_time_format = format;
     }
 
-    pub(crate) fn is_starred_file(&self, path: &Path) -> bool {
-        self.starred_files.iter().any(|candidate| candidate == path)
+    pub(crate) fn stars_for(
+        &self,
+        workspace: &super::workspace_strip::WorkspaceKey,
+    ) -> Option<&WorkspaceStars> {
+        self.workspace_stars
+            .iter()
+            .find(|entry| &entry.workspace == workspace)
     }
 
-    pub(crate) fn add_starred_file(&mut self, path: PathBuf) {
-        self.starred_files.retain(|candidate| candidate != &path);
-        self.starred_files.insert(0, path);
+    pub(crate) fn stars_for_mut(
+        &mut self,
+        workspace: &super::workspace_strip::WorkspaceKey,
+    ) -> &mut WorkspaceStars {
+        if let Some(index) = self
+            .workspace_stars
+            .iter()
+            .position(|entry| &entry.workspace == workspace)
+        {
+            return &mut self.workspace_stars[index];
+        }
+        self.workspace_stars.push(WorkspaceStars {
+            workspace: workspace.clone(),
+            files: Vec::new(),
+            resources: Vec::new(),
+            collapsed: false,
+        });
+        self.workspace_stars.last_mut().unwrap()
     }
 
-    pub(crate) fn remove_starred_file(&mut self, path: &Path) -> bool {
-        let original_len = self.starred_files.len();
-        self.starred_files.retain(|candidate| candidate != path);
-        self.starred_files.len() != original_len
+    pub(crate) fn migrate_legacy_stars(
+        &mut self,
+        workspace: &super::workspace_strip::WorkspaceKey,
+    ) -> bool {
+        if self.starred_files.is_empty() && self.starred_resources.is_empty() {
+            return false;
+        }
+        let files = std::mem::take(&mut self.starred_files);
+        let resources = std::mem::take(&mut self.starred_resources);
+        let entry = self.stars_for_mut(workspace);
+        for path in files {
+            if !entry.files.contains(&path) {
+                entry.files.push(path);
+            }
+        }
+        for resource in resources {
+            if !entry.resources.contains(&resource) {
+                entry.resources.push(resource);
+            }
+        }
+        true
+    }
+
+    pub(crate) fn is_starred_file(
+        &self,
+        workspace: &super::workspace_strip::WorkspaceKey,
+        path: &Path,
+    ) -> bool {
+        self.stars_for(workspace)
+            .is_some_and(|entry| entry.files.iter().any(|candidate| candidate == path))
+    }
+
+    pub(crate) fn add_starred_file(
+        &mut self,
+        workspace: &super::workspace_strip::WorkspaceKey,
+        path: PathBuf,
+    ) {
+        let files = &mut self.stars_for_mut(workspace).files;
+        files.retain(|candidate| candidate != &path);
+        files.insert(0, path);
+    }
+
+    pub(crate) fn remove_starred_file(
+        &mut self,
+        workspace: &super::workspace_strip::WorkspaceKey,
+        path: &Path,
+    ) -> bool {
+        let Some(entry) = self
+            .workspace_stars
+            .iter_mut()
+            .find(|entry| &entry.workspace == workspace)
+        else {
+            return false;
+        };
+        let original_len = entry.files.len();
+        entry.files.retain(|candidate| candidate != path);
+        entry.files.len() != original_len
     }
 
     /// An unavailable mount is not evidence of deletion. Only remove duplicate
     /// records here; confirmed deletes/renames use the explicit prefix helpers.
     #[cfg(test)]
-    pub(crate) fn prune_missing_starred_files(&mut self) -> bool {
-        let original_len = self.starred_files.len();
+    pub(crate) fn prune_missing_starred_files(
+        &mut self,
+        workspace: &super::workspace_strip::WorkspaceKey,
+    ) -> bool {
+        let files = &mut self.stars_for_mut(workspace).files;
+        let original_len = files.len();
         let mut seen = std::collections::HashSet::new();
-        self.starred_files.retain(|path| seen.insert(path.clone()));
-        self.starred_files.len() != original_len
+        files.retain(|path| seen.insert(path.clone()));
+        files.len() != original_len
     }
 
     pub(crate) fn rename_starred_prefix(&mut self, from: &Path, to: &Path) -> bool {
         let mut changed = false;
-        for path in &mut self.starred_files {
-            if path == from {
-                *path = to.to_path_buf();
-                changed = true;
-                continue;
-            }
+        for entry in &mut self.workspace_stars {
+            let mut entry_changed = false;
+            for path in &mut entry.files {
+                if path == from {
+                    *path = to.to_path_buf();
+                    entry_changed = true;
+                    continue;
+                }
 
-            if let Ok(relative) = path.strip_prefix(from) {
-                *path = to.join(relative);
-                changed = true;
-            }
-        }
-
-        if changed {
-            let mut deduped = Vec::with_capacity(self.starred_files.len());
-            for path in self.starred_files.drain(..) {
-                if !deduped.iter().any(|candidate| candidate == &path) {
-                    deduped.push(path);
+                if let Ok(relative) = path.strip_prefix(from) {
+                    *path = to.join(relative);
+                    entry_changed = true;
                 }
             }
-            self.starred_files = deduped;
+
+            if entry_changed {
+                let mut deduped = Vec::with_capacity(entry.files.len());
+                for path in entry.files.drain(..) {
+                    if !deduped.iter().any(|candidate| candidate == &path) {
+                        deduped.push(path);
+                    }
+                }
+                entry.files = deduped;
+                changed = true;
+            }
         }
 
         changed
     }
 
     pub(crate) fn remove_starred_prefix(&mut self, prefix: &Path) -> bool {
-        let original_len = self.starred_files.len();
-        self.starred_files.retain(|path| !path.starts_with(prefix));
-        self.starred_files.len() != original_len
+        let mut changed = false;
+        for entry in &mut self.workspace_stars {
+            let original_len = entry.files.len();
+            entry.files.retain(|path| !path.starts_with(prefix));
+            changed |= entry.files.len() != original_len;
+        }
+        changed
     }
 }
 
@@ -715,6 +806,7 @@ pub(crate) fn theme_kind_to_string(kind: ThemeKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::{AppSettings, MinimapPosition, theme_kind_to_string};
+    use crate::editor::workspace_strip::WorkspaceKey;
     #[test]
     fn remote_stars_round_trip_authorities_and_native_units_without_local_paths() {
         use moeka_fs::path::{FilesystemId, NativePath, ResourcePath};
@@ -730,13 +822,18 @@ mod tests {
                 path: NativePath::Unix(b"/work/bad-\xff.md".to_vec()),
             },
         ];
-        let settings = AppSettings {
-            starred_resources: resources.clone(),
-            ..Default::default()
+        let workspace = WorkspaceKey::Remote {
+            destination: "example".into(),
+            root: ResourcePath {
+                filesystem: FilesystemId::Ssh([1; 32]),
+                path: NativePath::unix_absolute("/work").unwrap(),
+            },
         };
+        let mut settings = AppSettings::default();
+        settings.stars_for_mut(&workspace).resources = resources.clone();
         let restored: AppSettings =
             serde_yaml::from_str(&serde_yaml::to_string(&settings).unwrap()).unwrap();
-        assert_eq!(restored.starred_resources, resources);
+        assert_eq!(restored.stars_for(&workspace).unwrap().resources, resources);
         assert!(restored.starred_files.is_empty());
     }
     use crate::editor::attachments::{AttachmentLinkSyntax, AttachmentPathStyle};
@@ -760,27 +857,29 @@ mod tests {
         use crate::style::UiCorners;
         let legacy: AppSettings = serde_yaml::from_str("{}").unwrap();
         assert_eq!(legacy.ui_corners, UiCorners::Half);
-        assert!(!legacy.ui_elevation);
         assert_eq!(
             legacy.ui_style_spec().appearance,
             crate::style::UiAppearance::default()
         );
         for corners in UiCorners::ALL {
-            for elevation in [false, true] {
-                let settings = AppSettings {
-                    ui_corners: corners,
-                    ui_elevation: elevation,
-                    ..legacy.clone()
-                };
-                let encoded = serde_yaml::to_string(&settings).unwrap();
-                let restored: AppSettings = serde_yaml::from_str(&encoded).unwrap();
-                assert_eq!(restored, settings);
-                assert_eq!(restored.ui_style_spec().appearance.corners, corners);
-                assert_eq!(restored.ui_style_spec().appearance.elevation, elevation);
-                assert_eq!(restored.font_size, legacy.font_size);
-                assert_eq!(restored.editor_theme_mode, legacy.editor_theme_mode);
-            }
+            let settings = AppSettings {
+                ui_corners: corners,
+                ..legacy.clone()
+            };
+            let encoded = serde_yaml::to_string(&settings).unwrap();
+            let restored: AppSettings = serde_yaml::from_str(&encoded).unwrap();
+            assert_eq!(restored, settings);
+            assert_eq!(restored.ui_style_spec().appearance.corners, corners);
+            assert_eq!(restored.font_size, legacy.font_size);
+            assert_eq!(restored.editor_theme_mode, legacy.editor_theme_mode);
         }
+        let old_elevation: AppSettings = serde_yaml::from_str("ui_elevation: true").unwrap();
+        assert_eq!(old_elevation, legacy);
+        assert!(
+            !serde_yaml::to_string(&old_elevation)
+                .unwrap()
+                .contains("ui_elevation")
+        );
         // Configs written while the removed preset existed keep loading.
         let removed: AppSettings = serde_yaml::from_str("ui_style: shadcn").unwrap();
         assert_eq!(removed, legacy);
@@ -803,10 +902,44 @@ mod tests {
         let mut settings = AppSettings::default();
         let unknown = std::path::PathBuf::from("offline-workspace/unavailable.md");
         let known = std::path::PathBuf::from("workspace/note.md");
-        settings.starred_files = vec![unknown.clone(), known.clone(), unknown.clone()];
-        assert!(settings.prune_missing_starred_files());
-        assert_eq!(settings.starred_files, vec![unknown, known]);
-        assert!(!settings.prune_missing_starred_files());
+        let workspace = WorkspaceKey::Local("workspace".into());
+        settings.stars_for_mut(&workspace).files =
+            vec![unknown.clone(), known.clone(), unknown.clone()];
+        assert!(settings.prune_missing_starred_files(&workspace));
+        assert_eq!(
+            settings.stars_for(&workspace).unwrap().files,
+            vec![unknown, known]
+        );
+        assert!(!settings.prune_missing_starred_files(&workspace));
+    }
+
+    #[test]
+    fn legacy_stars_migrate_once_to_active_workspace_without_cross_workspace_leakage() {
+        use moeka_fs::path::{FilesystemId, NativePath, ResourcePath};
+        let first = WorkspaceKey::Local("first".into());
+        let second = WorkspaceKey::Local("second".into());
+        let mut settings: AppSettings =
+            serde_yaml::from_str("starred_files:\n  - first/a.md\n  - first/a.md\n").unwrap();
+        let remote = ResourcePath {
+            filesystem: FilesystemId::Ssh([3; 32]),
+            path: NativePath::unix_absolute("/outside/note.md").unwrap(),
+        };
+        settings.starred_resources = vec![remote.clone(), remote.clone()];
+        settings.add_starred_file(&first, "first/a.md".into());
+        assert!(settings.migrate_legacy_stars(&first));
+        assert!(!settings.migrate_legacy_stars(&second));
+        assert_eq!(
+            settings.stars_for(&first).unwrap().files,
+            vec![std::path::PathBuf::from("first/a.md")]
+        );
+        assert_eq!(settings.stars_for(&first).unwrap().resources, vec![remote]);
+        settings.stars_for_mut(&first).collapsed = true;
+        assert!(settings.stars_for(&second).is_none());
+        let encoded = serde_yaml::to_string(&settings).unwrap();
+        assert!(!encoded.contains("starred_files:"));
+        let restored: AppSettings = serde_yaml::from_str(&encoded).unwrap();
+        assert_eq!(restored.stars_for(&first), settings.stars_for(&first));
+        assert!(!restored.is_starred_file(&second, std::path::Path::new("first/a.md")));
     }
 
     #[test]

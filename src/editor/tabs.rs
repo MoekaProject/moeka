@@ -1047,8 +1047,18 @@ impl EditorView {
                     .as_ref()
                     .is_some_and(|id| self.tabs.iter().any(|tab| &tab.id == id && tab.is_remote))
             {
+                let local_image_keys = self
+                    .all_tabs()
+                    .filter(|tab| {
+                        !tab.is_remote && tab.file_kind.as_ref().is_some_and(FileKind::is_image)
+                    })
+                    .filter_map(|tab| tab.path.as_ref())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect::<HashSet<_>>();
                 for key in self.image_cache.keys().cloned().collect::<Vec<_>>() {
-                    self.retire_image_cache_entry(&key);
+                    if !local_image_keys.contains(&key) {
+                        self.retire_image_cache_entry(&key);
+                    }
                 }
             }
             self.table_boundary_caret = None;

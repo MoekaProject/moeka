@@ -152,6 +152,9 @@ impl TreeFrame {
 impl EditorView {
     pub(super) fn toggle_starred_section(&mut self, cx: &mut Context<Self>) {
         self.sidebar_starred_collapsed = !self.sidebar_starred_collapsed;
+        let workspace = self.active_starred_workspace_key();
+        self.app_settings.stars_for_mut(&workspace).collapsed = self.sidebar_starred_collapsed;
+        self.save_settings_in_background(cx);
         let expanding = !self.sidebar_starred_collapsed;
         let paths = self.visible_starred_resources();
         let now = Instant::now();

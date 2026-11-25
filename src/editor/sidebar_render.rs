@@ -398,12 +398,12 @@ impl EditorView {
                 )
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
                         window.prevent_default();
                         cx.stop_propagation();
                         this.open_context_menu(
                             ContextMenu {
-                                position: event.position,
+                                position: gpui::point(px(0.0), px(0.0)),
                                 kind: ContextMenuKind::SidebarSettings,
                             },
                             false,
@@ -1235,6 +1235,29 @@ impl EditorView {
                     }
                 }
             }))
+            .on_drag_move(cx.listener({
+                let path = path.clone();
+                let drop_path = item_drop_target.clone();
+                move |this, event: &DragMoveEvent<DraggedResources>, _, cx| {
+                    if !event.bounds.contains(&event.event.position) {
+                        return;
+                    }
+
+                    cx.stop_propagation();
+                    this.sidebar_drag_child_hover_position =
+                        Some(Self::sidebar_drag_position_key(event.event.position));
+                    this.update_sidebar_drag_autoscroll(event.event.position, cx);
+                    this.update_sidebar_drag_expand_hover_dir(is_dir.then(|| path.clone()), cx);
+
+                    let target = moeka_fs::path::ResourcePath::local(&drop_path);
+                    let valid_move = event
+                        .drag(cx)
+                        .resources
+                        .iter()
+                        .all(|source| !super::file_tree::resource_is_within(&target, source));
+                    this.update_sidebar_drag_target(valid_move.then(|| drop_path.clone()), cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1588,14 +1611,14 @@ impl EditorView {
                             .on_mouse_down(MouseButton::Right, {
                                 let root = self.sidebar_root.clone();
                                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                    window.prevent_default();
-                                    cx.stop_propagation();
-                                    this.open_sidebar_context_menu(
-                                        root.clone(),
-                                        true,
-                                        event.position,
-                                        cx,
-                                    );
+                                    if !root.as_os_str().is_empty() {
+                                        this.open_workspace_resource_context_menu(
+                                            moeka_fs::path::ResourcePath::local(&root),
+                                            event,
+                                            window,
+                                            cx,
+                                        );
+                                    }
                                 })
                             })
                             .drag_over::<DraggedSidebarItems>(move |style, _, _, _| style)

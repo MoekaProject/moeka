@@ -101,6 +101,173 @@ mod tests {
     struct TreeHarness(Entity<EditorView>, Subscription);
 
     #[gpui::test]
+    fn dragging_a_selected_file_over_a_directory_expands_it(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.md");
+        let target = directory.path().join("target");
+        moeka_fs::local::native::write(&source, "source").unwrap();
+        moeka_fs::local::native::create_dir(&target).unwrap();
+        let editor = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut editor = EditorView::new_with_mode(cx, true, false, Some(""), false);
+                editor.sidebar_root = directory.path().to_path_buf();
+                editor.workspaces.push(editor.sidebar_root.clone());
+                editor.expanded_dirs.insert(editor.sidebar_root.clone());
+                editor.selected_sidebar_paths.insert(source.clone());
+                editor.sidebar_visible = true;
+                editor.set_sidebar_width_immediately(320.0);
+                editor.last_window_height = 600.0;
+                editor.sidebar_items_cache = Rc::new(vec![
+                    SidebarItem {
+                        name: "source.md".into(),
+                        path: source.clone(),
+                        depth: 1,
+                        is_dir: false,
+                        is_expanded: false,
+                    },
+                    SidebarItem {
+                        name: "target".into(),
+                        path: target.clone(),
+                        depth: 1,
+                        is_dir: true,
+                        is_expanded: false,
+                    },
+                ]);
+                editor.sidebar_items_dirty = false;
+                editor
+            })
+        });
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            TreeHarness(editor.clone(), cx.observe(&editor, |_, _, cx| cx.notify()))
+        });
+        let source_id = Box::leak(format!("sidebar-{}", source.display()).into_boxed_str());
+        let target_id = Box::leak(format!("sidebar-{}", target.display()).into_boxed_str());
+        let start = cx.debug_bounds(source_id).unwrap().center();
+        let end = cx.debug_bounds(target_id).unwrap().center();
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(8.0), px(0.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+        for _ in 0..5 {
+            cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+        }
+        cx.update(|_, cx| {
+            assert_eq!(
+                editor.read(cx).sidebar_drag_expand_hover_dir.as_ref(),
+                Some(&target)
+            );
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                assert!(editor.expanded_dirs.contains(&target));
+                editor.clear_sidebar_drag_state(cx);
+                assert!(!editor.expanded_dirs.contains(&target));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn resource_drag_over_local_directory_expands_it(cx: &mut gpui::TestAppContext) {
+        struct ResourceHarness(Entity<EditorView>, Subscription, PathBuf);
+        impl Render for ResourceHarness {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let _ = &self.1;
+                let source = self.2.clone();
+                let editor = self.0.read(cx);
+                let style = editor.styles.drag_preview(false, editor.ui_scale);
+                div()
+                    .w(px(700.0))
+                    .h(px(600.0))
+                    .relative()
+                    .child(
+                        self.0
+                            .update(cx, |editor, cx| editor.render_sidebar(false, cx)),
+                    )
+                    .child(
+                        div()
+                            .id("resource-drag-source")
+                            .debug_selector(|| "resource-drag-source".into())
+                            .absolute()
+                            .left(px(400.0))
+                            .top(px(100.0))
+                            .w(px(100.0))
+                            .h(px(30.0))
+                            .on_drag(
+                                DraggedResources {
+                                    resources: vec![moeka_fs::path::ResourcePath::local(&source)],
+                                },
+                                move |_, offset, _, cx| {
+                                    cx.new(|_| DraggedSidebarItemsView {
+                                        label: "resource".into(),
+                                        count: 1,
+                                        style: style.clone(),
+                                        cursor_offset: offset,
+                                    })
+                                },
+                            ),
+                    )
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
+        let source = root.join("source.md");
+        let target = root.join("target");
+        moeka_fs::local::native::create_dir(&target).unwrap();
+        let editor = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut editor = EditorView::new_with_mode(cx, true, false, Some(""), false);
+                editor.sidebar_root = root.clone();
+                editor.workspaces.push(root.clone());
+                editor.sidebar_visible = true;
+                editor.set_sidebar_width_immediately(320.0);
+                editor.last_window_height = 600.0;
+                editor.sidebar_items_cache = Rc::new(vec![SidebarItem {
+                    name: "target".into(),
+                    path: target.clone(),
+                    depth: 1,
+                    is_dir: true,
+                    is_expanded: false,
+                }]);
+                editor.sidebar_items_dirty = false;
+                editor
+            })
+        });
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            ResourceHarness(
+                editor.clone(),
+                cx.observe(&editor, |_, _, cx| cx.notify()),
+                source,
+            )
+        });
+        let start = cx.debug_bounds("resource-drag-source").unwrap().center();
+        let target_id = Box::leak(format!("sidebar-{}", target.display()).into_boxed_str());
+        let end = cx.debug_bounds(target_id).unwrap().center();
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(8.0), px(0.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                assert!(editor.expanded_dirs.contains(&target));
+                editor.clear_sidebar_drag_state(cx);
+                assert!(!editor.expanded_dirs.contains(&target));
+            });
+        });
+    }
+
+    #[gpui::test]
     fn local_and_offline_remote_stars_share_row_geometry_and_remove_action(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -117,8 +284,9 @@ mod tests {
                 editor.sidebar_visible = true;
                 editor.set_sidebar_width_immediately(320.0);
                 editor.last_window_height = 600.0;
-                editor.app_settings.starred_files = vec![local.clone()];
-                editor.app_settings.starred_resources = vec![remote.clone()];
+                let workspace = editor.active_starred_workspace_key();
+                editor.app_settings.stars_for_mut(&workspace).files = vec![local.clone()];
+                editor.app_settings.stars_for_mut(&workspace).resources = vec![remote.clone()];
                 editor.sidebar_starred_collapsed = false;
                 editor.styles.ui.spec.animations_enabled = false;
                 editor
@@ -150,8 +318,16 @@ mod tests {
         cx.simulate_click(remove.center(), Default::default());
         cx.update(|_, cx| {
             let editor = editor.read(cx);
-            assert!(!editor.app_settings.starred_resources.contains(&remote));
-            assert!(editor.app_settings.is_starred_file(&local));
+            let workspace = editor.active_starred_workspace_key();
+            assert!(
+                !editor
+                    .app_settings
+                    .stars_for(&workspace)
+                    .unwrap()
+                    .resources
+                    .contains(&remote)
+            );
+            assert!(editor.app_settings.is_starred_file(&workspace, &local));
         });
     }
 
@@ -165,7 +341,7 @@ mod tests {
                 editor.sidebar_visible = true;
                 editor.set_sidebar_width_immediately(320.0);
                 editor.last_window_height = 600.0;
-                editor.app_settings.starred_files.clear();
+                editor.app_settings.workspace_stars.clear();
                 editor.ui_language = UiLanguage::English;
                 editor.styles.ui.spec.animations_enabled = false;
                 editor
@@ -189,6 +365,17 @@ mod tests {
         assert!(cx.debug_bounds("sidebar-help").is_none());
         assert!(cx.debug_bounds("sidebar-add-workspace").is_none());
         cx.simulate_click(settings.center(), Default::default());
+        let first_menu_bounds = cx.debug_bounds("context-menu").unwrap();
+        let margin = cx.update(|_, cx| editor.read(cx).scaled(8.0));
+        assert!(
+            (f32::from(first_menu_bounds.left()) - margin).abs() < 1.0,
+            "menu={first_menu_bounds:?}, margin={margin}"
+        );
+        let gap = f32::from(settings.top() - first_menu_bounds.bottom());
+        assert!(
+            (gap - margin).abs() < 2.0,
+            "menu={first_menu_bounds:?}, settings={settings:?}, margin={margin}"
+        );
         cx.update(|_, cx| {
             assert!(matches!(
                 editor.read(cx).context_menu.as_ref().map(|menu| &menu.kind),
@@ -200,7 +387,7 @@ mod tests {
         let add = cx.debug_bounds("menu-item-Add Local Folder...").unwrap();
         assert!(menu_settings.bottom() <= help.top());
         assert!(help.bottom() <= add.top());
-        assert!(add.bottom() <= px(600.0));
+        assert!(add.bottom() < settings.top());
         assert!(cx.debug_bounds("menu-item-Add Folder...").is_none());
         if crate::platform::capabilities::CHILD_PROCESSES {
             let ssh = cx
@@ -210,7 +397,7 @@ mod tests {
                 add.bottom() <= ssh.top() + px(1.0),
                 "local={add:?}, ssh={ssh:?}"
             );
-            assert!(ssh.bottom() <= px(600.0));
+            assert!(ssh.bottom() < settings.top());
         }
         cx.simulate_click(menu_settings.center(), Default::default());
         cx.update(|_, cx| {
@@ -218,7 +405,11 @@ mod tests {
                 assert!(editor.active_tab_is_settings());
             })
         });
-        cx.simulate_click(settings.center(), Default::default());
+        cx.simulate_click(
+            gpui::point(settings.right() - px(4.0), settings.top() + px(4.0)),
+            Default::default(),
+        );
+        assert_eq!(cx.debug_bounds("context-menu").unwrap(), first_menu_bounds);
         let help = cx.debug_bounds("menu-item-Help").unwrap();
         cx.simulate_click(help.center(), Default::default());
         cx.update(|_, cx| {
@@ -275,7 +466,7 @@ mod tests {
                 editor.set_sidebar_width_immediately(320.0);
                 editor.last_window_height = 600.0;
                 editor.app_settings.simple_mode = true;
-                editor.app_settings.starred_files.clear();
+                editor.app_settings.workspace_stars.clear();
                 editor.sidebar_items_cache = Rc::new(
                     (0..100)
                         .map(|index| SidebarItem {
@@ -353,7 +544,7 @@ mod tests {
                 editor.set_sidebar_width_immediately(320.0);
                 editor.last_window_height = 600.0;
                 editor.app_settings.simple_mode = true;
-                editor.app_settings.starred_files.clear();
+                editor.app_settings.workspace_stars.clear();
                 editor.sidebar_items_cache = snapshots[0].clone();
                 editor.sidebar_items_dirty = false;
                 editor
@@ -465,9 +656,44 @@ mod tests {
     }
 
     #[gpui::test]
-    fn global_starred_files_precede_every_workspace_and_open_in_their_owner(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn file_tree_blank_space_uses_workspace_root_context_menu(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
+        let resource = moeka_fs::path::ResourcePath::local(&root);
+        let editor = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut editor = EditorView::new_with_mode(cx, true, false, Some(""), false);
+                editor.workspaces = vec![root.clone()];
+                editor.sidebar_root = root.clone();
+                editor.sidebar_visible = true;
+                editor.set_sidebar_width_immediately(320.0);
+                editor.last_window_height = 600.0;
+                editor.app_settings.workspace_stars.clear();
+                editor
+            })
+        });
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            TreeHarness(editor.clone(), cx.observe(&editor, |_, _, cx| cx.notify()))
+        });
+        let blank = cx.debug_bounds("sidebar-tree-region").unwrap().center();
+        cx.simulate_mouse_down(blank, gpui::MouseButton::Right, Default::default());
+        cx.update(|_, cx| {
+            let editor = editor.read(cx);
+            assert!(matches!(
+                editor.context_menu.as_ref().map(|menu| &menu.kind),
+                Some(super::super::ContextMenuKind::FileTreeResource {
+                    resource: selected,
+                    is_dir: true,
+                    is_root: true,
+                    ..
+                }) if selected == &resource
+            ));
+            assert!(editor.file_tree_resource_selected(&resource));
+        });
+    }
+
+    #[gpui::test]
+    fn starred_files_belong_to_the_active_workspace(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         let roots = [directory.path().join("a"), directory.path().join("b")];
         for root in &roots {
@@ -487,7 +713,8 @@ mod tests {
                 editor.set_sidebar_width_immediately(320.0);
                 editor.last_window_height = 600.0;
                 editor.app_settings.simple_mode = true;
-                editor.app_settings.starred_files = stars.to_vec();
+                let workspace = editor.active_starred_workspace_key();
+                editor.app_settings.stars_for_mut(&workspace).files = stars.to_vec();
                 editor.sidebar_starred_collapsed = false;
                 editor
             })
@@ -515,27 +742,18 @@ mod tests {
         let second = cx
             .debug_bounds(star_selectors[1])
             .expect("cross-workspace star");
-        let first = cx.debug_bounds(star_selectors[0]).unwrap();
+        cx.debug_bounds(star_selectors[0]).unwrap();
         cx.simulate_click(second.center(), Default::default());
         cx.update(|_, cx| {
             editor.update(cx, |editor, _| {
                 assert_eq!(editor.sidebar_root, roots[1]);
-                assert_eq!(editor.visible_starred_sidebar_files(), stars);
+                assert!(editor.visible_starred_sidebar_files().is_empty());
             })
         });
-        for (selector, before) in star_selectors.iter().zip([first, second]) {
-            let after = cx.debug_bounds(selector).unwrap();
-            assert_eq!(after.origin.y, before.origin.y);
-            assert_eq!(after.size.height, before.size.height);
-        }
         cx.update(|_, cx| {
             editor.update(cx, |editor, cx| {
-                editor.focus_workspace_row(roots[1].clone(), cx);
-                editor.sidebar_nav_up(cx);
-                assert_eq!(editor.focused_starred_path.as_ref(), Some(&stars[1]));
-                editor.sidebar_nav_up(cx);
-                assert_eq!(editor.focused_starred_path.as_ref(), Some(&stars[0]));
-                editor.sidebar_confirm_focused(cx);
+                editor.switch_workspace(roots[0].clone(), cx);
+                assert_eq!(editor.visible_starred_sidebar_files(), stars);
                 assert_eq!(editor.sidebar_root, roots[0]);
             })
         });
@@ -561,7 +779,7 @@ mod tests {
                 editor.set_sidebar_width_immediately(320.0);
                 editor.last_window_height = 600.0;
                 editor.app_settings.simple_mode = true;
-                editor.app_settings.starred_files.clear();
+                editor.app_settings.workspace_stars.clear();
                 editor.sidebar_items_cache = Rc::new(
                     (0..100)
                         .map(|index| SidebarItem {
@@ -623,7 +841,7 @@ mod tests {
                 editor.sidebar_visible = true;
                 editor.set_sidebar_width_immediately(320.0);
                 editor.last_window_height = 600.0;
-                editor.app_settings.starred_files.clear();
+                editor.app_settings.workspace_stars.clear();
                 editor.sidebar_items_cache = Rc::new(vec![SidebarItem {
                     name: "folder".into(),
                     path: child.clone(),
@@ -691,7 +909,7 @@ mod tests {
                 editor.sidebar_visible = true;
                 editor.set_sidebar_width_immediately(320.0);
                 editor.last_window_height = 600.0;
-                editor.app_settings.starred_files.clear();
+                editor.app_settings.workspace_stars.clear();
                 editor.file_list_visible = true;
                 editor.file_list_dir = roots[0].join("nested");
                 editor.file_list_pending_reveal_path = Some(roots[0].join("nested/file.md"));

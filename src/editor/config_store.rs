@@ -512,7 +512,6 @@ mod tests {
     fn sample_settings() -> AppSettings {
         AppSettings {
             ui_corners: crate::style::UiCorners::Full,
-            ui_elevation: true,
             theme: "One Dark".to_string(),
             theme_mode: "auto".to_string(),
             dark_theme: "One Dark".to_string(),
@@ -560,6 +559,7 @@ mod tests {
             date_time_format: "%Y-%m-%d %H:%M".to_string(),
             starred_files: Vec::new(),
             starred_resources: Vec::new(),
+            workspace_stars: Vec::new(),
             keybindings: std::collections::BTreeMap::new(),
         }
     }

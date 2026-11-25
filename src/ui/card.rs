@@ -13,9 +13,6 @@ pub(crate) fn theme_card(style: ThemeCardStyle, scale: f32) -> Div {
         .border(px(style.border_width_px))
         .border_color(style.border_color)
         .bg(style.background)
-        .when_some(style.elevation, |this, elevation| {
-            this.shadow(elevation.shadows(scale))
-        })
         .cursor(gpui::CursorStyle::Arrow)
         .hover(move |s| s.border_color(style.hover_border_color))
 }

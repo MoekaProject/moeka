@@ -164,25 +164,13 @@ pub(crate) fn tree_row(
                 inset_surface()
                     .bg(style.selected_background)
                     .border(px(style.border_width_px))
-                    .border_color(style.active_border)
-                    .when_some(style.selected_elevation, |this, elevation| {
-                        this.shadow(elevation.shadows(scale))
-                    }),
+                    .border_color(style.active_border),
             )
         })
-        // Inset rows hover with the same rounded, raised surface as selection.
+        // Inset rows hover with the same rounded surface as selection.
         .when(inset && !state.selected && !state.resizing, |this| {
-            let shadows = style
-                .selected_elevation
-                .map(|elevation| elevation.shadows(scale));
             this.group(GROUP)
-                .child(inset_surface().group_hover(GROUP, move |s| {
-                    let s = s.bg(style.hover_background);
-                    match shadows {
-                        Some(shadows) => s.shadow(shadows),
-                        None => s,
-                    }
-                }))
+                .child(inset_surface().group_hover(GROUP, move |s| s.bg(style.hover_background)))
         })
         .when(!inset && !state.resizing, |this| {
             this.hover(move |s| {

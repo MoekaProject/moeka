@@ -2103,23 +2103,6 @@ impl EditorView {
 
         vec![line_format_action(&decoration.block_type)]
     }
-    pub(crate) fn open_sidebar_context_menu(
-        &mut self,
-        path: PathBuf,
-        is_dir: bool,
-        position: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_context_menu(
-            ContextMenu {
-                position,
-                kind: ContextMenuKind::Sidebar { path, is_dir },
-            },
-            true,
-            cx,
-        );
-    }
-
     pub(super) fn open_remote_create_menu(
         &mut self,
         parent: moeka_fs::path::ResourcePath,
@@ -4208,7 +4191,9 @@ impl EditorView {
                     let mut changed = false;
                     for starred_path in &context_paths {
                         let normalized = Self::normalize_sidebar_path(starred_path);
-                        changed |= this.app_settings.remove_starred_file(&normalized);
+                        changed |= this
+                            .app_settings
+                            .remove_starred_file(&this.active_starred_workspace_key(), &normalized);
                     }
                     if changed {
                         this.app_settings.save();
@@ -5717,6 +5702,7 @@ impl EditorView {
         surface.radius_px = self.scaled(surface.radius_px);
         let mut menu_div = crate::ui::surface::surface(&surface, 1.0)
             .id(panel_id)
+            .debug_selector(move || panel_id.into())
             .absolute()
             .left(px(layout.left))
             .w(px(width))
@@ -6361,16 +6347,6 @@ impl EditorView {
                     self.scaled(self.styles.context_menu.menu_sidebar_width_px),
                 )
             }
-            ContextMenuKind::Sidebar { path, is_dir } => (
-                self.render_file_tree_resource_context_menu(
-                    moeka_fs::path::ResourcePath::local(path),
-                    *is_dir,
-                    false,
-                    self.remote_generation,
-                    cx,
-                ),
-                self.scaled(self.styles.context_menu.menu_sidebar_width_px),
-            ),
             ContextMenuKind::RemoteCreate { parent, generation } => {
                 let mut items = Vec::new();
                 for (label, folder) in [
@@ -7038,6 +7014,15 @@ impl EditorView {
                 anchor_height,
             )
         };
+        if matches!(menu.kind, ContextMenuKind::SidebarSettings) {
+            let margin = self.scaled(8.0);
+            layout.left = margin.min((layout.overlay_width - width).max(0.0));
+            let footer_height =
+                self.status_bar_height() - self.styles.workspace_roots_separator().thickness_px;
+            let bottom_anchor = (footer_height + margin).min(layout.overlay_height);
+            layout.bottom_anchor = Some(bottom_anchor);
+            layout.max_height = (layout.overlay_height - bottom_anchor - margin).max(1.0);
+        }
         if matches!(menu.kind, ContextMenuKind::TableResize { .. }) && toolbar_bounds.is_none() {
             let (anchor_x, anchor_y) = self.context_menu_overlay_coordinates(anchor_position);
             layout.left = anchor_x;

@@ -193,7 +193,9 @@ impl EditorView {
     }
 
     pub(super) fn visible_starred_sidebar_files(&self) -> Vec<PathBuf> {
-        visible_starred_paths(&self.app_settings.starred_files)
+        let workspace = self.active_starred_workspace_key();
+        let stars = self.app_settings.stars_for(&workspace);
+        visible_starred_paths(stars.map_or(&[], |stars| &stars.files))
             .into_iter()
             .filter(|path| self.sidebar_cached_path_is_dir(path) != Some(true))
             .filter(|path| {
@@ -221,8 +223,9 @@ impl EditorView {
             .map(|path| moeka_fs::path::ResourcePath::local(path))
             .chain(
                 self.app_settings
-                    .starred_resources
-                    .iter()
+                    .stars_for(&self.active_starred_workspace_key())
+                    .into_iter()
+                    .flat_map(|stars| &stars.resources)
                     .filter(|resource| {
                         matches!(resource.filesystem, moeka_fs::path::FilesystemId::Ssh(_))
                             && (!self.sidebar_filter_active()
@@ -412,6 +415,7 @@ impl EditorView {
 
     pub(super) fn clear_sidebar_drag_hover(&mut self, cx: &mut Context<Self>) {
         self.update_sidebar_drag_expand_hover_dir(None, cx);
+        self.update_remote_drag_expand_hover_dir(None, cx);
         self.update_sidebar_drag_target(None, cx);
     }
 
@@ -575,6 +579,23 @@ impl EditorView {
         self.clear_sidebar_drag_hover(cx);
         if self.collapse_sidebar_drag_auto_expanded_dirs() {
             self.invalidate_sidebar_items_cache();
+            cx.notify();
+        }
+        let auto_expanded = std::mem::take(&mut self.remote_drag_auto_expanded_dirs);
+        let mut collapsed_remote = false;
+        for path in auto_expanded {
+            if self.sidebar_filter_active() {
+                collapsed_remote |= self.remote_sidebar_filter_collapsed.insert(path);
+            } else {
+                if let Some(workspace) = self.remote_workspace.as_mut() {
+                    collapsed_remote |= workspace.expanded.remove(&path);
+                }
+                for workspace in &mut self.parked_remote_workspaces {
+                    collapsed_remote |= workspace.expanded.remove(&path);
+                }
+            }
+        }
+        if collapsed_remote {
             cx.notify();
         }
     }

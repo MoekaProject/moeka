@@ -308,11 +308,28 @@ impl EditorView {
         action: Option<StatusBarAction>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let open = self.language_picker_visible
+            && matches!(
+                (action, self.language_picker_mode),
+                (
+                    Some(StatusBarAction::OpenIndentationMenu),
+                    language_picker::LanguagePickerMode::Indentation
+                ) | (
+                    Some(StatusBarAction::OpenLanguagePicker),
+                    language_picker::LanguagePickerMode::Language
+                )
+            );
+        let ss = self.styles.status_bar();
         let button = crate::ui::button::button_frame(
             self.styles.status_button(),
-            Default::default(),
+            crate::style::ControlState {
+                open,
+                ..Default::default()
+            },
             self.ui_scale,
         )
+        .border_l(px(ss.border_width_px))
+        .border_color(ss.border)
         .gap(px(0.0))
         .child(div().text_color(title_color).child(format!("{}: ", title)))
         .child(div().text_color(value_color).child(value))

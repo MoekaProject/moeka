@@ -28,6 +28,32 @@ mod tests {
     use gpui::{Styled, px};
 
     #[test]
+    fn status_picker_open_state_uses_darker_background() {
+        for kind in ThemeKind::light_themes()
+            .iter()
+            .chain(ThemeKind::dark_themes())
+        {
+            let theme = kind.build();
+            let styles = Styles::from_theme(&theme, &theme);
+            let button = styles.status_button();
+            let normal = button.resolve(ControlState::default());
+            let open = button.resolve(ControlState {
+                open: true,
+                ..Default::default()
+            });
+            let hovered_open = button.resolve(ControlState {
+                open: true,
+                hovered: true,
+                ..Default::default()
+            });
+            assert_ne!(normal.background, open.background);
+            assert_eq!(open.background, styles.status_bar().active_background);
+            assert_eq!(hovered_open.background, open.background);
+            assert!(open.background.l < styles.status_bar().background.l);
+        }
+    }
+
+    #[test]
     fn default_explicit_shadows_match_previous_native_presets() {
         use gpui::prelude::*;
         let theme = ThemeKind::OneDark.build();
@@ -241,25 +267,21 @@ mod tests {
     }
 
     #[test]
-    fn dialog_buttons_have_borders_with_and_without_elevation() {
+    fn dialog_buttons_have_borders() {
         for kind in ThemeKind::light_themes()
             .iter()
             .chain(ThemeKind::dark_themes())
         {
             let theme = kind.build();
-            for elevation in [false, true] {
-                let mut spec = UiStyleSpec::default();
-                spec.appearance.elevation = elevation;
-                let styles = Styles::from_theme_with_spec(&theme, &theme, false, spec);
-                let button = styles.dialog_button(
-                    styles.dialog.dialog_bg,
-                    styles.dialog.dialog_message_text_color,
-                    styles.dialog.dialog_btn_secondary_hover_bg,
-                );
-                assert!(button.border_width_px > 0.0);
-                assert!(button.normal.border.a > 0.0);
-                assert_eq!(button.hover.border, button.normal.border);
-            }
+            let styles = Styles::from_theme(&theme, &theme);
+            let button = styles.dialog_button(
+                styles.dialog.dialog_bg,
+                styles.dialog.dialog_message_text_color,
+                styles.dialog.dialog_btn_secondary_hover_bg,
+            );
+            assert!(button.border_width_px > 0.0);
+            assert!(button.normal.border.a > 0.0);
+            assert_eq!(button.hover.border, button.normal.border);
         }
     }
 
@@ -299,110 +321,54 @@ mod tests {
     }
 
     #[test]
-    fn raised_appearance_shadows_only_surfaced_controls_and_selected_segments() {
-        let theme = ThemeKind::OneDark.build();
-        let mut spec = UiStyleSpec::default();
-        spec.appearance.elevation = true;
-        let styles = Styles::from_theme_with_spec(&theme, &theme, false, spec);
-        assert!(styles.ui.control.elevation.is_some());
-        let shadow = ElevationStyle::raised(false).shadows(1.0);
-        assert_eq!(shadow.len(), 2);
-        assert!(shadow.iter().all(|layer| layer.spread_radius == px(0.0)));
-        assert!(shadow.iter().all(|layer| layer.blur_radius <= px(2.0)));
-        assert!(
-            !super::button::raised_shadows(
-                styles
-                    .ui
-                    .spec
-                    .button(&theme, ButtonVariant::Default, ButtonSize::Default),
-                ControlState::default(),
-                1.0,
-            )
-            .is_empty()
-        );
-        let ghost = styles
-            .ui
-            .spec
-            .button(&theme, ButtonVariant::Ghost, ButtonSize::Default);
-        assert!(super::button::raised_shadows(ghost, ControlState::default(), 1.0).is_empty());
-        let segment = styles.raised_segment(styles.settings_toggle());
-        assert_eq!(segment.hover.background, styles.ui.segment_hover);
-        let header = styles.settings_header_button();
-        assert_ne!(header.hover.background, header.normal.background);
-        assert!(super::button::raised_shadows(segment, ControlState::default(), 1.0).is_empty());
-        assert!(
-            !super::button::raised_shadows(
-                segment,
-                ControlState {
-                    selected: true,
-                    ..Default::default()
-                },
-                1.0
-            )
-            .is_empty()
-        );
-        assert!(styles.segmented_group(segment.radius_px).tray.is_some());
-        let normal = Styles::from_theme(&theme, &theme);
-        assert!(
-            normal
-                .segmented_group(normal.settings_toggle().radius_px)
-                .tray
-                .is_none()
-        );
-        assert!(normal.ui.control.elevation.is_none());
-    }
-
-    #[test]
-    fn tab_chrome_ignores_corner_and_elevation_options() {
+    fn tab_chrome_ignores_corner_options() {
         let theme = ThemeKind::OneDark.build();
         let baseline = Styles::from_theme(&theme, &theme);
         for corners in UiCorners::ALL {
-            for elevation in [false, true] {
-                let mut spec = UiStyleSpec::default();
-                spec.appearance = UiAppearance { corners, elevation };
-                let styles = Styles::from_theme_with_spec(&theme, &theme, false, spec);
-                let tab = styles.tab_surface();
-                let height = styles.tab_bar.tab_bar_height_px;
-                let mut active = super::chrome::tab_surface(tab, 1.0, height, true);
-                let mut inactive = super::chrome::tab_surface(tab, 1.0, height, false);
-                assert_eq!(active.style().size.height, Some(px(height).into()));
-                assert_eq!(inactive.style().size.height, active.style().size.height);
-                assert_eq!(active.style().margin.top, None);
-                assert_eq!(active.style().margin.bottom, None);
-                assert_eq!(inactive.style().margin.top, None);
-                assert_eq!(inactive.style().margin.bottom, None);
-                assert_eq!(active.style().corner_radii.top_left, None);
-                assert!(active.style().box_shadow.is_none());
-                assert!(inactive.style().box_shadow.is_none());
-                assert_eq!(
-                    active.style().border_widths.right,
-                    Some(px(baseline.tab_bar.tab_item_border_width_px).into())
-                );
-                assert_eq!(
-                    styles.tab_bar.tab_item_badge_radius_px,
-                    baseline.tab_bar.tab_item_badge_radius_px
-                );
-                assert_eq!(
-                    styles.tab_bar.tab_update_button_radius_px,
-                    baseline.tab_bar.tab_update_button_radius_px
-                );
-                assert_eq!(
-                    styles.tab_bar.tab_history_btn_radius_px,
-                    baseline.tab_bar.tab_history_btn_radius_px
-                );
-                assert_eq!(
-                    styles.tab_name(true, false, false).text.weight,
-                    styles.tab_name(false, false, false).text.weight
-                );
-                assert_eq!(
-                    styles.tab_name(true, false, false).text.size_px,
-                    styles.tab_name(false, false, false).text.size_px
-                );
-                assert_eq!(
-                    styles.tab_bar.tab_item_icon_size_px,
-                    baseline.tab_bar.tab_item_icon_size_px
-                );
-            }
+            let mut spec = UiStyleSpec::default();
+            spec.appearance = UiAppearance { corners };
+            let styles = Styles::from_theme_with_spec(&theme, &theme, false, spec);
+            let tab = styles.tab_surface();
+            let height = styles.tab_bar.tab_bar_height_px;
+            let mut active = super::chrome::tab_surface(tab, 1.0, height, true);
+            let mut inactive = super::chrome::tab_surface(tab, 1.0, height, false);
+            assert_eq!(active.style().size.height, Some(px(height).into()));
+            assert_eq!(inactive.style().size.height, active.style().size.height);
+            assert_eq!(active.style().margin.top, None);
+            assert_eq!(active.style().margin.bottom, None);
+            assert_eq!(inactive.style().margin.top, None);
+            assert_eq!(inactive.style().margin.bottom, None);
+            assert_eq!(active.style().corner_radii.top_left, None);
+            assert!(active.style().box_shadow.is_none());
+            assert!(inactive.style().box_shadow.is_none());
+            assert_eq!(
+                active.style().border_widths.right,
+                Some(px(baseline.tab_bar.tab_item_border_width_px).into())
+            );
+            assert_eq!(
+                styles.tab_bar.tab_item_badge_radius_px,
+                baseline.tab_bar.tab_item_badge_radius_px
+            );
+            assert_eq!(
+                styles.tab_bar.tab_update_button_radius_px,
+                baseline.tab_bar.tab_update_button_radius_px
+            );
+            assert_eq!(
+                styles.tab_bar.tab_history_btn_radius_px,
+                baseline.tab_bar.tab_history_btn_radius_px
+            );
+            assert_eq!(
+                styles.tab_name(true, false, false).text.weight,
+                styles.tab_name(false, false, false).text.weight
+            );
+            assert_eq!(
+                styles.tab_name(true, false, false).text.size_px,
+                styles.tab_name(false, false, false).text.size_px
+            );
+            assert_eq!(
+                styles.tab_bar.tab_item_icon_size_px,
+                baseline.tab_bar.tab_item_icon_size_px
+            );
         }
     }
 
@@ -464,17 +430,15 @@ mod tests {
     }
 
     #[test]
-    fn raised_sidebar_selection_uses_an_inset_surface_without_changing_row_height() {
+    fn rounded_sidebar_selection_uses_an_inset_surface_without_changing_row_height() {
         let theme = ThemeKind::OneDark.build();
         let normal = Styles::from_theme(&theme, &theme);
         assert_eq!(normal.sidebar_tree_row().selected_inset_px, 0.0);
         let mut spec = UiStyleSpec::default();
         spec.appearance.corners = UiCorners::Full;
-        spec.appearance.elevation = true;
         let styles = Styles::from_theme_with_spec(&theme, &theme, false, spec);
         let row_style = styles.sidebar_tree_row();
-        assert_eq!(row_style.selected_inset_px, 4.0);
-        assert!(row_style.selected_elevation.is_some());
+        assert_eq!(row_style.selected_inset_px, 3.0);
         assert_eq!(
             row_style.selected_radius_px,
             (row_style.height_px - 2.0) * 0.5
@@ -491,78 +455,16 @@ mod tests {
             row.style().size.height,
             Some(px(row_style.height_px * 1.5).into())
         );
-        assert_eq!(
-            row_style.selected_background,
-            styles.sidebar.sidebar_item_raised_bg
-        );
     }
 
     #[test]
-    fn raised_settings_header_keeps_the_native_palette_with_quieter_chrome() {
-        for kind in ThemeKind::light_themes()
-            .iter()
-            .chain(ThemeKind::dark_themes())
-        {
-            let theme = kind.build();
-            let baseline = Styles::from_theme(&theme, &theme);
-            let mut spec = UiStyleSpec::default();
-            spec.appearance.elevation = true;
-            let raised = Styles::from_theme_with_spec(&theme, &theme, false, spec);
-            assert_eq!(baseline.ui.spec.settings_padding_y_px, 36.0);
-            assert_eq!(raised.ui.spec.settings_padding_y_px, 36.0);
-            assert_eq!(
-                raised.settings_header_button().normal.background,
-                raised.ui.raised_surface
-            );
-            assert_ne!(
-                raised.settings_header_button().hover.background,
-                raised.settings_header_button().normal.background
-            );
-            assert_ne!(raised.ui.segment_hover, raised.ui.segment_tray);
-            assert_eq!(
-                raised.ui.segment_tray,
-                theme.with_light_surface_contrast().bg_secondary
-            );
-            assert_eq!(
-                raised.settings_header_button().normal.border,
-                raised.settings_panel.settings_site_button_border_color
-            );
-            for style in [
-                raised.settings_header_button(),
-                raised.settings_picker(),
-                raised.settings_folder_picker(),
-                raised.settings_stepper(),
-                raised.dialog_button(
-                    raised.dialog.dialog_bg,
-                    raised.dialog.dialog_message_text_color,
-                    raised.dialog.dialog_btn_secondary_hover_bg,
-                ),
-            ] {
-                assert!(style.border_width_px > 0.0);
-                assert!(style.normal.border.a > 0.0);
-                assert_eq!(style.hover.border, style.normal.border);
-                assert!(
-                    !super::button::raised_shadows(style, ControlState::default(), 1.0).is_empty()
-                );
-            }
-            assert_eq!(
-                raised.settings_header_button().height_px,
-                baseline.settings_header_button().height_px
-            );
-        }
-    }
-
-    #[test]
-    fn settings_vertical_padding_is_independent_of_elevation() {
+    fn settings_vertical_padding_is_preserved() {
         let theme = ThemeKind::OneDark.build();
         for padding in [0.0, 36.0, 60.0, 84.0] {
-            for elevation in [false, true] {
-                let mut spec = UiStyleSpec::default();
-                spec.settings_padding_y_px = padding;
-                spec.appearance.elevation = elevation;
-                let styles = Styles::from_theme_with_spec(&theme, &theme, false, spec);
-                assert_eq!(styles.ui.spec.settings_padding_y_px, padding);
-            }
+            let mut spec = UiStyleSpec::default();
+            spec.settings_padding_y_px = padding;
+            let styles = Styles::from_theme_with_spec(&theme, &theme, false, spec);
+            assert_eq!(styles.ui.spec.settings_padding_y_px, padding);
         }
     }
 
@@ -892,7 +794,6 @@ mod application_tests {
         for orientation in [Orientation::Horizontal, Orientation::Vertical] {
             let mut group = super::button::toggle_group(
                 ToggleGroupStyle {
-                    tray: None,
                     alignment: GroupAlignment::Stretch,
                     orientation,
                     gap_px: 7.0,
@@ -1154,7 +1055,6 @@ mod group_tests {
         ] {
             let mut group = super::button::toggle_group(
                 ToggleGroupStyle {
-                    tray: None,
                     alignment,
                     orientation: Orientation::Vertical,
                     gap_px: 3.0,

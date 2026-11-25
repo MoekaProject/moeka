@@ -68,38 +68,13 @@ pub(crate) fn button(
     scale: f32,
 ) -> Stateful<Div> {
     let ring = style.ring.shadows(scale, state.invalid);
-    let raised = raised_shadows(style, state, scale);
-    let with_ring = [raised.clone(), ring.clone()].concat();
     button_frame(style, state, scale)
         .id(id)
-        .when(!raised.is_empty(), |this| this.shadow(raised.clone()))
-        .when(state.focus_visible, |this| this.shadow(with_ring.clone()))
+        .when(state.focus_visible, |this| this.shadow(ring.clone()))
         .when(
             !state.disabled && !state.loading && !state.read_only,
-            |this| this.focus(move |s| s.shadow(with_ring)),
+            |this| this.focus(move |s| s.shadow(ring)),
         )
-}
-
-/// Raised controls cast a shadow only while their resting state has a visible
-/// surface, so ghost controls stay flat until selected.
-pub(crate) fn raised_shadows(
-    style: ControlStyle,
-    state: ControlState,
-    scale: f32,
-) -> Vec<gpui::BoxShadow> {
-    let Some(elevation) = style.elevation else {
-        return Vec::new();
-    };
-    let resting = style.resolve(ControlState {
-        hovered: false,
-        pressed: false,
-        ..state
-    });
-    let visible_border = style.border_width_px > 0.0 && resting.border.a > 0.01;
-    if state.disabled || (resting.background.a <= 0.01 && !visible_border) {
-        return Vec::new();
-    }
-    elevation.shadows(scale)
 }
 
 pub(crate) fn icon_button(
@@ -127,10 +102,6 @@ pub(crate) fn toggle_segment(
     } else {
         style.radius_px
     }) * if style.scale_radius { scale } else { 1.0 };
-    if style.elevation.is_some() && border == 0.0 {
-        // Raised segments sit apart inside a tray instead of sharing seams.
-        return button(id, style, state, scale);
-    }
     let element = button(id, style, state, scale).rounded(px(0.0));
     match position.orientation {
         crate::style::Orientation::Horizontal => element
@@ -162,11 +133,6 @@ pub(crate) fn icon(
 pub(crate) fn toggle_group(style: crate::style::ToggleGroupStyle, scale: f32) -> Div {
     let mut group = div()
         .flex()
-        .when_some(style.tray, |this, tray| {
-            this.p(px(tray.padding_px * scale))
-                .rounded(px(tray.radius_px * scale))
-                .bg(tray.background)
-        })
         .gap(px(style.gap_px * scale))
         .when(
             style.orientation == crate::style::Orientation::Horizontal,

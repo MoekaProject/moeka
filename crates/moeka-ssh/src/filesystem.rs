@@ -249,6 +249,16 @@ impl SshFilesystem {
         &self.capabilities
     }
 
+    pub fn home_directory(&self) -> FsResult<NativePath> {
+        match self.request(Request::HomeDirectory)? {
+            Response::Path(path) => Ok(path),
+            _ => Err(FsError::invalid(
+                "ssh_home_directory",
+                "unexpected home directory response",
+            )),
+        }
+    }
+
     /// Ephemeral host/kernel, namespace, root and user scope; not host authentication.
     pub fn peer_identity(&self) -> FsResult<[u8; 32]> {
         if !self

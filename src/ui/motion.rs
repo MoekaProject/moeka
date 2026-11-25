@@ -334,7 +334,6 @@ mod tests {
             crate::style::UiStyleSpec {
                 appearance: crate::style::UiAppearance {
                     corners: crate::style::UiCorners::Full,
-                    elevation: true,
                 },
                 ..Default::default()
             },
@@ -348,7 +347,6 @@ mod tests {
             assert_eq!(style.normal.background.a, 0.0);
             assert_eq!(style.hover.background.a, 0.0);
             assert_eq!(style.border_width_px, 0.0);
-            assert!(style.elevation.is_none());
         }
         let mut style = styles.ui.control;
         assert_eq!(style.radius_px, styles.ui.control.radius_px);

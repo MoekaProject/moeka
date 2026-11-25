@@ -795,7 +795,8 @@ mod tests {
         .collect();
         let input = editor.update(cx, |editor, cx| {
             editor.sidebar_root = "workspace".into();
-            editor.app_settings.starred_files = stars.clone();
+            let workspace = editor.active_starred_workspace_key();
+            editor.app_settings.stars_for_mut(&workspace).files = stars.clone();
             editor.sidebar_items_dirty = false;
             editor.sidebar_items_cache = Rc::new(vec![entries()[7].item.clone()]);
             editor.ensure_sidebar_filter_input(cx);
@@ -846,7 +847,14 @@ mod tests {
                     editor.sidebar_visible_starred_count(),
                     editor.visible_starred_sidebar_files().len()
                 );
-                assert_eq!(editor.app_settings.starred_files, stars);
+                assert_eq!(
+                    editor
+                        .app_settings
+                        .stars_for(&editor.active_starred_workspace_key())
+                        .unwrap()
+                        .files,
+                    stars
+                );
                 if query == " DESPUÉS " {
                     assert_eq!(editor.sidebar_filter_match_ranges("DESPUÉS.md"), vec![0..8]);
                 }

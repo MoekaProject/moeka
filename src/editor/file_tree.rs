@@ -933,21 +933,47 @@ impl EditorView {
                 );
             }
         }
-        let stars = self.app_settings.starred_resources.clone();
-        for resource in stars {
-            if let Some(rebased) = rebase_transferred_resource(&resource, source, destination) {
-                self.set_resources_starred(&[resource], false, cx);
-                self.set_resources_starred(&[rebased], true, cx);
+        let stars = self.app_settings.workspace_stars.clone();
+        for entry in stars {
+            for resource in entry.resources {
+                if let Some(rebased) = rebase_transferred_resource(&resource, source, destination) {
+                    let starred = self.app_settings.stars_for_mut(&entry.workspace);
+                    starred.resources.retain(|candidate| candidate != &resource);
+                    match rebased.local_path() {
+                        Ok(path) => {
+                            if !starred.files.contains(&path) {
+                                starred.files.push(path);
+                            }
+                        }
+                        Err(_) => {
+                            if !starred.resources.contains(&rebased) {
+                                starred.resources.push(rebased);
+                            }
+                        }
+                    }
+                }
+            }
+            for path in entry.files {
+                let resource = ResourcePath::local(&path);
+                if let Some(rebased) = rebase_transferred_resource(&resource, source, destination) {
+                    let starred = self.app_settings.stars_for_mut(&entry.workspace);
+                    starred.files.retain(|candidate| candidate != &path);
+                    match rebased.local_path() {
+                        Ok(new_path) => {
+                            if !starred.files.contains(&new_path) {
+                                starred.files.push(new_path);
+                            }
+                        }
+                        Err(_) => {
+                            if !starred.resources.contains(&rebased) {
+                                starred.resources.push(rebased);
+                            }
+                        }
+                    }
+                }
             }
         }
-        let stars = self.app_settings.starred_files.clone();
-        for path in stars {
-            let resource = ResourcePath::local(&path);
-            if let Some(rebased) = rebase_transferred_resource(&resource, source, destination) {
-                self.set_resources_starred(&[resource], false, cx);
-                self.set_resources_starred(&[rebased], true, cx);
-            }
-        }
+        self.save_settings_in_background(cx);
     }
 
     pub(super) fn resource_text_snapshot(
@@ -1109,10 +1135,11 @@ impl EditorView {
                                 );
                                 continue;
                             }
-                            editor
-                                .app_settings
-                                .starred_resources
-                                .retain(|path| !resource_is_within(path, &resource));
+                            for stars in &mut editor.app_settings.workspace_stars {
+                                stars
+                                    .resources
+                                    .retain(|path| !resource_is_within(path, &resource));
+                            }
                             let closed = editor
                                 .all_tabs()
                                 .filter(|tab| {
@@ -1398,9 +1425,13 @@ impl EditorView {
     }
 
     pub(super) fn resource_is_starred(&self, resource: &ResourcePath) -> bool {
+        let workspace = self.active_starred_workspace_key();
         match resource.local_path() {
-            Ok(path) => self.app_settings.is_starred_file(&path),
-            Err(_) => self.app_settings.starred_resources.contains(resource),
+            Ok(path) => self.app_settings.is_starred_file(&workspace, &path),
+            Err(_) => self
+                .app_settings
+                .stars_for(&workspace)
+                .is_some_and(|stars| stars.resources.contains(resource)),
         }
     }
 
@@ -1423,27 +1454,35 @@ impl EditorView {
         starred: bool,
         cx: &mut Context<Self>,
     ) {
+        let workspace = self.active_starred_workspace_key();
         for resource in resources {
             if let Ok(path) = resource.local_path() {
                 if starred {
                     self.app_settings
-                        .add_starred_file(Self::normalize_sidebar_path(&path));
+                        .add_starred_file(&workspace, Self::normalize_sidebar_path(&path));
                 } else {
                     self.app_settings
-                        .remove_starred_file(&Self::normalize_sidebar_path(&path));
+                        .remove_starred_file(&workspace, &Self::normalize_sidebar_path(&path));
                 }
             } else if starred {
-                if !self.app_settings.starred_resources.contains(resource) {
-                    self.app_settings.starred_resources.push(resource.clone());
+                let stars = &mut self.app_settings.stars_for_mut(&workspace).resources;
+                if !stars.contains(resource) {
+                    stars.push(resource.clone());
                 }
             } else {
-                self.app_settings
-                    .starred_resources
-                    .retain(|path| path != resource);
+                if let Some(entry) = self
+                    .app_settings
+                    .workspace_stars
+                    .iter_mut()
+                    .find(|entry| entry.workspace == workspace)
+                {
+                    entry.resources.retain(|path| path != resource);
+                }
             }
         }
         if starred {
             self.sidebar_starred_collapsed = false;
+            self.app_settings.stars_for_mut(&workspace).collapsed = false;
         }
         self.save_settings_in_background(cx);
         cx.notify();

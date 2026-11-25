@@ -2151,11 +2151,12 @@ impl EditorView {
 
     fn prepare_ssh_directory_input(
         editor: &gpui::Entity<crate::text_input::TextInput>,
+        directory: &str,
         cx: &mut Context<Self>,
     ) {
         editor.update(cx, |input, cx| {
             input.placeholder = "/absolute/path".into();
-            input.set_text("/", cx);
+            input.set_text(directory, cx);
         });
     }
 
@@ -2244,7 +2245,7 @@ impl EditorView {
         #[cfg(test)]
         if picker.disable_browsing_for_test {
             picker.connecting = false;
-            Self::prepare_ssh_directory_input(&input.editor, cx);
+            Self::prepare_ssh_directory_input(&input.editor, "/home/test/", cx);
             cx.notify();
             return;
         }
@@ -2255,12 +2256,34 @@ impl EditorView {
             let result = crate::platform::fs_task::run_write(
                 "SSH directory connection",
                 scheduler_key(),
-                move || open_remote_filesystem(destination, config_file, language),
+                move || {
+                    let remote = open_remote_filesystem(destination, config_file, language)?;
+                    let home = remote.home_directory().map_err(fs_error)?;
+                    let NativePath::Unix(bytes) = home else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            crate::i18n::remote_text(language, "directory_response_error"),
+                        ));
+                    };
+                    let mut home = String::from_utf8(bytes).map_err(|error| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "{}: {error}",
+                                crate::i18n::remote_text(language, "directory_response_error")
+                            ),
+                        )
+                    })?;
+                    if !home.ends_with('/') {
+                        home.push('/');
+                    }
+                    Ok((remote, home))
+                },
             )
             .await;
-            let (mut filesystem, error) = match result {
-                Ok(remote) => (Some(remote), None),
-                Err(error) => (None, Some(error.to_string())),
+            let (mut filesystem, home, error) = match result {
+                Ok((remote, home)) => (Some(remote), Some(home), None),
+                Err(error) => (None, None, Some(error.to_string())),
             };
             let _ = this.update(cx, |editor, cx| {
                 if editor.remote_input_generation != generation {
@@ -2277,12 +2300,12 @@ impl EditorView {
                 }
                 picker.connecting = false;
                 input.error = error;
-                if let Some(remote) = filesystem.take() {
+                if let (Some(remote), Some(home)) = (filesystem.take(), home) {
                     picker.browsing_filesystem = Some(remote);
-                    Self::prepare_ssh_directory_input(&input.editor, cx);
+                    Self::prepare_ssh_directory_input(&input.editor, &home, cx);
                     editor.queue_ssh_directory_query(cx);
                 } else {
-                    Self::prepare_ssh_directory_input(&input.editor, cx);
+                    Self::prepare_ssh_directory_input(&input.editor, "", cx);
                 }
                 cx.notify();
             });
@@ -2790,6 +2813,11 @@ impl EditorView {
         workspace.refreshing.clear();
         workspace.previews_loading.clear();
         workspace.previews_waiting_refresh.clear();
+        for key in workspace.image_requests.keys() {
+            if self.image_cache.get(key).is_some_and(Option::is_none) {
+                self.image_cache.remove(key);
+            }
+        }
         workspace.image_requests.clear();
         workspace.documents_to_refresh.clear();
         workspace.document_refresh_running = false;
@@ -4442,7 +4470,9 @@ impl EditorView {
         cx.subscribe(
             &editor,
             |this, _, event: &crate::text_input::TextInputEvent, cx| match event {
-                crate::text_input::TextInputEvent::Submit => this.commit_remote_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Submit => {
+                    this.commit_remote_sidebar_edit(false, cx)
+                }
                 crate::text_input::TextInputEvent::Escape => this.cancel_remote_sidebar_edit(cx),
                 _ => {}
             },
@@ -4450,7 +4480,7 @@ impl EditorView {
         .detach();
         let focus = editor.focus_handle(cx);
         self.sidebar_edit_blur_sub = Some(cx.on_blur(&focus, window, |this, _, cx| {
-            this.commit_remote_sidebar_edit(cx);
+            this.commit_remote_sidebar_edit(true, cx);
         }));
         window.focus(&focus);
         self.remote_sidebar_edit = Some(if directory {
@@ -4483,7 +4513,9 @@ impl EditorView {
         cx.subscribe(
             &editor,
             |this, _, event: &crate::text_input::TextInputEvent, cx| match event {
-                crate::text_input::TextInputEvent::Submit => this.commit_remote_sidebar_edit(cx),
+                crate::text_input::TextInputEvent::Submit => {
+                    this.commit_remote_sidebar_edit(false, cx)
+                }
                 crate::text_input::TextInputEvent::Escape => this.cancel_remote_sidebar_edit(cx),
                 _ => {}
             },
@@ -4491,14 +4523,14 @@ impl EditorView {
         .detach();
         let focus = editor.focus_handle(cx);
         self.sidebar_edit_blur_sub = Some(cx.on_blur(&focus, window, |this, _, cx| {
-            this.commit_remote_sidebar_edit(cx);
+            this.commit_remote_sidebar_edit(true, cx);
         }));
         window.focus(&focus);
         self.remote_sidebar_edit = Some(RemoteSidebarEditMode::Rename { resource, editor });
         cx.notify();
     }
 
-    fn commit_remote_sidebar_edit(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn commit_remote_sidebar_edit(&mut self, on_blur: bool, cx: &mut Context<Self>) {
         let value = match self.remote_sidebar_edit.as_ref() {
             Some(RemoteSidebarEditMode::CreateFile { editor, .. })
             | Some(RemoteSidebarEditMode::CreateDirectory { editor, .. })
@@ -4508,10 +4540,14 @@ impl EditorView {
             None => return,
         };
         if value.trim().is_empty() {
-            self.notify_error(
-                crate::i18n::remote_text(self.ui_language, "name_required"),
-                cx,
-            );
+            if on_blur {
+                self.cancel_remote_sidebar_edit(cx);
+            } else {
+                self.notify_error(
+                    crate::i18n::remote_text(self.ui_language, "name_required"),
+                    cx,
+                );
+            }
             return;
         }
         let Some(edit) = self.remote_sidebar_edit.take() else {
@@ -4544,7 +4580,7 @@ impl EditorView {
         cx.notify();
     }
 
-    fn cancel_remote_sidebar_edit(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn cancel_remote_sidebar_edit(&mut self, cx: &mut Context<Self>) {
         self.remote_sidebar_edit = None;
         self.sidebar_edit_blur_sub = None;
         cx.notify();
@@ -4727,7 +4763,12 @@ impl EditorView {
                                 tab.title = name.to_string();
                             }
                         }
-                        for resource in &mut editor.app_settings.starred_resources {
+                        for resource in editor
+                            .app_settings
+                            .workspace_stars
+                            .iter_mut()
+                            .flat_map(|stars| &mut stars.resources)
+                        {
                             if let Some(rebased) = rebase_resource(resource, &source, &target) {
                                 *resource = rebased;
                             }
@@ -5469,7 +5510,37 @@ impl EditorView {
                                     None::<SharedString>,
                                 ))
                             })
-                            .child(div().flex_1().min_w(px(0.0)).child(input.editor.clone())),
+                            .child(div().flex_1().min_w(px(0.0)).child(input.editor.clone()))
+                            .when(picker.destination.is_some(), |this| {
+                                this.child(
+                                    crate::ui::button::icon_button(
+                                        "ssh-directory-add",
+                                        self.styles.workspace_toggle(),
+                                        crate::style::ControlState {
+                                            disabled: picker.connecting,
+                                            ..Default::default()
+                                        },
+                                        self.ui_scale,
+                                    )
+                                    .debug_selector(|| "ssh-directory-add".into())
+                                    .child(
+                                        gpui::svg()
+                                            .path(super::assets::FILETREE_ADD_SVG_PATH)
+                                            .size(px(self.scaled(
+                                                self.styles.workspace_toggle().icon_size_px,
+                                            )))
+                                            .text_color(
+                                                self.styles.workspace_toggle().normal.foreground,
+                                            ),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.submit_remote_input(cx);
+                                        }),
+                                    ),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -5799,6 +5870,53 @@ impl EditorView {
         }
     }
 
+    pub(super) fn update_remote_drag_expand_hover_dir(
+        &mut self,
+        new_dir: Option<ResourcePath>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.remote_drag_expand_hover_dir == new_dir {
+            return;
+        }
+        self.remote_drag_expand_hover_dir = new_dir.clone();
+        self.remote_drag_expand_task = None;
+        let Some(path) = new_dir else {
+            return;
+        };
+        if self.remote_directory_is_expanded(&path) {
+            return;
+        }
+        let generation = self.remote_generation;
+        self.remote_drag_expand_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            this.update(cx, |editor, cx| {
+                if editor.remote_generation != generation
+                    || editor.remote_drag_expand_hover_dir.as_ref() != Some(&path)
+                    || editor.remote_directory_is_expanded(&path)
+                {
+                    return;
+                }
+                if editor.sidebar_filter_active() {
+                    editor.remote_sidebar_filter_collapsed.remove(&path);
+                    editor.remote_drag_auto_expanded_dirs.insert(path.clone());
+                } else if let Some(workspace) = editor.remote_workspace.as_mut() {
+                    if !resource_is_at_or_below(&path, &workspace.root) {
+                        return;
+                    }
+                    workspace.expanded.insert(path.clone());
+                    editor.remote_drag_auto_expanded_dirs.insert(path.clone());
+                    editor.load_remote_directory(path, cx);
+                } else {
+                    return;
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     pub(super) fn remote_sidebar_nav_left(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self
             .remote_workspace
@@ -6027,6 +6145,30 @@ impl EditorView {
         })
         .drag_over::<super::DraggedResources>(move |style, _, _, _| style.bg(drag_over_bg))
         .drag_over::<super::DraggedSidebarItems>(move |style, _, _, _| style.bg(drag_over_bg))
+        .on_drag_move({
+            let path = entry.resource.clone();
+            cx.listener(
+                move |this, event: &gpui::DragMoveEvent<super::DraggedResources>, _, cx| {
+                    if !event.bounds.contains(&event.event.position) {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    this.update_remote_drag_expand_hover_dir(is_dir.then(|| path.clone()), cx);
+                },
+            )
+        })
+        .on_drag_move({
+            let path = entry.resource.clone();
+            cx.listener(
+                move |this, event: &gpui::DragMoveEvent<super::DraggedSidebarItems>, _, cx| {
+                    if !event.bounds.contains(&event.event.position) {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    this.update_remote_drag_expand_hover_dir(is_dir.then(|| path.clone()), cx);
+                },
+            )
+        })
         .on_drop({
             let target = drop_target.clone();
             cx.listener(move |this, dragged: &super::DraggedResources, window, cx| {
@@ -6573,6 +6715,17 @@ impl EditorView {
                     .min_h(px(0.0))
                     .overflow_y_scroll()
                     .track_scroll(&scroll)
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                            this.open_workspace_resource_context_menu(
+                                root.clone(),
+                                event,
+                                window,
+                                cx,
+                            );
+                        }),
+                    )
                     .children(list),
             )
             .child(self.render_sidebar_settings_item(cx))
@@ -7041,6 +7194,91 @@ impl EditorView {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "gpui-test-support")]
+    #[gpui::test]
+    fn remote_file_tree_drag_arms_directory_expansion(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext as _, Render};
+        struct Host(gpui::Entity<EditorView>, RemoteDirectoryEntry);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let entry = self.1.clone();
+                let editor = self.0.read(cx);
+                let style = editor.styles.drag_preview(false, editor.ui_scale);
+                div()
+                    .w(px(600.0))
+                    .h(px(400.0))
+                    .relative()
+                    .child(self.0.update(cx, |editor, cx| {
+                        editor.render_remote_entry(&entry, 1, &HashSet::new(), cx)
+                    }))
+                    .child(
+                        div()
+                            .id("remote-resource-drag-source")
+                            .debug_selector(|| "remote-resource-drag-source".into())
+                            .absolute()
+                            .left(px(400.0))
+                            .top(px(100.0))
+                            .w(px(100.0))
+                            .h(px(30.0))
+                            .on_drag(
+                                super::super::DraggedResources {
+                                    resources: vec![ResourcePath {
+                                        filesystem: entry.resource.filesystem,
+                                        path: NativePath::unix_absolute("/work/source.md").unwrap(),
+                                    }],
+                                },
+                                move |_, offset, _, cx| {
+                                    cx.new(|_| super::super::DraggedSidebarItemsView {
+                                        label: "resource".into(),
+                                        count: 1,
+                                        style: style.clone(),
+                                        cursor_offset: offset,
+                                    })
+                                },
+                            ),
+                    )
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let entry = RemoteDirectoryEntry {
+            resource: ResourcePath {
+                filesystem: FilesystemId::Ssh([3; 32]),
+                path: NativePath::unix_absolute("/work/target").unwrap(),
+            },
+            name: "target".into(),
+            metadata: moeka_fs::local::native::metadata(directory.path())
+                .unwrap()
+                .into(),
+        };
+        let editor = cx
+            .update(|cx| cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some(""), false)));
+        let (_, cx) = cx.add_window_view(|_, _| Host(editor.clone(), entry.clone()));
+        let start = cx
+            .debug_bounds("remote-resource-drag-source")
+            .unwrap()
+            .center();
+        let target_id =
+            Box::leak(format!("remote-{}", resource_key(&entry.resource)).into_boxed_str());
+        let end = cx.debug_bounds(target_id).unwrap().center();
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(8.0), px(0.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+        cx.update(|_, cx| {
+            assert_eq!(
+                editor.read(cx).remote_drag_expand_hover_dir.as_ref(),
+                Some(&entry.resource)
+            );
+            editor.update(cx, |editor, cx| {
+                editor.clear_sidebar_drag_state(cx);
+                assert!(editor.remote_drag_expand_hover_dir.is_none());
+            });
+        });
+    }
+
     #[test]
     fn directory_failure_does_not_restart_from_render_until_explicit_invalidation() {
         let path = ResourcePath {
@@ -7257,8 +7495,8 @@ mod tests {
                 .unwrap()
                 .editor
                 .read(cx);
-            assert_eq!(input.text(), "/");
-            assert_eq!(input.selection_range(), 1..1);
+            assert_eq!(input.text(), "/home/test/");
+            assert_eq!(input.selection_range(), 11..11);
         });
         cx.simulate_input("w");
         cx.update(|_, cx| {
@@ -7269,8 +7507,8 @@ mod tests {
                 .unwrap()
                 .editor
                 .read(cx);
-            assert_eq!(input.text(), "/w");
-            assert_eq!(input.selection_range(), 2..2);
+            assert_eq!(input.text(), "/home/test/w");
+            assert_eq!(input.selection_range(), 12..12);
         });
         cx.update(|_, cx| {
             editor.update(cx, |editor, cx| {
@@ -7304,6 +7542,42 @@ mod tests {
             );
         });
         cx.run_until_parked();
+        let add = cx
+            .debug_bounds("ssh-directory-add")
+            .expect("SSH directory add button");
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor
+                    .remote_input
+                    .as_ref()
+                    .unwrap()
+                    .editor
+                    .update(cx, |input, cx| input.set_text("relative", cx));
+            });
+        });
+        cx.simulate_click(add.center(), Default::default());
+        cx.update(|_, cx| {
+            let input = editor.read(cx).remote_input.as_ref().unwrap();
+            assert!(input.ssh_picker.is_some());
+            assert!(input.error.is_some());
+        });
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, _| {
+                editor.remote_input.as_mut().unwrap().error = None;
+            });
+        });
+        cx.simulate_keystrokes("enter");
+        cx.update(|_, cx| {
+            assert!(
+                editor
+                    .read(cx)
+                    .remote_input
+                    .as_ref()
+                    .unwrap()
+                    .error
+                    .is_some()
+            );
+        });
         let back = cx
             .debug_bounds("ssh-host-back")
             .expect("SSH host back button");
@@ -7491,8 +7765,8 @@ mod tests {
                 editor.workspaces = vec![local_workspace.path().to_path_buf()];
                 editor.sidebar_root = local_workspace.path().to_path_buf();
                 editor.file_list_dir = local_workspace.path().to_path_buf();
-                editor.app_settings.starred_files = vec![local_star.clone()];
-                editor.app_settings.starred_resources.clear();
+                let workspace = editor.active_starred_workspace_key();
+                editor.app_settings.stars_for_mut(&workspace).files = vec![local_star.clone()];
                 editor.sidebar_starred_collapsed = false;
                 editor.sidebar_visible = true;
                 editor.set_sidebar_width_immediately(320.);
@@ -7537,15 +7811,31 @@ mod tests {
                 .and_then(|input| input.ssh_picker.as_ref())
                 .is_some_and(|picker| picker.browsing_filesystem.is_some() && !picker.connecting)
         });
-        wait_for(cx, &editor, "initial root directories", |editor| {
+        cx.update(|_, cx| {
+            assert_eq!(
+                editor
+                    .read(cx)
+                    .remote_input
+                    .as_ref()
+                    .unwrap()
+                    .editor
+                    .read(cx)
+                    .text(),
+                format!("{}/", home.display())
+            );
+        });
+        let workspace_directory = format!("{}/", workspace.path().display());
+        wait_for(cx, &editor, "initial home directories", |editor| {
             editor
                 .remote_input
                 .as_ref()
                 .and_then(|input| input.ssh_picker.as_ref())
-                .is_some_and(|picker| picker.directories.iter().any(|path| path == "/Users/"))
+                .is_some_and(|picker| picker.directories.contains(&workspace_directory))
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("ssh-picker-item-/Users/").is_some());
+        let workspace_selector =
+            Box::leak(format!("ssh-picker-item-{workspace_directory}").into_boxed_str());
+        assert!(cx.debug_bounds(workspace_selector).is_some());
         cx.update(|_, cx| {
             editor.update(cx, |editor, cx| {
                 editor
@@ -7986,8 +8276,8 @@ mod tests {
                 editor
                     .read(cx)
                     .app_settings
-                    .starred_resources
-                    .contains(&renamed)
+                    .stars_for(&editor.read(cx).active_starred_workspace_key())
+                    .is_some_and(|stars| stars.resources.contains(&renamed))
             )
         });
         let renamed_path = workspace.path().join("renamed.md");

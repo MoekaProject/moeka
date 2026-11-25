@@ -302,8 +302,6 @@ pub struct ControlStyle {
     pub selected_hover: ControlColors,
     pub disabled_opacity: f32,
     pub loading_opacity: f32,
-    /// Raised shadow for controls with a visible resting surface.
-    pub elevation: Option<ElevationStyle>,
     pub ring: RingStyle,
 }
 impl ControlStyle {
@@ -344,41 +342,6 @@ pub struct GroupPosition {
     pub orientation: Orientation,
     pub first: bool,
     pub last: bool,
-}
-
-/// Compact outer shadow for raised controls.
-#[derive(Clone, Copy)]
-pub struct ElevationStyle {
-    pub layers: [ShadowLayer; 2],
-}
-impl ElevationStyle {
-    pub fn raised(dark: bool) -> Self {
-        let alpha = if dark { 0.16 } else { 0.055 };
-        Self {
-            layers: [
-                ShadowLayer {
-                    color: crate::theme::ui_shadow_color(alpha),
-                    x_px: 0.0,
-                    y_px: 1.0,
-                    blur_px: 2.0,
-                    spread_px: 0.0,
-                },
-                ShadowLayer {
-                    color: crate::theme::ui_shadow_color(alpha * 0.35),
-                    x_px: 0.0,
-                    y_px: 0.0,
-                    blur_px: 1.0,
-                    spread_px: 0.0,
-                },
-            ],
-        }
-    }
-    pub fn shadows(&self, scale: f32) -> Vec<gpui::BoxShadow> {
-        ShadowStyle {
-            layers: self.layers.to_vec(),
-        }
-        .layers(scale)
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -521,13 +484,10 @@ impl UiCorners {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UiAppearance {
     pub corners: UiCorners,
-    /// Raised controls: surfaced buttons, selected segments and cards cast a
-    /// compact outer shadow that stays in place when pressed.
-    pub elevation: bool,
 }
 
-/// Native Moeka style tokens. `appearance` is resolved into the radii and
-/// control elevation when styles are built; the stored spec stays unscaled.
+/// Native Moeka style tokens. Appearance is resolved when styles are built;
+/// the stored spec stays unscaled.
 #[derive(Clone)]
 pub struct UiStyleSpec {
     pub appearance: UiAppearance,
@@ -790,10 +750,6 @@ impl UiStyleSpec {
             selected_hover: selected,
             disabled_opacity: self.disabled_opacity,
             loading_opacity: self.loading_opacity,
-            elevation: self
-                .appearance
-                .elevation
-                .then(|| ElevationStyle::raised(theme.bg_primary.l < 0.5)),
             ring: RingStyle {
                 color: self.colors.resolve(theme, C::Ring),
                 invalid_color: self.colors.resolve(theme, C::Destructive),
@@ -815,18 +771,10 @@ pub struct UiStyles {
     pub popup_shadow: ShadowStyle,
     /// Spec as configured, before the appearance options were resolved.
     pub base_spec: UiStyleSpec,
-    pub raised_surface: Hsla,
-    pub raised_foreground: Hsla,
-    /// Hover fill for a raised surface; distinct but no heavier than the surface.
-    pub raised_hover: Hsla,
-    /// Light hover fill for unselected segments inside the tray.
-    pub segment_hover: Hsla,
-    pub segment_tray: Hsla,
 }
 impl UiStyles {
     fn new(theme: &Theme, base_spec: UiStyleSpec) -> Self {
         let spec = base_spec.resolved();
-        let dark = theme.bg_primary.l < 0.5;
         let small_shadow = ShadowStyle {
             layers: vec![
                 ShadowLayer {
@@ -872,26 +820,6 @@ impl UiStyles {
             base_spec,
             small_shadow,
             popup_shadow,
-            raised_surface: if dark {
-                theme.bg_hover
-            } else {
-                theme.bg_primary
-            },
-            raised_foreground: theme.text_bright,
-            raised_hover: if dark {
-                theme.bg_hover.blend(with_alpha(theme.text_bright, 0.06))
-            } else {
-                theme.bg_primary.blend(with_alpha(theme.bg_hover, 0.5))
-            },
-            segment_hover: with_alpha(
-                if dark {
-                    theme.bg_hover
-                } else {
-                    theme.bg_primary
-                },
-                0.6,
-            ),
-            segment_tray: theme.bg_secondary,
         }
     }
 }
@@ -917,21 +845,13 @@ impl Styles {
         c.scale_border = false;
         c.font_size_px = s.settings_site_button_font_size_px;
         c.normal = ControlColors {
-            background: if self.ui.spec.appearance.elevation {
-                self.ui.raised_surface
-            } else {
-                s.settings_site_button_bg
-            },
+            background: s.settings_site_button_bg,
             foreground: s.settings_site_button_text_color,
             border: s.settings_site_button_border_color,
             opacity: 1.0,
         };
         c.hover = ControlColors {
-            background: if self.ui.spec.appearance.elevation {
-                self.ui.raised_hover
-            } else {
-                s.settings_site_button_hover_bg
-            },
+            background: s.settings_site_button_hover_bg,
             ..c.normal
         };
         c.pressed = c.hover;
@@ -1167,7 +1087,6 @@ impl Styles {
         c.padding_x_px = 0.0;
         c.radius_px = 0.0;
         c.border_width_px = 0.0;
-        c.elevation = None;
         c.normal.background = gpui::transparent_black();
         c.normal.border = gpui::transparent_black();
         c.hover = c.normal;
@@ -1441,7 +1360,6 @@ impl ContextMenuStyles {
                 pressed: hover,
                 disabled_opacity: self.menu_item_disabled_opacity,
                 loading_opacity: 0.6,
-                elevation: None,
                 ring: RingStyle {
                     color: self.menu_border_color,
                     invalid_color: self.menu_item_danger_text_color,
@@ -1774,7 +1692,6 @@ pub struct SidebarStyles {
     pub sidebar_item_gap_px: f32,
     pub sidebar_item_hover_bg: Hsla,
     pub sidebar_item_selected_bg: Hsla,
-    pub sidebar_item_raised_bg: Hsla,
     // File tree item — fold arrow
     pub sidebar_item_fold_container_width_px: f32,
     pub sidebar_item_fold_container_height_px: f32,
@@ -2741,10 +2658,26 @@ impl Styles {
 
     /// Re-resolve colors while retaining the installed, non-persisted UI style.
     pub fn retheme(&self, theme: &Theme, ui_theme: &Theme, sidebar_always_dark: bool) -> Self {
-        Self::from_theme_with_spec(
+        self.retheme_with_sidebar_theme(
             theme,
             ui_theme,
             sidebar_always_dark,
+            &ThemeKind::OneDark.build(),
+        )
+    }
+
+    pub fn retheme_with_sidebar_theme(
+        &self,
+        theme: &Theme,
+        ui_theme: &Theme,
+        sidebar_always_dark: bool,
+        dark_sidebar_theme: &Theme,
+    ) -> Self {
+        Self::from_theme_with_spec_and_sidebar_theme(
+            theme,
+            ui_theme,
+            sidebar_always_dark,
+            dark_sidebar_theme,
             self.ui.base_spec.clone(),
         )
     }
@@ -2766,12 +2699,27 @@ impl Styles {
         sidebar_always_dark: bool,
         spec: UiStyleSpec,
     ) -> Self {
+        Self::from_theme_with_spec_and_sidebar_theme(
+            theme,
+            ui_theme,
+            sidebar_always_dark,
+            &ThemeKind::OneDark.build(),
+            spec,
+        )
+    }
+
+    pub fn from_theme_with_spec_and_sidebar_theme(
+        theme: &Theme,
+        ui_theme: &Theme,
+        sidebar_always_dark: bool,
+        dark_sidebar_theme: &Theme,
+        spec: UiStyleSpec,
+    ) -> Self {
         // Light palettes need their muted foregrounds and hairlines deepened
         // before any style token is derived from them.
         let switch_theme = theme;
         let theme_contrast = theme.with_light_surface_contrast();
         let ui_theme_contrast = ui_theme.with_light_surface_contrast();
-        let dark_sidebar_theme = ThemeKind::OneDark.build();
         let theme = &theme_contrast;
         let ui_theme = &ui_theme_contrast;
 
@@ -2786,7 +2734,7 @@ impl Styles {
         let format_toolbar_theme = theme;
         let menu_theme = format_toolbar_theme;
         let sidebar_theme = if sidebar_always_dark && is_light {
-            &dark_sidebar_theme
+            dark_sidebar_theme
         } else if sidebar_always_dark {
             ui_theme
         } else {
@@ -2845,7 +2793,7 @@ impl Styles {
             menu_border_width_px: 1.0,
             menu_border_color: menu_theme.border_secondary,
             menu_radius_px: 8.0,
-            menu_shadow: if is_light && !ui.spec.appearance.elevation {
+            menu_shadow: if is_light {
                 ShadowStyle::default()
             } else {
                 ui.small_shadow.clone()
@@ -3092,7 +3040,6 @@ impl Styles {
                 sidebar_item_gap_px: 4.0,
                 sidebar_item_hover_bg: sidebar_theme.bg_hover,
                 sidebar_item_selected_bg: sidebar_theme.bg_selected,
-                sidebar_item_raised_bg: sidebar_theme.bg_primary,
                 sidebar_item_fold_container_width_px: 16.0,
                 sidebar_item_fold_container_height_px: 18.0,
                 sidebar_item_fold_icon_size_px: 12.0,
@@ -4264,27 +4211,23 @@ mod tests {
     }
 
     #[test]
-    fn context_menus_follow_theme_and_elevation_shadow_policy() {
+    fn context_menus_follow_theme_shadow_policy() {
         for kind in ThemeKind::light_themes()
             .iter()
             .chain(ThemeKind::dark_themes())
         {
             let theme = kind.build();
-            for elevation in [false, true] {
-                let mut spec = super::UiStyleSpec::default();
-                spec.appearance.elevation = elevation;
-                let styles = Styles::from_theme_with_spec(&theme, &theme, false, spec);
-                let expected_shadow = elevation || theme.bg_primary.l < 0.5;
-                assert_eq!(
-                    !styles.context_menu.surface().shadow.layers.is_empty(),
-                    expected_shadow
-                );
-                assert_eq!(
-                    !styles.text_input.menu.surface().shadow.layers.is_empty(),
-                    expected_shadow
-                );
-                assert!(!styles.search_menu_surface().shadow.layers.is_empty());
-            }
+            let styles = Styles::from_theme(&theme, &theme);
+            let expected_shadow = theme.bg_primary.l < 0.5;
+            assert_eq!(
+                !styles.context_menu.surface().shadow.layers.is_empty(),
+                expected_shadow
+            );
+            assert_eq!(
+                !styles.text_input.menu.surface().shadow.layers.is_empty(),
+                expected_shadow
+            );
+            assert!(!styles.search_menu_surface().shadow.layers.is_empty());
         }
     }
 
@@ -4456,7 +4399,6 @@ pub struct ThemeCardStyle {
     pub radius_px: f32,
     pub border_width_px: f32,
     pub background: Hsla,
-    pub elevation: Option<ElevationStyle>,
     pub border_color: Hsla,
     pub hover_border_color: Hsla,
     pub swatches: [Hsla; 5],
@@ -4482,6 +4424,7 @@ pub struct StatusBarStyle {
     pub border_width_px: f32,
     pub border: Hsla,
     pub background: Hsla,
+    pub active_background: Hsla,
     pub title: Hsla,
     pub value: Hsla,
     pub hover: Hsla,
@@ -4593,12 +4536,6 @@ impl Styles {
                 .colors
                 .get(crate::theme::UiColor::Card)
                 .unwrap_or(preview.bg_primary),
-            elevation: self
-                .ui
-                .spec
-                .appearance
-                .elevation
-                .then(|| ElevationStyle::raised(self.window.window_bg.l < 0.5)),
             border_color: if active {
                 accent
             } else {
@@ -4633,6 +4570,7 @@ impl Styles {
     }
     pub fn status_bar(&self) -> StatusBarStyle {
         let c = self.ui.colors;
+        let background = c.status_background;
         StatusBarStyle {
             height_px: self.ui.spec.application.status_height_px,
             font_size_px: self.ui.spec.application.status_font_size_px,
@@ -4641,7 +4579,11 @@ impl Styles {
             icon_size_px: self.ui.spec.application.status_icon_size_px,
             border_width_px: self.tab_bar.tab_bar_border_width_px,
             border: self.tab_bar.tab_bar_border_color,
-            background: c.status_background,
+            background,
+            active_background: Hsla {
+                l: (background.l - 0.06).max(0.0),
+                ..background
+            },
             title: c.status_title,
             value: c.status_value,
             hover: c.status_hover,
@@ -4662,6 +4604,11 @@ impl Styles {
             ..c.normal
         };
         c.pressed = c.hover;
+        c.selected = ControlColors {
+            background: s.active_background,
+            ..c.normal
+        };
+        c.selected_hover = c.selected;
         c
     }
     pub fn tab_surface(&self) -> TabSurfaceStyle {
@@ -4913,7 +4860,6 @@ pub struct TreeRowStyle {
     pub cut_opacity: f32,
     pub selected_inset_px: f32,
     pub selected_radius_px: f32,
-    pub selected_elevation: Option<ElevationStyle>,
 }
 #[derive(Clone, Copy)]
 pub struct FileRowStyle {
@@ -4938,7 +4884,6 @@ impl SidebarStyles {
             cut_opacity: 0.48,
             selected_inset_px: 0.0,
             selected_radius_px: 0.0,
-            selected_elevation: None,
         }
     }
     pub fn file_row(&self) -> FileRowStyle {
@@ -4966,18 +4911,9 @@ impl Styles {
     pub fn sidebar_tree_row(&self) -> TreeRowStyle {
         let mut row = self.sidebar.tree_row();
         let appearance = self.ui.spec.appearance;
-        if appearance.elevation || appearance.corners == UiCorners::Full {
-            row.selected_inset_px = if appearance.elevation { 4.0 } else { 3.0 };
-            row.selected_radius_px = if appearance.corners == UiCorners::Full {
-                (row.height_px - 2.0) * 0.5
-            } else {
-                self.ui.spec.radius_px
-            };
-        }
-        if appearance.elevation {
-            row.selected_background = self.sidebar.sidebar_item_raised_bg;
-            row.active_border = with_alpha(self.sidebar.sidebar_item_active_border_color, 0.32);
-            row.selected_elevation = Some(ElevationStyle::raised(self.sidebar.sidebar_bg.l < 0.5));
+        if appearance.corners == UiCorners::Full {
+            row.selected_inset_px = 3.0;
+            row.selected_radius_px = (row.height_px - 2.0) * 0.5;
         }
         row
     }
@@ -5091,7 +5027,6 @@ impl Styles {
         c.padding_x_px = 0.0;
         c.radius_px = 0.0;
         c.border_width_px = 0.0;
-        c.elevation = None;
         c.normal.background = gpui::transparent_black();
         c.normal.border = gpui::transparent_black();
         if over_sidebar {
@@ -5222,14 +5157,6 @@ pub struct ToggleGroupStyle {
     pub alignment: GroupAlignment,
     pub orientation: Orientation,
     pub gap_px: f32,
-    /// Muted track holding raised segments; `None` keeps joined segments.
-    pub tray: Option<SegmentTrayStyle>,
-}
-#[derive(Clone, Copy)]
-pub struct SegmentTrayStyle {
-    pub background: Hsla,
-    pub padding_px: f32,
-    pub radius_px: f32,
 }
 impl UiStyleSpec {
     pub fn toggle(&self, theme: &Theme, variant: ToggleVariant, size: ToggleSize) -> ControlStyle {
@@ -5450,7 +5377,6 @@ impl Styles {
         c.padding_x_px = s.tab_action_button_padding_x_px;
         c.radius_px = 0.0;
         c.border_width_px = 0.0;
-        c.elevation = None;
         c.normal.background = gpui::transparent_black();
         c.normal.border = gpui::transparent_black();
         c.min_width_px = c.icon_size_px + c.padding_x_px * 2.0;
@@ -6174,7 +6100,6 @@ impl UiStyles {
     pub fn item(&self, mut control: ControlStyle) -> ListItemStyle {
         let presentation = self.spec.composition.item;
         control.radius_px = 0.0;
-        control.elevation = None;
         control.height_px *= presentation.height_factor();
         control.padding_x_px *= presentation.padding_factor();
         if presentation.variant == ContainerVariant::Outline {
@@ -6196,54 +6121,12 @@ impl Styles {
                 DialogSize::Lg => 1.5,
             }
     }
-    /// Segmented controls joined by borders, or a muted tray when raised.
-    pub fn segmented_group(&self, radius_px: f32) -> ToggleGroupStyle {
+    pub fn segmented_group(&self) -> ToggleGroupStyle {
         ToggleGroupStyle {
             alignment: GroupAlignment::Stretch,
             orientation: Orientation::Horizontal,
-            gap_px: if self.ui.spec.appearance.elevation {
-                self.ui.space(SpaceStep::Half)
-            } else {
-                0.0
-            },
-            tray: self.segment_tray(radius_px),
+            gap_px: 0.0,
         }
-    }
-    fn segment_tray(&self, radius_px: f32) -> Option<SegmentTrayStyle> {
-        self.ui.spec.appearance.elevation.then(|| {
-            let padding_px = self.ui.space(SpaceStep::Half);
-            SegmentTrayStyle {
-                background: self.ui.segment_tray,
-                padding_px,
-                radius_px: radius_px + if radius_px > 0.0 { padding_px } else { 0.0 },
-            }
-        })
-    }
-    /// Raised segments drop their joined borders; the selected one becomes a
-    /// shadowed surface inside the tray.
-    pub fn raised_segment(&self, mut c: ControlStyle) -> ControlStyle {
-        if !self.ui.spec.appearance.elevation {
-            return c;
-        }
-        let transparent = gpui::transparent_black();
-        c.border_width_px = 0.0;
-        c.normal.background = transparent;
-        c.normal.border = transparent;
-        // Unselected segments keep the native hover fill inside the tray.
-        c.hover = ControlColors {
-            background: self.ui.segment_hover,
-            foreground: self.ui.raised_foreground,
-            ..c.normal
-        };
-        c.pressed = c.hover;
-        c.selected = ControlColors {
-            background: self.ui.raised_surface,
-            foreground: self.ui.raised_foreground,
-            border: transparent,
-            opacity: c.selected.opacity,
-        };
-        c.selected_hover = c.selected;
-        c
     }
 }
 

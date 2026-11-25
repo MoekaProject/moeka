@@ -135,12 +135,10 @@ impl EditorView {
     pub(crate) fn render_workspace_strip(&self, cx: &mut Context<Self>) -> AnyElement {
         let ss = self.styles.status_bar();
         let height = self.status_bar_height();
-        let active_background = gpui::Hsla {
-            l: (ss.background.l - 0.06).max(0.0),
-            ..ss.background
-        };
+        let active_background = ss.active_background;
         let mut remote_badge = self.styles.sidebar_kind_badge(false);
-        remote_badge.text.size_px = ss.font_size_px * 0.8;
+        let font_size = ss.font_size_px - 1.0;
+        remote_badge.text.size_px = font_size * 0.8;
         remote_badge.padding_x_px = (ss.padding_x_px * 0.5).max(2.0);
         remote_badge.padding_y_px = 0.0;
         remote_badge.radius_px = (ss.height_px * 0.2).min(remote_badge.radius_px);
@@ -308,6 +306,7 @@ impl EditorView {
             .h(px(height))
             .flex()
             .items_center()
+            .text_size(px(self.scaled(font_size)))
             .child({
                 let editor = cx.entity().clone();
                 canvas(
@@ -325,7 +324,16 @@ impl EditorView {
                                 });
                                 let Some(key) = key else { return };
                                 editor.update(cx, |this, cx| match event.button {
-                                    MouseButton::Left => this.activate_workspace_key(key, cx),
+                                    MouseButton::Left => {
+                                        if this.sidebar_edit.is_some()
+                                            || this.remote_sidebar_edit.is_some()
+                                        {
+                                            window.focus(&this.focus_handle);
+                                        }
+                                        this.commit_sidebar_edit(cx);
+                                        this.commit_remote_sidebar_edit(true, cx);
+                                        this.activate_workspace_key(key, cx);
+                                    }
                                     MouseButton::Right => {
                                         window.prevent_default();
                                         cx.stop_propagation();
@@ -599,6 +607,156 @@ mod tests {
                     if resource.local_path().ok().as_deref() == Some(std::path::Path::new("/tmp/ws-0"))
             ));
         });
+    }
+
+    #[gpui::test]
+    fn empty_workspace_menu_create_is_removed_on_blur(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext as _, Render, Window};
+        struct Host(gpui::Entity<EditorView>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().child(self.0.clone())
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
+        let other = root.join("other");
+        moeka_fs::local::native::create_dir(&other).unwrap();
+        let editor = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut editor = EditorView::new_with_mode(cx, true, false, Some(""), false);
+                editor.workspaces.push(root.clone());
+                editor.workspaces.push(other.clone());
+                editor.sidebar_root = root.clone();
+                editor.sidebar_visible = true;
+                editor.embedded_editor = false;
+                editor.last_window_height = 700.0;
+                editor
+            })
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Host(editor.clone()));
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.perform_resource_menu_action(
+                    super::file_tree::ResourceMenuAction::NewDirectory,
+                    &moeka_fs::path::ResourcePath::local(&root),
+                    &[],
+                    true,
+                    window,
+                    cx,
+                );
+                assert!(editor.sidebar_edit.is_some());
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-edit-row").is_some());
+        let item = Box::leak(
+            format!("workspace-strip-{:?}", WorkspaceKey::Local(other.clone())).into_boxed_str(),
+        );
+        let target = cx.debug_bounds(item).unwrap().center();
+        cx.simulate_click(target, Default::default());
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(editor.read(cx).sidebar_edit.is_none()));
+
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.switch_workspace(root.clone(), cx);
+                editor.perform_resource_menu_action(
+                    super::file_tree::ResourceMenuAction::NewDirectory,
+                    &moeka_fs::path::ResourcePath::local(&root),
+                    &[],
+                    true,
+                    window,
+                    cx,
+                );
+                if let Some(super::SidebarEditMode::CreateDir { editor: input, .. }) =
+                    &editor.sidebar_edit
+                {
+                    input.update(cx, |input, cx| input.set_text("created", cx));
+                    assert_eq!(input.read(cx).text(), "created");
+                } else {
+                    panic!("expected directory input");
+                }
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_click(target, Default::default());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(editor.read(cx).sidebar_root, other);
+            assert!(editor.read(cx).sidebar_edit.is_none());
+        });
+        for _ in 0..100 {
+            if moeka_fs::local::native::metadata(root.join("created")).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cx.run_until_parked();
+        }
+        assert!(moeka_fs::local::native::metadata(root.join("created")).is_ok());
+        cx.update(|_, cx| assert_eq!(editor.read(cx).sidebar_root, other));
+
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.switch_workspace(root.clone(), cx);
+                editor.perform_resource_menu_action(
+                    super::file_tree::ResourceMenuAction::NewFile,
+                    &moeka_fs::path::ResourcePath::local(&root),
+                    &[],
+                    true,
+                    window,
+                    cx,
+                );
+                if let Some(super::SidebarEditMode::CreateFile { editor: input, .. }) =
+                    &editor.sidebar_edit
+                {
+                    input.update(cx, |input, cx| input.set_text("created-file", cx));
+                } else {
+                    panic!("expected file input");
+                }
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_click(target, Default::default());
+        for _ in 0..100 {
+            cx.run_until_parked();
+            if moeka_fs::local::native::metadata(root.join("created-file.md")).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(moeka_fs::local::native::metadata(root.join("created-file.md")).is_ok());
+        cx.update(|_, cx| assert_eq!(editor.read(cx).sidebar_root, other));
+    }
+
+    #[gpui::test]
+    fn empty_remote_create_blur_cancels_but_submit_keeps_input(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext as _, Render, Window};
+        use moeka_fs::path::{FilesystemId, NativePath, ResourcePath};
+        struct Host(gpui::Entity<EditorView>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().child(self.0.clone())
+            }
+        }
+        let root = ResourcePath {
+            filesystem: FilesystemId::Ssh([4; 32]),
+            path: NativePath::unix_absolute("/work").unwrap(),
+        };
+        let editor = cx
+            .update(|cx| cx.new(|cx| EditorView::new_with_mode(cx, true, false, Some(""), false)));
+        let (_, cx) = cx.add_window_view(|_, _| Host(editor.clone()));
+        for directory in [true, false] {
+            cx.update(|window, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.start_remote_sidebar_create(root.clone(), directory, window, cx);
+                    editor.commit_remote_sidebar_edit(false, cx);
+                    assert!(editor.remote_sidebar_edit.is_some());
+                    editor.commit_remote_sidebar_edit(true, cx);
+                    assert!(editor.remote_sidebar_edit.is_none());
+                });
+            });
+        }
     }
 
     #[gpui::test]

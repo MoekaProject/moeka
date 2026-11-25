@@ -78,7 +78,6 @@ pub(super) enum SettingsOptionAction {
     AutoSave(bool),
     SimpleMode(bool),
     SidebarAlwaysDark(bool),
-    UiElevation(bool),
     TerminalCopyOnSelect(bool),
 }
 
@@ -1074,10 +1073,6 @@ impl EditorView {
                 self.app_settings.sidebar_always_dark = value;
                 self.refresh_theme_styles(false, cx);
             }
-            SettingsOptionAction::UiElevation(value) => {
-                self.app_settings.ui_elevation = value;
-                self.set_ui_style_spec(self.app_settings.ui_style_spec(), cx);
-            }
             SettingsOptionAction::TerminalCopyOnSelect(value) => {
                 self.app_settings.terminal_copy_on_select = value;
             }
@@ -1267,6 +1262,14 @@ impl EditorView {
         let previous_minimap_side = self.app_settings.minimap_last_side;
         let previous_attachment_template = self.app_settings.effective_attachment_folder_template();
         self.app_settings = settings;
+        let workspace = self.active_starred_workspace_key();
+        if self.app_settings.migrate_legacy_stars(&workspace) {
+            self.save_settings_in_background(cx);
+        }
+        self.sidebar_starred_collapsed = self
+            .app_settings
+            .stars_for(&workspace)
+            .is_some_and(|stars| stars.collapsed);
         let template = self.app_settings.effective_attachment_folder_template();
         if template != previous_attachment_template
             && let Some(editor) = self.settings_attachment_folder_editor.as_ref()
@@ -1311,10 +1314,8 @@ impl EditorView {
 
     fn render_minimap_position_control(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::style::{ControlState, GroupPosition, Orientation};
-        let style = self
-            .styles
-            .raised_segment(self.styles.editor_theme_toggle());
-        crate::ui::button::toggle_group(self.styles.segmented_group(style.radius_px), self.ui_scale)
+        let style = self.styles.editor_theme_toggle();
+        crate::ui::button::toggle_group(self.styles.segmented_group(), self.ui_scale)
             .children(
                 MinimapPosition::ALL
                     .into_iter()
@@ -1356,10 +1357,8 @@ impl EditorView {
 
     fn render_ui_corners_control(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::style::{ControlState, GroupPosition, Orientation, UiCorners};
-        let style = self
-            .styles
-            .raised_segment(self.styles.editor_theme_toggle());
-        crate::ui::button::toggle_group(self.styles.segmented_group(style.radius_px), self.ui_scale)
+        let style = self.styles.editor_theme_toggle();
+        crate::ui::button::toggle_group(self.styles.segmented_group(), self.ui_scale)
             .children(
                 UiCorners::ALL
                     .into_iter()
@@ -1388,8 +1387,7 @@ impl EditorView {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, _, cx| {
-                                let elevation = this.app_settings.ui_elevation;
-                                this.set_ui_appearance(corners, elevation, cx);
+                                this.set_ui_appearance(corners, cx);
                             }),
                         )
                     }),
@@ -1406,7 +1404,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let styles = &self.styles.settings_panel;
-        let style = self.styles.raised_segment(self.styles.settings_toggle());
+        let style = self.styles.settings_toggle();
         let text_secondary = style.normal.foreground;
         let active_text = style.selected.foreground;
         let icon_size = self.scaled(styles.settings_theme_toggle_icon_size_px);
@@ -1490,10 +1488,7 @@ impl EditorView {
         let icon_size = self.scaled(settings_styles.settings_theme_toggle_icon_size_px);
         let option_border_width =
             self.scaled(settings_styles.settings_theme_option_border_width_px);
-        let editor_mode_style = self
-            .styles
-            .raised_segment(self.styles.editor_theme_toggle());
-        let raised = self.styles.ui.spec.appearance.elevation;
+        let editor_mode_style = self.styles.editor_theme_toggle();
         let option_text_color = editor_mode_style.normal.foreground;
         let option_active_text_color = editor_mode_style.selected.foreground;
 
@@ -1509,16 +1504,6 @@ impl EditorView {
             .child(self.render_attachment_settings_row(
                 crate::i18n::settings_label(self.ui_language, "ui_corners"),
                 self.render_ui_corners_control(cx),
-            ))
-            .child(self.render_attachment_settings_row(
-                crate::i18n::settings_label(self.ui_language, "ui_elevation"),
-                self.render_boolean_settings_checkbox(
-                    "settings-ui-elevation",
-                    self.app_settings.ui_elevation,
-                    SettingsOptionAction::UiElevation(false),
-                    SettingsOptionAction::UiElevation(true),
-                    cx,
-                ),
             ))
             .child(self.render_attachment_settings_row(
                 crate::i18n::settings_label(self.ui_language, "simple_mode"),
@@ -1550,11 +1535,7 @@ impl EditorView {
                     .gap(px(self.scaled(settings_styles.settings_theme_group_gap_px)))
                     .child(
                         crate::ui::button::toggle_group(
-                            self.styles.segmented_group(
-                                self.styles
-                                    .raised_segment(self.styles.settings_toggle())
-                                    .radius_px,
-                            ),
+                            self.styles.segmented_group(),
                             self.ui_scale,
                         )
                         .child(self.render_theme_appearance_segment(
@@ -1581,7 +1562,7 @@ impl EditorView {
                     )
                     .child(
                         crate::ui::button::toggle_group(
-                            self.styles.segmented_group(editor_mode_style.radius_px),
+                            self.styles.segmented_group(),
                             self.ui_scale,
                         )
                         .children(
@@ -1608,9 +1589,7 @@ impl EditorView {
                                         },
                                         self.ui_scale,
                                     )
-                                    .when(index > 0 && !raised, |this| {
-                                        this.border_l(px(option_border_width))
-                                    })
+                                    .when(index > 0, |this| this.border_l(px(option_border_width)))
                                     .child(
                                         svg()
                                             .path(match mode {
