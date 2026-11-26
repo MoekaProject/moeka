@@ -7,9 +7,9 @@ What changes, and why?
 - User-visible behavior, if any:
 - Scope and compatibility considerations:
 
-## Related community issue
+## Related issue
 
-Link the full MoekaProject/community issue URL, a source issue, or explain why no issue is needed.
+Link the related Moeka issue, a source issue, or explain why no issue is needed.
 Do not use a bare issue number for another repository.
 
 ## Verification
