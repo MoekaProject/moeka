@@ -98,6 +98,8 @@ class CommunityChecksTest
     assert_equal true, jobs.fetch('remote_servers').fetch('with').fetch('sign_macos')
     assert_equal '1', jobs.fetch('build').fetch('env').fetch('MOEKA_REQUIRE_REMOTE_BUNDLE')
     assert_equal 'build', jobs.fetch('sign').fetch('needs')
+    assert_equal "always() && needs.build.result == 'success' && github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'",
+                 jobs.fetch('sign').fetch('if')
     assert_equal 'release-signing', jobs.fetch('sign').fetch('environment')
     %w[build sign].each do |name|
       job = jobs.fetch(name)
