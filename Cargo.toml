@@ -69,7 +69,7 @@ emojis = "0.6"
 portable-pty = "0.9.0"
 mathjax-svg-rs = "0.4"
 ondine = { git = "https://github.com/wevm/ondine", rev = "6a1586e5af980e67c104239593ae931837157b8b", package = "compiler" }
-resvg = { version = "0.45", default-features = false, features = [
+resvg = { version = "0.50", default-features = false, features = [
   "text",
   "system-fonts",
   "memmap-fonts",
