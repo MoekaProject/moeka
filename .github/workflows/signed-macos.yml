@@ -106,7 +106,7 @@ jobs:
 
   sign:
     needs: build
-    if: github.repository == 'MoekaProject/moeka' && github.ref == 'refs/heads/main'
+    if: needs.build.result == 'success'
     name: Sign and notarize ${{ matrix.arch }}
     runs-on: macos-15
     environment: release-signing
